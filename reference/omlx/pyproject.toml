@@ -1,0 +1,154 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omlx"
+dynamic = ["version"]
+description = "LLM inference server, optimized for your Mac"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "omlx contributors"}
+]
+keywords = ["llm", "mlx", "apple-silicon", "vllm", "inference", "transformers"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "mlx>=0.31.1",
+    # mlx-lm from commit (dcbf6e3) - Gemma 4 tool call parser + multi-token think/tool support
+    "mlx-lm @ git+https://github.com/ml-explore/mlx-lm@dcbf6e33d135a1b7c6767ca0fe7ebbd23df814a7",
+    # regex for mlx-lm's Gemma 4 tool parser (uses recursive patterns)
+    "regex",
+    # mlx-embeddings from latest commit (32981fa)
+    "mlx-embeddings @ git+https://github.com/Blaizzy/mlx-embeddings@32981fa4e8064ed664b52071789dd18271fe4206",
+    # transformers version aligned with mlx-lm requirement
+    # 5.4.0 broke VLM: Qwen2VLImageProcessor now hard-requires torch (#431)
+    "transformers>=5.0.0,<5.4.0",
+    "tokenizers>=0.19.0",
+    "huggingface-hub>=0.23.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.66.0",
+    "pyyaml>=6.0",
+    "itsdangerous>=2.0",
+    "jinja2>=3.0",
+    "sentencepiece",
+    "tiktoken",
+    "protobuf",
+    "requests>=2.28.0",
+    # SOCKS proxy support (used by httpx via huggingface-hub)
+    "socksio>=1.0.0",
+    "tabulate>=0.9.0",
+    # Resource monitoring
+    "psutil>=5.9.0",
+    # Server
+    "fastapi>=0.108.0",
+    "uvicorn>=0.23.0",
+    # JSON Schema validation for structured output
+    "jsonschema>=4.0.0",
+    # Harmony format parser for gpt-oss models
+    "openai-harmony",
+    # mlx-vlm from commit (23e1dff) - Gemma 4 multi-image fix + nested tool parser
+    "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm@23e1dffd224488141a4f022b6d21d6a730f11507",
+    "Pillow>=9.0.0",
+]
+
+[project.optional-dependencies]
+grammar = [
+    # Grammar-constrained decoding for structured output (requires torch ~2GB)
+    "xgrammar>=0.1.32",
+]
+mcp = [
+    "mcp>=1.0.0",
+]
+modelscope = [
+    "modelscope>=1.10.0",
+]
+audio = [
+    # mlx-audio from commit (6408d2a) with tts/stt/sts extras
+    # tts extra: misaki, num2words, spacy, phonemizer-fork, espeakng-loader, sentencepiece
+    # stt extra: tiktoken, mistral-common[audio]
+    # sts extra: tts deps + stt deps + webrtcvad
+    "mlx-audio[tts,stt,sts] @ git+https://github.com/Blaizzy/mlx-audio@6408d2a410eb8c57464e07725b92271860199250",
+    "python-multipart>=0.0.5",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "mcp>=1.0.0",
+]
+# PEP 735 dependency groups — consumed by `uv sync --dev`.
+# Keep in sync with [project.optional-dependencies] dev above
+# (pip/legacy toolchains use that section instead).
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "mcp>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jundot/omlx"
+Documentation = "https://github.com/jundot/omlx#readme"
+Repository = "https://github.com/jundot/omlx"
+
+[project.scripts]
+omlx = "omlx.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "omlx._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["omlx*"]
+
+[tool.setuptools.package-data]
+"omlx" = ["oq_calibration_data.json"]
+"omlx.admin" = ["templates/**/*.html", "static/**/*", "i18n/*.json"]
+"omlx.eval" = ["data/*.jsonl"]
+
+[tool.uv]
+# mlx-lm is pinned to a git commit; override transitive pins
+# (e.g. mlx-audio → mlx-lm==0.31.1) so the resolver accepts it.
+override-dependencies = [
+    "mlx-lm @ git+https://github.com/ml-explore/mlx-lm@dcbf6e33d135a1b7c6767ca0fe7ebbd23df814a7",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312", "py313"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501", "B905"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

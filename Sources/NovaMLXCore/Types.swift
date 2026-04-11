@@ -1,0 +1,332 @@
+import Foundation
+import Logging
+
+public enum NovaMLX {}
+
+public let version = "1.0.0"
+
+public enum NovaMLXError: Error, LocalizedError {
+    case modelNotFound(String)
+    case modelLoadFailed(String, underlying: Error)
+    case inferenceFailed(String)
+    case configurationError(String)
+    case cacheError(String)
+    case apiError(String)
+    case downloadFailed(String, underlying: Error)
+    case unsupportedModel(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .modelNotFound(let name): "Model not found: \(name)"
+        case .modelLoadFailed(let name, let err): "Failed to load model '\(name)': \(err.localizedDescription)"
+        case .inferenceFailed(let msg): "Inference failed: \(msg)"
+        case .configurationError(let msg): "Configuration error: \(msg)"
+        case .cacheError(let msg): "Cache error: \(msg)"
+        case .apiError(let msg): "API error: \(msg)"
+        case .downloadFailed(let url, let err): "Download failed for \(url): \(err.localizedDescription)"
+        case .unsupportedModel(let name): "Unsupported model: \(name)"
+        }
+    }
+}
+
+public struct ModelIdentifier: Hashable, Codable, Sendable {
+    public let id: String
+    public let family: ModelFamily
+
+    public init(id: String, family: ModelFamily) {
+        self.id = id
+        self.family = family
+    }
+
+    public var displayName: String { id }
+}
+
+public enum ModelFamily: String, Codable, Sendable, CaseIterable {
+    case llama
+    case mistral
+    case phi
+    case qwen
+    case gemma
+    case starcoder
+    case claude
+    case other
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ModelFamily(rawValue: raw) ?? .other
+    }
+}
+
+public enum ModelType: String, Codable, Sendable {
+    case llm
+    case vlm
+    case embedding
+}
+
+public struct ModelConfig: Codable, Sendable {
+    public let identifier: ModelIdentifier
+    public let modelType: ModelType
+    public let contextLength: Int
+    public let maxTokens: Int
+    public let temperature: Double
+    public let topP: Double
+    public let repeatPenalty: Float
+    public let repeatLastN: Int
+    public let seed: UInt64?
+    public let kvBits: Int?
+    public let kvGroupSize: Int
+
+    public init(
+        identifier: ModelIdentifier,
+        modelType: ModelType = .llm,
+        contextLength: Int = 4096,
+        maxTokens: Int = 4096,
+        temperature: Double = 0.7,
+        topP: Double = 0.9,
+        repeatPenalty: Float = 1.0,
+        repeatLastN: Int = 64,
+        seed: UInt64? = nil,
+        kvBits: Int? = nil,
+        kvGroupSize: Int = 64
+    ) {
+        self.identifier = identifier
+        self.modelType = modelType
+        self.contextLength = contextLength
+        self.maxTokens = maxTokens
+        self.temperature = temperature
+        self.topP = topP
+        self.repeatPenalty = repeatPenalty
+        self.repeatLastN = repeatLastN
+        self.seed = seed
+        self.kvBits = kvBits
+        self.kvGroupSize = kvGroupSize
+    }
+}
+
+public enum ResponseFormat: String, Codable, Sendable {
+    case text
+    case jsonObject = "json_object"
+}
+
+public struct InferenceRequest: Sendable {
+    public let id: UUID
+    public let model: String
+    public let messages: [ChatMessage]
+    public let temperature: Double?
+    public let maxTokens: Int?
+    public let topP: Double?
+    public let topK: Int?
+    public let minP: Float?
+    public let frequencyPenalty: Float?
+    public let presencePenalty: Float?
+    public let repetitionPenalty: Float?
+    public let seed: UInt64?
+    public let stream: Bool
+    public let stop: [String]?
+    public let sessionId: String?
+    public let responseFormat: ResponseFormat?
+    public let thinkingBudget: Int?
+
+    public init(
+        id: UUID = UUID(),
+        model: String,
+        messages: [ChatMessage],
+        temperature: Double? = nil,
+        maxTokens: Int? = nil,
+        topP: Double? = nil,
+        topK: Int? = nil,
+        minP: Float? = nil,
+        frequencyPenalty: Float? = nil,
+        presencePenalty: Float? = nil,
+        repetitionPenalty: Float? = nil,
+        seed: UInt64? = nil,
+        stream: Bool = false,
+        stop: [String]? = nil,
+        sessionId: String? = nil,
+        responseFormat: ResponseFormat? = nil,
+        thinkingBudget: Int? = nil
+    ) {
+        self.id = id
+        self.model = model
+        self.messages = messages
+        self.temperature = temperature
+        self.maxTokens = maxTokens
+        self.topP = topP
+        self.topK = topK
+        self.minP = minP
+        self.frequencyPenalty = frequencyPenalty
+        self.presencePenalty = presencePenalty
+        self.repetitionPenalty = repetitionPenalty
+        self.seed = seed
+        self.stream = stream
+        self.stop = stop
+        self.sessionId = sessionId
+        self.responseFormat = responseFormat
+        self.thinkingBudget = thinkingBudget
+    }
+}
+
+public struct ChatMessage: Codable, Sendable {
+    public enum Role: String, Codable, Sendable {
+        case system
+        case user
+        case assistant
+        case tool
+    }
+
+    public let role: Role
+    public let content: String?
+    public let images: [String]?
+    public let name: String?
+    public let toolCallId: String?
+
+    public init(role: Role, content: String? = nil, images: [String]? = nil, name: String? = nil, toolCallId: String? = nil) {
+        self.role = role
+        self.content = content
+        self.images = images
+        self.name = name
+        self.toolCallId = toolCallId
+    }
+}
+
+public struct InferenceResult: Sendable {
+    public let id: UUID
+    public let model: String
+    public let text: String
+    public let tokensPerSecond: Double
+    public let promptTokens: Int
+    public let completionTokens: Int
+    public let finishReason: FinishReason
+
+    public init(
+        id: UUID,
+        model: String,
+        text: String,
+        tokensPerSecond: Double,
+        promptTokens: Int,
+        completionTokens: Int,
+        finishReason: FinishReason
+    ) {
+        self.id = id
+        self.model = model
+        self.text = text
+        self.tokensPerSecond = tokensPerSecond
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.finishReason = finishReason
+    }
+}
+
+public enum FinishReason: String, Codable, Sendable {
+    case stop
+    case length
+    case toolCalls = "tool_calls"
+}
+
+public struct Token: Sendable {
+    public let id: Int
+    public let text: String
+    public let logprob: Float?
+    public let finishReason: FinishReason?
+
+    public init(id: Int, text: String, logprob: Float? = nil, finishReason: FinishReason? = nil) {
+        self.id = id
+        self.text = text
+        self.logprob = logprob
+        self.finishReason = finishReason
+    }
+}
+
+public protocol TokenizerProtocol: Sendable {
+    func encode(text: String) -> [Int]
+    func decode(tokens: [Int]) -> String
+    var vocabularySize: Int { get }
+    var bosToken: String? { get }
+    var eosToken: String? { get }
+}
+
+public protocol ModelProtocol: Sendable {
+    var identifier: ModelIdentifier { get }
+    var config: ModelConfig { get }
+    func warmup() async throws
+}
+
+public protocol InferenceEngineProtocol: Sendable {
+    func generate(_ request: InferenceRequest) async throws -> InferenceResult
+    func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error>
+    func abort(requestId: UUID) async
+    var isReady: Bool { get }
+}
+
+public protocol ModelRegistryProtocol: Sendable {
+    func availableModels() async -> [ModelIdentifier]
+    func loadModel(_ identifier: ModelIdentifier) async throws -> ModelProtocol
+    func unloadModel(_ identifier: ModelIdentifier) async throws
+    func isLoaded(_ identifier: ModelIdentifier) async -> Bool
+}
+
+public struct ServerConfig: Codable, Sendable {
+    public let host: String
+    public let port: Int
+    public let adminPort: Int
+    public let apiKeys: [String]
+    public let maxConcurrentRequests: Int
+    public let requestTimeout: TimeInterval
+    public let contextScalingTarget: Int?
+
+    public init(
+        host: String = "127.0.0.1",
+        port: Int = 8080,
+        adminPort: Int = 8081,
+        apiKeys: [String] = [],
+        maxConcurrentRequests: Int = 16,
+        requestTimeout: TimeInterval = 300,
+        contextScalingTarget: Int? = nil
+    ) {
+        self.host = host
+        self.port = port
+        self.adminPort = adminPort
+        self.apiKeys = apiKeys
+        self.maxConcurrentRequests = maxConcurrentRequests
+        self.requestTimeout = requestTimeout
+        self.contextScalingTarget = contextScalingTarget
+    }
+
+    public func scaleTokenCount(_ count: Int, modelContextWindow: Int) -> Int {
+        guard let target = contextScalingTarget, target > 0, modelContextWindow > 0 else { return count }
+        return Int(Double(count) * Double(target) / Double(modelContextWindow))
+    }
+}
+
+public struct SystemStats: Sendable {
+    public let cpuUsage: Double
+    public let memoryUsed: UInt64
+    public let memoryTotal: UInt64
+    public let gpuMemoryUsed: UInt64
+    public let activeRequests: Int
+    public let tokensPerSecond: Double
+    public let uptime: TimeInterval
+
+    public init(
+        cpuUsage: Double = 0,
+        memoryUsed: UInt64 = 0,
+        memoryTotal: UInt64 = 0,
+        gpuMemoryUsed: UInt64 = 0,
+        activeRequests: Int = 0,
+        tokensPerSecond: Double = 0,
+        uptime: TimeInterval = 0
+    ) {
+        self.cpuUsage = cpuUsage
+        self.memoryUsed = memoryUsed
+        self.memoryTotal = memoryTotal
+        self.gpuMemoryUsed = gpuMemoryUsed
+        self.activeRequests = activeRequests
+        self.tokensPerSecond = tokensPerSecond
+        self.uptime = uptime
+    }
+
+    public var memoryUsagePercent: Double {
+        guard memoryTotal > 0 else { return 0 }
+        return Double(memoryUsed) / Double(memoryTotal) * 100
+    }
+}

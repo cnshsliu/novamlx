@@ -1,0 +1,1844 @@
+            <div x-show="mainTab === 'models'" x-cloak>
+                <div class="animate-fade-in-up">
+                    <!-- Sub-tab navigation (Manager / Downloader) -->
+                    <div class="flex flex-wrap items-center gap-2 mb-10 animate-fade-in-up">
+                        <button
+                            @click="setModelsTab('manager')"
+                            :class="modelsTab === 'manager'
+                                ? 'bg-neutral-900 text-white'
+                                : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100'"
+                            class="px-5 py-2.5 rounded-full text-sm font-medium transition-all duration-200">
+                            {{ t('models.tab.manager') }}
+                        </button>
+                        <button
+                            @click="setModelsTab('downloader')"
+                            :class="modelsTab === 'downloader'
+                                ? 'bg-neutral-900 text-white'
+                                : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100'"
+                            class="px-5 py-2.5 rounded-full text-sm font-medium transition-all duration-200">
+                            {{ t('models.tab.downloader') }}
+                        </button>
+                        <button
+                            @click="setModelsTab('quantizer')"
+                            :class="modelsTab === 'quantizer'
+                                ? 'bg-neutral-900 text-white'
+                                : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100'"
+                            class="px-5 py-2.5 rounded-full text-sm font-medium transition-all duration-200">
+                            {{ t('models.tab.quantizer') }}
+                        </button>
+                        <button
+                            @click="setModelsTab('uploader')"
+                            :class="modelsTab === 'uploader'
+                                ? 'bg-neutral-900 text-white'
+                                : 'text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100'"
+                            class="px-5 py-2.5 rounded-full text-sm font-medium transition-all duration-200">
+                            {{ t('models.tab.uploader') }}
+                        </button>
+                    </div>
+
+                    <!-- ==================== MANAGER TAB ==================== -->
+                    <div x-show="modelsTab === 'manager'" x-cloak>
+                        <!-- Header -->
+                        <div class="mb-8">
+                            <h2 class="text-xs font-bold uppercase tracking-widest text-neutral-400 mb-2">{{ t('models.manager.section_label') }}</h2>
+                            <div class="flex items-center gap-3">
+                                <h3 class="text-2xl font-bold tracking-tight text-neutral-900">{{ t('models.manager.heading') }}</h3>
+                                <button @click="reloadModels()"
+                                        :disabled="reloading"
+                                        class="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700
+                                               hover:bg-neutral-100 rounded-lg transition-all flex items-center gap-1.5
+                                               disabled:opacity-50 disabled:cursor-not-allowed">
+                                    <span class="inline-flex" :class="reloading && 'animate-spin'"><i data-lucide="rotate-cw" class="w-3.5 h-3.5"></i></span>
+                                    <span x-text="reloading ? window.t('models.manager.reloading') : window.t('models.manager.reload')"></span>
+                                </button>
+                            </div>
+                            <p class="text-sm text-neutral-500 mt-2">{{ t('models.manager.description') }}</p>
+                        </div>
+
+                        <!-- Local Models Section -->
+                        <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden">
+                            <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                <div class="flex items-center gap-3">
+                                    <i data-lucide="hard-drive" class="w-4 h-4 text-neutral-500"></i>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.manager.local_models') }}</span>
+                                    <span class="text-xs text-neutral-400" x-text="window.t('models.manager.models_count').replace('{count}', hfModels.length)"></span>
+                                </div>
+                                <button @click="loadHFModels()"
+                                        class="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700
+                                               hover:bg-neutral-100 rounded-lg transition-all flex items-center gap-1.5">
+                                    <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+                                    {{ t('models.manager.refresh') }}
+                                </button>
+                            </div>
+                            <div class="divide-y divide-neutral-100">
+                                <template x-if="hfModels.length === 0">
+                                    <div class="px-6 py-12 text-center">
+                                        <i data-lucide="inbox" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                        <p class="text-sm text-neutral-500">{{ t('models.manager.no_models') }}</p>
+                                    </div>
+                                </template>
+                                <template x-for="model in hfModels" :key="model.name">
+                                    <div class="px-4 sm:px-6 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 hover:bg-neutral-50 transition-colors">
+                                        <div class="min-w-0 flex-1 flex items-center gap-2">
+                                            <span class="text-sm font-medium text-neutral-900 truncate" x-text="model.name"></span>
+                                            <template x-if="models.find(m => m.id === model.name)?.settings?.model_alias">
+                                                <span class="px-1.5 py-0.5 text-[10px] font-medium rounded bg-neutral-100 text-neutral-500 border border-neutral-200 truncate max-w-[120px]"
+                                                      x-text="models.find(m => m.id === model.name)?.settings?.model_alias"></span>
+                                            </template>
+                                            <span class="text-xs text-neutral-400 flex-shrink-0" x-text="'(' + model.size_formatted + ')'"></span>
+                                            <button x-data="{ copied: false }"
+                                                    @click.stop="copyToClipboard(models.find(m => m.id === model.name)?.settings?.model_alias || model.name); copied = true; setTimeout(() => copied = false, 2000)"
+                                                    class="p-1 rounded-md transition-all flex-shrink-0"
+                                                    :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
+                                                    :title="window.t('models.manager.copy_model_name_tooltip')">
+                                                <svg x-show="!copied" class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                                                <svg x-show="copied" x-cloak class="w-3.5 h-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                                            </button>
+                                        </div>
+                                        <div class="flex items-center gap-2 ml-4 shrink-0">
+                                            <template x-if="hfDeleteConfirm !== model.name">
+                                                <button @click="hfDeleteConfirm = model.name"
+                                                        class="p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                                        :title="window.t('models.manager.delete_tooltip')">
+                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                </button>
+                                            </template>
+                                            <template x-if="hfDeleteConfirm === model.name">
+                                                <div class="flex items-center gap-2">
+                                                    <span class="text-xs text-red-600">{{ t('models.manager.delete_confirm') }}</span>
+                                                    <button @click="deleteHFModel(model.name)"
+                                                            class="px-2.5 py-1 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition-all">
+                                                        {{ t('models.manager.delete_yes') }}
+                                                    </button>
+                                                    <button @click="hfDeleteConfirm = null"
+                                                            class="px-2.5 py-1 text-xs font-medium text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all">
+                                                        {{ t('models.manager.delete_no') }}
+                                                    </button>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ==================== DOWNLOADER TAB ==================== -->
+                    <div x-show="modelsTab === 'downloader'" x-cloak>
+                        <!-- Header -->
+                        <div class="mb-8">
+                            <h2 class="text-xs font-bold uppercase tracking-widest text-neutral-400 mb-2">{{ t('models.downloader.section_label') }}</h2>
+                            <div class="flex items-center gap-3">
+                                <h3 class="text-2xl font-bold tracking-tight text-neutral-900">{{ t('models.downloader.heading') }}</h3>
+                                <div class="relative group">
+                                    <button @click="openHfMirrorModal()"
+                                            class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 transition-all">
+                                        <i data-lucide="settings" class="w-4 h-4"></i>
+                                    </button>
+                                    <div class="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 px-2.5 py-1 text-xs font-medium text-white bg-neutral-800 rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+                                         x-text="t('models.downloader.mirror_settings')"></div>
+                                </div>
+                            </div>
+                            <p class="text-sm text-neutral-500 mt-2">{{ t('models.downloader.description') }}</p>
+                        </div>
+
+                        <!-- Source Switcher (HF / MS) -->
+                        <div class="flex items-center gap-1 bg-neutral-100 rounded-lg p-0.5 mb-6 w-fit">
+                            <button @click="downloaderSource = 'hf'"
+                                    :class="downloaderSource === 'hf'
+                                        ? 'bg-white text-neutral-900 shadow-sm'
+                                        : 'text-neutral-500 hover:text-neutral-700'"
+                                    class="px-4 py-1.5 text-xs font-medium rounded-md transition-all">
+                                {{ t('models.downloader.source.hf') }}
+                            </button>
+                            <button @click="downloaderSource = 'ms'; initMsDownloader()"
+                                    :class="downloaderSource === 'ms'
+                                        ? 'bg-white text-neutral-900 shadow-sm'
+                                        : 'text-neutral-500 hover:text-neutral-700'"
+                                    class="px-4 py-1.5 text-xs font-medium rounded-md transition-all">
+                                {{ t('models.downloader.source.ms') }}
+                            </button>
+                        </div>
+
+                        <!-- ===== HuggingFace Source ===== -->
+                        <div x-show="downloaderSource === 'hf'">
+
+                        <!-- Download Form Section -->
+                        <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                            <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                <div class="flex items-center gap-3">
+                                    <i data-lucide="cloud-download" class="w-4 h-4 text-neutral-500"></i>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.downloader.download_section') }}</span>
+                                </div>
+                            </div>
+                            <div class="px-6 py-5">
+                                <div class="flex flex-col sm:flex-row sm:items-end gap-4">
+                                    <div class="flex-1">
+                                        <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">{{ t('models.downloader.repo_id') }}</label>
+                                        <input type="text" x-model="hfRepoId"
+                                               @keydown.enter="startHFDownload()"
+                                               placeholder="mlx-community/Llama-3-8B-4bit"
+                                               class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                      focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all
+                                                      bg-white font-mono text-xs"
+                                        >
+                                    </div>
+                                    <div class="w-full sm:w-48">
+                                        <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">
+                                            {{ t('models.downloader.hf_token') }} <span class="text-neutral-400 normal-case">{{ t('models.downloader.hf_token_optional') }}</span>
+                                        </label>
+                                        <input type="password" x-model="hfToken"
+                                               @keydown.enter="startHFDownload()"
+                                               placeholder="hf_..."
+                                               class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                      focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all
+                                                      bg-white font-mono text-xs"
+                                        >
+                                    </div>
+                                    <button @click="startHFDownload()"
+                                            :disabled="hfDownloading || !hfRepoId.trim()"
+                                            class="px-6 py-2.5 bg-neutral-900 text-white text-sm font-semibold rounded-full
+                                                   hover:bg-neutral-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed
+                                                   flex items-center gap-2 whitespace-nowrap">
+                                        <i data-lucide="download" class="w-4 h-4"></i>
+                                        {{ t('models.downloader.download_button') }}
+                                    </button>
+                                </div>
+                                <div x-show="hfError" x-cloak
+                                     class="mt-3 px-4 py-2.5 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl flex items-center gap-2">
+                                    <i data-lucide="alert-circle" class="w-4 h-4 shrink-0"></i>
+                                    <span x-text="hfError"></span>
+                                </div>
+                                <div x-show="hfSuccess" x-cloak
+                                     class="mt-3 px-4 py-2.5 bg-green-50 border border-green-200 text-green-700 text-sm rounded-xl flex items-center gap-2">
+                                    <i data-lucide="check-circle" class="w-4 h-4 shrink-0"></i>
+                                    <span x-text="hfSuccess"></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Search HuggingFace Section -->
+                        <div class="bg-white rounded-2xl border border-neutral-200 mb-6">
+                            <div class="flex items-center gap-3 px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                <i data-lucide="search" class="w-4 h-4 text-neutral-500"></i>
+                                <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.search.section_label') }}</span>
+                            </div>
+                            <div class="px-6 py-5">
+                                <div class="flex items-center gap-3">
+                                    <!-- Search input with history -->
+                                    <div class="flex-1 relative">
+                                        <input type="text" x-model="hfSearchQuery"
+                                               @input="debounceSearch()"
+                                               @keydown.enter="immediateSearch()"
+                                               @focus="hfSearchHistoryOpen = true"
+                                               @blur="closeSearchHistory()"
+                                               placeholder="{{ t('models.search.placeholder') }}"
+                                               class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                      focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all bg-white">
+                                        <!-- Search history dropdown -->
+                                        <div x-show="hfSearchHistoryOpen && hfSearchHistory.length > 0 && !hfSearchQuery.trim()"
+                                             x-cloak
+                                             class="absolute top-full left-0 right-0 mt-1 bg-white rounded-xl shadow-lg border border-neutral-200 py-1 z-50">
+                                            <div class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-neutral-400">{{ t('models.search.recent_searches') }}</div>
+                                            <template x-for="(item, idx) in hfSearchHistory" :key="idx">
+                                                <button @mousedown.prevent="selectSearchHistory(item)"
+                                                        class="w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-50 flex items-center gap-2 transition-colors">
+                                                    <i data-lucide="clock" class="w-3 h-3 text-neutral-400 shrink-0"></i>
+                                                    <span x-text="item" class="truncate"></span>
+                                                </button>
+                                            </template>
+                                        </div>
+                                    </div>
+                                    <!-- Sort dropdown -->
+                                    <div class="w-52">
+                                        <select x-model="hfSearchSort"
+                                                @change="if (hfSearchQuery.trim()) immediateSearch()"
+                                                class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                       focus:ring-2 focus:ring-neutral-900 focus:border-transparent
+                                                       transition-all bg-white appearance-none cursor-pointer">
+                                            <option value="trending">{{ t('models.search.sort.trending') }}</option>
+                                            <option value="downloads">{{ t('models.search.sort.downloads') }}</option>
+                                            <option value="created">{{ t('models.search.sort.created') }}</option>
+                                            <option value="updated">{{ t('models.search.sort.updated') }}</option>
+                                            <option value="most_params">{{ t('models.search.sort.most_params') }}</option>
+                                            <option value="least_params">{{ t('models.search.sort.least_params') }}</option>
+                                        </select>
+                                    </div>
+                                    <!-- Search button -->
+                                    <button @click="immediateSearch()"
+                                            :disabled="hfSearchLoading || !hfSearchQuery.trim()"
+                                            class="px-6 py-2.5 bg-neutral-900 text-white text-sm font-semibold rounded-full
+                                                   hover:bg-neutral-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed
+                                                   flex items-center gap-2 whitespace-nowrap">
+                                        <i data-lucide="search" class="w-4 h-4"></i>
+                                        {{ t('models.search.button') }}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Model List Section (Trending / Popular / Search Results) -->
+                        <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                            <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                <div class="flex items-center gap-3">
+                                    <i data-lucide="star" class="w-4 h-4 text-neutral-500"></i>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.browse.section_label') }}</span>
+                                    <span x-show="globalSettings.system.total_memory" x-cloak
+                                          class="text-xs text-neutral-400" x-text="window.t('models.browse.system_suffix').replace('{memory}', globalSettings.system.total_memory)"></span>
+                                    <label class="flex items-center gap-1.5 ml-2 cursor-pointer select-none">
+                                        <input type="checkbox" x-model="hfMlxOnly"
+                                               class="w-3.5 h-3.5 rounded border-neutral-300 text-neutral-900 focus:ring-neutral-500 cursor-pointer">
+                                        <span class="text-xs text-neutral-500 font-medium">{{ t('models.browse.mlx_only') }}</span>
+                                    </label>
+                                </div>
+                                <div class="flex items-center gap-1 bg-neutral-100 rounded-lg p-0.5">
+                                    <button @click="hfRecommendedTab = 'trending'"
+                                            :class="hfRecommendedTab === 'trending'
+                                                ? 'bg-white text-neutral-900 shadow-sm'
+                                                : 'text-neutral-500 hover:text-neutral-700'"
+                                            class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                        {{ t('models.browse.tab.trending') }}
+                                    </button>
+                                    <button @click="hfRecommendedTab = 'popular'"
+                                            :class="hfRecommendedTab === 'popular'
+                                                ? 'bg-white text-neutral-900 shadow-sm'
+                                                : 'text-neutral-500 hover:text-neutral-700'"
+                                            class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                        {{ t('models.browse.tab.popular') }}
+                                    </button>
+                                    <button @click="hfRecommendedTab = 'search'"
+                                            :class="hfRecommendedTab === 'search'
+                                                ? 'bg-white text-neutral-900 shadow-sm'
+                                                : 'text-neutral-500 hover:text-neutral-700'"
+                                            class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                        {{ t('models.browse.tab.search_results') }}
+                                        <span x-show="hfSearchResults.length > 0" x-cloak
+                                              class="ml-1 text-[10px] text-neutral-400"
+                                              x-text="'(' + hfSearchResults.length + ')'"></span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Loading state for recommended -->
+                            <div x-show="hfRecommendedLoading && (hfRecommendedTab === 'trending' || hfRecommendedTab === 'popular')" x-cloak class="px-6 py-12 text-center">
+                                <div class="inline-block w-5 h-5 border-2 border-neutral-300 border-t-neutral-600 rounded-full animate-spin mb-3"></div>
+                                <p class="text-sm text-neutral-500">{{ t('models.browse.loading') }}</p>
+                            </div>
+
+                            <!-- Not loaded state for recommended -->
+                            <div x-show="!hfRecommendedLoading && !hfRecommendedLoaded && (hfRecommendedTab === 'trending' || hfRecommendedTab === 'popular')" x-cloak class="px-6 py-12 text-center">
+                                <i data-lucide="star" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                <p class="text-sm text-neutral-500">{{ t('models.browse.load_prompt') }}</p>
+                                <button @click="loadRecommendedModels()"
+                                        class="mt-3 px-4 py-2 text-xs font-medium text-neutral-600 hover:text-neutral-800
+                                               bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-all">
+                                    {{ t('models.browse.load_button') }}
+                                </button>
+                            </div>
+
+                            <!-- Trending tab -->
+                            <template x-if="hfRecommendedLoaded && !hfRecommendedLoading">
+                                <div x-show="hfRecommendedTab === 'trending'">
+                                    <div class="divide-y divide-neutral-100">
+                                        <template x-if="(hfRecommended.trending || []).length === 0">
+                                            <div class="px-6 py-8 text-center">
+                                                <p class="text-sm text-neutral-500">{{ t('models.browse.no_trending') }}</p>
+                                            </div>
+                                        </template>
+                                        <template x-for="model in getPagedModels('trending')" :key="model.repo_id">
+                                            <div class="px-6 py-3.5 flex items-center justify-between hover:bg-neutral-50 transition-colors">
+                                                <div class="min-w-0 flex-1">
+                                                    <button @click="openModelDetail(model.repo_id)"
+                                                       class="text-sm font-medium text-neutral-900 hover:text-blue-600 truncate block transition-colors text-left cursor-pointer" x-text="model.name"></button>
+                                                    <div class="flex items-center gap-3 mt-0.5">
+                                                        <span class="text-xs text-neutral-400" x-text="model.size_formatted"></span>
+                                                        <span class="text-xs text-neutral-400" x-text="'&#11015; ' + formatDownloads(model.downloads)"></span>
+                                                        <span class="text-xs text-neutral-400" x-text="'&#9829; ' + model.likes"></span>
+                                                        <span x-show="model.params" x-cloak class="text-xs text-neutral-400" x-text="model.params_formatted + ' ' + window.t('models.browse.params_suffix')"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="flex items-center gap-2 shrink-0 ml-4">
+                                                    <span x-show="getMemoryFitStatus(model.size) === 'warning'" x-cloak
+                                                          class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-amber-50 text-amber-600 border border-amber-200">
+                                                        {{ t('models.browse.tight_fit') }}
+                                                    </span>
+                                                    <span x-show="getMemoryFitStatus(model.size) === 'danger'" x-cloak
+                                                          class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-red-50 text-red-700 border border-red-200">
+                                                        {{ t('models.browse.high_oom_risk') }}
+                                                    </span>
+                                                    <button @click="downloadRecommended(model.repo_id)"
+                                                            :disabled="hfDownloading"
+                                                            class="px-3.5 py-1.5 text-xs font-medium text-neutral-600 bg-neutral-100
+                                                                   hover:bg-neutral-900 hover:text-white rounded-lg transition-all
+                                                                   disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                        <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                                        {{ t('models.downloader.download_button') }}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                    <!-- Pagination -->
+                                    <template x-if="getTotalPages('trending') > 1">
+                                        <div class="px-6 py-3 border-t border-neutral-100 flex items-center justify-center gap-1">
+                                            <template x-for="p in getTotalPages('trending')" :key="p">
+                                                <button @click="setPage('trending', p)"
+                                                        :class="hfPage.trending === p
+                                                            ? 'bg-neutral-900 text-white'
+                                                            : 'text-neutral-600 hover:bg-neutral-100'"
+                                                        class="w-8 h-8 text-xs font-medium rounded-lg transition-all"
+                                                        x-text="p"></button>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+
+                            <!-- Popular tab -->
+                            <template x-if="hfRecommendedLoaded && !hfRecommendedLoading">
+                                <div x-show="hfRecommendedTab === 'popular'">
+                                    <div class="divide-y divide-neutral-100">
+                                        <template x-if="(hfRecommended.popular || []).length === 0">
+                                            <div class="px-6 py-8 text-center">
+                                                <p class="text-sm text-neutral-500">{{ t('models.browse.no_popular') }}</p>
+                                            </div>
+                                        </template>
+                                        <template x-for="model in getPagedModels('popular')" :key="model.repo_id">
+                                            <div class="px-6 py-3.5 flex items-center justify-between hover:bg-neutral-50 transition-colors">
+                                                <div class="min-w-0 flex-1">
+                                                    <button @click="openModelDetail(model.repo_id)"
+                                                       class="text-sm font-medium text-neutral-900 hover:text-blue-600 truncate block transition-colors text-left cursor-pointer" x-text="model.name"></button>
+                                                    <div class="flex items-center gap-3 mt-0.5">
+                                                        <span class="text-xs text-neutral-400" x-text="model.size_formatted"></span>
+                                                        <span class="text-xs text-neutral-400" x-text="'&#11015; ' + formatDownloads(model.downloads)"></span>
+                                                        <span class="text-xs text-neutral-400" x-text="'&#9829; ' + model.likes"></span>
+                                                        <span x-show="model.params" x-cloak class="text-xs text-neutral-400" x-text="model.params_formatted + ' ' + window.t('models.browse.params_suffix')"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="flex items-center gap-2 shrink-0 ml-4">
+                                                    <span x-show="getMemoryFitStatus(model.size) === 'warning'" x-cloak
+                                                          class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-amber-50 text-amber-600 border border-amber-200">
+                                                        {{ t('models.browse.tight_fit') }}
+                                                    </span>
+                                                    <span x-show="getMemoryFitStatus(model.size) === 'danger'" x-cloak
+                                                          class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-red-50 text-red-700 border border-red-200">
+                                                        {{ t('models.browse.high_oom_risk') }}
+                                                    </span>
+                                                    <button @click="downloadRecommended(model.repo_id)"
+                                                            :disabled="hfDownloading"
+                                                            class="px-3.5 py-1.5 text-xs font-medium text-neutral-600 bg-neutral-100
+                                                                   hover:bg-neutral-900 hover:text-white rounded-lg transition-all
+                                                                   disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                        <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                                        {{ t('models.downloader.download_button') }}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                    <!-- Pagination -->
+                                    <template x-if="getTotalPages('popular') > 1">
+                                        <div class="px-6 py-3 border-t border-neutral-100 flex items-center justify-center gap-1">
+                                            <template x-for="p in getTotalPages('popular')" :key="p">
+                                                <button @click="setPage('popular', p)"
+                                                        :class="hfPage.popular === p
+                                                            ? 'bg-neutral-900 text-white'
+                                                            : 'text-neutral-600 hover:bg-neutral-100'"
+                                                        class="w-8 h-8 text-xs font-medium rounded-lg transition-all"
+                                                        x-text="p"></button>
+                                            </template>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+
+                            <!-- Search Results tab -->
+                            <div x-show="hfRecommendedTab === 'search'">
+                                <!-- Loading state -->
+                                <div x-show="hfSearchLoading" x-cloak class="px-6 py-12 text-center">
+                                    <div class="inline-block w-5 h-5 border-2 border-neutral-300 border-t-neutral-600 rounded-full animate-spin mb-3"></div>
+                                    <p class="text-sm text-neutral-500">{{ t('models.browse.searching') }}</p>
+                                </div>
+                                <!-- Not searched yet -->
+                                <div x-show="!hfSearchLoading && !hfSearchLoaded" x-cloak class="px-6 py-12 text-center">
+                                    <i data-lucide="search" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                    <p class="text-sm text-neutral-500">{{ t('models.browse.search_prompt') }}</p>
+                                </div>
+                                <!-- Results -->
+                                <template x-if="hfSearchLoaded && !hfSearchLoading">
+                                    <div>
+                                        <template x-if="hfSearchResults.length === 0">
+                                            <div class="px-6 py-8 text-center">
+                                                <p class="text-sm text-neutral-500">{{ t('models.browse.no_results') }}</p>
+                                            </div>
+                                        </template>
+                                        <div class="divide-y divide-neutral-100">
+                                            <template x-for="model in getPagedModels('search')" :key="model.repo_id">
+                                                <div class="px-6 py-3.5 flex items-center justify-between hover:bg-neutral-50 transition-colors">
+                                                    <div class="min-w-0 flex-1">
+                                                        <button @click="openModelDetail(model.repo_id)"
+                                                           class="text-sm font-medium text-neutral-900 hover:text-blue-600 truncate block transition-colors text-left cursor-pointer font-mono text-xs" x-text="model.repo_id"></button>
+                                                        <div class="flex items-center gap-3 mt-0.5 flex-wrap">
+                                                            <span x-show="model.size > 0" x-cloak class="text-xs text-neutral-400" x-text="model.size_formatted"></span>
+                                                            <span class="text-xs text-neutral-400" x-text="'&#11015; ' + formatDownloads(model.downloads)"></span>
+                                                            <span class="text-xs text-neutral-400" x-text="'&#9829; ' + model.likes"></span>
+                                                            <span x-show="model.params" x-cloak class="text-xs text-neutral-400" x-text="model.params_formatted + ' ' + window.t('models.browse.params_suffix')"></span>
+                                                        </div>
+                                                    </div>
+                                                    <div class="flex items-center gap-2 shrink-0 ml-4">
+                                                        <span x-show="getMemoryFitStatus(model.size) === 'warning'" x-cloak
+                                                              class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-amber-50 text-amber-600 border border-amber-200">
+                                                            {{ t('models.browse.tight_fit') }}
+                                                        </span>
+                                                        <span x-show="getMemoryFitStatus(model.size) === 'danger'" x-cloak
+                                                              class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-red-50 text-red-700 border border-red-200">
+                                                            {{ t('models.browse.high_oom_risk') }}
+                                                        </span>
+                                                        <button @click="downloadRecommended(model.repo_id)"
+                                                                :disabled="hfDownloading"
+                                                                class="px-3.5 py-1.5 text-xs font-medium text-neutral-600 bg-neutral-100
+                                                                       hover:bg-neutral-900 hover:text-white rounded-lg transition-all
+                                                                       disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                            <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                                            {{ t('models.downloader.download_button') }}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                        <!-- Pagination -->
+                                        <template x-if="getTotalPages('search') > 1">
+                                            <div class="px-6 py-3 border-t border-neutral-100 flex items-center justify-center gap-1">
+                                                <template x-for="p in getTotalPages('search')" :key="p">
+                                                    <button @click="setPage('search', p)"
+                                                            :class="hfPage.search === p
+                                                                ? 'bg-neutral-900 text-white'
+                                                                : 'text-neutral-600 hover:bg-neutral-100'"
+                                                            class="w-8 h-8 text-xs font-medium rounded-lg transition-all"
+                                                            x-text="p"></button>
+                                                </template>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Download Queue Section -->
+                        <template x-if="hfTasks.length > 0">
+                            <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                                <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                    <div class="flex items-center gap-3">
+                                        <i data-lucide="list" class="w-4 h-4 text-neutral-500"></i>
+                                        <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.queue.section_label') }}</span>
+                                    </div>
+                                </div>
+                                <div class="divide-y divide-neutral-100">
+                                    <template x-for="task in hfTasks" :key="task.task_id">
+                                        <div class="px-6 py-4">
+                                            <div class="flex items-center justify-between">
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="flex items-center gap-2 flex-wrap">
+                                                        <span class="text-sm font-medium text-neutral-900 truncate" x-text="task.repo_id"></span>
+                                                        <span class="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full shrink-0"
+                                                              :class="{
+                                                                  'bg-blue-50 text-blue-700 border border-blue-200': task.status === 'downloading',
+                                                                  'bg-green-50 text-green-700 border border-green-200': task.status === 'completed',
+                                                                  'bg-red-50 text-red-700 border border-red-200': task.status === 'failed',
+                                                                  'bg-neutral-100 text-neutral-600 border border-neutral-200': task.status === 'pending',
+                                                                  'bg-orange-50 text-orange-700 border border-orange-200': task.status === 'cancelled',
+                                                              }"
+                                                              x-text="task.status"></span>
+                                                    </div>
+                                                    <p x-show="task.error" x-cloak class="text-xs text-red-500 mt-1.5 truncate" x-text="task.error"></p>
+                                                    <template x-if="task.status === 'downloading'">
+                                                        <div class="mt-2.5">
+                                                            <div class="h-1.5 bg-neutral-100 rounded-full overflow-hidden">
+                                                                <div class="h-full bg-neutral-900 rounded-full transition-all duration-500"
+                                                                     :style="'width: ' + (task.total_size > 0 ? task.progress : 100) + '%'"
+                                                                     :class="task.total_size <= 0 ? 'animate-pulse' : ''"></div>
+                                                            </div>
+                                                            <div class="flex items-center gap-3 mt-1.5 text-xs text-neutral-400">
+                                                                <template x-if="task.total_size > 0">
+                                                                    <span x-text="formatProgress(task)"></span>
+                                                                </template>
+                                                                <template x-if="task.total_size <= 0">
+                                                                    <span>{{ t('models.queue.downloading') }}</span>
+                                                                </template>
+                                                            </div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                                <div class="flex items-center gap-2 ml-4 shrink-0">
+                                                    <button x-show="task.status === 'downloading' || task.status === 'pending'" x-cloak
+                                                            @click="cancelHFDownload(task.task_id)"
+                                                            class="p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                                            :title="window.t('models.queue.cancel_tooltip')">
+                                                        <i data-lucide="x" class="w-4 h-4"></i>
+                                                    </button>
+                                                    <button x-show="task.status === 'failed' || task.status === 'cancelled'" x-cloak
+                                                            @click="retryHFDownload(task.task_id)"
+                                                            class="p-1.5 text-neutral-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-all"
+                                                            :title="window.t('models.queue.retry_tooltip') || 'Retry download'">
+                                                        <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                                                    </button>
+                                                    <button x-show="task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'" x-cloak
+                                                            @click="removeHFTask(task.task_id)"
+                                                            class="p-1.5 text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all"
+                                                            :title="window.t('models.queue.remove_tooltip')">
+                                                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+
+                        </div><!-- end HuggingFace Source -->
+
+                        <!-- ===== ModelScope Source ===== -->
+                        <div x-show="downloaderSource === 'ms'" x-cloak>
+
+                            <!-- MS Unavailable Banner -->
+                            <div x-show="!msAvailable" class="bg-amber-50 border border-amber-200 rounded-2xl p-6 mb-6 text-center">
+                                <i data-lucide="alert-triangle" class="w-8 h-8 text-amber-400 mx-auto mb-3"></i>
+                                <p class="text-sm text-amber-700" x-text="window.t('models.downloader.ms_unavailable')"></p>
+                            </div>
+
+                            <template x-if="msAvailable">
+                                <div>
+                                    <!-- MS Download Form -->
+                                    <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                                        <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                            <div class="flex items-center gap-3">
+                                                <i data-lucide="cloud-download" class="w-4 h-4 text-neutral-500"></i>
+                                                <span class="text-xs font-bold uppercase tracking-wider text-neutral-600" x-text="window.t('models.downloader.ms_download_section')"></span>
+                                            </div>
+                                        </div>
+                                        <div class="px-6 py-5">
+                                            <div class="flex flex-col sm:flex-row sm:items-end gap-4">
+                                                <div class="flex-1">
+                                                    <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">{{ t('models.downloader.repo_id') }}</label>
+                                                    <input type="text" x-model="msRepoId"
+                                                           @keydown.enter="startMSDownload()"
+                                                           placeholder="mlx-community/Qwen2.5-7B-Instruct-MLX"
+                                                           class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                                  focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all
+                                                                  bg-white font-mono text-xs">
+                                                </div>
+                                                <div class="w-full sm:w-48">
+                                                    <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">
+                                                        <span x-text="window.t('models.downloader.ms_token')"></span>
+                                                        <span class="text-neutral-400 normal-case" x-text="window.t('models.downloader.ms_token_optional')"></span>
+                                                    </label>
+                                                    <input type="password" x-model="msToken"
+                                                           @keydown.enter="startMSDownload()"
+                                                           :placeholder="window.t('models.downloader.ms_token_placeholder')"
+                                                           class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                                  focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all
+                                                                  bg-white font-mono text-xs">
+                                                </div>
+                                                <button @click="startMSDownload()"
+                                                        :disabled="msDownloading || !msRepoId.trim()"
+                                                        class="px-6 py-2.5 bg-neutral-900 text-white text-sm font-semibold rounded-full
+                                                               hover:bg-neutral-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed
+                                                               flex items-center gap-2 whitespace-nowrap">
+                                                    <i data-lucide="download" class="w-4 h-4"></i>
+                                                    {{ t('models.downloader.download_button') }}
+                                                </button>
+                                            </div>
+                                            <div x-show="msError" x-cloak
+                                                 class="mt-3 px-4 py-2.5 bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl flex items-center gap-2">
+                                                <i data-lucide="alert-circle" class="w-4 h-4 shrink-0"></i>
+                                                <span x-text="msError"></span>
+                                            </div>
+                                            <div x-show="msSuccess" x-cloak
+                                                 class="mt-3 px-4 py-2.5 bg-green-50 border border-green-200 text-green-700 text-sm rounded-xl flex items-center gap-2">
+                                                <i data-lucide="check-circle" class="w-4 h-4 shrink-0"></i>
+                                                <span x-text="msSuccess"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Search ModelScope Section -->
+                                    <div class="bg-white rounded-2xl border border-neutral-200 mb-6">
+                                        <div class="flex items-center gap-3 px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                            <i data-lucide="search" class="w-4 h-4 text-neutral-500"></i>
+                                            <span class="text-xs font-bold uppercase tracking-wider text-neutral-600" x-text="window.t('models.search.ms_section_label')"></span>
+                                        </div>
+                                        <div class="px-6 py-5">
+                                            <div class="flex items-center gap-3">
+                                                <!-- Search input with history -->
+                                                <div class="flex-1 relative">
+                                                    <input type="text" x-model="msSearchQuery"
+                                                           @input="msDebounceSearch()"
+                                                           @keydown.enter="mImmediateSearch()"
+                                                           @focus="msSearchHistoryOpen = true"
+                                                           @blur="closeMsSearchHistory()"
+                                                           :placeholder="window.t('models.search.ms_placeholder')"
+                                                           class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                                  focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all bg-white">
+                                                    <!-- Search history dropdown -->
+                                                    <div x-show="msSearchHistoryOpen && msSearchHistory.length > 0 && !msSearchQuery.trim()"
+                                                         x-cloak
+                                                         class="absolute top-full left-0 right-0 mt-1 bg-white rounded-xl shadow-lg border border-neutral-200 py-1 z-50">
+                                                        <div class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-neutral-400">{{ t('models.search.recent_searches') }}</div>
+                                                        <template x-for="(item, idx) in msSearchHistory" :key="idx">
+                                                            <button @mousedown.prevent="selectMsSearchHistory(item)"
+                                                                    class="w-full px-3 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-50 flex items-center gap-2 transition-colors">
+                                                                <i data-lucide="clock" class="w-3 h-3 text-neutral-400 shrink-0"></i>
+                                                                <span x-text="item" class="truncate"></span>
+                                                            </button>
+                                                        </template>
+                                                    </div>
+                                                </div>
+                                                <!-- Sort dropdown -->
+                                                <div class="w-52">
+                                                    <select x-model="msSearchSort"
+                                                            @change="if (msSearchQuery.trim()) mImmediateSearch()"
+                                                            class="w-full px-4 py-2.5 border border-neutral-200 rounded-xl text-sm
+                                                                   focus:ring-2 focus:ring-neutral-900 focus:border-transparent
+                                                                   transition-all bg-white appearance-none cursor-pointer">
+                                                        <option value="trending">{{ t('models.search.sort.trending') }}</option>
+                                                        <option value="downloads">{{ t('models.search.sort.downloads') }}</option>
+                                                        <option value="created">{{ t('models.search.sort.created') }}</option>
+                                                        <option value="updated">{{ t('models.search.sort.updated') }}</option>
+                                                    </select>
+                                                </div>
+                                                <!-- Search button -->
+                                                <button @click="mImmediateSearch()"
+                                                        :disabled="msSearchLoading || !msSearchQuery.trim()"
+                                                        class="px-6 py-2.5 bg-neutral-900 text-white text-sm font-semibold rounded-full
+                                                               hover:bg-neutral-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed
+                                                               flex items-center gap-2 whitespace-nowrap">
+                                                    <i data-lucide="search" class="w-4 h-4"></i>
+                                                    {{ t('models.search.button') }}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- MS Model List Section (Recommended / Search Results) -->
+                                    <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                                        <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                            <div class="flex items-center gap-3">
+                                                <i data-lucide="star" class="w-4 h-4 text-neutral-500"></i>
+                                                <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.browse.section_label') }}</span>
+                                                <span x-show="globalSettings.system.total_memory" x-cloak
+                                                      class="text-xs text-neutral-400" x-text="window.t('models.browse.system_suffix').replace('{memory}', globalSettings.system.total_memory)"></span>
+                                                <label class="flex items-center gap-1.5 ml-2 cursor-pointer select-none">
+                                                    <input type="checkbox" x-model="msMlxOnly"
+                                                           class="w-3.5 h-3.5 rounded border-neutral-300 text-neutral-900 focus:ring-neutral-500 cursor-pointer">
+                                                    <span class="text-xs text-neutral-500 font-medium">{{ t('models.browse.mlx_only') }}</span>
+                                                </label>
+                                            </div>
+                                            <div class="flex items-center gap-1 bg-neutral-100 rounded-lg p-0.5">
+                                                <button @click="msRecommendedTab = 'trending'"
+                                                        :class="msRecommendedTab === 'trending'
+                                                            ? 'bg-white text-neutral-900 shadow-sm'
+                                                            : 'text-neutral-500 hover:text-neutral-700'"
+                                                        class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                    {{ t('models.browse.tab.trending') }}
+                                                </button>
+                                                <button @click="msRecommendedTab = 'popular'"
+                                                        :class="msRecommendedTab === 'popular'
+                                                            ? 'bg-white text-neutral-900 shadow-sm'
+                                                            : 'text-neutral-500 hover:text-neutral-700'"
+                                                        class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                    {{ t('models.browse.tab.popular') }}
+                                                </button>
+                                                <button @click="msRecommendedTab = 'search'"
+                                                        :class="msRecommendedTab === 'search'
+                                                            ? 'bg-white text-neutral-900 shadow-sm'
+                                                            : 'text-neutral-500 hover:text-neutral-700'"
+                                                        class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                    {{ t('models.browse.tab.search_results') }}
+                                                    <span x-show="msSearchResults.length > 0" x-cloak
+                                                          class="ml-1 text-[10px] text-neutral-400"
+                                                          x-text="'(' + msSearchResults.length + ')'"></span>
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <!-- Loading state for recommended -->
+                                        <div x-show="msRecommendedLoading && (msRecommendedTab === 'trending' || msRecommendedTab === 'popular')" x-cloak class="px-6 py-12 text-center">
+                                            <div class="inline-block w-5 h-5 border-2 border-neutral-300 border-t-neutral-600 rounded-full animate-spin mb-3"></div>
+                                            <p class="text-sm text-neutral-500">{{ t('models.browse.loading') }}</p>
+                                        </div>
+
+                                        <!-- Not loaded state for recommended -->
+                                        <div x-show="!msRecommendedLoading && !msRecommendedLoaded && (msRecommendedTab === 'trending' || msRecommendedTab === 'popular')" x-cloak class="px-6 py-12 text-center">
+                                            <i data-lucide="star" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                            <p class="text-sm text-neutral-500">{{ t('models.browse.load_prompt') }}</p>
+                                            <button @click="loadMsRecommendedModels()"
+                                                    class="mt-3 px-4 py-2 text-xs font-medium text-neutral-600 hover:text-neutral-800
+                                                           bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-all">
+                                                {{ t('models.browse.load_button') }}
+                                            </button>
+                                        </div>
+
+                                        <!-- Trending tab -->
+                                        <template x-if="msRecommendedLoaded && !msRecommendedLoading">
+                                            <div x-show="msRecommendedTab === 'trending'">
+                                                <div class="divide-y divide-neutral-100">
+                                                    <template x-if="(msRecommended.trending || []).length === 0">
+                                                        <div class="px-6 py-8 text-center">
+                                                            <p class="text-sm text-neutral-500">{{ t('models.browse.no_trending') }}</p>
+                                                        </div>
+                                                    </template>
+                                                    <template x-for="model in getMsPagedModels('trending')" :key="model.repo_id">
+                                                        <div class="px-6 py-3.5 flex items-center justify-between hover:bg-neutral-50 transition-colors">
+                                                            <div class="min-w-0 flex-1">
+                                                                <button @click="openMsModelDetail(model.repo_id)"
+                                                                   class="text-sm font-medium text-neutral-900 hover:text-blue-600 truncate block transition-colors text-left cursor-pointer" x-text="model.name || model.repo_id"></button>
+                                                                <div class="flex items-center gap-3 mt-0.5">
+                                                                    <span x-show="model.size_formatted" x-cloak class="text-xs text-neutral-400" x-text="model.size_formatted"></span>
+                                                                    <span class="text-xs text-neutral-400" x-text="'&#11015; ' + formatDownloads(model.downloads)"></span>
+                                                                    <span class="text-xs text-neutral-400" x-text="'&#9829; ' + model.likes"></span>
+                                                                </div>
+                                                            </div>
+                                                            <div class="flex items-center gap-2 shrink-0 ml-4">
+                                                                <span x-show="getMemoryFitStatus(model.size) === 'warning'" x-cloak
+                                                                      class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-amber-50 text-amber-600 border border-amber-200">
+                                                                    {{ t('models.browse.tight_fit') }}
+                                                                </span>
+                                                                <button @click="downloadMsModel(model.repo_id)"
+                                                                        :disabled="msDownloading"
+                                                                        class="px-3.5 py-1.5 text-xs font-medium text-neutral-600 bg-neutral-100
+                                                                               hover:bg-neutral-900 hover:text-white rounded-lg transition-all
+                                                                               disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                                    <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                                                    {{ t('models.downloader.download_button') }}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                                <!-- Pagination -->
+                                                <template x-if="getMsTotalPages('trending') > 1">
+                                                    <div class="px-6 py-3 border-t border-neutral-100 flex items-center justify-center gap-1">
+                                                        <template x-for="p in getMsTotalPages('trending')" :key="p">
+                                                            <button @click="setMsPage('trending', p)"
+                                                                    :class="msPage.trending === p
+                                                                        ? 'bg-neutral-900 text-white'
+                                                                        : 'text-neutral-600 hover:bg-neutral-100'"
+                                                                    class="w-8 h-8 text-xs font-medium rounded-lg transition-all"
+                                                                    x-text="p"></button>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </template>
+
+                                        <!-- Popular tab -->
+                                        <template x-if="msRecommendedLoaded && !msRecommendedLoading">
+                                            <div x-show="msRecommendedTab === 'popular'">
+                                                <div class="divide-y divide-neutral-100">
+                                                    <template x-if="(msRecommended.popular || []).length === 0">
+                                                        <div class="px-6 py-8 text-center">
+                                                            <p class="text-sm text-neutral-500">{{ t('models.browse.no_popular') }}</p>
+                                                        </div>
+                                                    </template>
+                                                    <template x-for="model in getMsPagedModels('popular')" :key="model.repo_id">
+                                                        <div class="px-6 py-3.5 flex items-center justify-between hover:bg-neutral-50 transition-colors">
+                                                            <div class="min-w-0 flex-1">
+                                                                <button @click="openMsModelDetail(model.repo_id)"
+                                                                   class="text-sm font-medium text-neutral-900 hover:text-blue-600 truncate block transition-colors text-left cursor-pointer" x-text="model.name || model.repo_id"></button>
+                                                                <div class="flex items-center gap-3 mt-0.5">
+                                                                    <span x-show="model.size_formatted" x-cloak class="text-xs text-neutral-400" x-text="model.size_formatted"></span>
+                                                                    <span class="text-xs text-neutral-400" x-text="'&#11015; ' + formatDownloads(model.downloads)"></span>
+                                                                    <span class="text-xs text-neutral-400" x-text="'&#9829; ' + model.likes"></span>
+                                                                </div>
+                                                            </div>
+                                                            <div class="flex items-center gap-2 shrink-0 ml-4">
+                                                                <span x-show="getMemoryFitStatus(model.size) === 'warning'" x-cloak
+                                                                      class="inline-flex items-center px-2 py-0.5 text-[10px] font-medium rounded bg-amber-50 text-amber-600 border border-amber-200">
+                                                                    {{ t('models.browse.tight_fit') }}
+                                                                </span>
+                                                                <button @click="downloadMsModel(model.repo_id)"
+                                                                        :disabled="msDownloading"
+                                                                        class="px-3.5 py-1.5 text-xs font-medium text-neutral-600 bg-neutral-100
+                                                                               hover:bg-neutral-900 hover:text-white rounded-lg transition-all
+                                                                               disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                                    <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                                                    {{ t('models.downloader.download_button') }}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                                <!-- Pagination -->
+                                                <template x-if="getMsTotalPages('popular') > 1">
+                                                    <div class="px-6 py-3 border-t border-neutral-100 flex items-center justify-center gap-1">
+                                                        <template x-for="p in getMsTotalPages('popular')" :key="p">
+                                                            <button @click="setMsPage('popular', p)"
+                                                                    :class="msPage.popular === p
+                                                                        ? 'bg-neutral-900 text-white'
+                                                                        : 'text-neutral-600 hover:bg-neutral-100'"
+                                                                    class="w-8 h-8 text-xs font-medium rounded-lg transition-all"
+                                                                    x-text="p"></button>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </template>
+
+                                        <!-- MS Search Results tab -->
+                                        <div x-show="msRecommendedTab === 'search'">
+                                            <div x-show="msSearchLoading" x-cloak class="px-6 py-12 text-center">
+                                                <div class="inline-block w-5 h-5 border-2 border-neutral-300 border-t-neutral-600 rounded-full animate-spin mb-3"></div>
+                                                <p class="text-sm text-neutral-500">{{ t('models.browse.searching') }}</p>
+                                            </div>
+                                            <div x-show="!msSearchLoading && !msSearchLoaded" x-cloak class="px-6 py-12 text-center">
+                                                <i data-lucide="search" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                                <p class="text-sm text-neutral-500">{{ t('models.browse.search_prompt') }}</p>
+                                            </div>
+                                            <template x-if="msSearchLoaded && !msSearchLoading">
+                                                <div>
+                                                    <template x-if="msSearchResults.length === 0">
+                                                        <div class="px-6 py-8 text-center">
+                                                            <p class="text-sm text-neutral-500">{{ t('models.browse.no_results') }}</p>
+                                                        </div>
+                                                    </template>
+                                                    <div class="divide-y divide-neutral-100">
+                                                        <template x-for="model in getMsPagedModels('search')" :key="model.repo_id">
+                                                            <div class="px-6 py-3.5 flex items-center justify-between hover:bg-neutral-50 transition-colors">
+                                                                <div class="min-w-0 flex-1">
+                                                                    <button @click="openMsModelDetail(model.repo_id)"
+                                                                       class="text-sm font-medium text-neutral-900 hover:text-blue-600 truncate block transition-colors text-left cursor-pointer font-mono text-xs" x-text="model.repo_id"></button>
+                                                                    <div class="flex items-center gap-3 mt-0.5 flex-wrap">
+                                                                        <span x-show="model.size_formatted" x-cloak class="text-xs text-neutral-400" x-text="model.size_formatted"></span>
+                                                                        <span class="text-xs text-neutral-400" x-text="'&#11015; ' + formatDownloads(model.downloads)"></span>
+                                                                        <span class="text-xs text-neutral-400" x-text="'&#9829; ' + model.likes"></span>
+                                                                    </div>
+                                                                </div>
+                                                                <div class="flex items-center gap-2 shrink-0 ml-4">
+                                                                    <button @click="downloadMsModel(model.repo_id)"
+                                                                            :disabled="msDownloading"
+                                                                            class="px-3.5 py-1.5 text-xs font-medium text-neutral-600 bg-neutral-100
+                                                                                   hover:bg-neutral-900 hover:text-white rounded-lg transition-all
+                                                                                   disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                                        <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                                                        {{ t('models.downloader.download_button') }}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                    <template x-if="getMsTotalPages('search') > 1">
+                                                        <div class="px-6 py-3 border-t border-neutral-100 flex items-center justify-center gap-1">
+                                                            <template x-for="p in getMsTotalPages('search')" :key="p">
+                                                                <button @click="setMsPage('search', p)"
+                                                                        :class="msPage.search === p
+                                                                            ? 'bg-neutral-900 text-white'
+                                                                            : 'text-neutral-600 hover:bg-neutral-100'"
+                                                                        class="w-8 h-8 text-xs font-medium rounded-lg transition-all"
+                                                                        x-text="p"></button>
+                                                            </template>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </div>
+
+                                    <!-- MS Download Queue -->
+                                    <template x-if="msTasks.length > 0">
+                                        <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                                            <div class="flex items-center justify-between px-4 sm:px-6 py-4 bg-neutral-100 border-b border-neutral-200">
+                                                <div class="flex items-center gap-3">
+                                                    <i data-lucide="list" class="w-4 h-4 text-neutral-500"></i>
+                                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.queue.section_label') }}</span>
+                                                </div>
+                                            </div>
+                                            <div class="divide-y divide-neutral-100">
+                                                <template x-for="task in msTasks" :key="task.task_id">
+                                                    <div class="px-6 py-4">
+                                                        <div class="flex items-center justify-between">
+                                                            <div class="flex-1 min-w-0">
+                                                                <div class="flex items-center gap-2 flex-wrap">
+                                                                    <span class="text-sm font-medium text-neutral-900 truncate" x-text="task.repo_id"></span>
+                                                                    <span class="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full shrink-0"
+                                                                          :class="{
+                                                                              'bg-blue-50 text-blue-700 border border-blue-200': task.status === 'downloading',
+                                                                              'bg-green-50 text-green-700 border border-green-200': task.status === 'completed',
+                                                                              'bg-red-50 text-red-700 border border-red-200': task.status === 'failed',
+                                                                              'bg-neutral-100 text-neutral-600 border border-neutral-200': task.status === 'pending',
+                                                                              'bg-orange-50 text-orange-700 border border-orange-200': task.status === 'cancelled',
+                                                                          }"
+                                                                          x-text="task.status"></span>
+                                                                </div>
+                                                                <p x-show="task.error" x-cloak class="text-xs text-red-500 mt-1.5 truncate" x-text="task.error"></p>
+                                                                <template x-if="task.status === 'downloading'">
+                                                                    <div class="mt-2.5">
+                                                                        <div class="h-1.5 bg-neutral-100 rounded-full overflow-hidden">
+                                                                            <div class="h-full bg-neutral-900 rounded-full transition-all duration-500"
+                                                                                 :style="'width: ' + (task.total_size > 0 ? task.progress : 100) + '%'"
+                                                                                 :class="task.total_size <= 0 ? 'animate-pulse' : ''"></div>
+                                                                        </div>
+                                                                        <div class="flex items-center gap-3 mt-1.5 text-xs text-neutral-400">
+                                                                            <template x-if="task.total_size > 0">
+                                                                                <span x-text="formatProgress(task)"></span>
+                                                                            </template>
+                                                                            <template x-if="task.total_size <= 0">
+                                                                                <span>{{ t('models.queue.downloading') }}</span>
+                                                                            </template>
+                                                                        </div>
+                                                                    </div>
+                                                                </template>
+                                                            </div>
+                                                            <div class="flex items-center gap-2 ml-4 shrink-0">
+                                                                <button x-show="task.status === 'downloading' || task.status === 'pending'" x-cloak
+                                                                        @click="cancelMSDownload(task.task_id)"
+                                                                        class="p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                                                        :title="window.t('models.queue.cancel_tooltip')">
+                                                                    <i data-lucide="x" class="w-4 h-4"></i>
+                                                                </button>
+                                                                <button x-show="task.status === 'failed' || task.status === 'cancelled'" x-cloak
+                                                                        @click="retryMSDownload(task.task_id)"
+                                                                        class="p-1.5 text-neutral-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-all"
+                                                                        title="Retry download">
+                                                                    <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                                                                </button>
+                                                                <button x-show="task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'" x-cloak
+                                                                        @click="removeMSTask(task.task_id)"
+                                                                        class="p-1.5 text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all"
+                                                                        :title="window.t('models.queue.remove_tooltip')">
+                                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div><!-- end ModelScope Source -->
+
+                    </div>
+
+                    <!-- ==================== QUANTIZER TAB ==================== -->
+                    <div x-show="modelsTab === 'quantizer'" x-cloak
+                         x-effect="oqSelectedModelPath; oqLevel; oqRefreshEstimate()">
+                        <!-- Header -->
+                        <div class="mb-8">
+                            <h2 class="text-xs font-bold uppercase tracking-widest text-neutral-400 mb-2">{{ t('models.oq.section_label') }}</h2>
+                            <h3 class="text-2xl font-bold tracking-tight text-neutral-900">{{ t('models.oq.heading') }}</h3>
+                            <p class="text-sm text-neutral-500 mt-2">{{ t('models.oq.description') }}</p>
+                        </div>
+
+                        <!-- Quantization Form -->
+                        <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                            <div class="flex items-center gap-3 px-4 sm:px-6 py-4 bg-neutral-50 border-b border-neutral-200">
+                                <i data-lucide="sparkles" class="w-4 h-4 text-neutral-500"></i>
+                                <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.oq.form_section') }}</span>
+                            </div>
+                            <div class="px-6 py-5">
+                                <div class="flex items-end gap-4 flex-wrap">
+                                    <!-- Model Selector -->
+                                    <div class="flex-1">
+                                        <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">{{ t('models.oq.select_model') }} <span class="normal-case font-normal">(full precision only)</span></label>
+                                        <select x-model="oqSelectedModelPath"
+                                                class="w-full px-4 py-2.5 bg-white border border-neutral-300 rounded-xl text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all">
+                                            <option value="">{{ t('models.oq.select_placeholder') }}</option>
+                                            <template x-for="m in oqModels" :key="m.path">
+                                                <option :value="m.path" x-text="m.name + ' (' + m.size_formatted + ')'"></option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                    <!-- Sensitivity Model (optional, all models) -->
+                                    <div class="flex-1" x-show="oqSelectedModelPath && oqSensitivityModelCandidates().length > 0" x-cloak>
+                                        <div class="flex items-center gap-1.5 mb-1.5">
+                                            <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider">Sensitivity Model</label>
+                                            <span class="cursor-help" @mouseenter="$refs.sensTip.style.display='block'" @mouseleave="$refs.sensTip.style.display='none'">
+                                                <svg class="w-4 h-4 text-neutral-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                                </svg>
+                                            </span>
+                                            <div x-ref="sensTip" style="display:none" class="absolute mt-6 w-64 px-3 py-2 bg-neutral-800 text-white text-xs leading-relaxed rounded-lg z-50 shadow-lg pointer-events-none">
+                                                Use a quantized version of the source model to analyze layer sensitivity with ~4x less memory.
+                                            </div>
+                                        </div>
+                                        <select x-model="oqSensitivityModelPath"
+                                                class="w-full px-4 py-2.5 bg-white border border-neutral-300 rounded-xl text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all">
+                                            <option value="">None (use source model)</option>
+                                            <template x-for="m in oqSensitivityModelCandidates()" :key="m.path">
+                                                <option :value="m.path" x-text="m.name + ' (' + m.size_formatted + ')'"></option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                    <!-- oQ Level Selector -->
+                                    <div class="w-40 shrink-0">
+                                        <label class="block text-xs font-medium text-neutral-500 uppercase tracking-wider mb-1.5">{{ t('models.oq.level') }}</label>
+                                        <select x-model.number="oqLevel"
+                                                class="w-full px-4 py-2.5 bg-white border border-neutral-300 rounded-xl text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-transparent transition-all">
+                                            <option value="2">oQ2</option>
+                                            <option value="3">oQ3</option>
+                                            <option value="3.5">oQ3.5</option>
+                                            <option value="4" selected>oQ4</option>
+                                            <option value="5">oQ5</option>
+                                            <option value="6">oQ6</option>
+                                            <option value="8">oQ8</option>
+                                        </select>
+                                    </div>
+                                    <!-- Start Button -->
+                                    <button @click="startOQQuantization()"
+                                            :disabled="oqStarting || !oqSelectedModelPath"
+                                            class="px-6 py-2.5 bg-neutral-900 text-white text-sm font-semibold rounded-full hover:bg-neutral-800 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200 flex items-center gap-2 whitespace-nowrap">
+                                        <svg x-show="oqStarting" x-cloak class="animate-spin w-4 h-4" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                                        <i x-show="!oqStarting" data-lucide="sparkles" class="w-4 h-4"></i>
+                                        {{ t('models.oq.start_button') }}
+                                    </button>
+                                </div>
+                                <!-- Estimated Memory + BPW + Output Size (below the form row) -->
+                                <div x-show="oqSelectedModelPath" x-cloak class="mt-3 pt-3 border-t border-neutral-100">
+                                    <div class="text-xs text-neutral-400 flex items-center flex-wrap gap-y-1">
+                                        <span class="inline-flex items-center gap-1.5"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg><span x-text="'Estimated memory: ~' + oqEstimatedMemory()"></span></span>
+                                        <span class="inline-flex items-center gap-1.5 ml-5"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg><span x-text="oqEstimatedBpw() ? 'Effective ' + oqEstimatedBpw() + ' bpw' : 'Calculating...'"></span></span>
+                                        <span class="inline-flex items-center gap-1.5 ml-5"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg><span x-text="oqEstimatedOutputSize() ? 'Output size: ~' + oqEstimatedOutputSize() : 'Calculating...'"></span></span>
+                                    </div>
+                                </div>
+                                <!-- Advanced Settings -->
+                                <div class="mt-4 border-t border-neutral-100 pt-3">
+                                    <button @click="oqAdvancedOpen = !oqAdvancedOpen"
+                                            class="flex items-center gap-1.5 text-sm text-neutral-500 hover:text-neutral-700 transition-colors">
+                                        <i :data-lucide="oqAdvancedOpen ? 'chevron-down' : 'chevron-right'" class="w-3.5 h-3.5"></i>
+                                        {{ t('models.oq.advanced_settings') }}
+                                    </button>
+                                    <div x-show="oqAdvancedOpen" x-cloak class="mt-3 space-y-3 pl-1">
+                                        <!-- Text Only (VLM only) -->
+                                        <div x-show="oqSelectedModelIsVLM()" x-cloak class="flex items-center justify-between">
+                                            <span class="text-sm text-neutral-600">Text Only</span>
+                                            <button type="button"
+                                                    @click="oqTextOnly = !oqTextOnly"
+                                                    :class="oqTextOnly ? 'bg-black' : 'bg-neutral-200'"
+                                                    class="relative w-11 h-6 rounded-full transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-black">
+                                                <span :class="oqTextOnly ? 'translate-x-5' : 'translate-x-0'"
+                                                      class="block w-5 h-5 bg-white rounded-full shadow-sm transform transition-transform duration-300 absolute top-0.5 left-0.5"></span>
+                                            </button>
+                                        </div>
+                                        <p x-show="oqTextOnly && oqSelectedModelIsVLM()" x-cloak class="text-xs text-amber-600 leading-relaxed">
+                                            Excludes vision encoder weights. Output is a text-only model (~2-3% smaller).
+                                        </p>
+                                    </div>
+                                </div>
+                                <!-- Error -->
+                                <div x-show="oqError" x-cloak
+                                     class="mt-3 px-4 py-2.5 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 flex items-start gap-2">
+                                    <i data-lucide="alert-circle" class="w-4 h-4 mt-0.5 shrink-0"></i>
+                                    <span x-text="oqError"></span>
+                                </div>
+                                <!-- Success -->
+                                <div x-show="oqSuccess" x-cloak
+                                     class="mt-3 px-4 py-2.5 bg-green-50 border border-green-200 rounded-xl text-sm text-green-700 flex items-start gap-2">
+                                    <i data-lucide="check-circle" class="w-4 h-4 mt-0.5 shrink-0"></i>
+                                    <span x-text="oqSuccess"></span>
+                                </div>
+                                <!-- No models -->
+                                <div x-show="oqModelsLoaded && oqModels.length === 0" x-cloak
+                                     class="mt-3 px-4 py-2.5 bg-neutral-50 border border-neutral-200 rounded-xl text-sm text-neutral-500 flex items-start gap-2">
+                                    <i data-lucide="info" class="w-4 h-4 mt-0.5 shrink-0"></i>
+                                    <span>{{ t('models.oq.no_models') }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- oQ Queue Section -->
+                        <template x-if="oqTasks.length > 0">
+                            <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                                <div class="flex items-center gap-3 px-4 sm:px-6 py-4 bg-neutral-50 border-b border-neutral-200">
+                                    <i data-lucide="list" class="w-4 h-4 text-neutral-500"></i>
+                                    <span class="text-xs font-bold uppercase tracking-wider text-neutral-600">{{ t('models.oq.queue_section') }}</span>
+                                </div>
+                                <div class="divide-y divide-neutral-100">
+                                    <template x-for="task in oqTasks" :key="task.task_id">
+                                        <div class="px-6 py-4">
+                                            <div class="flex items-center justify-between">
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="flex items-center gap-2 flex-wrap">
+                                                        <span class="text-sm font-medium text-neutral-900 truncate" x-text="task.output_name"></span>
+                                                        <span class="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded-full shrink-0"
+                                                              :class="{
+                                                                  'bg-blue-100 text-blue-700': ['loading','quantizing','saving'].includes(task.status),
+                                                                  'bg-green-100 text-green-700': task.status === 'completed',
+                                                                  'bg-red-100 text-red-700': task.status === 'failed',
+                                                                  'bg-neutral-100 text-neutral-600': task.status === 'pending',
+                                                                  'bg-orange-100 text-orange-700': task.status === 'cancelled',
+                                                              }"
+                                                              x-text="task.status"></span>
+                                                        <span class="text-xs text-neutral-400" x-text="formatOQElapsed(task)"></span>
+                                                    </div>
+                                                    <p x-show="task.phase && !['completed','failed','cancelled'].includes(task.status)"
+                                                       class="text-xs text-neutral-500 mt-1" x-text="task.phase"></p>
+                                                    <p x-show="task.error"
+                                                       class="text-xs text-red-500 mt-1.5 break-all" x-text="task.error"></p>
+                                                    <!-- Progress bar -->
+                                                    <template x-if="['loading','quantizing','saving'].includes(task.status)">
+                                                        <div class="mt-2.5">
+                                                            <div class="h-1.5 bg-neutral-100 rounded-full overflow-hidden">
+                                                                <div class="h-full bg-neutral-900 rounded-full transition-all duration-500"
+                                                                     :style="'width: ' + task.progress + '%'"></div>
+                                                            </div>
+                                                            <div class="mt-1.5 text-xs text-neutral-400" x-text="formatOQProgress(task)"></div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                                <!-- Action buttons -->
+                                                <div class="flex items-center gap-2 ml-4 shrink-0">
+                                                    <button x-show="['pending','loading','quantizing','saving'].includes(task.status)"
+                                                            @click="cancelOQTask(task.task_id)"
+                                                            class="p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                                            :title="t('models.oq.cancel_tooltip')">
+                                                        <i data-lucide="x" class="w-4 h-4"></i>
+                                                    </button>
+                                                    <button x-show="['completed','failed','cancelled'].includes(task.status)"
+                                                            @click="removeOQTask(task.task_id)"
+                                                            class="p-1.5 text-neutral-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                                            :title="t('models.oq.remove_tooltip')">
+                                                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                        <!-- About oQ Quantization -->
+                        <div class="bg-neutral-50 rounded-2xl border border-neutral-200 overflow-hidden">
+                            <div class="px-6 py-4 border-b border-neutral-200">
+                                <h4 class="text-sm font-semibold text-neutral-700">About oQ Quantization</h4>
+                            </div>
+                            <div class="px-6 py-5 text-sm text-neutral-500 leading-relaxed space-y-5">
+                                <!-- Title -->
+                                <h4 class="text-lg font-bold text-neutral-800">oQ: oMLX Universal Dynamic Quantization</h4>
+
+                                <!-- Philosophy -->
+                                <blockquote class="border-l-2 border-neutral-300 pl-4 text-neutral-600 italic font-semibold">
+                                    <p>Quantization should not be exclusive to any particular inference server.</p>
+                                    <p class="mt-1">oQ produces standard mlx-lm models that work everywhere — oMLX, mlx-lm, LM Studio, and any app
+                                    that supports MLX safetensors format.</p>
+                                    <p class="mt-1">No custom loader required.</p>
+                                </blockquote>
+
+                                <!-- Intro -->
+                                <div>
+                                    <p class="mt-1.5 text-sm text-neutral-500">
+                                        oQ measures each layer's quantization sensitivity through calibration (relative MSE vs float16)
+                                        and builds a byte-budgeted mixed-precision plan that allocates bits where the data says they
+                                        matter most. Built-in calibration data (600 samples across code, multilingual, reasoning, and
+                                        tool calling). Every model gets a unique bit allocation tuned to its architecture.
+                                    </p>
+                                </div>
+
+                                <!-- Key features -->
+                                <div>
+                                    <h5 class="text-base font-bold text-neutral-700">Key features</h5>
+                                    <div class="mt-3 space-y-3">
+                                        <div class="flex gap-3">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-neutral-400 shrink-0 mt-0.5"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>
+                                            <div class="text-sm"><strong class="text-neutral-700">Data-driven sensitivity</strong> <span class="text-neutral-500">Per-layer relative MSE measured against float16. Layers are ranked by quantization impact; the top 25% are marked as sensitive and receive priority in bit allocation.</span></div>
+                                        </div>
+                                        <div class="flex gap-3">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-neutral-400 shrink-0 mt-0.5"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
+                                            <div class="text-sm"><strong class="text-neutral-700">Budget-constrained allocation</strong> <span class="text-neutral-500">4-phase greedy plan within a hard bpw cap. Consensus tensors (lm_head, embeddings) get 8-bit first. Then attention and shared-expert layers get a protection floor. Remaining budget goes to the highest-sensitivity tensors. Routed experts (93-98% of MoE params) stay at base bits so the budget concentrates on the layers that actually move output quality.</span></div>
+                                        </div>
+                                        <div class="flex gap-3">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-neutral-400 shrink-0 mt-0.5"><path d="M2 12h5l3-9 4 18 3-9h5"/></svg>
+                                            <div class="text-sm"><strong class="text-neutral-700">Model-aware quantization</strong> <span class="text-neutral-500">MoE: router fp16, routed experts at base, shared experts protected. VLM: vision encoder fp16. SSM: state tensors fp32. 512+ expert models get larger group size automatically.</span></div>
+                                        </div>
+                                        <div class="flex gap-3">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-neutral-400 shrink-0 mt-0.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                                            <div class="text-sm"><strong class="text-neutral-700">Streaming</strong> <span class="text-neutral-500">Tensor-by-tensor quantization from safetensors. Use a sensitivity model (pre-quantized proxy) to measure layer ranking at ~4x less memory than float16 calibration.</span></div>
+                                        </div>
+
+                                    </div>
+                                </div>
+
+                                <!-- Comparison table -->
+                                <div>
+                                    <h5 class="text-base font-bold text-neutral-700">Comparison with other methods</h5>
+                                    <div class="mt-2 overflow-x-auto">
+                                        <table class="w-full text-xs">
+                                            <thead>
+                                                <tr class="border-b border-neutral-200">
+                                                    <th class="text-left py-2 pr-4 font-semibold text-neutral-600"></th>
+                                                    <th class="text-left py-2 px-3 font-semibold text-neutral-600">oQ</th>
+                                                    <th class="text-left py-2 px-3 font-semibold text-neutral-600">GGUF K-quant</th>
+                                                    <th class="text-left py-2 px-3 font-semibold text-neutral-600">GGUF IQ</th>
+                                                    <th class="text-left py-2 px-3 font-semibold text-neutral-600">unsloth Dynamic</th>
+                                                    <th class="text-left py-2 px-3 font-semibold text-neutral-600">AWQ</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody class="text-neutral-500">
+                                                <tr class="border-b border-neutral-100">
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">Format</td>
+                                                    <td class="py-1.5 px-3">MLX safetensors</td>
+                                                    <td class="py-1.5 px-3">GGUF</td>
+                                                    <td class="py-1.5 px-3">GGUF</td>
+                                                    <td class="py-1.5 px-3">GGUF</td>
+                                                    <td class="py-1.5 px-3">safetensors</td>
+                                                </tr>
+                                                <tr class="border-b border-neutral-100">
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">Mixed precision</td>
+                                                    <td class="py-1.5 px-3">Data-driven sensitivity (per-layer MSE)</td>
+                                                    <td class="py-1.5 px-3">~15 type rules</td>
+                                                    <td class="py-1.5 px-3">imatrix per-weight</td>
+                                                    <td class="py-1.5 px-3">Per-layer (proprietary)</td>
+                                                    <td class="py-1.5 px-3">Per-channel scaling</td>
+                                                </tr>
+                                                <tr class="border-b border-neutral-100">
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">Hybrid modes</td>
+                                                    <td class="py-1.5 px-3">Affine (group_size=64)</td>
+                                                    <td class="py-1.5 px-3">K-quant types</td>
+                                                    <td class="py-1.5 px-3">E8 lattice</td>
+                                                    <td class="py-1.5 px-3">Proprietary</td>
+                                                    <td class="py-1.5 px-3">Affine only</td>
+                                                </tr>
+                                                <tr class="border-b border-neutral-100">
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">MoE support</td>
+                                                    <td class="py-1.5 px-3">Router fp16, expert-aware budget</td>
+                                                    <td class="py-1.5 px-3">Basic</td>
+                                                    <td class="py-1.5 px-3">Basic</td>
+                                                    <td class="py-1.5 px-3">Router fp16</td>
+                                                    <td class="py-1.5 px-3">Limited</td>
+                                                </tr>
+                                                <tr class="border-b border-neutral-100">
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">VLM / SSM</td>
+                                                    <td class="py-1.5 px-3">Vision fp16, SSM F32 state</td>
+                                                    <td class="py-1.5 px-3">Separate mmproj, F32 state</td>
+                                                    <td class="py-1.5 px-3">Separate mmproj, F32 state</td>
+                                                    <td class="py-1.5 px-3">Supported</td>
+                                                    <td class="py-1.5 px-3">Not tested</td>
+                                                </tr>
+                                                <tr class="border-b border-neutral-100">
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">Calibration</td>
+                                                    <td class="py-1.5 px-3">Built-in 600 samples (code + multilingual + reasoning)</td>
+                                                    <td class="py-1.5 px-3">None</td>
+                                                    <td class="py-1.5 px-3">imatrix required</td>
+                                                    <td class="py-1.5 px-3">Proprietary data</td>
+                                                    <td class="py-1.5 px-3">Activation data</td>
+                                                </tr>
+                                                <tr class="border-b border-neutral-100">
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">Memory</td>
+                                                    <td class="py-1.5 px-3">Streaming (~5-7GB)</td>
+                                                    <td class="py-1.5 px-3">1× model</td>
+                                                    <td class="py-1.5 px-3">1× model</td>
+                                                    <td class="py-1.5 px-3">Proprietary</td>
+                                                    <td class="py-1.5 px-3">1.5× model</td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="py-1.5 pr-4 font-medium text-neutral-600">Apple Silicon</td>
+                                                    <td class="py-1.5 px-3">Native (MLX affine)</td>
+                                                    <td class="py-1.5 px-3">Via llama.cpp</td>
+                                                    <td class="py-1.5 px-3">Via llama.cpp</td>
+                                                    <td class="py-1.5 px-3">GGUF only</td>
+                                                    <td class="py-1.5 px-3">MLX (affine)</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ==================== UPLOADER TAB ==================== -->
+                    <div x-show="modelsTab === 'uploader'" x-cloak>
+                        <!-- Header -->
+                        <div class="mb-8">
+                            <h2 class="text-xs font-bold uppercase tracking-widest text-neutral-400 mb-2" x-text="window.t('models.uploader.section_label')"></h2>
+                            <h3 class="text-2xl font-bold tracking-tight text-neutral-900" x-text="window.t('models.uploader.heading')"></h3>
+                            <p class="text-sm text-neutral-500 mt-2" x-text="window.t('models.uploader.description')"></p>
+                        </div>
+
+                        <!-- HF Credentials Card -->
+                        <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6 p-6">
+                            <h4 class="text-sm font-semibold text-neutral-900 mb-4 flex items-center gap-2">
+                                <i data-lucide="key" class="w-4 h-4 text-neutral-400"></i>
+                                <span x-text="window.t('models.uploader.hf_token_label')"></span>
+                            </h4>
+                            <div class="flex flex-col sm:flex-row sm:items-center gap-3">
+                                <div class="flex-1 relative">
+                                    <input type="password"
+                                           x-model="uploadHfToken"
+                                           @input="uploadTokenValidated = false; uploadHfUsername = ''; uploadHfOrgs = [];"
+                                           :placeholder="window.t('models.uploader.hf_token_placeholder')"
+                                           class="w-full px-4 py-2.5 text-sm rounded-lg border border-neutral-200
+                                                  focus:border-neutral-400 focus:ring-1 focus:ring-neutral-400 outline-none
+                                                  transition-all bg-neutral-50">
+                                </div>
+                                <button @click="validateUploadToken()"
+                                        :disabled="!uploadHfToken || uploadTokenValidating"
+                                        class="px-5 py-2.5 text-sm font-medium rounded-lg transition-all flex items-center gap-2
+                                               disabled:opacity-50 disabled:cursor-not-allowed"
+                                        :class="uploadTokenValidated
+                                            ? 'bg-green-50 text-green-700 border border-green-200'
+                                            : 'bg-neutral-900 text-white hover:bg-neutral-800'">
+                                    <template x-if="uploadTokenValidating">
+                                        <span class="inline-flex animate-spin"><i data-lucide="loader-2" class="w-4 h-4"></i></span>
+                                    </template>
+                                    <template x-if="!uploadTokenValidating && uploadTokenValidated">
+                                        <i data-lucide="check" class="w-4 h-4"></i>
+                                    </template>
+                                    <template x-if="!uploadTokenValidating && !uploadTokenValidated">
+                                        <i data-lucide="shield-check" class="w-4 h-4"></i>
+                                    </template>
+                                    <span x-text="uploadTokenValidating
+                                        ? window.t('models.uploader.validating')
+                                        : (uploadTokenValidated
+                                            ? window.t('models.uploader.validated').replace('{username}', uploadHfUsername)
+                                            : window.t('models.uploader.validate_button'))"></span>
+                                </button>
+                            </div>
+                            <!-- Namespace selector (shown after validation) -->
+                            <div x-show="uploadTokenValidated" x-cloak class="mt-4">
+                                <label class="text-xs font-medium text-neutral-500 mb-1.5 block" x-text="window.t('models.uploader.namespace_label')"></label>
+                                <select x-model="uploadHfNamespace"
+                                        class="w-full max-w-xs px-3 py-2 text-sm rounded-lg border border-neutral-200
+                                               focus:border-neutral-400 focus:ring-1 focus:ring-neutral-400 outline-none
+                                               bg-neutral-50 transition-all">
+                                    <option :value="uploadHfUsername" x-text="uploadHfUsername + ' (personal)'"></option>
+                                    <template x-for="org in uploadHfOrgs" :key="org.name">
+                                        <option :value="org.name" x-text="org.name + ' (org)'"></option>
+                                    </template>
+                                </select>
+                            </div>
+                            <!-- Error message -->
+                            <div x-show="uploadError" x-cloak class="mt-3 px-3 py-2 text-xs text-red-700 bg-red-50 rounded-lg border border-red-100" x-text="uploadError"></div>
+                            <!-- Success message -->
+                            <div x-show="uploadSuccess" x-cloak class="mt-3 px-3 py-2 text-xs text-green-700 bg-green-50 rounded-lg border border-green-100" x-text="uploadSuccess"></div>
+                        </div>
+
+                        <!-- oQ Models List -->
+                        <div x-show="uploadTokenValidated" x-cloak>
+                            <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden mb-6">
+                                <div class="px-4 sm:px-6 py-4 border-b border-neutral-100 flex items-center justify-between">
+                                    <h4 class="text-sm font-semibold text-neutral-900 flex items-center gap-2">
+                                        <i data-lucide="package" class="w-4 h-4 text-neutral-400"></i>
+                                        <span x-text="window.t('models.uploader.oq_models_label')"></span>
+                                        <span class="text-xs font-normal text-neutral-400" x-text="'(' + uploadOqModels.length + ')'"></span>
+                                    </h4>
+                                    <button @click="loadUploadOqModels()"
+                                            class="px-3 py-1.5 text-xs font-medium text-neutral-500 hover:text-neutral-700
+                                                   hover:bg-neutral-100 rounded-lg transition-all flex items-center gap-1.5">
+                                        <i data-lucide="rotate-cw" class="w-3.5 h-3.5"></i>
+                                    </button>
+                                </div>
+                                <!-- Empty state -->
+                                <div x-show="uploadOqModels.length === 0" class="px-6 py-12 text-center">
+                                    <i data-lucide="package-x" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                    <p class="text-sm text-neutral-500" x-text="window.t('models.uploader.no_oq_models')"></p>
+                                </div>
+                                <!-- Model list -->
+                                <div x-show="uploadOqModels.length > 0">
+                                    <template x-for="model in uploadOqModels" :key="model.path">
+                                        <div class="px-4 sm:px-6 py-3.5 border-b border-neutral-50 last:border-b-0 flex items-center justify-between
+                                                    hover:bg-neutral-50 transition-colors">
+                                            <div class="flex-1 min-w-0">
+                                                <div class="text-sm font-medium text-neutral-900 truncate" x-text="model.name"></div>
+                                                <div class="text-xs text-neutral-400 mt-0.5" x-text="model.size_formatted"></div>
+                                            </div>
+                                            <button @click="openUploadModal(model)"
+                                                    class="p-2 text-neutral-400 hover:text-neutral-900 hover:bg-neutral-100
+                                                           rounded-lg transition-all"
+                                                    :title="window.t('models.uploader.upload_button')">
+                                                <i data-lucide="cloud-upload" class="w-4 h-4"></i>
+                                            </button>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Upload Queue -->
+                        <div x-show="uploadTasks.length > 0" x-cloak>
+                            <div class="bg-white rounded-2xl border border-neutral-200 overflow-hidden">
+                                <div class="px-4 sm:px-6 py-4 border-b border-neutral-100">
+                                    <h4 class="text-sm font-semibold text-neutral-900 flex items-center gap-2">
+                                        <i data-lucide="list" class="w-4 h-4 text-neutral-400"></i>
+                                        <span x-text="window.t('models.uploader.queue_section')"></span>
+                                    </h4>
+                                </div>
+                                <template x-for="task in uploadTasks" :key="task.task_id">
+                                    <div class="px-4 sm:px-6 py-4 border-b border-neutral-50 last:border-b-0">
+                                        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-2">
+                                            <div class="flex-1 min-w-0">
+                                                <div class="text-sm font-medium text-neutral-900 truncate" x-text="task.model_name"></div>
+                                                <div class="text-xs text-neutral-400 mt-0.5 flex items-center gap-2">
+                                                    <span x-text="task.repo_id"></span>
+                                                    <span x-show="task.total_size_formatted" x-text="'· ' + task.total_size_formatted"></span>
+                                                </div>
+                                            </div>
+                                            <div class="flex items-center gap-2 ml-4">
+                                                <!-- Status badge -->
+                                                <span class="px-2 py-0.5 text-[10px] font-semibold rounded-full uppercase tracking-wider"
+                                                      :class="{
+                                                          'bg-amber-50 text-amber-600': task.status === 'pending',
+                                                          'bg-blue-50 text-blue-600': task.status === 'uploading',
+                                                          'bg-green-50 text-green-600': task.status === 'completed',
+                                                          'bg-red-50 text-red-600': task.status === 'failed',
+                                                          'bg-neutral-100 text-neutral-500': task.status === 'cancelled',
+                                                      }"
+                                                      x-text="task.status"></span>
+                                                <!-- Elapsed time -->
+                                                <span x-show="task.started_at" class="text-[10px] text-neutral-400 font-mono"
+                                                      x-text="formatUploadElapsed(task)"></span>
+                                                <!-- Cancel button -->
+                                                <button x-show="task.status === 'pending' || task.status === 'uploading'"
+                                                        @click="cancelUploadTask(task.task_id)"
+                                                        class="p-1 text-neutral-400 hover:text-red-500 rounded transition-colors"
+                                                        :title="window.t('models.uploader.cancel_tooltip')">
+                                                    <i data-lucide="x" class="w-3.5 h-3.5"></i>
+                                                </button>
+                                                <!-- Remove button -->
+                                                <button x-show="task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'"
+                                                        @click="removeUploadTask(task.task_id)"
+                                                        class="p-1 text-neutral-400 hover:text-neutral-600 rounded transition-colors"
+                                                        :title="window.t('models.uploader.remove_tooltip')">
+                                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <!-- Progress bar (for uploading) -->
+                                        <div x-show="task.status === 'uploading' || task.status === 'pending'" class="mt-2">
+                                            <div class="w-full bg-neutral-100 rounded-full h-1.5 overflow-hidden">
+                                                <div class="h-full rounded-full transition-all duration-500"
+                                                     :class="task.status === 'pending' ? 'bg-amber-400 animate-pulse' : 'bg-blue-500'"
+                                                     :style="'width: ' + (task.status === 'pending' ? 100 : Math.max(task.progress, 5)) + '%'"></div>
+                                            </div>
+                                        </div>
+                                        <!-- Error message -->
+                                        <div x-show="task.status === 'failed' && task.error" x-cloak
+                                             class="mt-2 text-xs text-red-600 truncate" x-text="task.error"></div>
+                                        <!-- Completed: HF repo link -->
+                                        <div x-show="task.status === 'completed' && task.repo_url" x-cloak class="mt-2">
+                                            <a :href="task.repo_url" target="_blank" rel="noopener noreferrer"
+                                               class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 transition-colors">
+                                                <i data-lucide="external-link" class="w-3 h-3"></i>
+                                                <span x-text="task.repo_url"></span>
+                                            </a>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Upload Confirmation Modal -->
+                        <template x-if="uploadModalOpen">
+                            <div class="fixed inset-0 z-[100] flex items-center justify-center" @keydown.escape.window="uploadModalOpen = false">
+                                <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="uploadModalOpen = false"></div>
+                                <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+                                    <!-- Modal header -->
+                                    <div class="px-6 py-4 border-b border-neutral-100">
+                                        <h3 class="text-base font-semibold text-neutral-900" x-text="window.t('models.uploader.modal_title')"></h3>
+                                    </div>
+                                    <!-- Modal body -->
+                                    <div class="px-6 py-5 space-y-4">
+                                        <!-- Model name (read-only) -->
+                                        <div>
+                                            <label class="text-xs font-medium text-neutral-500 mb-1.5 block">Model</label>
+                                            <div class="text-sm font-medium text-neutral-900" x-text="uploadModalModelName"></div>
+                                        </div>
+                                        <!-- Repo name -->
+                                        <div>
+                                            <label class="text-xs font-medium text-neutral-500 mb-1.5 block" x-text="window.t('models.uploader.modal_repo_label')"></label>
+                                            <input type="text" x-model="uploadModalRepoId"
+                                                   class="w-full px-3 py-2 text-sm rounded-lg border border-neutral-200
+                                                          focus:border-neutral-400 focus:ring-1 focus:ring-neutral-400 outline-none
+                                                          bg-neutral-50 transition-all">
+                                        </div>
+                                        <!-- README source -->
+                                        <div>
+                                            <label class="text-xs font-medium text-neutral-500 mb-1.5 block" x-text="window.t('models.uploader.modal_readme_label')"></label>
+                                            <select x-model="uploadReadmeSource"
+                                                    class="w-full px-3 py-2 text-sm rounded-lg border border-neutral-200
+                                                           focus:border-neutral-400 focus:ring-1 focus:ring-neutral-400 outline-none
+                                                           bg-neutral-50 transition-all">
+                                                <option value="" x-text="window.t('models.uploader.modal_readme_none')"></option>
+                                                <template x-for="m in uploadAllModels.filter(m => m.has_readme)" :key="m.path">
+                                                    <option :value="m.path" x-text="m.name"></option>
+                                                </template>
+                                            </select>
+                                        </div>
+                                        <!-- Re-download notice toggle (only when auto-generate) -->
+                                        <template x-if="uploadReadmeSource === ''">
+                                            <div class="flex items-center justify-between">
+                                                <div>
+                                                    <label class="text-xs font-medium text-neutral-500" x-text="window.t('models.uploader.modal_redownload_label')"></label>
+                                                    <p class="text-[10px] text-neutral-400 mt-0.5" x-text="window.t('models.uploader.modal_redownload_hint')"></p>
+                                                </div>
+                                                <button @click="uploadRedownloadNotice = !uploadRedownloadNotice"
+                                                        class="relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 ml-3"
+                                                        :class="uploadRedownloadNotice ? 'bg-neutral-900' : 'bg-neutral-200'">
+                                                    <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+                                                          :class="uploadRedownloadNotice ? 'translate-x-5' : ''"></span>
+                                                </button>
+                                            </div>
+                                        </template>
+                                        <!-- Private toggle -->
+                                        <div class="flex items-center justify-between">
+                                            <label class="text-xs font-medium text-neutral-500" x-text="window.t('models.uploader.modal_private_label')"></label>
+                                            <button @click="uploadPrivate = !uploadPrivate"
+                                                    class="relative w-10 h-5 rounded-full transition-colors duration-200"
+                                                    :class="uploadPrivate ? 'bg-neutral-900' : 'bg-neutral-200'">
+                                                <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform duration-200"
+                                                      :class="uploadPrivate ? 'translate-x-5' : ''"></span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <!-- Modal footer -->
+                                    <div class="px-6 py-4 border-t border-neutral-100 flex items-center justify-end gap-2 bg-neutral-50">
+                                        <button @click="uploadModalOpen = false"
+                                                class="px-4 py-2 text-xs font-medium text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all">
+                                            <span x-text="window.t('models.uploader.modal_cancel')"></span>
+                                        </button>
+                                        <button @click="startUpload()"
+                                                :disabled="!uploadModalRepoId || uploadStarting"
+                                                class="px-5 py-2 text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 rounded-lg transition-all
+                                                       disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                            <template x-if="uploadStarting">
+                                                <span class="inline-flex animate-spin"><i data-lucide="loader-2" class="w-3.5 h-3.5"></i></span>
+                                            </template>
+                                            <template x-if="!uploadStarting">
+                                                <i data-lucide="cloud-upload" class="w-3.5 h-3.5"></i>
+                                            </template>
+                                            <span x-text="window.t('models.uploader.modal_confirm')"></span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+
+                </div>
+
+                <!-- Model Detail Modal -->
+                <div x-show="hfModelDetail || hfModelDetailLoading || msModelDetail || msModelDetailLoading"
+                     x-cloak
+                     class="fixed inset-0 z-[100] flex items-center justify-center"
+                     @keydown.escape.window="closeModelDetail()">
+                    <!-- Backdrop -->
+                    <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="closeModelDetail()"></div>
+                    <!-- Modal: fixed size, 480px wide, 70vh tall -->
+                    <div class="relative bg-white rounded-2xl shadow-2xl border border-neutral-200 overflow-hidden flex flex-col"
+                         style="width: 800px; height: 70vh;">
+                        <!-- Loading -->
+                        <div x-show="(hfModelDetailLoading && !hfModelDetail) || (msModelDetailLoading && !msModelDetail)" class="p-12 text-center">
+                            <div class="inline-block w-6 h-6 border-2 border-neutral-300 border-t-neutral-600 rounded-full animate-spin mb-3"></div>
+                            <p class="text-sm text-neutral-500">{{ t('models.detail.loading') }}</p>
+                        </div>
+                        <!-- Content (HF) -->
+                        <template x-if="hfModelDetail">
+                            <div class="flex flex-col h-full overflow-hidden">
+                                <!-- Header -->
+                                <div class="px-6 py-5 border-b border-neutral-200 shrink-0">
+                                    <div class="flex items-start justify-between gap-4">
+                                        <div class="min-w-0 flex-1">
+                                            <h3 class="text-lg font-bold text-neutral-900 truncate" x-text="hfModelDetail.repo_id"></h3>
+                                            <div class="flex items-center gap-3 mt-1.5 flex-wrap">
+                                                <span x-show="hfModelDetail.size > 0" class="text-xs text-neutral-500" x-text="hfModelDetail.size_formatted"></span>
+                                                <span class="text-xs text-neutral-500" x-text="'&#11015; ' + formatDownloads(hfModelDetail.downloads)"></span>
+                                                <span class="text-xs text-neutral-500" x-text="'&#9829; ' + hfModelDetail.likes"></span>
+                                                <span x-show="hfModelDetail.params" x-cloak class="text-xs text-neutral-500" x-text="hfModelDetail.params_formatted + ' ' + window.t('models.browse.params_suffix')"></span>
+                                                <span x-show="hfModelDetail.pipeline_tag" x-cloak
+                                                      class="px-2 py-0.5 text-[10px] font-medium rounded bg-blue-50 text-blue-700 border border-blue-200"
+                                                      x-text="hfModelDetail.pipeline_tag"></span>
+                                            </div>
+                                        </div>
+                                        <button @click="closeModelDetail()" class="p-1.5 text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all shrink-0">
+                                            <i data-lucide="x" class="w-5 h-5"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <!-- Body -->
+                                <div class="px-6 py-4 flex-1 min-h-0 flex flex-col overflow-hidden">
+                                    <!-- Model Card tab / Files tab -->
+                                    <div x-data="{ detailTab: 'card' }" class="flex-1 min-h-0 flex flex-col">
+                                        <div class="flex items-center gap-1 bg-neutral-100 rounded-lg p-0.5 mb-4 shrink-0 w-fit">
+                                            <button @click="detailTab = 'card'"
+                                                    :class="detailTab === 'card' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-700'"
+                                                    class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                {{ t('models.detail.tab.model_card') }}
+                                            </button>
+                                            <button @click="detailTab = 'files'"
+                                                    :class="detailTab === 'files' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-700'"
+                                                    class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                {{ t('models.detail.tab.files') }}
+                                                <span x-show="hfModelDetail.files && hfModelDetail.files.length > 0" x-cloak
+                                                      class="ml-1 text-[10px] text-neutral-400"
+                                                      x-text="'(' + hfModelDetail.files.length + ')'"></span>
+                                            </button>
+                                            <button @click="detailTab = 'tags'"
+                                                    :class="detailTab === 'tags' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-700'"
+                                                    class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                {{ t('models.detail.tab.tags') }}
+                                            </button>
+                                        </div>
+
+                                        <!-- Model Card content -->
+                                        <div x-show="detailTab === 'card'" class="flex-1 min-h-0 overflow-y-auto">
+                                            <div x-show="hfModelDetail.model_card" x-cloak>
+                                                <div class="model-card-content"
+                                                     x-html="typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(marked.parse(hfModelDetail.model_card)) : ''"></div>
+                                            </div>
+                                            <div x-show="!hfModelDetail.model_card" x-cloak class="py-8 text-center">
+                                                <i data-lucide="file-text" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                                <p class="text-sm text-neutral-500">{{ t('models.detail.no_model_card') }}</p>
+                                            </div>
+                                        </div>
+
+                                        <!-- Files content -->
+                                        <div x-show="detailTab === 'files'" class="flex-1 min-h-0 overflow-y-auto">
+                                            <div x-show="hfModelDetail.files && hfModelDetail.files.length > 0" x-cloak>
+                                                <div class="bg-neutral-50 rounded-xl border border-neutral-200 divide-y divide-neutral-200">
+                                                    <template x-for="file in hfModelDetail.files" :key="file.name">
+                                                        <div class="px-3 py-1.5 flex items-center justify-between text-xs">
+                                                            <span class="font-mono text-neutral-700 truncate" x-text="file.name"></span>
+                                                            <span class="text-neutral-400 shrink-0 ml-3" x-text="formatFileSize(file.size)"></span>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                            <div x-show="!hfModelDetail.files || hfModelDetail.files.length === 0" x-cloak class="py-8 text-center">
+                                                <p class="text-sm text-neutral-500">{{ t('models.detail.no_files') }}</p>
+                                            </div>
+                                        </div>
+
+                                        <!-- Tags content -->
+                                        <div x-show="detailTab === 'tags'" class="flex-1 min-h-0 overflow-y-auto">
+                                            <div x-show="hfModelDetail.tags && hfModelDetail.tags.length > 0" x-cloak>
+                                                <div class="flex flex-wrap gap-1.5">
+                                                    <template x-for="tag in hfModelDetail.tags" :key="tag">
+                                                        <span class="px-2 py-0.5 text-[10px] font-medium rounded bg-neutral-100 text-neutral-600 border border-neutral-200"
+                                                              x-text="tag"></span>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                            <div x-show="!hfModelDetail.tags || hfModelDetail.tags.length === 0" x-cloak class="py-8 text-center">
+                                                <p class="text-sm text-neutral-500">{{ t('models.detail.no_tags') }}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- Footer -->
+                                <div class="px-6 py-4 border-t border-neutral-200 flex items-center justify-between shrink-0 bg-neutral-50">
+                                    <a :href="'https://huggingface.co/' + hfModelDetail.repo_id" target="_blank" rel="noopener noreferrer"
+                                       class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1.5 transition-colors">
+                                        <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                                        {{ t('models.detail.view_on_hf') }}
+                                    </a>
+                                    <div class="flex items-center gap-2">
+                                        <button @click="closeModelDetail()"
+                                                class="px-4 py-2 text-xs font-medium text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all">
+                                            {{ t('models.detail.close') }}
+                                        </button>
+                                        <template x-if="hfModelDetail.is_adapter">
+                                            <span class="px-4 py-2 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-1.5">
+                                                <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
+                                                {{ t('models.detail.lora_warning') }}
+                                            </span>
+                                        </template>
+                                        <template x-if="!hfModelDetail.is_adapter">
+                                            <button @click="downloadRecommended(hfModelDetail.repo_id); closeModelDetail();"
+                                                    :disabled="hfDownloading"
+                                                    class="px-5 py-2 text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 rounded-lg transition-all
+                                                           disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                                <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                                {{ t('models.downloader.download_button') }}
+                                            </button>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                        <!-- Content (MS) -->
+                        <template x-if="msModelDetail">
+                            <div class="flex flex-col h-full overflow-hidden">
+                                <!-- Header -->
+                                <div class="px-6 py-5 border-b border-neutral-200 shrink-0">
+                                    <div class="flex items-start justify-between gap-4">
+                                        <div class="min-w-0 flex-1">
+                                            <h3 class="text-lg font-bold text-neutral-900 truncate" x-text="msModelDetail.repo_id"></h3>
+                                            <div class="flex items-center gap-3 mt-1.5 flex-wrap">
+                                                <span x-show="msModelDetail.size_formatted" x-cloak class="text-xs text-neutral-500" x-text="msModelDetail.size_formatted"></span>
+                                                <span class="text-xs text-neutral-500" x-text="'&#11015; ' + formatDownloads(msModelDetail.downloads)"></span>
+                                                <span class="text-xs text-neutral-500" x-text="'&#9829; ' + msModelDetail.likes"></span>
+                                            </div>
+                                        </div>
+                                        <button @click="closeModelDetail()" class="p-1.5 text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all shrink-0">
+                                            <i data-lucide="x" class="w-5 h-5"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <!-- Body -->
+                                <div class="px-6 py-4 flex-1 min-h-0 flex flex-col overflow-hidden">
+                                    <div x-data="{ detailTab: 'card' }" class="flex-1 min-h-0 flex flex-col">
+                                        <div class="flex items-center gap-1 bg-neutral-100 rounded-lg p-0.5 mb-4 shrink-0 w-fit">
+                                            <button @click="detailTab = 'card'"
+                                                    :class="detailTab === 'card' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-700'"
+                                                    class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                {{ t('models.detail.tab.model_card') }}
+                                            </button>
+                                            <button @click="detailTab = 'tags'"
+                                                    :class="detailTab === 'tags' ? 'bg-white text-neutral-900 shadow-sm' : 'text-neutral-500 hover:text-neutral-700'"
+                                                    class="px-3 py-1 text-xs font-medium rounded-md transition-all">
+                                                {{ t('models.detail.tab.tags') }}
+                                            </button>
+                                        </div>
+                                        <div x-show="detailTab === 'card'" class="flex-1 min-h-0 overflow-y-auto">
+                                            <div x-show="msModelDetail.model_card" x-cloak>
+                                                <div class="model-card-content"
+                                                     x-html="typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(marked.parse(msModelDetail.model_card)) : ''"></div>
+                                            </div>
+                                            <div x-show="!msModelDetail.model_card" x-cloak class="py-8 text-center">
+                                                <i data-lucide="file-text" class="w-8 h-8 text-neutral-300 mx-auto mb-3"></i>
+                                                <p class="text-sm text-neutral-500">{{ t('models.detail.no_model_card') }}</p>
+                                            </div>
+                                        </div>
+                                        <div x-show="detailTab === 'tags'" class="flex-1 min-h-0 overflow-y-auto">
+                                            <div x-show="msModelDetail.tags && msModelDetail.tags.length > 0" x-cloak>
+                                                <div class="flex flex-wrap gap-1.5">
+                                                    <template x-for="tag in msModelDetail.tags" :key="tag">
+                                                        <span class="px-2 py-0.5 text-[10px] font-medium rounded bg-neutral-100 text-neutral-600 border border-neutral-200"
+                                                              x-text="tag"></span>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                            <div x-show="!msModelDetail.tags || msModelDetail.tags.length === 0" x-cloak class="py-8 text-center">
+                                                <p class="text-sm text-neutral-500">{{ t('models.detail.no_tags') }}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- Footer -->
+                                <div class="px-6 py-4 border-t border-neutral-200 flex items-center justify-between shrink-0 bg-neutral-50">
+                                    <a :href="'https://modelscope.cn/models/' + msModelDetail.repo_id" target="_blank" rel="noopener noreferrer"
+                                       class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1.5 transition-colors">
+                                        <i data-lucide="external-link" class="w-3.5 h-3.5"></i>
+                                        <span x-text="window.t('models.detail.view_on_ms')"></span>
+                                    </a>
+                                    <div class="flex items-center gap-2">
+                                        <button @click="closeModelDetail()"
+                                                class="px-4 py-2 text-xs font-medium text-neutral-600 hover:bg-neutral-100 rounded-lg transition-all">
+                                            {{ t('models.detail.close') }}
+                                        </button>
+                                        <button @click="downloadMsModel(msModelDetail.repo_id); closeModelDetail();"
+                                                :disabled="msDownloading"
+                                                class="px-5 py-2 text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 rounded-lg transition-all
+                                                       disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+                                            <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                            {{ t('models.downloader.download_button') }}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
