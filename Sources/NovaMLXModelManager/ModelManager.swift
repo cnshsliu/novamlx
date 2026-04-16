@@ -86,7 +86,7 @@ public struct DownloadStatus: Codable, Sendable {
 }
 
 public final class ModelManager: @unchecked Sendable {
-    private let modelsDirectory: URL
+    public let modelsDirectory: URL
     private let registryFile: URL
     private let hubApi: HubApi
     private var _registry: [String: ModelRecord]
@@ -107,7 +107,14 @@ public final class ModelManager: @unchecked Sendable {
         loadRegistry()
     }
 
+    /// Models that are downloaded and ready to use (complete weight files on disk).
     public func availableModels() -> [ModelRecord] {
+        downloadedModels()
+    }
+
+    /// All records in the registry, including incomplete/failed downloads.
+    /// Use this only for admin/management purposes.
+    public func allRegisteredModels() -> [ModelRecord] {
         lock.withLock { Array(_registry.values) }
     }
 
@@ -307,8 +314,21 @@ public final class ModelManager: @unchecked Sendable {
         let scanDirs = [modelsDirectory, hubDir]
         var allDiscovered: [DiscoveredModel] = []
 
+        #if DEBUG
+        NovaMLXLog.info("[Discovery] Scanning dirs: \(scanDirs.map(\.path))")
+        // List immediate subdirectories in modelsDirectory
+        if let contents = try? FileManager.default.contentsOfDirectory(at: modelsDirectory, includingPropertiesForKeys: nil) {
+            NovaMLXLog.info("[Discovery] modelsDirectory contents: \(contents.map(\.lastPathComponent))")
+        }
+        #endif
+
         for dir in scanDirs {
-            guard dir.directoryExists else { continue }
+            guard dir.directoryExists else {
+                #if DEBUG
+                NovaMLXLog.info("[Discovery] Skipping non-existent dir: \(dir.path)")
+                #endif
+                continue
+            }
             let found = discovery.discover(in: dir)
             allDiscovered.append(contentsOf: found)
         }
@@ -328,6 +348,7 @@ public final class ModelManager: @unchecked Sendable {
                     remoteURL: remoteURL,
                     sizeBytes: model.estimatedSizeBytes
                 )
+                // Only mark as downloaded if model is complete (has valid weight files)
                 let updatedRecord = ModelRecord(
                     id: model.modelId,
                     family: model.family,
@@ -336,32 +357,74 @@ public final class ModelManager: @unchecked Sendable {
                     localURL: model.modelPath,
                     remoteURL: remoteURL,
                     sizeBytes: model.estimatedSizeBytes,
-                    downloadedAt: Date(),
+                    downloadedAt: model.isComplete ? Date() : nil,
                     version: "1.0"
                 )
                 lock.withLock { _registry[model.modelId] = updatedRecord }
                 saveRegistry()
                 registered += 1
-            } else if existing!.downloadedAt == nil && model.modelPath.directoryExists {
-                let updatedRecord = ModelRecord(
-                    id: existing!.id,
-                    family: existing!.family,
-                    modelType: existing!.modelType,
-                    source: existing!.source,
-                    localURL: model.modelPath,
-                    remoteURL: existing!.remoteURL,
-                    sizeBytes: model.estimatedSizeBytes,
-                    downloadedAt: Date(),
-                    version: existing!.version
-                )
-                lock.withLock { _registry[model.modelId] = updatedRecord }
-                saveRegistry()
-                updated += 1
+            } else {
+                // Existing record — sync localURL with actual disk path, update download status
+                let currentRecord = existing!
+                let needsURLUpdate = currentRecord.localURL != model.modelPath
+                let needsDownloadUpdate = currentRecord.downloadedAt == nil && model.isComplete
+                let needsCompletenessUpdate = currentRecord.downloadedAt != nil && !model.isComplete
+
+                if needsURLUpdate || needsDownloadUpdate || needsCompletenessUpdate {
+                    let updatedRecord = ModelRecord(
+                        id: currentRecord.id,
+                        family: currentRecord.family,
+                        modelType: model.modelType,
+                        source: currentRecord.source,
+                        localURL: model.modelPath,
+                        remoteURL: currentRecord.remoteURL,
+                        sizeBytes: model.estimatedSizeBytes,
+                        downloadedAt: model.isComplete
+                            ? (currentRecord.downloadedAt ?? Date())
+                            : nil,
+                        version: currentRecord.version
+                    )
+                    lock.withLock { _registry[model.modelId] = updatedRecord }
+                    saveRegistry()
+                    updated += 1
+                }
             }
         }
 
         NovaMLXLog.info("Model discovery: \(allDiscovered.count) found, \(registered) registered, \(updated) updated")
         return allDiscovered
+    }
+
+    /// Clean up empty directories left by failed/interrupted downloads
+    public func cleanupEmptyDirectories() {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: modelsDirectory, includingPropertiesForKeys: nil
+        ) else { return }
+
+        for dir in contents {
+            guard dir.directoryExists else { continue }
+            let name = dir.lastPathComponent
+            guard name != "hub" && !name.hasPrefix(".") && name != "registry.json" else { continue }
+
+            if isEffectivelyEmpty(dir) {
+                try? fm.removeItem(at: dir)
+                NovaMLXLog.info("Cleaned up empty directory: \(name)")
+            }
+        }
+    }
+
+    private func isEffectivelyEmpty(_ dir: URL) -> Bool {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        ) else { return true }
+        if contents.isEmpty { return true }
+        for item in contents {
+            if item.directoryExists, isEffectivelyEmpty(item) { continue }
+            return false
+        }
+        return true
     }
 
     private func hubFileURL(repo: Hub.Repo, filename: String) -> URL {

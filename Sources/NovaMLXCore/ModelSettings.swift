@@ -21,6 +21,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
     public var kvBits: Int?
     public var kvGroupSize: Int?
     public var thinkingBudget: Int?
+    public var kvMemoryBytesPerTokenOverride: Int?
 
     public init(
         maxContextWindow: Int? = nil,
@@ -42,7 +43,8 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         description: String? = nil,
         kvBits: Int? = nil,
         kvGroupSize: Int? = nil,
-        thinkingBudget: Int? = nil
+        thinkingBudget: Int? = nil,
+        kvMemoryBytesPerTokenOverride: Int? = nil
     ) {
         self.maxContextWindow = maxContextWindow
         self.maxTokens = maxTokens
@@ -64,6 +66,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
         self.thinkingBudget = thinkingBudget
+        self.kvMemoryBytesPerTokenOverride = kvMemoryBytesPerTokenOverride
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -83,6 +86,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         case kvBits = "kv_bits"
         case kvGroupSize = "kv_group_size"
         case thinkingBudget = "thinking_budget"
+        case kvMemoryBytesPerTokenOverride = "kv_memory_bytes_per_token_override"
     }
 
     public func applySamplingOverrides(to request: InferenceRequest) -> InferenceRequest {

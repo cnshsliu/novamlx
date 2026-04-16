@@ -12,6 +12,12 @@ if [ -d .build/checkouts/mlx-swift ] && ! grep -q "NOVAMLX_PATCHED" .build/check
 	python3 Scripts/patch-mlx-complex.py
 fi
 
+# Apply fused quantized SDPA patch to mlx-swift-lm
+if [ -d .build/checkouts/mlx-swift-lm ] && ! grep -q "NOVAMLX_FUSED_SDPA_PATCHED" .build/checkouts/mlx-swift-lm/Libraries/MLXLMCommon/AttentionUtils.swift 2>/dev/null; then
+	echo "→ Applying fused quantized SDPA patch..."
+	python3 Scripts/patch-fused-sdpa.py
+fi
+
 # Compile MLX Metal shaders if metallib is missing
 METALLIB=".build/arm64-apple-macosx/release/mlx.metallib"
 METAL_SRC=".build/checkouts/mlx-swift/Source/Cmlx/mlx-generated/metal"

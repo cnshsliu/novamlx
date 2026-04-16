@@ -29,6 +29,10 @@ public enum NovaMLXError: Error, LocalizedError {
     }
 }
 
+public enum QuantizationScheme: String, Codable, Sendable {
+    case affine
+}
+
 public struct ModelIdentifier: Hashable, Codable, Sendable {
     public let id: String
     public let family: ModelFamily
@@ -75,6 +79,7 @@ public struct ModelConfig: Codable, Sendable {
     public let seed: UInt64?
     public let kvBits: Int?
     public let kvGroupSize: Int
+    public var kvMemoryBytesPerToken: Int?
 
     public init(
         identifier: ModelIdentifier,
@@ -87,7 +92,8 @@ public struct ModelConfig: Codable, Sendable {
         repeatLastN: Int = 64,
         seed: UInt64? = nil,
         kvBits: Int? = nil,
-        kvGroupSize: Int = 64
+        kvGroupSize: Int = 64,
+        kvMemoryBytesPerToken: Int? = nil
     ) {
         self.identifier = identifier
         self.modelType = modelType
@@ -100,6 +106,7 @@ public struct ModelConfig: Codable, Sendable {
         self.seed = seed
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
+        self.kvMemoryBytesPerToken = kvMemoryBytesPerToken
     }
 }
 
@@ -108,7 +115,7 @@ public enum ResponseFormat: String, Codable, Sendable {
     case jsonObject = "json_object"
 }
 
-public struct InferenceRequest: Sendable {
+public struct InferenceRequest: @unchecked Sendable {
     public let id: UUID
     public let model: String
     public let messages: [ChatMessage]
@@ -125,6 +132,9 @@ public struct InferenceRequest: Sendable {
     public let stop: [String]?
     public let sessionId: String?
     public let responseFormat: ResponseFormat?
+    public let jsonSchemaDef: [String: Any]?
+    public let regexPattern: String?
+    public let gbnfGrammar: String?
     public let thinkingBudget: Int?
 
     public init(
@@ -144,6 +154,9 @@ public struct InferenceRequest: Sendable {
         stop: [String]? = nil,
         sessionId: String? = nil,
         responseFormat: ResponseFormat? = nil,
+        jsonSchemaDef: [String: Any]? = nil,
+        regexPattern: String? = nil,
+        gbnfGrammar: String? = nil,
         thinkingBudget: Int? = nil
     ) {
         self.id = id
@@ -162,6 +175,9 @@ public struct InferenceRequest: Sendable {
         self.stop = stop
         self.sessionId = sessionId
         self.responseFormat = responseFormat
+        self.jsonSchemaDef = jsonSchemaDef
+        self.regexPattern = regexPattern
+        self.gbnfGrammar = gbnfGrammar
         self.thinkingBudget = thinkingBudget
     }
 }
@@ -189,7 +205,7 @@ public struct ChatMessage: Codable, Sendable {
     }
 }
 
-public struct InferenceResult: Sendable {
+public struct InferenceResult: Codable, Sendable {
     public let id: UUID
     public let model: String
     public let text: String
@@ -273,15 +289,29 @@ public struct ServerConfig: Codable, Sendable {
     public let maxConcurrentRequests: Int
     public let requestTimeout: TimeInterval
     public let contextScalingTarget: Int?
+    public let tlsCertPath: String?
+    public let tlsKeyPath: String?
+    public let tlsKeyPassword: String?
+    public let maxRequestSizeMB: Double
+
+    private enum CodingKeys: String, CodingKey {
+        case host, port, adminPort, apiKeys, maxConcurrentRequests
+        case requestTimeout, contextScalingTarget
+        case tlsCertPath, tlsKeyPath, tlsKeyPassword, maxRequestSizeMB
+    }
 
     public init(
         host: String = "127.0.0.1",
-        port: Int = 8080,
-        adminPort: Int = 8081,
+        port: Int = 6590,
+        adminPort: Int = 6591,
         apiKeys: [String] = [],
         maxConcurrentRequests: Int = 16,
         requestTimeout: TimeInterval = 300,
-        contextScalingTarget: Int? = nil
+        contextScalingTarget: Int? = nil,
+        tlsCertPath: String? = nil,
+        tlsKeyPath: String? = nil,
+        tlsKeyPassword: String? = nil,
+        maxRequestSizeMB: Double = 100
     ) {
         self.host = host
         self.port = port
@@ -290,6 +320,27 @@ public struct ServerConfig: Codable, Sendable {
         self.maxConcurrentRequests = maxConcurrentRequests
         self.requestTimeout = requestTimeout
         self.contextScalingTarget = contextScalingTarget
+        self.tlsCertPath = tlsCertPath
+        self.tlsKeyPath = tlsKeyPath
+        self.tlsKeyPassword = tlsKeyPassword
+        self.maxRequestSizeMB = maxRequestSizeMB
+    }
+
+    public var isTLSEnabled: Bool { tlsCertPath != nil }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        host = try container.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
+        port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 6590
+        adminPort = try container.decodeIfPresent(Int.self, forKey: .adminPort) ?? 6591
+        apiKeys = try container.decodeIfPresent([String].self, forKey: .apiKeys) ?? []
+        maxConcurrentRequests = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentRequests) ?? 16
+        requestTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .requestTimeout) ?? 300
+        contextScalingTarget = try container.decodeIfPresent(Int.self, forKey: .contextScalingTarget)
+        tlsCertPath = try container.decodeIfPresent(String.self, forKey: .tlsCertPath)
+        tlsKeyPath = try container.decodeIfPresent(String.self, forKey: .tlsKeyPath)
+        tlsKeyPassword = try container.decodeIfPresent(String.self, forKey: .tlsKeyPassword)
+        maxRequestSizeMB = try container.decodeIfPresent(Double.self, forKey: .maxRequestSizeMB) ?? 100
     }
 
     public func scaleTokenCount(_ count: Int, modelContextWindow: Int) -> Int {
@@ -328,5 +379,56 @@ public struct SystemStats: Sendable {
     public var memoryUsagePercent: Double {
         guard memoryTotal > 0 else { return 0 }
         return Double(memoryUsed) / Double(memoryTotal) * 100
+    }
+}
+
+// MARK: - Download Management
+
+public enum DownloadStatus: Sendable, Equatable {
+    case pending
+    case downloading
+    case completed
+    case failed
+}
+
+public struct DownloadTaskInfo: Sendable {
+    public let repoId: String
+    public var taskId: String?
+    public var status: DownloadStatus
+    public var progress: Double
+    public var downloadedBytes: Int64
+    public var totalBytes: Int64
+    public var errorMessage: String?
+    public let startedAt: Date
+    public var fileProgresses: [FileDownloadInfo]
+
+    public init(repoId: String) {
+        self.repoId = repoId
+        self.taskId = nil
+        self.status = .pending
+        self.progress = 0
+        self.downloadedBytes = 0
+        self.totalBytes = 0
+        self.errorMessage = nil
+        self.startedAt = Date()
+        self.fileProgresses = []
+    }
+
+    public var isActive: Bool { status == .downloading || status == .pending }
+}
+
+/// Lightweight per-file progress info for UI display
+public struct FileDownloadInfo: Sendable, Identifiable {
+    public var id: String { filename }
+    public let filename: String
+    public var downloadedBytes: Int64
+    public var totalBytes: Int64
+    public var status: String  // "downloading", "completed", "failed", "waiting"
+
+    public init(filename: String, downloadedBytes: Int64 = 0, totalBytes: Int64 = 0, status: String = "waiting") {
+        self.filename = filename
+        self.downloadedBytes = downloadedBytes
+        self.totalBytes = totalBytes
+        self.status = status
     }
 }

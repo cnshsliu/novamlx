@@ -61,6 +61,12 @@ extension Date {
 }
 
 extension FileManager {
+    public func fileSize(at url: URL) -> UInt64? {
+        guard let attrs = try? attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? UInt64 else { return nil }
+        return size
+    }
+
     public func directorySize(at url: URL) -> UInt64 {
         guard let enumerator = enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
         var total: UInt64 = 0

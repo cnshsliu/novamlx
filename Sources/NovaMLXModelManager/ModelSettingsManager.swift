@@ -96,10 +96,8 @@ public final class ModelSettingsManager: @unchecked Sendable {
             let container = SettingsContainer(version: 1, models: _settings)
             return (try? JSONEncoder().encode(container)) ?? Data()
         }
-        let tmpFile = settingsFile.deletingLastPathComponent()
-            .appendingPathComponent(".model_settings.json.tmp")
-        try? data.write(to: tmpFile, options: .atomic)
-        try? FileManager.default.moveItem(at: tmpFile, to: settingsFile)
+        // .atomic write handles temp file + rename atomically, no need for manual moveItem
+        try? data.write(to: settingsFile, options: .atomic)
     }
 }
 

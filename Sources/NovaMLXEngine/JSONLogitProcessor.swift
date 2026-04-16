@@ -9,6 +9,11 @@ struct SendableBox<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
+final class MutableSendableBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
+
 public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     enum JSONState: Int {
         case expectValue
@@ -34,18 +39,14 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     private let vocabSize: Int
     private var precomputedMasks: [JSONState: MLXArray]
     private var firstToken = true
+    private let maskBuilder: TokenMaskBuilder
 
     public init(tokenizer: NovaMLXEngine.Tokenizer) {
         self.tokenizer = tokenizer
         self.eosTokenId = tokenizer.eosTokenId
         self.precomputedMasks = [:]
-        var detectedVocabSize = 0
-        for i in 0..<128000 {
-            let text = tokenizer.decode([i])
-            if text.isEmpty && i > 100 { break }
-            detectedVocabSize = i + 1
-        }
-        self.vocabSize = detectedVocabSize
+        self.maskBuilder = TokenMaskBuilder(tokenizer: tokenizer)
+        self.vocabSize = maskBuilder.vocabSize
         self.precomputeMasks()
     }
 
@@ -53,6 +54,7 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
         self.tokenizer = tokenizer
         self.eosTokenId = tokenizer.eosTokenId
         self.vocabSize = vocabSize
+        self.maskBuilder = TokenMaskBuilder(tokenizer: tokenizer)
         self.precomputedMasks = [:]
         self.precomputeMasks()
     }
@@ -64,10 +66,7 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
         guard let mask = precomputedMasks[currentState] else {
             return logits
         }
-
-        let logitsShape = logits.shape
-        let maskSlice = mask[0..., 0..<logitsShape[logitsShape.count - 1]]
-        return MLX.where(maskSlice, logits, MLXArray(-Float.infinity))
+        return TokenMaskBuilder.applyMask(mask, to: logits)
     }
 
     public func didSample(token: MLXArray) {
@@ -226,24 +225,22 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     }
 
     private func precomputeMasks() {
-        let negInf = -Float.infinity
-
         for state in [JSONState.expectValue, .expectObjectKeyOrEnd, .inString, .afterKeyQuote, .expectColon, .expectValueAfterColon, .expectObjectCommaOrEnd, .expectArrayValueOrEnd, .expectArrayCommaOrEnd, .inNumber, .inLiteral, .done] {
             let allowed = allowedChars(for: state)
 
-            var maskValues = [Float](repeating: negInf, count: vocabSize)
+            var maskValues = [Bool](repeating: false, count: vocabSize)
             for i in 0..<vocabSize {
                 if i == eosTokenId {
-                    maskValues[i] = 0.0
+                    maskValues[i] = true
                     continue
                 }
-                let text = tokenizer.decode([i])
+                let text = maskBuilder.decodedText(for: i)
                 if let first = text.first(where: { !$0.isWhitespace && $0 != "▁" && $0 != " " }) {
                     if allowed.contains(first) {
-                        maskValues[i] = 0.0
+                        maskValues[i] = true
                     }
                 } else if text.isEmpty || text.allSatisfy({ $0.isWhitespace }) {
-                    maskValues[i] = 0.0
+                    maskValues[i] = true
                 }
             }
             precomputedMasks[state] = MLXArray(maskValues)[.newAxis, 0...]

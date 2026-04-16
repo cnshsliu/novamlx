@@ -289,7 +289,7 @@ struct CoreTypesTests {
     @Test("StreamingDetokenizer multi-byte UTF-8 simulation")
     func streamingDetokenizerMultiByte() {
         let fullText = "Hello 世界"
-        var decoded = ""
+        let _ = ""
         let detok = StreamingDetokenizer(decode: { tokens in
             return fullText
         })

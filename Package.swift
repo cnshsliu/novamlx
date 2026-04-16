@@ -11,6 +11,7 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "NovaMLX", targets: ["NovaMLXApp"]),
+        .executable(name: "nova", targets: ["NovaMLXCLI"]),
         .library(name: "NovaMLXCore", targets: ["NovaMLXCore"]),
         .library(name: "NovaMLXUtils", targets: ["NovaMLXUtils"]),
         .library(name: "NovaMLXPrefixCache", targets: ["NovaMLXPrefixCache"]),
@@ -140,6 +141,27 @@ let package = Package(
             ],
             swiftSettings: concurrencySettings
         ),
+        .executableTarget(
+            name: "NovaMLXCLI",
+            dependencies: [
+                "NovaMLXCore",
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .executableTarget(
+            name: "NovaMLXBenchmarkRunner",
+            dependencies: [
+                "NovaMLXCore",
+                "NovaMLXUtils",
+                "NovaMLXEngine",
+                "NovaMLXInference",
+                "NovaMLXModelManager",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "Hub", package: "swift-transformers"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
         .testTarget(
             name: "NovaMLXCoreTests",
             dependencies: ["NovaMLXCore", "NovaMLXUtils"],
@@ -168,6 +190,20 @@ let package = Package(
         .testTarget(
             name: "NovaMLXPrefixCacheTests",
             dependencies: ["NovaMLXPrefixCache"],
+            swiftSettings: concurrencySettings
+        ),
+        .testTarget(
+            name: "NovaMLXBenchTests",
+            dependencies: [
+                "NovaMLXCore",
+                "NovaMLXUtils",
+                "NovaMLXEngine",
+                "NovaMLXInference",
+                "NovaMLXModelManager",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "Hub", package: "swift-transformers"),
+            ],
             swiftSettings: concurrencySettings
         ),
     ]

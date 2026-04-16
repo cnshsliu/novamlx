@@ -9,8 +9,8 @@ public actor NovaMLXConfiguration {
     private var _defaultModel: String?
 
     private init() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let base = appSupport.appendingPathComponent("NovaMLX", isDirectory: true)
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let base = homeDir.appendingPathComponent(".nova", isDirectory: true)
         _modelsDirectory = base.appendingPathComponent("models", isDirectory: true)
         _cacheDirectory = base.appendingPathComponent("cache", isDirectory: true)
         _serverConfig = ServerConfig()
@@ -72,6 +72,29 @@ public actor NovaMLXConfiguration {
         )
         let data = try JSONEncoder().encode(config)
         try data.write(to: url, options: .atomic)
+    }
+
+    /// Update apiKeys in the server config and persist to file
+    public func updateApiKeys(_ keys: [String], file url: URL) throws {
+        _serverConfig = ServerConfig(
+            host: _serverConfig.host,
+            port: _serverConfig.port,
+            adminPort: _serverConfig.adminPort,
+            apiKeys: keys,
+            maxConcurrentRequests: _serverConfig.maxConcurrentRequests,
+            requestTimeout: _serverConfig.requestTimeout,
+            contextScalingTarget: _serverConfig.contextScalingTarget,
+            tlsCertPath: _serverConfig.tlsCertPath,
+            tlsKeyPath: _serverConfig.tlsKeyPath,
+            tlsKeyPassword: _serverConfig.tlsKeyPassword,
+            maxRequestSizeMB: _serverConfig.maxRequestSizeMB
+        )
+        try saveToFile(url)
+    }
+
+    /// Convenience: get the config file URL (sibling of models directory)
+    public var configFileURL: URL {
+        _modelsDirectory.deletingLastPathComponent().appendingPathComponent("config.json")
     }
 }
 

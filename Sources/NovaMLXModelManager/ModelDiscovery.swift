@@ -10,6 +10,8 @@ public struct DiscoveredModel: Sendable {
     public let estimatedSizeBytes: UInt64
     public let architectures: [String]
     public let configModelType: String
+    public let isAdapter: Bool
+    public let isComplete: Bool
 
     public init(
         modelId: String,
@@ -18,7 +20,9 @@ public struct DiscoveredModel: Sendable {
         family: ModelFamily,
         estimatedSizeBytes: UInt64,
         architectures: [String],
-        configModelType: String
+        configModelType: String,
+        isAdapter: Bool = false,
+        isComplete: Bool = true
     ) {
         self.modelId = modelId
         self.modelPath = modelPath
@@ -27,6 +31,8 @@ public struct DiscoveredModel: Sendable {
         self.estimatedSizeBytes = estimatedSizeBytes
         self.architectures = architectures
         self.configModelType = configModelType
+        self.isAdapter = isAdapter
+        self.isComplete = isComplete
     }
 }
 
@@ -78,7 +84,7 @@ public final class ModelDiscovery: Sendable {
         "mistral": .mistral, "mixtral": .mistral,
         "phi": .phi, "phi3": .phi, "phi3_v": .phi, "phi4mm": .phi,
         "qwen2": .qwen, "qwen2_vl": .qwen, "qwen2_5_vl": .qwen, "qwen3": .qwen, "qwen3_vl": .qwen,
-        "gemma": .gemma, "gemma2": .gemma, "gemma3": .gemma,
+        "gemma": .gemma, "gemma2": .gemma, "gemma3": .gemma, "gemma4": .gemma, "gemma3_text": .gemma, "gemma3n": .gemma,
         "starcoder2": .starcoder,
     ]
 
@@ -93,6 +99,7 @@ public final class ModelDiscovery: Sendable {
         "Qwen2_5_VLForConditionalGeneration": .qwen,
         "Gemma2ForCausalLM": .gemma,
         "Gemma3ForConditionalGeneration": .gemma,
+        "Gemma4ForConditionalGeneration": .gemma,
     ]
 
     public init() {}
@@ -110,7 +117,13 @@ public final class ModelDiscovery: Sendable {
             let configPath = subdir.appendingPathComponent("config.json")
 
             if configPath.fileExists {
-                if !subdir.appendingPathComponent("adapter_config.json").fileExists {
+                let adapterConfigPath = subdir.appendingPathComponent("adapter_config.json")
+                let adapterWeightsPath = subdir.appendingPathComponent("adapters.safetensors")
+                if adapterConfigPath.fileExists && adapterWeightsPath.fileExists {
+                    if let model = registerModel(at: subdir, id: subdir.lastPathComponent, isAdapter: true) {
+                        models.append(model)
+                    }
+                } else {
                     if let model = registerModel(at: subdir, id: subdir.lastPathComponent) {
                         models.append(model)
                     }
@@ -121,11 +134,13 @@ public final class ModelDiscovery: Sendable {
                     guard child.directoryExists, !child.lastPathComponent.hasPrefix(".") else { continue }
                     let childConfig = child.appendingPathComponent("config.json")
                     guard childConfig.fileExists else { continue }
-                    if child.appendingPathComponent("adapter_config.json").fileExists { continue }
+                    let adapterConfigPath = child.appendingPathComponent("adapter_config.json")
+                    let adapterWeightsPath = child.appendingPathComponent("adapters.safetensors")
+                    let isAdapter = adapterConfigPath.fileExists && adapterWeightsPath.fileExists
 
                     let orgPrefix = subdir.lastPathComponent
                     let modelId = "\(orgPrefix)/\(child.lastPathComponent)"
-                    if let model = registerModel(at: child, id: modelId) {
+                    if let model = registerModel(at: child, id: modelId, isAdapter: isAdapter) {
                         models.append(model)
                     }
                 }
@@ -144,7 +159,7 @@ public final class ModelDiscovery: Sendable {
         return models
     }
 
-    private func registerModel(at path: URL, id: String) -> DiscoveredModel? {
+    private func registerModel(at path: URL, id: String, isAdapter: Bool = false) -> DiscoveredModel? {
         let configPath = path.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configPath) else { return nil }
 
@@ -159,8 +174,9 @@ public final class ModelDiscovery: Sendable {
         let modelType = detectModelType(config: config, path: path)
         let family = detectFamily(config: config, modelId: id)
         let size = estimateSize(at: path)
+        let complete = Self.checkCompleteness(at: path, isAdapter: isAdapter)
 
-        NovaMLXLog.info("Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=\(config.architectures ?? []), size=\(size.bytesFormatted)")
+        NovaMLXLog.info("Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=\(config.architectures ?? []), size=\(size.bytesFormatted), complete=\(complete)")
 
         return DiscoveredModel(
             modelId: id,
@@ -169,8 +185,53 @@ public final class ModelDiscovery: Sendable {
             family: family,
             estimatedSizeBytes: size,
             architectures: config.architectures ?? [],
-            configModelType: config.modelType ?? ""
+            configModelType: config.modelType ?? "",
+            isAdapter: isAdapter,
+            isComplete: complete
         )
+    }
+
+    /// A model is "complete" if it has non-zero weight files.
+    /// - Has at least one .safetensors file with size > 0 (or adapters.safetensors for adapters)
+    /// - No zero-byte safetensors files (indicates interrupted download)
+    private static func checkCompleteness(at path: URL, isAdapter: Bool) -> Bool {
+        let fm = FileManager.default
+
+        if isAdapter {
+            let adapterFile = path.appendingPathComponent("adapters.safetensors")
+            guard let size = fm.fileSize(at: adapterFile), size > 0 else { return false }
+            return true
+        }
+
+        // Check for weight files
+        guard let contents = try? fm.contentsOfDirectory(at: path, includingPropertiesForKeys: nil) else {
+            return false
+        }
+
+        // If ANY .download temp files exist, download is still in progress — not complete
+        let hasTempFiles = contents.contains { $0.pathExtension == "download" }
+        if hasTempFiles {
+            #if DEBUG
+            NovaMLXLog.info("[Discovery] Incomplete model: .download temp files found in \(path.lastPathComponent)")
+            #endif
+            return false
+        }
+
+        let safetensors = contents.filter { $0.pathExtension == "safetensors" }
+        // Must have at least one safetensors file
+        guard !safetensors.isEmpty else { return false }
+
+        // All safetensors files must be non-zero (zero-byte = interrupted download)
+        for file in safetensors {
+            guard let size = fm.fileSize(at: file), size > 0 else {
+                #if DEBUG
+                NovaMLXLog.info("[Discovery] Incomplete model: zero-byte file \(file.lastPathComponent) in \(path.lastPathComponent)")
+                #endif
+                return false
+            }
+        }
+
+        return true
     }
 
     private func detectModelType(config: HFConfig, path: URL) -> ModelType {
