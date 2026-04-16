@@ -73,7 +73,7 @@ public final class EnginePool: @unchecked Sendable {
     }
 
     @discardableResult
-    public func evictLRU(excluding excludedModelId: String? = nil) -> String? {
+    public func evictLRU(excluding excludedModelId: String? = nil) -> UInt64? {
         lock.withLock {
             let candidates = pool.filter { !$0.value.isPinned && $0.key != excludedModelId }
                 .sorted { $0.value.lastAccessed < $1.value.lastAccessed }
@@ -83,11 +83,12 @@ public final class EnginePool: @unchecked Sendable {
                 return nil
             }
 
+            let freedMB = victim.value.estimatedSizeMB
             let modelId = victim.key
             pool[modelId]?.container.unload()
             pool.removeValue(forKey: modelId)
-            NovaMLXLog.info("EnginePool: LRU evicted \(modelId)")
-            return modelId
+            NovaMLXLog.info("EnginePool: LRU evicted \(modelId) (\(freedMB)MB)")
+            return freedMB
         }
     }
 
@@ -102,8 +103,12 @@ public final class EnginePool: @unchecked Sendable {
         var freed = UInt64(0)
         let target = neededMB - maxMemoryMB
         while freed < target {
-            guard let evicted = evictLRU() else { break }
-            freed += pool[evicted]?.estimatedSizeMB ?? 0
+            guard let freedMB = evictLRU() else { break }
+            freed += freedMB
+        }
+
+        if freed < target {
+            NovaMLXLog.warning("EnginePool: could only free \(freed)MB of \(target)MB needed")
         }
     }
 

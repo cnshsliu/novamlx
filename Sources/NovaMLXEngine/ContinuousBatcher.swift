@@ -37,6 +37,8 @@ public struct BatcherMetrics: Codable, Sendable {
     public let averageQueueWaitTime: TimeInterval
     public let maxBatchSize: Int
     public let uptime: TimeInterval
+    public let specAcceptedTokens: UInt64
+    public let specTotalDrafted: UInt64
 
     public init(
         activeRequests: Int = 0,
@@ -47,7 +49,9 @@ public struct BatcherMetrics: Codable, Sendable {
         peakActiveCount: Int = 0,
         averageQueueWaitTime: TimeInterval = 0,
         maxBatchSize: Int = 8,
-        uptime: TimeInterval = 0
+        uptime: TimeInterval = 0,
+        specAcceptedTokens: UInt64 = 0,
+        specTotalDrafted: UInt64 = 0
     ) {
         self.activeRequests = activeRequests
         self.queueDepth = queueDepth
@@ -58,17 +62,22 @@ public struct BatcherMetrics: Codable, Sendable {
         self.averageQueueWaitTime = averageQueueWaitTime
         self.maxBatchSize = maxBatchSize
         self.uptime = uptime
+        self.specAcceptedTokens = specAcceptedTokens
+        self.specTotalDrafted = specTotalDrafted
     }
 }
 
 public final class ContinuousBatcher: @unchecked Sendable {
     private let engine: MLXEngine
+    private let budgetTracker: MemoryBudgetTracker
     public let maxBatchSize: Int
+    private let maxConcurrentPerModel: Int
     private let lock = NovaMLXLock()
 
     private var generateQueue: [QueuedRequest]
     private var streamQueue: [QueuedStreamRequest]
     private var _activeCount: Int
+    private var _activeModelCounts: [String: Int]
     private var _totalQueued: UInt64
     private var _totalCompleted: UInt64
     private var _totalQueueWaitTime: TimeInterval
@@ -77,12 +86,18 @@ public final class ContinuousBatcher: @unchecked Sendable {
     private var _startTime: Date
     private var activeTasks: [UUID: Task<Void, Never>]
 
-    public init(engine: MLXEngine, maxBatchSize: Int = 8) {
+    private var _specAcceptedTokens: UInt64 = 0
+    private var _specTotalDrafted: UInt64 = 0
+
+    public init(engine: MLXEngine, maxBatchSize: Int = 8, maxConcurrentPerModel: Int = 4) {
         self.engine = engine
+        self.budgetTracker = engine.budgetTracker
         self.maxBatchSize = maxBatchSize
+        self.maxConcurrentPerModel = maxConcurrentPerModel
         self.generateQueue = []
         self.streamQueue = []
         self._activeCount = 0
+        self._activeModelCounts = [:]
         self._totalQueued = 0
         self._totalCompleted = 0
         self._totalQueueWaitTime = 0
@@ -98,6 +113,11 @@ public final class ContinuousBatcher: @unchecked Sendable {
     public var totalCompleted: UInt64 { lock.withLock { _totalCompleted } }
     public var totalPreempted: UInt64 { lock.withLock { _totalPreempted } }
     public var peakActiveCount: Int { lock.withLock { _peakActiveCount } }
+    public var specAcceptanceRate: Double {
+        lock.withLock {
+            _specTotalDrafted > 0 ? Double(_specAcceptedTokens) / Double(_specTotalDrafted) : 0
+        }
+    }
     public var averageQueueWaitTime: TimeInterval {
         lock.withLock {
             _totalCompleted > 0 ? _totalQueueWaitTime / Double(_totalCompleted) : 0
@@ -118,77 +138,163 @@ public final class ContinuousBatcher: @unchecked Sendable {
                 peakActiveCount: _peakActiveCount,
                 averageQueueWaitTime: _totalCompleted > 0 ? _totalQueueWaitTime / Double(_totalCompleted) : 0,
                 maxBatchSize: maxBatchSize,
-                uptime: Date().timeIntervalSince(_startTime)
+                uptime: Date().timeIntervalSince(_startTime),
+                specAcceptedTokens: _specAcceptedTokens,
+                specTotalDrafted: _specTotalDrafted
             )
         }
     }
 
+    // MARK: - Memory-Aware Admission
+
+    /// Check whether a request can be admitted based on memory budget and per-model concurrency.
+    private func canAdmitRequest(_ request: InferenceRequest) async -> Bool {
+        let modelId = request.model
+
+        // Per-model concurrency check (like OLLAMA_NUM_PARALLEL)
+        let activeForModel = lock.withLock {
+            _activeModelCounts[modelId] ?? 0
+        }
+        if activeForModel >= maxConcurrentPerModel {
+            NovaMLXLog.info("Scheduler: queuing \(request.id.uuidString.prefix(8)) — model \(modelId) at concurrency limit (\(activeForModel)/\(maxConcurrentPerModel))")
+            return false
+        }
+
+        // Memory budget check
+        let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
+        let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
+        let canAdmit = await budgetTracker.canAdmit(
+            modelId: modelId,
+            estimatedTokens: estimatedTokens,
+            bytesPerToken: bytesPerToken
+        )
+
+        if !canAdmit {
+            let neededMB = UInt64(estimatedTokens) * UInt64(bytesPerToken) / 1024 / 1024
+            let availableMB = await budgetTracker.availableKVBudget / 1024 / 1024
+            NovaMLXLog.info("Scheduler: queuing \(request.id.uuidString.prefix(8)) — insufficient memory (need \(neededMB)MB, available \(availableMB)MB)")
+        }
+
+        return canAdmit
+    }
+
+    // MARK: - Submit
+
     public func submit(_ request: InferenceRequest) async throws -> InferenceResult {
         let priority: RequestPriority = .normal
+        let modelId = request.model
 
-        guard activeRequests < maxBatchSize else {
+        // Memory-aware admission check
+        let canStart = await canAdmitRequest(request)
+
+        guard canStart else {
             return try await enqueueAndWait(request: request, priority: priority)
         }
+
+        // Admit: increment counts and reserve memory
+        let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
+        let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
 
         lock.withLock {
             _activeCount += 1
             _totalQueued += 1
             if _activeCount > _peakActiveCount { _peakActiveCount = _activeCount }
+            _activeModelCounts[modelId] = (_activeModelCounts[modelId] ?? 0) + 1
         }
-        defer { lock.withLock { _activeCount -= 1; _totalCompleted += 1 } }
 
-        NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Processing generate (active: \(activeRequests))")
+        await budgetTracker.reserve(
+            modelId: modelId,
+            sequenceId: request.id,
+            weightsBytes: 0,
+            estimatedTokens: estimatedTokens,
+            bytesPerToken: bytesPerToken
+        )
+
+        defer {
+            lock.withLock {
+                _activeCount -= 1
+                _totalCompleted += 1
+                _activeModelCounts[modelId] = max(0, (_activeModelCounts[modelId] ?? 1) - 1)
+            }
+            Task { await budgetTracker.release(sequenceId: request.id) }
+        }
+
+        NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Processing generate (active: \(activeRequests), model=\(modelId))")
         return try await engine.generate(request)
     }
 
     public func submitStream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
         return AsyncThrowingStream { continuation in
             let priority: RequestPriority = .normal
+            let modelId = request.model
 
-            let canStart = lock.withLock {
-                if _activeCount < maxBatchSize {
-                    _activeCount += 1
-                    _totalQueued += 1
-                    if _activeCount > _peakActiveCount { _peakActiveCount = _activeCount }
-                    return true
-                }
-                return false
+            let admissionTask = Task {
+                await self.canAdmitRequest(request)
             }
 
-            if canStart {
-                let task = Task {
-                    NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Processing stream (active: \(self.activeRequests))")
-                    do {
-                        let stream = self.engine.stream(request)
-                        for try await token in stream {
-                            if Task.isCancelled { break }
-                            continuation.yield(token)
-                        }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                    self.lock.withLock {
-                        self._activeCount -= 1
-                        self._totalCompleted += 1
-                    }
-                    self.processQueuedStream()
-                }
-                self.lock.withLock { self.activeTasks[request.id] = task }
+            Task {
+                let canStart = await admissionTask.value
 
-                continuation.onTermination = { _ in
-                    task.cancel()
-                    _ = self.lock.withLock { self.activeTasks.removeValue(forKey: request.id) }
+                if canStart {
+                    let bytesPerToken = self.engine.effectiveBytesPerToken(modelId: modelId)
+                    let estimatedTokens = self.engine.estimateRequestTokens(modelId: modelId, request: request)
+
+                    self.lock.withLock {
+                        self._activeCount += 1
+                        self._totalQueued += 1
+                        if self._activeCount > self._peakActiveCount { self._peakActiveCount = self._activeCount }
+                        self._activeModelCounts[modelId] = (self._activeModelCounts[modelId] ?? 0) + 1
+                    }
+
+                    await self.budgetTracker.reserve(
+                        modelId: modelId,
+                        sequenceId: request.id,
+                        weightsBytes: 0,
+                        estimatedTokens: estimatedTokens,
+                        bytesPerToken: bytesPerToken
+                    )
+
+                    NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Processing stream (active: \(self.activeRequests), model=\(modelId))")
+
+                    let task = Task {
+                        do {
+                            let stream = self.engine.stream(request)
+                            for try await token in stream {
+                                if Task.isCancelled { break }
+                                continuation.yield(token)
+                            }
+                            continuation.finish()
+                        } catch {
+                            continuation.finish(throwing: error)
+                        }
+
+                        self.lock.withLock {
+                            self._activeCount -= 1
+                            self._totalCompleted += 1
+                            self._activeModelCounts[modelId] = max(0, (self._activeModelCounts[modelId] ?? 1) - 1)
+                        }
+                        await self.budgetTracker.release(sequenceId: request.id)
+
+                        self.processQueuedStream()
+                        self.processQueuedGenerate()
+                    }
+                    self.lock.withLock { self.activeTasks[request.id] = task }
+
+                    continuation.onTermination = { _ in
+                        task.cancel()
+                        _ = self.lock.withLock { self.activeTasks.removeValue(forKey: request.id) }
+                    }
+                } else {
+                    // Queue the request
+                    self.lock.withLock {
+                        self.streamQueue.append(QueuedStreamRequest(
+                            request: request, priority: priority, enqueuedAt: Date(), continuation: continuation
+                        ))
+                        self.streamQueue.sort { $0.priority > $1.priority }
+                        self._totalQueued += 1
+                    }
+                    NovaMLXLog.info("Stream request queued: \(request.id.uuidString.prefix(8)), queue depth: \(self.queueDepth)")
                 }
-            } else {
-                lock.withLock {
-                    streamQueue.append(QueuedStreamRequest(
-                        request: request, priority: priority, enqueuedAt: Date(), continuation: continuation
-                    ))
-                    streamQueue.sort { $0.priority > $1.priority }
-                    _totalQueued += 1
-                }
-                NovaMLXLog.info("Stream request queued: \(request.id), queue depth: \(queueDepth)")
             }
         }
     }
@@ -215,7 +321,7 @@ public final class ContinuousBatcher: @unchecked Sendable {
                 generateQueue.sort { $0.priority > $1.priority }
                 _totalQueued += 1
             }
-            NovaMLXLog.info("Generate request queued: \(request.id), queue depth: \(queueDepth)")
+            NovaMLXLog.info("Generate request queued: \(request.id.uuidString.prefix(8)), queue depth: \(queueDepth)")
             processQueuedGenerate()
         }
     }
@@ -224,7 +330,12 @@ public final class ContinuousBatcher: @unchecked Sendable {
         let item = lock.withLock { () -> QueuedRequest? in
             guard _activeCount < maxBatchSize, !generateQueue.isEmpty else { return nil }
             let item = generateQueue.removeFirst()
+
+            let currentForModel = _activeModelCounts[item.request.model] ?? 0
+            guard currentForModel < maxConcurrentPerModel else { return nil }
+
             _activeCount += 1
+            _activeModelCounts[item.request.model] = currentForModel + 1
             return item
         }
 
@@ -235,18 +346,46 @@ public final class ContinuousBatcher: @unchecked Sendable {
 
         let request = item.request
         let continuation = item.continuation
+        let modelId = request.model
 
         Task {
+            let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
+            let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
+
+            let canAdmit = await budgetTracker.canAdmit(
+                modelId: modelId, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
+            )
+
+            if !canAdmit {
+                lock.withLock {
+                    _activeCount -= 1
+                    _activeModelCounts[modelId] = max(0, (_activeModelCounts[modelId] ?? 1) - 1)
+                    generateQueue.insert(item, at: 0)
+                    _totalQueued -= 1
+                }
+                NovaMLXLog.info("Scheduler: generate dequeue rejected — insufficient memory, re-queuing")
+                return
+            }
+
+            await budgetTracker.reserve(
+                modelId: modelId, sequenceId: request.id,
+                weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
+            )
+
             do {
                 let result = try await engine.generate(request)
                 continuation.resume(returning: result)
             } catch {
                 continuation.resume(throwing: error)
             }
+
             lock.withLock {
                 _activeCount -= 1
                 _totalCompleted += 1
+                _activeModelCounts[modelId] = max(0, (_activeModelCounts[modelId] ?? 1) - 1)
             }
+            await budgetTracker.release(sequenceId: request.id)
+
             processQueuedGenerate()
             processQueuedStream()
         }
@@ -256,7 +395,12 @@ public final class ContinuousBatcher: @unchecked Sendable {
         let item = lock.withLock { () -> QueuedStreamRequest? in
             guard _activeCount < maxBatchSize, !streamQueue.isEmpty else { return nil }
             let item = streamQueue.removeFirst()
+
+            let currentForModel = _activeModelCounts[item.request.model] ?? 0
+            guard currentForModel < maxConcurrentPerModel else { return nil }
+
             _activeCount += 1
+            _activeModelCounts[item.request.model] = currentForModel + 1
             return item
         }
 
@@ -267,8 +411,32 @@ public final class ContinuousBatcher: @unchecked Sendable {
 
         let request = item.request
         let continuation = item.continuation
+        let modelId = request.model
 
         let task = Task {
+            let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
+            let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
+
+            let canAdmit = await budgetTracker.canAdmit(
+                modelId: modelId, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
+            )
+
+            if !canAdmit {
+                lock.withLock {
+                    _activeCount -= 1
+                    _activeModelCounts[modelId] = max(0, (_activeModelCounts[modelId] ?? 1) - 1)
+                    streamQueue.insert(item, at: 0)
+                    _totalQueued -= 1
+                }
+                NovaMLXLog.info("Scheduler: stream dequeue rejected — insufficient memory, re-queuing")
+                return
+            }
+
+            await budgetTracker.reserve(
+                modelId: modelId, sequenceId: request.id,
+                weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
+            )
+
             NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Processing dequeued stream")
             do {
                 let stream = engine.stream(request)
@@ -280,10 +448,14 @@ public final class ContinuousBatcher: @unchecked Sendable {
             } catch {
                 continuation.finish(throwing: error)
             }
+
             lock.withLock {
                 _activeCount -= 1
                 _totalCompleted += 1
+                _activeModelCounts[modelId] = max(0, (_activeModelCounts[modelId] ?? 1) - 1)
             }
+            await budgetTracker.release(sequenceId: request.id)
+
             processQueuedStream()
             processQueuedGenerate()
         }

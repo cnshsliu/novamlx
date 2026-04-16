@@ -10,107 +10,64 @@ public final class InferenceService: @unchecked Sendable {
     public let engine: MLXEngine
     private let batcher: ContinuousBatcher
     public let settingsManager: ModelSettingsManager
+    private let loadedModelsFile: URL
 
     public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8) {
         self.engine = engine
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
         self.settingsManager = settingsManager
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        self.loadedModelsFile = appSupport.appendingPathComponent("NovaMLX/loaded_models.json")
+        engine.settingsProvider = { [settingsManager] modelId in
+            settingsManager.getSettings(modelId)
+        }
     }
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
         let resolvedId = settingsManager.resolveModelId(request.model)
-
-        if let sessionId = request.sessionId {
-            return try await generateWithSession(request, sessionId: sessionId)
-        }
-
-        if request.responseFormat == .jsonObject {
-            let resolvedRequest = InferenceRequest(
-                id: request.id, model: resolvedId, messages: request.messages,
-                temperature: request.temperature, maxTokens: request.maxTokens,
-                topP: request.topP, topK: request.topK, minP: request.minP,
-                frequencyPenalty: request.frequencyPenalty, presencePenalty: request.presencePenalty,
-                repetitionPenalty: request.repetitionPenalty, seed: request.seed,
-                stream: false, stop: request.stop, responseFormat: .jsonObject,
-                thinkingBudget: request.thinkingBudget
-            )
-            return try await engine.generateWithProcessor(resolvedRequest)
-        }
-
         let settings = settingsManager.getSettings(resolvedId)
-        let adjusted = settings.applySamplingOverrides(to: request)
-        let finalRequest = InferenceRequest(
-            id: adjusted.id, model: resolvedId, messages: adjusted.messages,
-            temperature: adjusted.temperature, maxTokens: adjusted.maxTokens,
-            topP: adjusted.topP, topK: adjusted.topK, minP: adjusted.minP,
-            frequencyPenalty: adjusted.frequencyPenalty, presencePenalty: adjusted.presencePenalty,
-            repetitionPenalty: adjusted.repetitionPenalty, seed: adjusted.seed,
-            stream: adjusted.stream, stop: adjusted.stop,
-            thinkingBudget: adjusted.thinkingBudget
+        var finalRequest = settings.applySamplingOverrides(to: request)
+        finalRequest = InferenceRequest(
+            id: finalRequest.id, model: resolvedId, messages: finalRequest.messages,
+            temperature: finalRequest.temperature, maxTokens: finalRequest.maxTokens,
+            topP: finalRequest.topP, topK: finalRequest.topK, minP: finalRequest.minP,
+            frequencyPenalty: finalRequest.frequencyPenalty, presencePenalty: finalRequest.presencePenalty,
+            repetitionPenalty: finalRequest.repetitionPenalty, seed: finalRequest.seed,
+            stream: finalRequest.stream, stop: finalRequest.stop,
+            sessionId: finalRequest.sessionId,
+            responseFormat: finalRequest.responseFormat,
+            jsonSchemaDef: finalRequest.jsonSchemaDef,
+            regexPattern: finalRequest.regexPattern,
+            gbnfGrammar: finalRequest.gbnfGrammar,
+            thinkingBudget: finalRequest.thinkingBudget
         )
+
+        // ALL requests go through the batcher for unified memory-aware admission.
+        // Session, grammar, and JSON schema paths are handled inside engine.generate()
+        // which dispatches to the appropriate method based on request fields.
         return try await batcher.submit(finalRequest)
     }
 
     public func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
         let resolvedId = settingsManager.resolveModelId(request.model)
-
-        if let sessionId = request.sessionId {
-            return streamWithSession(request, sessionId: sessionId)
-        }
-
-        if request.responseFormat == .jsonObject {
-            let resolvedRequest = InferenceRequest(
-                id: request.id, model: resolvedId, messages: request.messages,
-                temperature: request.temperature, maxTokens: request.maxTokens,
-                topP: request.topP, topK: request.topK, minP: request.minP,
-                frequencyPenalty: request.frequencyPenalty, presencePenalty: request.presencePenalty,
-                repetitionPenalty: request.repetitionPenalty, seed: request.seed,
-                stream: true, stop: request.stop, responseFormat: .jsonObject,
-                thinkingBudget: request.thinkingBudget
-            )
-            return engine.streamWithProcessor(resolvedRequest)
-        }
-
         let settings = settingsManager.getSettings(resolvedId)
-        let adjusted = settings.applySamplingOverrides(to: request)
-        let finalRequest = InferenceRequest(
-            id: adjusted.id, model: resolvedId, messages: adjusted.messages,
-            temperature: adjusted.temperature, maxTokens: adjusted.maxTokens,
-            topP: adjusted.topP, topK: adjusted.topK, minP: adjusted.minP,
-            frequencyPenalty: adjusted.frequencyPenalty, presencePenalty: adjusted.presencePenalty,
-            repetitionPenalty: adjusted.repetitionPenalty, seed: adjusted.seed,
-            stream: adjusted.stream, stop: adjusted.stop,
-            thinkingBudget: adjusted.thinkingBudget
+        var finalRequest = settings.applySamplingOverrides(to: request)
+        finalRequest = InferenceRequest(
+            id: finalRequest.id, model: resolvedId, messages: finalRequest.messages,
+            temperature: finalRequest.temperature, maxTokens: finalRequest.maxTokens,
+            topP: finalRequest.topP, topK: finalRequest.topK, minP: finalRequest.minP,
+            frequencyPenalty: finalRequest.frequencyPenalty, presencePenalty: finalRequest.presencePenalty,
+            repetitionPenalty: finalRequest.repetitionPenalty, seed: finalRequest.seed,
+            stream: true, stop: finalRequest.stop,
+            sessionId: finalRequest.sessionId,
+            responseFormat: finalRequest.responseFormat,
+            jsonSchemaDef: finalRequest.jsonSchemaDef,
+            regexPattern: finalRequest.regexPattern,
+            gbnfGrammar: finalRequest.gbnfGrammar,
+            thinkingBudget: finalRequest.thinkingBudget
         )
+
         return batcher.submitStream(finalRequest)
-    }
-
-    private func generateWithSession(_ request: InferenceRequest, sessionId: String) async throws -> InferenceResult {
-        let resolvedId = settingsManager.resolveModelId(request.model)
-        let resolvedRequest = InferenceRequest(
-            id: request.id, model: resolvedId, messages: request.messages,
-            temperature: request.temperature, maxTokens: request.maxTokens,
-            topP: request.topP, topK: request.topK, minP: request.minP,
-            frequencyPenalty: request.frequencyPenalty, presencePenalty: request.presencePenalty,
-            repetitionPenalty: request.repetitionPenalty, seed: request.seed,
-            stream: request.stream, stop: request.stop, sessionId: sessionId,
-            thinkingBudget: request.thinkingBudget
-        )
-        return try await engine.generateWithSession(resolvedRequest, sessionId: sessionId)
-    }
-
-    private func streamWithSession(_ request: InferenceRequest, sessionId: String) -> AsyncThrowingStream<Token, Error> {
-        let resolvedId = settingsManager.resolveModelId(request.model)
-        let resolvedRequest = InferenceRequest(
-            id: request.id, model: resolvedId, messages: request.messages,
-            temperature: request.temperature, maxTokens: request.maxTokens,
-            topP: request.topP, topK: request.topK, minP: request.minP,
-            frequencyPenalty: request.frequencyPenalty, presencePenalty: request.presencePenalty,
-            repetitionPenalty: request.repetitionPenalty, seed: request.seed,
-            stream: request.stream, stop: request.stop, sessionId: sessionId,
-            thinkingBudget: request.thinkingBudget
-        )
-        return engine.streamWithSession(resolvedRequest, sessionId: sessionId)
     }
 
     public func abort(requestId: UUID) async {
@@ -124,10 +81,12 @@ public final class InferenceService: @unchecked Sendable {
         if settings.isPinned {
             engine.pool.pin(modelId)
         }
+        saveLoadedModelsList()
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) async {
         engine.unloadModel(identifier)
+        saveLoadedModelsList()
     }
 
     public func isModelLoaded(_ modelId: String) -> Bool {
@@ -154,6 +113,44 @@ public final class InferenceService: @unchecked Sendable {
                 NovaMLXLog.info("TTL expired for \(info.id), unloaded after \(ttl)s idle")
             }
         }
+        saveLoadedModelsList()
+    }
+
+    // MARK: - Loaded Models Persistence
+
+    private func saveLoadedModelsList() {
+        let ids = engine.pool.loadedModelIds
+        guard let data = try? JSONEncoder().encode(ids) else { return }
+        try? data.write(to: loadedModelsFile, options: .atomic)
+    }
+
+    private func loadLoadedModelsList() -> [String] {
+        guard let data = try? Data(contentsOf: loadedModelsFile),
+              let ids = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return ids
+    }
+
+    public func restoreModels(modelManager: ModelManager) async {
+        let ids = loadLoadedModelsList()
+        guard !ids.isEmpty else { return }
+        NovaMLXLog.info("Restoring \(ids.count) previously loaded model(s)...")
+        for modelId in ids {
+            guard let record = modelManager.getRecord(modelId) else {
+                NovaMLXLog.warning("Skipping restore of '\(modelId)' — not found in registry")
+                continue
+            }
+            let config = ModelConfig(
+                identifier: ModelIdentifier(id: modelId, family: record.family),
+                modelType: record.modelType
+            )
+            do {
+                try await loadModel(at: record.localURL, config: config)
+                NovaMLXLog.info("Restored model: \(modelId)")
+            } catch {
+                NovaMLXLog.warning("Failed to restore model \(modelId): \(error)")
+            }
+        }
+        saveLoadedModelsList()
     }
 
     public var stats: InferenceStats {

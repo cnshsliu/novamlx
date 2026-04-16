@@ -13,10 +13,12 @@ import NovaMLXPrefixCache
 
 public final class ModelContainer: @unchecked Sendable {
     public let identifier: ModelIdentifier
-    public let config: ModelConfig
+    public var config: ModelConfig
     public private(set) var mlxContainer: MLXLMCommon.ModelContainer?
     public private(set) var tokenizer: Tokenizer?
     public private(set) var isLoaded: Bool
+    public private(set) var wiredReservationTicket: WiredMemoryTicket?
+    public var kvMemoryOverride: Int?
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -31,10 +33,15 @@ public final class ModelContainer: @unchecked Sendable {
         NovaMLXLog.info("Model loaded: \(identifier.displayName)")
     }
 
+    public func setWiredReservation(_ ticket: WiredMemoryTicket) {
+        self.wiredReservationTicket = ticket
+    }
+
     public func unload() {
         mlxContainer = nil
         tokenizer = nil
         isLoaded = false
+        wiredReservationTicket = nil
         NovaMLXLog.info("Model unloaded: \(identifier.displayName)")
     }
 }
@@ -64,6 +71,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public let pool: EnginePool
     public let metricsStore: MetricsStore
     public let sessionManager: ChatSessionManager
+    public let turboQuantService: TurboQuantService
+    public let adapterService: AdapterService
+    public let specDecoder: SpeculativeDecoder
+    public let fusedBatchDecoder: FusedBatchDecoder
+    public let budgetTracker: MemoryBudgetTracker
+    public lazy var batchScheduler = BatchScheduler(engine: self)
+    public var settingsProvider: (@Sendable (String) -> ModelSettings?)?
     private var prefixCacheManagers: [String: PrefixCacheManager]
     private var activeCount: Int
     private var activeTasks: [UUID: Task<Void, Never>]
@@ -73,17 +87,27 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     private var totalTokensGenerated: UInt64
     private var totalInferenceTime: TimeInterval
 
+    private var deferredClearCounter: Int = 0
+    private let deferredClearThreshold: Int = 8
+    private let wiredPolicy = MLXLMCommon.WiredSumPolicy()
+
     public init(kvCacheCapacity: Int = 1024, maxMemoryMB: UInt64 = 2048, maxConcurrent: Int = 8, metricsStore: MetricsStore? = nil) {
         self.isReady = false
         self.pool = EnginePool(maxMemoryMB: maxMemoryMB)
         self.metricsStore = metricsStore ?? MetricsStore(baseDirectory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("NovaMLX"))
         self.sessionManager = ChatSessionManager()
+        self.turboQuantService = TurboQuantService()
+        self.adapterService = AdapterService()
+        self.specDecoder = SpeculativeDecoder()
+        self.fusedBatchDecoder = FusedBatchDecoder()
+        self.budgetTracker = MemoryBudgetTracker(gpuLimitBytes: UInt64(GPU.maxRecommendedWorkingSetBytes() ?? 0))
         self.prefixCacheManagers = [:]
         self.activeCount = 0
         self.activeTasks = [:]
         self.totalRequests = 0
         self.totalTokensGenerated = 0
         self.totalInferenceTime = 0
+        FusedSDPARegistration.register()
         NovaMLXLog.info("MLX Engine initialized (maxMemory: \(maxMemoryMB)MB)")
     }
 
@@ -104,12 +128,53 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         )
 
         container.setLoaded(mlxContainer: mlxContainer, tokenizer: tokenizer)
+
+        let model = await mlxContainer.perform { context in SendableBox(context.model) }
+
+        // Read actual head_dim from config.json — don't guess
+        // Qwen3.5 uses head_dim=256, Phi uses 96, most others use 128
+        var headDim = 128
+        let configFile = url.appendingPathComponent("config.json")
+        if let data = try? Data(contentsOf: configFile),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // Multimodal models (Qwen3.5) store attention params in text_config
+            let tc = (json["text_config"] as? [String: Any]) ?? json
+            if let hd = tc["head_dim"] as? Int {
+                headDim = hd
+            } else if let hs = tc["hidden_size"] as? Int,
+                      let nah = tc["num_attention_heads"] as? Int, nah > 0 {
+                headDim = hs / nah
+            }
+        }
+
+        if let kvProvider = model.value as? KVCacheDimensionProvider, container.config.kvMemoryBytesPerToken == nil {
+            let numLayers = kvProvider.kvHeads.count
+            let kvHeadsSum = kvProvider.kvHeads.reduce(0, +)
+            // KV cache per token = 2 (K+V) × sum(kvHeads per layer) × headDim × sizeof(Float16)
+            let bytesPerToken = 2 * kvHeadsSum * headDim * MemoryLayout<Float16>.size
+            container.config.kvMemoryBytesPerToken = bytesPerToken
+            NovaMLXLog.info("Auto-calculated KV memory: \(bytesPerToken / 1024)KB/token (\(numLayers) layers, \(kvHeadsSum) total kvHeads, headDim=\(headDim))")
+        }
+
+        let weightsBytes = MLX.Memory.activeMemory
+        if weightsBytes > 0 {
+            let reservationTicket = wiredPolicy.ticket(size: Int(weightsBytes), kind: MLX.WiredMemoryTicketKind.reservation)
+            _ = await reservationTicket.start()
+            container.setWiredReservation(reservationTicket)
+            NovaMLXLog.info("Wired memory reservation: \(weightsBytes / 1024 / 1024)MB for \(config.identifier.displayName)")
+        }
+
         pool.add(container)
         metricsStore.recordModelLoad()
         return container
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) {
+        if let container = pool.get(identifier.id),
+           let ticket = container.wiredReservationTicket {
+            Task { await ticket.end() }
+            NovaMLXLog.info("Wired memory reservation released for \(identifier.displayName)")
+        }
         _ = pool.remove(identifier.id)
         metricsStore.recordModelUnload()
         MLX.Memory.clearCache()
@@ -158,8 +223,108 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return allTokens
     }
 
-    private func buildGenerateParameters(
-        request: InferenceRequest, config: ModelConfig
+    func buildUserInput(request: InferenceRequest, hasImages: Bool) async throws -> UserInput {
+        if hasImages {
+            let chatMessages = request.messages.compactMap { msg -> Chat.Message? in
+                let images: [UserInput.Image] = (msg.images ?? []).compactMap { urlString -> UserInput.Image? in
+                    if urlString.hasPrefix("data:") {
+                        let parts = urlString.split(separator: ",", maxSplits: 1)
+                        guard parts.count == 2 else { return nil }
+                        let base64Str = String(parts[1])
+                        guard let data = Data(base64Encoded: base64Str) else { return nil }
+                        guard let ciImage = CIImage(data: data) else { return nil }
+                        return .ciImage(ciImage)
+                    } else if urlString.hasPrefix("http") {
+                        guard let url = URL(string: urlString) else { return nil }
+                        return .url(url)
+                    } else {
+                        return .url(URL(fileURLWithPath: urlString))
+    }
+}
+                return .user(msg.content ?? "", images: images)
+            }
+            return UserInput(prompt: .chat(chatMessages))
+        } else {
+            let messages: [Message] = request.messages.map { msg in
+                ["role": msg.role.rawValue, "content": msg.content ?? ""]
+            }
+            return UserInput(prompt: .messages(messages))
+        }
+    }
+
+    private func deferredClearCache() {
+        lock.withLock {
+            deferredClearCounter += 1
+            if deferredClearCounter >= deferredClearThreshold {
+                deferredClearCounter = 0
+                MLX.Memory.clearCache()
+            }
+        }
+    }
+
+    private func createGenerationTicket(promptTokens: Int, maxTokens: Int, bytesPerToken: Int = 262_144) -> WiredMemoryTicket {
+        let totalTokens = promptTokens + maxTokens
+        let estimatedBytes = totalTokens * bytesPerToken
+        return wiredPolicy.ticket(size: estimatedBytes, kind: MLX.WiredMemoryTicketKind.active)
+    }
+
+    public func preflightCheck(modelId: String, promptTokens: Int, maxTokens: Int) throws {
+        guard let maxGPU = GPU.maxRecommendedWorkingSetBytes(), maxGPU > 0 else { return }
+
+        guard let container = getContainer(for: modelId) else { return }
+
+        let adminOverride = container.kvMemoryOverride
+        let autoCalculated = container.config.kvMemoryBytesPerToken
+        let bytesPerToken = adminOverride ?? autoCalculated ?? 262144
+
+        let currentActive = UInt64(MLX.Memory.activeMemory)
+        let estimatedKVBytes = UInt64(promptTokens + maxTokens) * UInt64(bytesPerToken)
+        let projectedTotal = currentActive + estimatedKVBytes
+
+        guard projectedTotal <= UInt64(maxGPU) else {
+            let neededMB = projectedTotal / 1024 / 1024
+            let availableMB = UInt64(maxGPU) / 1024 / 1024
+            NovaMLXLog.warning("Preflight REJECTED: model=\(modelId), estimated=\(neededMB)MB, available=\(availableMB)MB, active=\(currentActive / 1024 / 1024)MB, kvEstimate=\(estimatedKVBytes / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
+            throw NovaMLXError.inferenceFailed(
+                "Insufficient GPU memory: estimated \(neededMB)MB needed, \(availableMB)MB available. Active: \(currentActive / 1024 / 1024)MB, KV estimate: \(estimatedKVBytes / 1024 / 1024)MB"
+            )
+        }
+
+        NovaMLXLog.info("Preflight OK: model=\(modelId), projected=\(projectedTotal / 1024 / 1024)MB, limit=\(UInt64(maxGPU) / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
+    }
+
+    /// Compute effective bytesPerToken for a model, factoring in TurboQuant compression.
+    /// Returns raw FP16 bytesPerToken when TurboQuant is not configured.
+    public func effectiveBytesPerToken(modelId: String) -> Int {
+        guard let container = getContainer(for: modelId) else { return 262_144 }
+        let raw = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
+
+        // Factor in TurboQuant compression
+        if let turboConfig = turboQuantService.getConfig(forModel: modelId) {
+            let compressionRatio = Double(16) / Double(turboConfig.bits)
+            return max(1, Int(Double(raw) / compressionRatio))
+        }
+
+        // Also check per-model config kvBits
+        if let kvBits = container.config.kvBits, kvBits < 16 {
+            let compressionRatio = Double(16) / Double(kvBits)
+            return max(1, Int(Double(raw) / compressionRatio))
+        }
+
+        return raw
+    }
+
+    /// Estimate total tokens for a request (prompt + max output).
+    /// Uses conservative defaults when maxTokens is not specified.
+    public func estimateRequestTokens(modelId: String, request: InferenceRequest) -> Int {
+        let maxTokens = request.maxTokens ?? getContainer(for: modelId)?.config.maxTokens ?? 4096
+        // Conservative prompt estimate before tokenization
+        let estimatedPromptTokens = 500
+        return estimatedPromptTokens + maxTokens
+    }
+
+    func buildGenerateParameters(
+        request: InferenceRequest, config: ModelConfig, settings: ModelSettings? = nil
     ) -> GenerateParameters {
         let temperature = Float(request.temperature ?? config.temperature)
         let maxTokens = request.maxTokens ?? config.maxTokens
@@ -189,10 +354,26 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             params.presencePenalty = pres
         }
 
-        if let kvBits = config.kvBits {
-            params.kvBits = kvBits
-            params.kvGroupSize = config.kvGroupSize
+        if let settings {
+            turboQuantService.applyToGenerateParameters(&params, modelId: config.identifier.id, settings: settings)
+        } else if let fetchedSettings = settingsProvider?(config.identifier.id) {
+            turboQuantService.applyToGenerateParameters(&params, modelId: config.identifier.id, settings: fetchedSettings)
+        } else {
+            let familyOpt = ModelFamilyRegistry.shared.optimization(
+                for: config.identifier.id, family: config.identifier.family)
+            if params.kvBits == nil, let defaultBits = familyOpt.defaultKVBits {
+                params.kvBits = defaultBits
+                params.kvGroupSize = familyOpt.safeGroupSize()
+            }
+            if params.kvBits == nil, let kvBits = config.kvBits {
+                params.kvBits = kvBits
+                params.kvGroupSize = config.kvGroupSize
+            }
         }
+
+        let familyOpt = ModelFamilyRegistry.shared.optimization(
+            for: config.identifier.id, family: config.identifier.family)
+        params.prefillStepSize = familyOpt.prefillStepSize
 
         if let seed = request.seed ?? config.seed {
             MLXRandom.seed(seed)
@@ -202,6 +383,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
+        // Dispatch to specialized paths based on request fields
+        if let sessionId = request.sessionId {
+            return try await generateWithSession(request, sessionId: sessionId)
+        }
+        if request.jsonSchemaDef != nil || request.responseFormat == .jsonObject ||
+            request.regexPattern != nil || request.gbnfGrammar != nil {
+            return try await generateWithProcessor(request)
+        }
+
         guard let container = getContainer(for: request.model) else {
             throw NovaMLXError.modelNotFound(request.model)
         }
@@ -219,39 +409,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             return true
         }
 
-        let userInput: UserInput
-        if hasImages {
-            let chatMessages = request.messages.compactMap { msg -> Chat.Message? in
-                let images: [UserInput.Image] = (msg.images ?? []).compactMap { urlString -> UserInput.Image? in
-                    if urlString.hasPrefix("data:") {
-                        let parts = urlString.split(separator: ",", maxSplits: 1)
-                        guard parts.count == 2 else { return nil }
-                        let base64Str = String(parts[1])
-                        guard let data = Data(base64Encoded: base64Str) else { return nil }
-                        guard let ciImage = CIImage(data: data) else { return nil }
-                        return .ciImage(ciImage)
-                    } else if urlString.hasPrefix("http") {
-                        guard let url = URL(string: urlString) else { return nil }
-                        return .url(url)
-                    } else {
-                        return .url(URL(fileURLWithPath: urlString))
-                    }
-                }
-                return .user(msg.content ?? "", images: images)
-            }
-            userInput = UserInput(prompt: .chat(chatMessages))
-        } else {
-            let messages: [Message] = request.messages.map { msg in
-                ["role": msg.role.rawValue, "content": msg.content ?? ""]
-            }
-            userInput = UserInput(prompt: .messages(messages))
-        }
-
+        let userInput = try await buildUserInput(request: request, hasImages: hasImages)
         let input = try await mlxContainer.prepare(input: userInput)
 
         let promptTokenCount = input.text.tokens.size
         NovaMLXLog.info("Encoded \(promptTokenCount) tokens via chat template")
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Starting generation for \(request.model)")
+
+        let maxTokens = request.maxTokens ?? container.config.maxTokens
+        try preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
         let prefixCacheTokens: [Int]? = if let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
             input.text.tokens.asArray(Int32.self).map { Int($0) }
@@ -259,8 +425,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             nil
         }
 
-        let parameters = buildGenerateParameters(request: request, config: container.config)
-        let stream = try await mlxContainer.generate(input: input, parameters: parameters)
+        let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
+
+        let kvCacheBox = MutableSendableBox<[KVCache]?>(nil)
+        let inputBox = SendableBox(input)
+
+        let bytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
+        let ticket = createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: bytesPerToken)
+
+        let stream = try await mlxContainer.perform { context in
+            let cache = context.model.newCache(parameters: parameters)
+            kvCacheBox.value = cache
+            return try MLXLMCommon.generate(
+                input: inputBox.value,
+                cache: cache,
+                parameters: parameters,
+                context: context,
+                wiredMemoryTicket: ticket
+            )
+        }
 
         var generatedText = ""
         var completionTokens = 0
@@ -279,11 +462,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         if let tokenArray = prefixCacheTokens,
-           let prefixCache = getOrCreatePrefixCacheManager(modelId: request.model) {
-            prefixCache.storeCache(tokenIds: tokenArray, cache: [])
+           let prefixCache = getOrCreatePrefixCacheManager(modelId: request.model),
+           let kvCache = kvCacheBox.value {
+            prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
         }
 
-        MLX.Memory.clearCache()
+        deferredClearCache()
 
         let elapsed = Date().timeIntervalSince(startTime)
         let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
@@ -307,6 +491,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     public func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
+        // Dispatch to specialized paths based on request fields
+        if let sessionId = request.sessionId {
+            return streamWithSession(request, sessionId: sessionId)
+        }
+        if request.jsonSchemaDef != nil || request.responseFormat == .jsonObject ||
+            request.regexPattern != nil || request.gbnfGrammar != nil {
+            return streamWithProcessor(request)
+        }
+
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -324,38 +517,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         return true
                     }
 
-                    let userInput: UserInput
-                    if hasImages {
-                        let chatMessages = request.messages.compactMap { msg -> Chat.Message? in
-                            let images: [UserInput.Image] = (msg.images ?? []).compactMap { urlString -> UserInput.Image? in
-                                if urlString.hasPrefix("data:") {
-                                    let parts = urlString.split(separator: ",", maxSplits: 1)
-                                    guard parts.count == 2 else { return nil }
-                                    let base64Str = String(parts[1])
-                                    guard let data = Data(base64Encoded: base64Str) else { return nil }
-                                    guard let ciImage = CIImage(data: data) else { return nil }
-                                    return .ciImage(ciImage)
-                                } else if urlString.hasPrefix("http") {
-                                    guard let url = URL(string: urlString) else { return nil }
-                                    return .url(url)
-                                } else {
-                                    return .url(URL(fileURLWithPath: urlString))
-                                }
-                            }
-                            return .user(msg.content ?? "", images: images)
-                        }
-                        userInput = UserInput(prompt: .chat(chatMessages))
-                    } else {
-                        let messages: [Message] = request.messages.map { msg in
-                            ["role": msg.role.rawValue, "content": msg.content ?? ""]
-                        }
-                        userInput = UserInput(prompt: .messages(messages))
-                    }
+                    let userInput = try await self.buildUserInput(request: request, hasImages: hasImages)
 
                     let input = try await mlxContainer.prepare(input: userInput)
 
-                    let parameters = self.buildGenerateParameters(request: request, config: container.config)
-                    let stream = try await mlxContainer.generate(input: input, parameters: parameters)
+                    let parameters = self.buildGenerateParameters(request: request, config: container.config, settings: self.settingsProvider?(request.model))
+                    let promptTokenCount = input.text.tokens.size
+                    let maxTokens = request.maxTokens ?? container.config.maxTokens
+                    try self.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+                    let ticket = self.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+                    let stream = try await mlxContainer.generate(input: input, parameters: parameters, wiredMemoryTicket: ticket)
 
                     var finishReason: FinishReason = .stop
                     var completionTokens = 0
@@ -390,7 +561,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
 
                 self.lock.withLock { self.activeCount -= 1 }
-                MLX.Memory.clearCache()
+                self.deferredClearCache()
             }
 
             self.lock.withLock { self.activeTasks[request.id] = task }
@@ -448,6 +619,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let lastUserMessage = request.messages.last(where: { $0.role == .user })?.content ?? ""
         let systemPrompt = request.messages.first(where: { $0.role == .system })?.content
+
+        let estimatedPromptTokens = tokenizeMessages(request.messages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
+        let maxTokens = request.maxTokens ?? container.config.maxTokens
+        try preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
         let sessionBox = sessionManager.getOrCreate(
             sessionId: sessionId,
@@ -511,6 +686,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let lastUserMessage = request.messages.last(where: { $0.role == .user })?.content ?? ""
                     let systemPrompt = request.messages.first(where: { $0.role == .system })?.content
+
+                    let estimatedPromptTokens = engine.tokenizeMessages(request.messages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
+                    let maxTokens = request.maxTokens ?? container.config.maxTokens
+                    try engine.preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
                     let sessionBox = engine.sessionManager.getOrCreate(
                         sessionId: sessionId,
@@ -591,7 +770,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             throw NovaMLXError.inferenceFailed("Model not loaded")
         }
 
-        let processor = JSONLogitProcessor(tokenizer: container.tokenizer!)
+        let grammarProcessor: any LogitProcessor
+        if let schema = request.jsonSchemaDef {
+            grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: container.tokenizer!)
+        } else if let pattern = request.regexPattern {
+            grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: container.tokenizer!)
+        } else if let grammar = request.gbnfGrammar {
+            grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: container.tokenizer!)
+        } else {
+            grammarProcessor = JSONLogitProcessor(tokenizer: container.tokenizer!)
+        }
+
+        let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
+        let penaltyProcessor = parameters.processor()
+        let processor: any LogitProcessor
+        if let penalty = penaltyProcessor {
+            processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
+        } else {
+            processor = grammarProcessor
+        }
 
         var systemMessages = request.messages.filter { $0.role == .system }
         if request.responseFormat == .jsonObject {
@@ -606,6 +803,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let input = try await mlxContainer.prepare(input: userInput)
 
         let promptTokenCount = input.text.tokens.size
+        let maxTokens = request.maxTokens ?? container.config.maxTokens
+        try preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
         let sampler = TopPSampler(
             temperature: Float(request.temperature ?? container.config.temperature),
@@ -622,11 +821,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             maxTokens: request.maxTokens ?? container.config.maxTokens
         )
 
+        let ticketBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
         let (stream, task) = generateTask(
             promptTokenCount: promptTokenCount,
             modelConfiguration: config,
             tokenizer: tokenizer,
-            iterator: iterator
+            iterator: iterator,
+            wiredMemoryTicket: createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: ticketBytesPerToken)
         )
 
         let startTime = Date()
@@ -647,7 +848,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
         _ = task
 
-        MLX.Memory.clearCache()
+        deferredClearCache()
 
         let elapsed = Date().timeIntervalSince(startTime)
         let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
@@ -680,7 +881,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         throw NovaMLXError.modelNotFound(request.model)
                     }
 
-                    let processor = JSONLogitProcessor(tokenizer: container.tokenizer!)
+                    let grammarProcessor: any LogitProcessor
+                    if let schema = request.jsonSchemaDef {
+                        grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: container.tokenizer!)
+                    } else if let pattern = request.regexPattern {
+                        grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: container.tokenizer!)
+                    } else if let grammar = request.gbnfGrammar {
+                        grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: container.tokenizer!)
+                    } else {
+                        grammarProcessor = JSONLogitProcessor(tokenizer: container.tokenizer!)
+                    }
+
+                    let parameters = engine.buildGenerateParameters(request: request, config: container.config, settings: engine.settingsProvider?(request.model))
+                    let penaltyProc = parameters.processor()
+                    let processor: any LogitProcessor
+                    if let penalty = penaltyProc {
+                        processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
+                    } else {
+                        processor = grammarProcessor
+                    }
 
                     var systemMessages = request.messages.filter { $0.role == .system }
                     if request.responseFormat == .jsonObject {
@@ -694,6 +913,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let userInput = UserInput(prompt: .messages(mappedMessages))
                     let input = try await mlxContainer.prepare(input: userInput)
                     let promptTokenCount = input.text.tokens.size
+                    let maxTokens = request.maxTokens ?? container.config.maxTokens
+                    try engine.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
                     let sampler = TopPSampler(
                         temperature: Float(request.temperature ?? container.config.temperature),
@@ -710,11 +931,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         maxTokens: request.maxTokens ?? container.config.maxTokens
                     )
 
+                    let sessionBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
                     let (stream, genTask) = generateTask(
                         promptTokenCount: promptTokenCount,
                         modelConfiguration: config,
                         tokenizer: tokenizer,
-                        iterator: iterator
+                        iterator: iterator,
+                        wiredMemoryTicket: engine.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: sessionBytesPerToken)
                     )
 
                     let startTime = Date()
@@ -744,7 +967,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     engine.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
-                    MLX.Memory.clearCache()
+                    self.deferredClearCache()
 
                     continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
                     continuation.finish()
