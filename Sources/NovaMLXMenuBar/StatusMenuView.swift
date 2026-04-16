@@ -10,7 +10,7 @@ struct StatusMenuView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Circle()
-                    .fill(appState.isServerRunning ? Color.green : Color.red)
+                    .fill(appState.isServerRunning ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
                     .frame(width: 8, height: 8)
                 Text(appState.isServerRunning ? "Running" : "Stopped")
                     .font(.headline)
@@ -18,7 +18,7 @@ struct StatusMenuView: View {
 
             Divider()
 
-            LabeledContent("Server", value: "127.0.0.1:\(appState.serverPort)")
+            LabeledContent("Server", value: "127.0.0.1:\(String(appState.serverPort))")
             LabeledContent("Models", value: "\(appState.loadedModels.count) loaded")
             LabeledContent("Memory", value: appState.systemStats.memoryUsed.bytesFormatted)
             LabeledContent("Requests", value: "\(appState.inferenceStats.activeRequests) active")

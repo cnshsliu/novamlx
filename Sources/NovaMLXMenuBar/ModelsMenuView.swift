@@ -21,7 +21,7 @@ struct ModelsMenuView: View {
                 ForEach(appState.loadedModels, id: \.self) { model in
                     HStack {
                         Image(systemName: "cpu")
-                            .foregroundColor(.green)
+                            .foregroundColor(NovaTheme.Colors.statusOK)
                         Text(model)
                             .lineLimit(1)
                             .truncationMode(.middle)

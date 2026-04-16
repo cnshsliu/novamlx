@@ -36,15 +36,50 @@ public struct MenuBarContentView: View {
     }
 
     public var body: some View {
-        TabView(selection: $selectedTab) {
-            StatusMenuView(appState: appState)
-                .tabItem { Label("Status", systemImage: "circle.fill") }
-                .tag(0)
+        VStack(spacing: 0) {
+            TabView(selection: $selectedTab) {
+                StatusMenuView(appState: appState)
+                    .tabItem { Label("Status", systemImage: "circle.fill") }
+                    .tag(0)
 
-            ModelsMenuView(appState: appState, modelManager: modelManager)
-                .tabItem { Label("Models", systemImage: "cube.box") }
-                .tag(1)
+                ModelsMenuView(appState: appState, modelManager: modelManager)
+                    .tabItem { Label("Models", systemImage: "cube.box") }
+                    .tag(1)
+            }
+            .frame(width: 280, height: 200)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Button {
+                    NotificationCenter.default.post(name: .openNovaAppWindow, object: nil)
+                } label: {
+                    Image(systemName: "macwindow")
+                    Text("Open Window")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+
+                Button {
+                    NSApp.terminate(nil)
+                } label: {
+                    Image(systemName: "power")
+                    Text("Quit")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .foregroundColor(NovaTheme.Colors.statusError)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
-        .frame(width: 280, height: 200)
     }
+}
+
+extension Notification.Name {
+    public static let openNovaAppWindow = Notification.Name("openNovaAppWindow")
+    public static let restartNovaMLXServer = Notification.Name("restartNovaMLXServer")
+    public static let novaMLXModelsChanged = Notification.Name("novaMLXModelsChanged")
 }
