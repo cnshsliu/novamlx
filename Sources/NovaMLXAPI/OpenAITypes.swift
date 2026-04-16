@@ -5,10 +5,142 @@ import NovaMLXUtils
 
 public struct OpenAIResponseFormat: Codable, Sendable {
     public let type: String
+    public let jsonSchema: OpenAIJSONSchemaField?
+    public let regex: String?
+    public let gbnf: String?
 
-    public init(type: String = "text") {
-        self.type = type
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case jsonSchema = "json_schema"
+        case regex
+        case gbnf
     }
+
+    public init(type: String = "text", jsonSchema: OpenAIJSONSchemaField? = nil, regex: String? = nil, gbnf: String? = nil) {
+        self.type = type
+        self.jsonSchema = jsonSchema
+        self.regex = regex
+        self.gbnf = gbnf
+    }
+}
+
+public struct OpenAIJSONSchemaField: Codable, Sendable {
+    public let name: String?
+    public let strict: Bool?
+    public let schema: AnyCodableDict?
+
+    private enum CodingKeys: String, CodingKey {
+        case name, strict, schema
+    }
+
+    public init(name: String? = nil, strict: Bool? = nil, schema: AnyCodableDict? = nil) {
+        self.name = name
+        self.strict = strict
+        self.schema = schema
+    }
+}
+
+public struct AnyCodableDict: Codable, Sendable, Equatable {
+    public let value: [String: AnyCodableValue]
+
+    public init(_ dict: [String: Any]) {
+        var result: [String: AnyCodableValue] = [:]
+        for (k, v) in dict { result[k] = AnyCodableValue(v) }
+        self.value = result
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DynamicCodingKey.self)
+        var result: [String: AnyCodableValue] = [:]
+        for key in container.allKeys {
+            result[key.stringValue] = try container.decode(AnyCodableValue.self, forKey: key)
+        }
+        self.value = result
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: DynamicCodingKey.self)
+        for (k, v) in value {
+            try container.encode(v, forKey: DynamicCodingKey(stringValue: k)!)
+        }
+    }
+
+    public func toDict() -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (k, v) in value { result[k] = v.toAny() }
+        return result
+    }
+}
+
+public enum AnyCodableValue: Codable, Sendable, Equatable {
+    case null
+    case bool(Bool)
+    case int(Int)
+    case double(Double)
+    case string(String)
+    case array([AnyCodableValue])
+    case dict([String: AnyCodableValue])
+
+    public init(_ value: Any) {
+        switch value {
+        case is NSNull: self = .null
+        case let b as Bool: self = .bool(b)
+        case let i as Int: self = .int(i)
+        case let d as Double: self = .double(d)
+        case let s as String: self = .string(s)
+        case let arr as [Any]: self = .array(arr.map { AnyCodableValue($0) })
+        case let dict as [String: Any]:
+            var result: [String: AnyCodableValue] = [:]
+            for (k, v) in dict { result[k] = AnyCodableValue(v) }
+            self = .dict(result)
+        default: self = .null
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null }
+        else if let b = try? container.decode(Bool.self) { self = .bool(b) }
+        else if let i = try? container.decode(Int.self) { self = .int(i) }
+        else if let d = try? container.decode(Double.self) { self = .double(d) }
+        else if let s = try? container.decode(String.self) { self = .string(s) }
+        else if let arr = try? container.decode([AnyCodableValue].self) { self = .array(arr) }
+        else if let dict = try? container.decode([String: AnyCodableValue].self) {
+            self = .dict(dict)
+        } else { self = .null }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case .bool(let b): try container.encode(b)
+        case .int(let i): try container.encode(i)
+        case .double(let d): try container.encode(d)
+        case .string(let s): try container.encode(s)
+        case .array(let arr): try container.encode(arr)
+        case .dict(let dict): try container.encode(dict)
+        }
+    }
+
+    public func toAny() -> Any {
+        switch self {
+        case .null: return NSNull()
+        case .bool(let b): return b
+        case .int(let i): return i
+        case .double(let d): return d
+        case .string(let s): return s
+        case .array(let arr): return arr.map { $0.toAny() }
+        case .dict(let dict): return dict.mapValues { $0.toAny() }
+        }
+    }
+}
+
+private struct DynamicCodingKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { self.stringValue = "\(intValue)"; self.intValue = intValue }
 }
 
 public struct OpenAIStreamOptions: Codable, Sendable {
@@ -506,6 +638,9 @@ public struct ModelSettingsUpdateRequest: Codable, Sendable {
     public var displayName: String?
     public var description: String?
     public var thinkingBudget: Int?
+    public var kvBits: Int?
+    public var kvGroupSize: Int?
+    public var kvMemoryBytesPerTokenOverride: Int?
 
     private enum CodingKeys: String, CodingKey {
         case maxContextWindow = "max_context_window"
@@ -521,6 +656,9 @@ public struct ModelSettingsUpdateRequest: Codable, Sendable {
         case displayName = "display_name"
         case description
         case thinkingBudget = "thinking_budget"
+        case kvBits = "kv_bits"
+        case kvGroupSize = "kv_group_size"
+        case kvMemoryBytesPerTokenOverride = "kv_memory_bytes_per_token_override"
     }
 }
 

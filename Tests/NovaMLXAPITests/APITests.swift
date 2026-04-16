@@ -72,13 +72,13 @@ struct APITypesTests {
             model: "claude-3",
             messages: [AnthropicMessage(role: "user", content: "Hello")],
             maxTokens: 2048,
-            system: "You are helpful"
+            system: .text("You are helpful")
         )
         let data = try JSONEncoder().encode(req)
         let decoded = try JSONDecoder().decode(AnthropicRequest.self, from: data)
         #expect(decoded.model == "claude-3")
         #expect(decoded.maxTokens == 2048)
-        #expect(decoded.system == "You are helpful")
+        #expect(decoded.system == .text("You are helpful"))
     }
 
     @Test("Anthropic response encoding")

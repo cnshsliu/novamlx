@@ -12,7 +12,7 @@ import NovaMLXUtils
 
 typealias AppContext = BasicRouterRequestContext
 
-private struct NovaMLXErrorMiddleware: RouterMiddleware {
+struct NovaMLXErrorMiddleware: RouterMiddleware {
     typealias Context = AppContext
 
     func handle(
@@ -133,10 +133,14 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
     ) async throws -> Response {
         if validKeys.isEmpty { return try await next(request, context) }
 
+        // 1. Authorization: Bearer xxx (OpenAI / standard)
         let authHeader = request.headers[.authorization]
         let token: String?
         if let authHeader, authHeader.hasPrefix("Bearer ") {
             token = String(authHeader.dropFirst(7))
+        } else if let xApiKey = request.headers[HTTPField.Name("x-api-key")!] {
+            // 2. x-api-key header (Anthropic standard)
+            token = xApiKey
         } else {
             token = nil
         }
@@ -251,6 +255,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private let perplexityService: PerplexityService
     private let updateChecker: UpdateChecker
     private let hfService: HuggingFaceService
+    private let audioService: AudioService
     private let config: ServerConfig
 
     public init(
@@ -272,7 +277,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let modelsDir = appSupport.appendingPathComponent("NovaMLX/models", isDirectory: true)
         self.hfService = HuggingFaceService(modelDirectory: modelsDir)
+        self.audioService = AudioService()
         self.config = config
+        // When HF download completes, re-run discovery so model appears in registry
+        self.hfService.onModelDownloaded = { [weak self] repoId in
+            NovaMLXLog.info("[HF] Download completed for \(repoId), running model discovery...")
+            self?.modelManager.discoverModels()
+        }
     }
 
     public func start() async throws {
@@ -286,14 +297,23 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let updater = self.updateChecker
         let cfg = self.config
         let hf = self.hfService
+        let audio = self.audioService
+
+        let rateLimiter = RateLimiter(config: RateLimitConfig())
+        let securityHeaders = SecurityHeadersMiddleware()
+        let requestSizeLimit = RequestSizeLimitMiddleware(maxMB: cfg.maxRequestSizeMB)
+        let rateLimitMiddleware = RateLimitMiddleware.perAPIKey(limiter: rateLimiter)
 
         let mainRouter = RouterBuilder(context: AppContext.self) {
             CORSMiddleware(allowedOrigins: "*")
             RequestIDMiddleware()
+            securityHeaders
+            requestSizeLimit
+            rateLimitMiddleware
             APIKeyAuthMiddleware(validKeys: cfg.apiKeys)
             NovaMLXErrorMiddleware()
             Get("/v1/models") { request, context in
-                let modelList = models.availableModels().map { OpenAIModel(id: $0.id) }
+                let modelList = models.downloadedModels().map { OpenAIModel(id: $0.id) }
                 let response = OpenAIModelsResponse(data: modelList)
                 return try Self.jsonResponse(response)
             }
@@ -319,17 +339,40 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
 
                 let sessionId = Self.extractSessionId(request: request, body: openAIReq.sessionId)
-                let responseFormat: ResponseFormat? = (openAIReq.responseFormat?.type == "json_object") ? .jsonObject : nil
+                let responseFormat: ResponseFormat?
+                var jsonSchemaDef: [String: Any]? = nil
+                var regexPattern: String? = nil
+                var gbnfGrammar: String? = nil
+                if openAIReq.responseFormat?.type == "json_schema",
+                   let schemaField = openAIReq.responseFormat?.jsonSchema,
+                   let schemaDict = schemaField.schema {
+                    responseFormat = .jsonObject
+                    jsonSchemaDef = schemaDict.toDict()
+                } else if openAIReq.responseFormat?.type == "json_object" {
+                    responseFormat = .jsonObject
+                } else if openAIReq.responseFormat?.type == "regex",
+                          let pattern = openAIReq.responseFormat?.regex {
+                    responseFormat = nil
+                    regexPattern = pattern
+                } else if openAIReq.responseFormat?.type == "gbnf",
+                          let grammar = openAIReq.responseFormat?.gbnf {
+                    responseFormat = nil
+                    gbnfGrammar = grammar
+                } else {
+                    responseFormat = nil
+                }
 
                 if openAIReq.stream ?? false {
                     return try await Self.handleStreamChat(
                         openAIReq: openAIReq, messages: messages, inference: inference,
-                        sessionId: sessionId, responseFormat: responseFormat
+                        sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
+                        regexPattern: regexPattern, gbnfGrammar: gbnfGrammar
                     )
                 } else {
                     return try await Self.handleChat(
                         openAIReq: openAIReq, messages: messages, inference: inference,
-                        sessionId: sessionId, responseFormat: responseFormat
+                        sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
+                        regexPattern: regexPattern, gbnfGrammar: gbnfGrammar
                     )
                 }
             }
@@ -339,10 +382,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 var messages = anthropicReq.messages.map { msg in
                     let role: ChatMessage.Role = msg.role == "assistant" ? .assistant : .user
-                    return ChatMessage(role: role, content: msg.content)
+                    return ChatMessage(role: role, content: msg.textContent)
                 }
                 if let system = anthropicReq.system {
-                    messages.insert(ChatMessage(role: .system, content: system), at: 0)
+                    messages.insert(ChatMessage(role: .system, content: system.textContent), at: 0)
                 }
 
                 if !inference.isModelLoaded(anthropicReq.model) {
@@ -382,10 +425,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 var messages = req.messages.map { msg in
                     let role: ChatMessage.Role = msg.role == "assistant" ? .assistant : .user
-                    return ChatMessage(role: role, content: msg.content)
+                    return ChatMessage(role: role, content: msg.textContent)
                 }
                 if let system = req.system {
-                    messages.insert(ChatMessage(role: .system, content: system), at: 0)
+                    messages.insert(ChatMessage(role: .system, content: system.textContent), at: 0)
                 }
 
                 guard let tokenCount = inference.countTokens(model: req.model, messages: messages) else {
@@ -464,6 +507,64 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 store.delete(responseId)
                 return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
             }
+            Post("/v1/audio/transcriptions") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                let data = Data(buffer: body)
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let language = json?["language"] as? String
+                let audioData: Data
+                if let file = json?["file"] as? String, let fileData = Data(base64Encoded: file) {
+                    audioData = fileData
+                } else if let file = json?["audio"] as? String, let fileData = Data(base64Encoded: file) {
+                    audioData = fileData
+                } else {
+                    audioData = data
+                }
+                let result = try await audio.transcribe(audioData: audioData, language: language)
+                return try Self.jsonResponse(result)
+            }
+            Post("/v1/audio/speech") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+                let text = json["input"] as? String ?? json["text"] as? String ?? ""
+                let voice = json["voice"] as? String
+                let speed = json["speed"] as? Double
+                let language = json["language"] as? String
+                let stream = json["stream"] as? Bool ?? false
+                guard !text.isEmpty else {
+                    return Response(status: .badRequest, body: .init(byteBuffer: ByteBuffer(string: "{\"error\":\"input text required\"}")))
+                }
+                let synthesisRequest = AudioService.SynthesisRequest(text: text, voice: voice, speed: speed, language: language)
+
+                if stream {
+                    let audioStream = audio.synthesizeStream(request: synthesisRequest)
+                    let responseBody: ResponseBody = .init { writer in
+                        do {
+                            for try await chunk in audioStream {
+                                try await writer.write(ByteBuffer(data: chunk.data))
+                            }
+                        } catch {
+                            NovaMLXLog.error("Audio stream error: \(error)")
+                        }
+                    }
+                    var headers = HTTPFields()
+                    headers[.contentType] = "audio/wav"
+                    return Response(status: .ok, headers: headers, body: responseBody)
+                } else {
+                    let wavData = try await audio.synthesize(request: synthesisRequest)
+                    var headers = HTTPFields()
+                    headers[.contentType] = "audio/wav"
+                    return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: wavData)))
+                }
+            }
+            Get("/v1/audio/voices") { _, _ in
+                let voices = AudioService.supportedVoices()
+                return try Self.jsonResponse(["voices": voices])
+            }
+            Get("/v1/audio/languages") { _, _ in
+                let languages = AudioService.supportedLanguages()
+                return try Self.jsonResponse(["languages": languages])
+            }
             Get("/health") { _, _ in
                 let stats = inference.stats
                 let mcpStatuses = mcp.getServerStatuses()
@@ -492,6 +593,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let stats = inference.stats
                 let sessionMetrics = inference.engine.metrics
                 let persistentMetrics = inference.engine.metricsStore.metrics
+                let batchMetrics = inference.engine.batchScheduler.metrics
                 let body: [String: Any] = [
                     "session": [
                         "loadedModels": stats.loadedModels,
@@ -525,6 +627,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         "peakActiveCount": inference.batcherMetrics.peakActiveCount,
                         "averageQueueWaitTime": inference.batcherMetrics.averageQueueWaitTime,
                         "maxBatchSize": inference.batcherMetrics.maxBatchSize,
+                    ],
+                    "fusedBatch": [
+                        "pendingCount": batchMetrics.pendingCount,
+                        "activeSequences": batchMetrics.activeSequences,
+                        "totalFusedSteps": batchMetrics.totalFusedSteps,
+                        "totalTokensViaFused": batchMetrics.totalTokensViaFused,
+                        "peakBatchWidth": batchMetrics.peakBatchWidth,
+                        "totalBatches": batchMetrics.totalBatches,
                     ],
                 ]
                 let data = try JSONSerialization.data(withJSONObject: body)
@@ -577,14 +687,50 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let respData = try JSONSerialization.data(withJSONObject: respBody)
                     return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: respData)))
                 }
+                Post("/batch/completions") { request, _ in
+                    struct BatchGenerateBody: Codable, Sendable {
+                        let model: String
+                        let messages: [ChatMessage]
+                        let temperature: Double?
+                        let maxTokens: Int?
+                        let topP: Double?
+                        let count: Int?
+                    }
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(BatchGenerateBody.self, from: body)
+                    let batchSize = req.count ?? 1
+                    let results = try await withThrowingTaskGroup(of: InferenceResult.self) { group in
+                        for _ in 0..<batchSize {
+                            let inferReq = InferenceRequest(
+                                id: UUID(),
+                                model: req.model,
+                                messages: req.messages,
+                                temperature: req.temperature,
+                                maxTokens: req.maxTokens,
+                                topP: req.topP
+                            )
+                            group.addTask {
+                                try await inference.engine.batchScheduler.submit(inferReq)
+                            }
+                        }
+                        var collected: [InferenceResult] = []
+                        for try await result in group {
+                            collected.append(result)
+                        }
+                        return collected
+                    }
+                    return try Self.jsonResponse(["results": results])
+                }
             }
         }
 
         let adminRouter = RouterBuilder(context: AppContext.self) {
             AdminAuthMiddleware(validKeys: cfg.apiKeys)
+            securityHeaders
+            requestSizeLimit
             NovaMLXErrorMiddleware()
             Get("/admin/models") { request, context in
-                let records = models.availableModels()
+                let records = models.allRegisteredModels()
                 let statuses = records.map { record -> AdminModelStatus in
                     AdminModelStatus(
                         id: record.id,
@@ -749,6 +895,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     if let v = update.displayName { settings.displayName = v }
                     if let v = update.description { settings.description = v }
                     if let v = update.thinkingBudget { settings.thinkingBudget = v }
+                    if let v = update.kvBits { settings.kvBits = v }
+                    if let v = update.kvGroupSize { settings.kvGroupSize = v }
+                    if let v = update.kvMemoryBytesPerTokenOverride { settings.kvMemoryBytesPerTokenOverride = v }
 
                     inference.settingsManager.setSettings(modelId, settings)
 
@@ -758,6 +907,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         }
                     } else if update.isPinned == false {
                         inference.engine.pool.unpin(modelId)
+                    }
+
+                    if let container = inference.engine.getContainer(for: modelId) {
+                        container.kvMemoryOverride = settings.kvMemoryBytesPerTokenOverride
                     }
                 }
 
@@ -851,6 +1004,109 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 inference.engine.metricsStore.clearAllTime()
                 return try Self.jsonResponse(["status": "cleared"])
             }
+            Get("/admin/api/turboquant") { _, _ in
+                let configs = inference.engine.turboQuantService.allConfigs()
+                var result: [[String: Any]] = []
+                for (modelId, config) in configs {
+                    var entry: [String: Any] = [
+                        "model_id": modelId,
+                        "bits": config.bits,
+                        "group_size": config.groupSize,
+                        "scheme": "affine",
+                        "compression_ratio": config.estimatedCompressionRatio
+                    ]
+                    if let stats = inference.engine.turboQuantService.getStats(modelId: modelId) {
+                        entry["compression_ratio"] = stats.compressionRatio
+                    }
+                    result.append(entry)
+                }
+                let jsonData = try JSONSerialization.data(withJSONObject: ["configs": result])
+                var headers = HTTPFields()
+                headers[.contentType] = "application/json"
+                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+            }
+            Put("/admin/api/turboquant/{modelId}") { request, context in
+                let modelId = try context.parameters.require("modelId")
+                let body = try await request.body.collect(upTo: .max)
+                struct TurboQuantRequest: Codable, Sendable {
+                    let enabled: Bool
+                    let bits: Int?
+                    let groupSize: Int?
+                    let modelSizeGB: Double?
+                    let contextLength: Int?
+                    let availableMemoryGB: Double?
+                }
+                let req = try JSONDecoder().decode(TurboQuantRequest.self, from: body)
+                if req.enabled {
+                    if let bits = req.bits {
+                        let config = TurboQuantService.Config(bits: bits, groupSize: req.groupSize ?? 64)
+                        inference.engine.turboQuantService.setConfig(config, forModel: modelId)
+                    } else {
+                        _ = inference.engine.turboQuantService.autoConfigure(
+                            modelId: modelId,
+                            modelSizeGB: req.modelSizeGB ?? 2.0,
+                            contextLength: req.contextLength ?? 4096,
+                            availableMemoryGB: req.availableMemoryGB ?? 16.0
+                        )
+                    }
+                    return try Self.jsonResponse(["status": "enabled", "model_id": modelId])
+                } else {
+                    inference.engine.turboQuantService.removeConfig(forModel: modelId)
+                    return try Self.jsonResponse(["status": "disabled", "model_id": modelId])
+                }
+            }
+            Delete("/admin/api/turboquant/{modelId}") { request, context in
+                let modelId = try context.parameters.require("modelId")
+                inference.engine.turboQuantService.removeConfig(forModel: modelId)
+                return try Self.jsonResponse(["status": "disabled", "model_id": modelId])
+            }
+            Put("/admin/api/model-family/{modelId}") { request, context in
+                let modelId = try context.parameters.require("modelId")
+                let body = try await request.body.collect(upTo: .max)
+                struct FamilyOverrideRequest: Codable, Sendable {
+                    let defaultKVBits: Int?
+                    let defaultKVGroupSize: Int?
+                    let prefillStepSize: Int?
+                    let recommendedContextLength: Int?
+                    let repeatLastN: Int?
+                }
+                let req = try JSONDecoder().decode(FamilyOverrideRequest.self, from: body)
+                let opt = ModelFamilyOptimization(
+                    defaultKVBits: req.defaultKVBits,
+                    defaultKVGroupSize: req.defaultKVGroupSize ?? 64,
+                    prefillStepSize: req.prefillStepSize ?? 512,
+                    recommendedContextLength: req.recommendedContextLength ?? 4096,
+                    repeatLastN: req.repeatLastN ?? 64
+                )
+                ModelFamilyRegistry.shared.setOverride(opt, forModel: modelId)
+                return try Self.jsonResponse(["status": "ok", "model_id": modelId])
+            }
+            Delete("/admin/api/model-family/{modelId}") { request, context in
+                let modelId = try context.parameters.require("modelId")
+                ModelFamilyRegistry.shared.removeOverride(forModel: modelId)
+                return try Self.jsonResponse(["status": "removed", "model_id": modelId])
+            }
+            Get("/admin/api/model-family") { _, _ in
+                let overrides = ModelFamilyRegistry.shared.allOverrides()
+                var result: [[String: Any]] = []
+                for (modelId, opt) in overrides {
+                    var entry: [String: Any] = [
+                        "model_id": modelId,
+                        "kv_group_size": opt.defaultKVGroupSize,
+                        "prefill_step_size": opt.prefillStepSize,
+                        "recommended_context_length": opt.recommendedContextLength,
+                        "repeat_last_n": opt.repeatLastN
+                    ]
+                    if let bits = opt.defaultKVBits {
+                        entry["kv_bits"] = bits
+                    }
+                    result.append(entry)
+                }
+                let jsonData = try JSONSerialization.data(withJSONObject: ["overrides": result])
+                var headers = HTTPFields()
+                headers[.contentType] = "application/json"
+                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+            }
             Post("/admin/api/ppl/start") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let pplReq = try JSONDecoder().decode(PerplexityRequest.self, from: body)
@@ -867,6 +1123,124 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 perplexity.cancelActiveRun()
                 return try Self.jsonResponse(["status": "cancelled"])
             }
+            Get("/admin/adapters") { request, _ in
+                let modelId = request.uri.query.flatMap { url in
+                    URLComponents(string: "/" + url)?.queryItems?.first(where: { $0.name == "model_id" })?.value
+                }
+                let adapters: [AdapterInfo]
+                if let modelId {
+                    adapters = inference.engine.adapterService.listAdapters(for: modelId)
+                } else {
+                    adapters = inference.engine.adapterService.listAdapters()
+                }
+                return try Self.jsonResponse(["adapters": adapters])
+            }
+            Post("/admin/adapters/load") { request, _ in
+                struct AdapterLoadRequest: Codable, Sendable {
+                    let modelId: String
+                    let path: String
+                    let name: String?
+                }
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(AdapterLoadRequest.self, from: body)
+
+                guard let container = inference.engine.getContainer(for: req.modelId) else {
+                    throw NovaMLXError.modelNotFound(req.modelId)
+                }
+
+                let adapterURL = URL(fileURLWithPath: req.path)
+                let info = try await inference.engine.adapterService.loadAdapter(
+                    from: adapterURL,
+                    into: container,
+                    name: req.name
+                )
+                return try Self.jsonResponse(info)
+            }
+            Post("/admin/adapters/unload") { request, _ in
+                struct AdapterUnloadRequest: Codable, Sendable {
+                    let modelId: String
+                    let name: String
+                }
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(AdapterUnloadRequest.self, from: body)
+
+                guard let container = inference.engine.getContainer(for: req.modelId) else {
+                    throw NovaMLXError.modelNotFound(req.modelId)
+                }
+
+                let info = try await inference.engine.adapterService.unloadAdapter(
+                    name: req.name,
+                    from: container
+                )
+                return try Self.jsonResponse(info)
+            }
+            Post("/admin/adapters/fuse") { request, _ in
+                struct AdapterFuseRequest: Codable, Sendable {
+                    let modelId: String
+                    let name: String
+                }
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(AdapterFuseRequest.self, from: body)
+
+                guard let container = inference.engine.getContainer(for: req.modelId) else {
+                    throw NovaMLXError.modelNotFound(req.modelId)
+                }
+
+                let info = try await inference.engine.adapterService.fuseAdapter(
+                    name: req.name,
+                    into: container
+                )
+                return try Self.jsonResponse(info)
+            }
+            Get("/admin/adapters/discover") { request, _ in
+                let dir: String? = request.uri.query.flatMap { url in
+                    URLComponents(string: "/" + url)?.queryItems?.first(where: { $0.name == "directory" })?.value
+                }
+                let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                let searchDir = dir.map { URL(fileURLWithPath: $0) }
+                    ?? appSupport.appendingPathComponent("NovaMLX/models", isDirectory: true)
+                let adapters = inference.engine.adapterService.discoverAdapters(in: searchDir)
+                return try Self.jsonResponse(["adapters": adapters])
+            }
+            Post("/admin/api/grammar/validate") { request, _ in
+                struct GrammarValidateRequest: Codable, Sendable {
+                    let type: String
+                    let value: String
+                }
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(GrammarValidateRequest.self, from: body)
+                do {
+                    switch req.type {
+                    case "regex":
+                        _ = try NSRegularExpression(pattern: req.value, options: [])
+                        let jsonData = try JSONSerialization.data(withJSONObject: ["valid": true, "type": "regex"] as [String: Any])
+                        var headers = HTTPFields()
+                        headers[.contentType] = "application/json"
+                        return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                    case "gbnf":
+                        let rules = try GBNFParser.parse(req.value)
+                        let result: [String: Any] = [
+                            "valid": true,
+                            "type": "gbnf",
+                            "rules": rules.map { ["name": $0.name, "alternatives": $0.alternatives.count] as [String: Any] }
+                        ]
+                        let jsonData = try JSONSerialization.data(withJSONObject: result)
+                        var headers = HTTPFields()
+                        headers[.contentType] = "application/json"
+                        return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                    default:
+                        let jsonData = try JSONSerialization.data(withJSONObject: ["valid": false, "error": "Unknown grammar type: \(req.type). Use 'regex' or 'gbnf'."] as [String: Any])
+                        var headers = HTTPFields()
+                        headers[.contentType] = "application/json"
+                        return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                    }
+                } catch {
+                    let jsonData = try JSONSerialization.data(withJSONObject: ["valid": false, "error": error.localizedDescription] as [String: Any])
+                    var headers = HTTPFields()
+                    headers[.contentType] = "application/json"
+                    return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                }
+            }
             Get("/admin/api/update-check") { _, _ in
                 do {
                     let info = try await updater.checkForUpdates()
@@ -880,12 +1254,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let query = request.uri.query ?? ""
                     let params = Self.parseQuery(query)
                     let q = params["q"] ?? ""
-                    let sort = params["sort"] ?? "trending"
                     let limit = Int(params["limit"] ?? "50") ?? 50
                     let mlxOnly = params["mlx_only"] != "false"
-                    let result = try await hf.searchModels(query: q, sort: sort, limit: limit, mlxOnly: mlxOnly)
+                    let result = try await hf.searchModels(query: q, limit: limit, mlxOnly: mlxOnly)
                     return try Self.jsonResponse(result)
                 } catch {
+                    NovaMLXLog.error("HF search failed: \(error)")
                     return try Self.jsonResponse(["error": error.localizedDescription])
                 }
             }
@@ -932,6 +1306,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     return try Self.jsonResponse(["error": error.localizedDescription])
                 }
             }
+            Get("/admin/api/rate-limits") { _, _ in
+                let stats = rateLimiter.getStats()
+                let data = try JSONSerialization.data(withJSONObject: stats)
+                return Response(
+                    status: .ok,
+                    headers: [.contentType: "application/json"],
+                    body: .init(byteBuffer: ByteBuffer(data: data))
+                )
+            }
             Get("/admin/dashboard") { _, _ in
                 let html = Self.dashboardHTML()
                 return Response(
@@ -942,9 +1325,25 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             }
         }
 
+        var mainConfig = ApplicationConfiguration(address: .hostname(cfg.host, port: cfg.port))
+        if let certPath = cfg.tlsCertPath {
+            do {
+                let identity = try TSTLSOptions.Identity.p12(filename: certPath, password: cfg.tlsKeyPassword ?? "")
+                if let tlsOpts = TSTLSOptions.options(serverIdentity: identity) {
+                    mainConfig = ApplicationConfiguration(
+                        address: .hostname(cfg.host, port: cfg.port),
+                        tlsOptions: tlsOpts
+                    )
+                    NovaMLXLog.info("TLS enabled for API server")
+                }
+            } catch {
+                NovaMLXLog.error("Failed to load TLS certificate: \(error)")
+            }
+        }
+
         let mainApp = Application(
             router: mainRouter,
-            configuration: .init(address: .hostname(cfg.host, port: cfg.port)),
+            configuration: mainConfig,
             logger: Logger(label: "NovaMLX.API")
         )
 
@@ -954,7 +1353,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             logger: Logger(label: "NovaMLX.Admin")
         )
 
-        NovaMLXLog.info("NovaMLX API server starting on \(cfg.host):\(cfg.port)")
+        NovaMLXLog.info("NovaMLX API server starting on \(cfg.host):\(cfg.port)\(cfg.isTLSEnabled ? " (TLS)" : "")")
         NovaMLXLog.info("NovaMLX Admin API starting on \(cfg.host):\(cfg.adminPort)")
 
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -967,7 +1366,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     private static func handleChat(
         openAIReq: OpenAIRequest, messages: [ChatMessage], inference: InferenceService,
-        sessionId: String? = nil, responseFormat: ResponseFormat? = nil
+        sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
+        regexPattern: String? = nil, gbnfGrammar: String? = nil
     ) async throws -> Response {
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
@@ -980,6 +1380,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             seed: openAIReq.seed,
             stream: false, stop: openAIReq.stop,
             sessionId: sessionId, responseFormat: responseFormat,
+            jsonSchemaDef: jsonSchemaDef,
+            regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
             thinkingBudget: openAIReq.thinkingBudget
         )
 
@@ -1017,7 +1419,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     private static func handleStreamChat(
         openAIReq: OpenAIRequest, messages: [ChatMessage], inference: InferenceService,
-        sessionId: String? = nil, responseFormat: ResponseFormat? = nil
+        sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
+        regexPattern: String? = nil, gbnfGrammar: String? = nil
     ) async throws -> Response {
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
@@ -1030,6 +1433,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             seed: openAIReq.seed,
             stream: true, stop: openAIReq.stop,
             sessionId: sessionId, responseFormat: responseFormat,
+            jsonSchemaDef: jsonSchemaDef,
+            regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
             thinkingBudget: openAIReq.thinkingBudget
         )
 
@@ -1486,6 +1891,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         <button class="btn danger" onclick="clearSessionStats()">Clear Session Stats</button>
         <button class="btn danger" onclick="clearAllTimeStats()">Clear All-Time Stats</button>
         </div>
+        <div class="card" style="margin-bottom:16px">
+        <h2>HuggingFace Model Browser</h2>
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <input id="hf-search" type="text" placeholder="Search models (e.g. llama mlx)..." style="flex:1;min-width:200px;padding:8px 12px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#e5e5e5;font-size:13px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#a3a3a3"><input type="checkbox" id="hf-mlx-only" checked> MLX only</label>
+        <button class="btn" onclick="hfSearch()">Search</button>
+        </div>
+        <div id="hf-results" style="max-height:500px;overflow-y:auto"></div>
+        <div id="hf-tasks" style="margin-top:12px"></div>
+        </div>
         </div>
         <script>
         const API=location.port==='8081'?'':':8081';
@@ -1555,8 +1970,53 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         await fetch(ADMIN_BASE+':8081/admin/api/stats/clear-alltime',{method:'POST',headers:authHeaders()});
         loadStats();
         }
-        function loadAll(){loadHealth();loadStats();loadDeviceInfo();loadBenchStatus()}
-        loadAll();setInterval(loadAll,5000);
+        function loadAll(){loadHealth();loadStats();loadDeviceInfo();loadBenchStatus();loadHFTasks()}
+        loadAll();setInterval(function(){loadAll()},5000);
+        async function hfSearch(){
+        const q=document.getElementById('hf-search').value.trim();
+        if(!q)return;
+        const mlxOnly=document.getElementById('hf-mlx-only').checked;
+        const p=page||1;
+        try{
+        const url=ADMIN_BASE+':8081/admin/api/hf/search?q='+encodeURIComponent(q)+(mlxOnly?'&mlx_only=true':'')+'&limit=10';
+        const r=await fetch(url,{headers:authHeaders()});
+        const d=await r.json();
+        if(!d.models||!d.models.length){document.getElementById('hf-results').innerHTML='<div class="sub">No models found</div>';return}
+        let html='<table><tr><th>Model</th><th>Downloads</th><th>Likes</th><th>Action</th></tr>';
+        d.models.forEach(function(m){
+        const dl=m.downloads?(m.downloads>1000?(m.downloads/1000).toFixed(1)+'k':m.downloads):'0';
+        html+='<tr><td style="max-width:300px;word-break:break-all"><a href="https://huggingface.co/'+m.id+'" target="_blank" style="color:#8b5cf6;text-decoration:none">'+m.id+'</a></td><td>'+dl+'</td><td>'+(m.likes||0)+'</td><td><button class="btn" onclick="hfDownload(\''+m.id+'\')">Download</button></td></tr>';
+        });
+        html+='</table>';
+        document.getElementById('hf-results').innerHTML=html;
+        }catch(e){document.getElementById('hf-results').innerHTML='<div class="sub" style="color:#fca5a5">Admin auth required</div>'}
+        }
+        async function hfDownload(modelId){
+        try{
+        await fetch(ADMIN_BASE+':8081/admin/api/hf/download',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({repo_id:modelId})});
+        loadHFTasks();
+        }catch(e){alert('Download failed: '+e)}
+        }
+        async function loadHFTasks(){
+        try{
+        const r=await fetch(ADMIN_BASE+':8081/admin/api/hf/tasks',{headers:authHeaders()});
+        const d=await r.json();
+        if(!d.tasks||!d.tasks.length){document.getElementById('hf-tasks').innerHTML='';return}
+        let html='<h3 style="font-size:13px;color:#a3a3a3;margin-bottom:8px">Downloads</h3><table><tr><th>Model</th><th>Progress</th><th>Status</th><th>Action</th></tr>';
+        d.tasks.forEach(function(t){
+        const pct=t.progress?t.progress.toFixed(0):'0';
+        const mb=(t.downloadedBytes/1024/1024).toFixed(0)+'/'+(t.totalBytes/1024/1024).toFixed(0)+'MB';
+        html+='<tr><td>'+t.repoId+'</td><td>'+pct+'% ('+mb+')</td><td>'+t.status+'</td><td>'+(t.status==='downloading'||t.status==='pending'?'<button class="btn danger" onclick="hfCancel(\''+t.id+'\')">Cancel</button>':'')+'</td></tr>';
+        });
+        html+='</table>';
+        document.getElementById('hf-tasks').innerHTML=html;
+        }catch(e){document.getElementById('hf-tasks').innerHTML=''}
+        }
+        async function hfCancel(taskId){
+        await fetch(ADMIN_BASE+':8081/admin/api/hf/cancel',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({task_id:taskId})});
+        loadHFTasks();
+        }
+        document.getElementById('hf-search').addEventListener('keydown',function(e){if(e.key==='Enter')hfSearch()});
         </script>
         </body>
         </html>
