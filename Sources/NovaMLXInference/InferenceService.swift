@@ -9,12 +9,14 @@ import AsyncAlgorithms
 public final class InferenceService: @unchecked Sendable {
     public let engine: MLXEngine
     private let batcher: ContinuousBatcher
+    private let fusedScheduler: FusedBatchScheduler
     public let settingsManager: ModelSettingsManager
     private let loadedModelsFile: URL
 
     public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8) {
         self.engine = engine
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
+        self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         self.settingsManager = settingsManager
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         self.loadedModelsFile = appSupport.appendingPathComponent("NovaMLX/loaded_models.json")
@@ -42,10 +44,19 @@ public final class InferenceService: @unchecked Sendable {
             thinkingBudget: finalRequest.thinkingBudget
         )
 
-        // ALL requests go through the batcher for unified memory-aware admission.
-        // Session, grammar, and JSON schema paths are handled inside engine.generate()
-        // which dispatches to the appropriate method based on request fields.
-        return try await batcher.submit(finalRequest)
+        // Session and grammar paths use engine directly (specialized execution)
+        let needsSpecialized = finalRequest.sessionId != nil ||
+            finalRequest.jsonSchemaDef != nil ||
+            finalRequest.responseFormat == .jsonObject ||
+            finalRequest.regexPattern != nil ||
+            finalRequest.gbnfGrammar != nil
+
+        if needsSpecialized {
+            return try await batcher.submit(finalRequest)
+        }
+
+        // Standard path: fused batch scheduler (shared GPU forward passes)
+        return try await fusedScheduler.submit(finalRequest)
     }
 
     public func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
@@ -67,7 +78,19 @@ public final class InferenceService: @unchecked Sendable {
             thinkingBudget: finalRequest.thinkingBudget
         )
 
-        return batcher.submitStream(finalRequest)
+        // Session and grammar paths use engine directly (specialized execution)
+        let needsSpecialized = finalRequest.sessionId != nil ||
+            finalRequest.jsonSchemaDef != nil ||
+            finalRequest.responseFormat == .jsonObject ||
+            finalRequest.regexPattern != nil ||
+            finalRequest.gbnfGrammar != nil
+
+        if needsSpecialized {
+            return batcher.submitStream(finalRequest)
+        }
+
+        // Standard path: fused batch scheduler (shared GPU forward passes)
+        return fusedScheduler.submitStream(finalRequest)
     }
 
     public func abort(requestId: UUID) async {
@@ -156,13 +179,17 @@ public final class InferenceService: @unchecked Sendable {
     public var stats: InferenceStats {
         InferenceStats(
             loadedModels: engine.loadedModelCount,
-            activeRequests: batcher.activeRequests,
+            activeRequests: batcher.activeRequests + fusedScheduler.activeRequestCount,
             gpuMemoryUsed: engine.gpuActiveMemory
         )
     }
 
     public var batcherMetrics: BatcherMetrics {
         batcher.metrics
+    }
+
+    public var fusedSchedulerMetrics: FusedSchedulerMetrics {
+        fusedScheduler.metrics
     }
 
     public func resolveModelId(_ input: String) -> String {

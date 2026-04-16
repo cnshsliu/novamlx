@@ -83,6 +83,11 @@ public final class FusedBatchKVCache: KVCache {
         }
     }
 
+    /// Remove all finished entries and free their slots.
+    public func compact() {
+        entries.removeAll { $0.finished }
+    }
+
     public func getCache(id: UUID) -> KVCacheSimple? {
         entries.first { $0.id == id }?.cache
     }
