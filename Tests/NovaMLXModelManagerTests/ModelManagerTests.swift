@@ -27,7 +27,8 @@ struct ModelManagerTests {
         let manager = makeTempManager()
         manager.register(id: "model-1", remoteURL: "https://example.com/1")
         manager.register(id: "model-2", remoteURL: "https://example.com/2")
-        #expect(manager.availableModels().count == 2)
+        // availableModels() only returns downloaded models; registered but not downloaded = empty
+        #expect(manager.allRegisteredModels().count == 2)
     }
 
     @Test("Downloaded models empty initially")
@@ -77,7 +78,7 @@ struct ModelManagerTests {
     func registerPopularModels() {
         let manager = makeTempManager()
         manager.registerPopularModels()
-        let models = manager.availableModels()
+        let models = manager.allRegisteredModels()
         #expect(models.count >= 5)
     }
 
@@ -224,8 +225,8 @@ struct ModelManagerTests {
         #expect(models[0].modelType == .embedding)
     }
 
-    @Test("Model discovery skips adapters")
-    func discoverySkipsAdapters() throws {
+    @Test("Model discovery detects adapters")
+    func discoveryDetectsAdapters() throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -235,10 +236,13 @@ struct ModelManagerTests {
         let data = try JSONSerialization.data(withJSONObject: config)
         try data.write(to: adapterDir.appendingPathComponent("config.json"))
         try data.write(to: adapterDir.appendingPathComponent("adapter_config.json"))
+        // Create adapter weights so the discovery recognizes it as a full adapter
+        try Data("fake".utf8).write(to: adapterDir.appendingPathComponent("adapters.safetensors"))
 
         let discovery = ModelDiscovery()
         let models = discovery.discover(in: tempDir)
-        #expect(models.isEmpty)
+        #expect(models.count == 1)
+        #expect(models[0].isAdapter == true)
     }
 
     @Test("Model discovery skips hidden directories")
@@ -275,6 +279,8 @@ struct ModelManagerTests {
 
         let modelDir = tempDir.appendingPathComponent("hub/models/mlx-community/test-llama")
         try createFakeModelConfig(at: modelDir, architectures: ["LlamaForCausalLM"], modelType: "llama")
+        // Model needs weight files to be considered complete (downloadedAt != nil)
+        try Data("fake weights".utf8).write(to: modelDir.appendingPathComponent("model.safetensors"))
 
         let discovered = manager.discoverModels()
         #expect(discovered.count >= 1)

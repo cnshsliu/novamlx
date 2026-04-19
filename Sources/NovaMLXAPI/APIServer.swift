@@ -215,6 +215,7 @@ extension NovaMLXError {
         case .apiError: .badRequest
         case .downloadFailed: .badGateway
         case .unsupportedModel: .badRequest
+        case .contextWindowExceeded: .badRequest
         }
     }
 
@@ -228,6 +229,7 @@ extension NovaMLXError {
         case .apiError: "invalid_request_error"
         case .downloadFailed: "server_error"
         case .unsupportedModel: "invalid_request_error"
+        case .contextWindowExceeded: "invalid_request_error"
         }
     }
 
@@ -241,6 +243,7 @@ extension NovaMLXError {
         case .apiError: "api_error"
         case .downloadFailed: "download_failed"
         case .unsupportedModel: "unsupported_model"
+        case .contextWindowExceeded: "context_window_exceeded"
         }
     }
 }
@@ -274,9 +277,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         self.benchmarkService = BenchmarkService(inferenceService: inferenceService)
         self.perplexityService = PerplexityService(inferenceService: inferenceService)
         self.updateChecker = UpdateChecker()
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let modelsDir = appSupport.appendingPathComponent("NovaMLX/models", isDirectory: true)
-        self.hfService = HuggingFaceService(modelDirectory: modelsDir)
+        self.hfService = HuggingFaceService(modelDirectory: modelManager.modelsDirectory)
         self.audioService = AudioService()
         self.config = config
         // When HF download completes, re-run discovery so model appears in registry
@@ -379,6 +380,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             Post("/v1/messages") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let anthropicReq = try JSONDecoder().decode(AnthropicRequest.self, from: body)
+
+                NovaMLXLog.info("[API] POST /v1/messages — model=\(anthropicReq.model), stream=\(anthropicReq.stream ?? false), maxTokens=\(anthropicReq.maxTokens), msgs=\(anthropicReq.messages.count)")
 
                 var messages = anthropicReq.messages.map { msg in
                     let role: ChatMessage.Role = msg.role == "assistant" ? .assistant : .user
@@ -1508,6 +1511,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try await writer.write(ByteBuffer(string: "data: \(String(data: usageData, encoding: .utf8) ?? "")\n\n"))
                 }
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                try await writer.finish(nil)
             } catch {
                 NovaMLXLog.error("Stream error: \(error)")
                 let (message, type, code) = Self.streamErrorFields(error)
@@ -1518,6 +1522,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try? await writer.write(ByteBuffer(string: sseError))
                 }
                 try? await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                try? await writer.finish(nil)
             }
         }
 
@@ -1537,12 +1542,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             topP: anthropicReq.topP, stream: true, stop: anthropicReq.stopSequences
         )
 
-        let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request))
+        let reqTag = request.id.uuidString.prefix(8)
+        NovaMLXLog.info("[SSE:\(reqTag)] Anthropic stream request started — model=\(anthropicReq.model), maxTokens=\(anthropicReq.maxTokens)")
+
+        let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request), reqTag: String(reqTag))
         let msgId = "msg_\(request.id.uuidString.prefix(24))"
 
         let body: ResponseBody = .init { writer in
+            var tokenCount = 0
+            let streamStart = Date()
             do {
                 try await writer.write(ByteBuffer(string: "event: ping\ndata: {\"type\":\"ping\"}\n\n"))
+                NovaMLXLog.info("[SSE:\(reqTag)] Sent initial headers + ping")
 
                 let startEvent = AnthropicStreamEvent.messageStart(id: msgId, model: anthropicReq.model)
                 let startData = try JSONEncoder().encode(startEvent)
@@ -1552,6 +1563,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let blockStartData = try JSONEncoder().encode(blockStart)
                 try await writer.write(ByteBuffer(string: "event: content_block_start\ndata: \(String(data: blockStartData, encoding: .utf8) ?? "{}")\n\n"))
 
+                NovaMLXLog.info("[SSE:\(reqTag)] Waiting for first token from inference stream...")
+
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
@@ -1559,27 +1572,38 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             try await writer.write(ByteBuffer(string: "event: content_block_stop\ndata: {}\n\n"))
                             try await writer.write(ByteBuffer(string: "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
                             try await writer.write(ByteBuffer(string: "event: message_stop\ndata: {}\n\n"))
+                            let elapsed = Date().timeIntervalSince(streamStart)
+                            NovaMLXLog.info("[SSE:\(reqTag)] Stream complete — \(tokenCount) tokens in \(String(format: "%.1f", elapsed))s")
                         } else if !token.text.isEmpty {
+                            if tokenCount == 0 {
+                                let ttft = Date().timeIntervalSince(streamStart)
+                                NovaMLXLog.info("[SSE:\(reqTag)] First token received (TTFT=\(String(format: "%.1f", ttft))s)")
+                            }
+                            tokenCount += 1
                             let deltaEvent = AnthropicStreamEvent.textDelta(token.text)
                             let deltaData = try JSONEncoder().encode(deltaEvent)
                             try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
                         }
                     case .keepAlive:
-                        try await writer.write(ByteBuffer(string: "event: ping\ndata: {\"type\":\"ping\"}\n\n"))
+                        let elapsed = Date().timeIntervalSince(streamStart)
+                        NovaMLXLog.info("[SSE:\(reqTag)] Keep-alive ping sent (\(String(format: "%.0f", elapsed))s elapsed, \(tokenCount) tokens so far)")
                     case .done:
-                        break
+                        NovaMLXLog.info("[SSE:\(reqTag)] Stream done signal")
                     }
                 }
             } catch {
-                NovaMLXLog.error("Anthropic stream error: \(error)")
-                let errorDetail = OpenAIErrorDetail(
-                    message: error.localizedDescription, type: "internal_error", code: "internal_error"
-                )
-                let errorResp = OpenAIErrorResponse(error: errorDetail)
+                let elapsed = Date().timeIntervalSince(streamStart)
+                NovaMLXLog.error("[SSE:\(reqTag)] Stream ERROR after \(String(format: "%.1f", elapsed))s, \(tokenCount) tokens sent: \(error)")
+                // Use Anthropic error format for Anthropic API endpoint
+                let (message, errorType) = Self.anthropicStreamErrorFields(error)
+                let errorDetail = AnthropicErrorDetail(type: errorType, message: message)
+                let errorResp = AnthropicErrorResponse(error: errorDetail)
                 if let data = try? JSONEncoder().encode(errorResp) {
                     try? await writer.write(ByteBuffer(string: "event: error\ndata: \(String(data: data, encoding: .utf8) ?? "{}")\n\n"))
                 }
+                try? await writer.finish(nil)
             }
+            try? await writer.finish(nil)
         }
 
         return Response(
@@ -1677,6 +1701,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     }
                 }
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                try await writer.finish(nil)
             } catch {
                 NovaMLXLog.error("Completion stream error: \(error)")
                 let (message, type, code) = Self.streamErrorFields(error)
@@ -1686,6 +1711,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try? await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                 }
                 try? await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                try? await writer.finish(nil)
             }
         }
 
@@ -1747,16 +1773,26 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     private static func withSSEKeepAlive(
         _ stream: AsyncThrowingStream<Token, Error>,
-        interval: Duration = .seconds(10)
+        interval: Duration = .seconds(10),
+        reqTag: String = "unknown"
     ) -> AsyncThrowingStream<SSEKeepAliveEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
-                continuation.yield(.keepAlive)
-                for try await token in stream {
-                    if Task.isCancelled { break }
-                    continuation.yield(.token(token))
+                do {
+                    continuation.yield(.keepAlive)
+                    for try await token in stream {
+                        if Task.isCancelled {
+                            NovaMLXLog.warning("[SSE:\(reqTag)] Inference stream consumer cancelled")
+                            break
+                        }
+                        continuation.yield(.token(token))
+                    }
+                    NovaMLXLog.info("[SSE:\(reqTag)] Inference stream finished normally")
+                    continuation.finish()
+                } catch {
+                    NovaMLXLog.error("[SSE:\(reqTag)] Inference stream error: \(error)")
+                    continuation.finish(throwing: error)
                 }
-                continuation.finish()
             }
             let heartbeat = Task {
                 while !Task.isCancelled {
@@ -1765,7 +1801,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     continuation.yield(.keepAlive)
                 }
             }
-            continuation.onTermination = { _ in
+            continuation.onTermination = { reason in
+                NovaMLXLog.warning("[SSE:\(reqTag)] SSE connection terminated: \(reason)")
                 task.cancel()
                 heartbeat.cancel()
             }
@@ -1777,6 +1814,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             return (error.errorDescription ?? "Unknown error", error.apiErrorType, error.apiErrorCode)
         }
         return (error.localizedDescription, "internal_error", "internal_error")
+    }
+
+    /// Anthropic-format error fields for SSE error events.
+    /// Returns (message, type) matching the Anthropic API error schema.
+    private static func anthropicStreamErrorFields(_ error: Error) -> (message: String, type: String) {
+        if let error = error as? NovaMLXError {
+            return (error.errorDescription ?? "Unknown error", error.apiErrorType)
+        }
+        return (error.localizedDescription, "api_error")
     }
 
     private static let sessionIDHeader = HTTPField.Name("x-session-id")!

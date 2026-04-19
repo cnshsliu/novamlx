@@ -18,8 +18,9 @@ public final class InferenceService: @unchecked Sendable {
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
         self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         self.settingsManager = settingsManager
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        self.loadedModelsFile = appSupport.appendingPathComponent("NovaMLX/loaded_models.json")
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let baseDir = homeDir.appendingPathComponent(".nova", isDirectory: true)
+        self.loadedModelsFile = baseDir.appendingPathComponent("loaded_models.json")
         engine.settingsProvider = { [settingsManager] modelId in
             settingsManager.getSettings(modelId)
         }
@@ -44,18 +45,49 @@ public final class InferenceService: @unchecked Sendable {
             thinkingBudget: finalRequest.thinkingBudget
         )
 
-        // Session and grammar paths use engine directly (specialized execution)
+        let reqTag = finalRequest.id.uuidString.prefix(8)
+
+        // Context window check — fail fast if prompt exceeds model's context length.
+        // This gives the client an immediate error instead of hanging through prefill.
+        let container = engine.getContainer(for: resolvedId)
+        if let tokenizer = container?.tokenizer {
+            let promptTokens = engine.tokenizeMessages(finalRequest.messages, tokenizer: tokenizer)
+            let contextLength = settings.maxContextWindow ?? container?.config.contextLength ?? 4096
+            let maxTokens = finalRequest.maxTokens ?? container?.config.maxTokens ?? 4096
+            if promptTokens.count + maxTokens > contextLength {
+                NovaMLXLog.warning("[ContextWindow:\(reqTag)] Prompt (\(promptTokens.count) tokens) + maxTokens (\(maxTokens)) exceeds context length (\(contextLength))")
+                throw NovaMLXError.contextWindowExceeded(
+                    promptTokens: promptTokens.count, maxTokens: maxTokens, contextLength: contextLength
+                )
+            }
+        }
+
+        // VLM models use ContinuousBatcher — they have complex internal position state
+        // (3D mRoPE, precomputedPositionIds, ropeDeltas) that our fused decode step
+        // can't replicate with a simple model(token, cache:) call.
+        let isVLM = container?.config.modelType == .vlm
+
+        // Hybrid linear attention models (e.g. Qwen3.5) mix MambaCache + KVCacheSimple layers.
+        // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
+        let hasLinearAttention = container?.config.hasLinearAttention == true
+
+        // Session, grammar, and VLM paths use engine directly (specialized execution)
         let needsSpecialized = finalRequest.sessionId != nil ||
             finalRequest.jsonSchemaDef != nil ||
             finalRequest.responseFormat == .jsonObject ||
             finalRequest.regexPattern != nil ||
-            finalRequest.gbnfGrammar != nil
+            finalRequest.gbnfGrammar != nil ||
+            isVLM ||
+            hasLinearAttention
 
         if needsSpecialized {
+            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (finalRequest.sessionId != nil ? "session" : "grammar"))
+            NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher (reason=\(reason), model=\(resolvedId))")
             return try await batcher.submit(finalRequest)
         }
 
-        // Standard path: fused batch scheduler (shared GPU forward passes)
+        // LLM standard path: fused batch scheduler (shared GPU forward passes)
+        NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(resolvedId))")
         return try await fusedScheduler.submit(finalRequest)
     }
 
@@ -78,18 +110,50 @@ public final class InferenceService: @unchecked Sendable {
             thinkingBudget: finalRequest.thinkingBudget
         )
 
-        // Session and grammar paths use engine directly (specialized execution)
+        let reqTag = finalRequest.id.uuidString.prefix(8)
+
+        // Context window check — fail fast with an error stream instead of hanging.
+        let container = engine.getContainer(for: resolvedId)
+        if let tokenizer = container?.tokenizer {
+            let promptTokens = engine.tokenizeMessages(finalRequest.messages, tokenizer: tokenizer)
+            let contextLength = settings.maxContextWindow ?? container?.config.contextLength ?? 4096
+            let maxTokens = finalRequest.maxTokens ?? container?.config.maxTokens ?? 4096
+            if promptTokens.count + maxTokens > contextLength {
+                NovaMLXLog.warning("[ContextWindow:\(reqTag)] Prompt (\(promptTokens.count) tokens) + maxTokens (\(maxTokens)) exceeds context length (\(contextLength))")
+                return AsyncThrowingStream {
+                    $0.finish(throwing: NovaMLXError.contextWindowExceeded(
+                        promptTokens: promptTokens.count, maxTokens: maxTokens, contextLength: contextLength
+                    ))
+                }
+            }
+        }
+
+        // VLM models use ContinuousBatcher — they have complex internal position state
+        // (3D mRoPE, precomputedPositionIds, ropeDeltas) that our fused decode step
+        // can't replicate with a simple model(token, cache:) call.
+        let isVLM = container?.config.modelType == .vlm
+
+        // Hybrid linear attention models (e.g. Qwen3.5) mix MambaCache + KVCacheSimple layers.
+        // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
+        let hasLinearAttention = container?.config.hasLinearAttention == true
+
+        // Session, grammar, and VLM paths use engine directly (specialized execution)
         let needsSpecialized = finalRequest.sessionId != nil ||
             finalRequest.jsonSchemaDef != nil ||
             finalRequest.responseFormat == .jsonObject ||
             finalRequest.regexPattern != nil ||
-            finalRequest.gbnfGrammar != nil
+            finalRequest.gbnfGrammar != nil ||
+            isVLM ||
+            hasLinearAttention
 
         if needsSpecialized {
+            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (finalRequest.sessionId != nil ? "session" : "grammar"))
+            NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher stream (reason=\(reason), model=\(resolvedId))")
             return batcher.submitStream(finalRequest)
         }
 
-        // Standard path: fused batch scheduler (shared GPU forward passes)
+        // LLM standard path: fused batch scheduler (shared GPU forward passes)
+        NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler stream (model=\(resolvedId))")
         return fusedScheduler.submitStream(finalRequest)
     }
 

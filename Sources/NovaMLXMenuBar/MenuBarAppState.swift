@@ -114,6 +114,17 @@ public final class MenuBarAppState: ObservableObject {
         downloadTasks.removeValue(forKey: repoId)
     }
 
+    /// Cancel a failed/incomplete download and delete all partial files from disk
+    public func cancelAndDeleteDownload(repoId: String, modelsDirectory: URL) {
+        let modelDir = modelsDirectory.appendingPathComponent(repoId, isDirectory: true)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: modelDir.path) {
+            try? fm.removeItem(at: modelDir)
+            NovaMLXLog.info("Deleted partial download: \(modelDir.path)")
+        }
+        downloadTasks.removeValue(forKey: repoId)
+    }
+
     /// Scan models directory for .download temp files left by interrupted downloads
     public func detectIncompleteDownloads(modelsDirectory: URL) {
         let fm = FileManager.default
@@ -136,6 +147,16 @@ public final class MenuBarAppState: ObservableObject {
                 task.errorMessage = "Interrupted — tap Retry to resume"
                 downloadTasks[repoId] = task
                 NovaMLXLog.info("Detected incomplete download: \(repoId)")
+            }
+        }
+    }
+
+    /// Auto-resume any downloads that were interrupted in a previous session
+    public func resumeIncompleteDownloads() {
+        for (repoId, task) in downloadTasks {
+            if task.status == .failed {
+                NovaMLXLog.info("Auto-resuming interrupted download: \(repoId)")
+                startDownload(repoId: repoId)
             }
         }
     }

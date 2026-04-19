@@ -238,19 +238,40 @@ public final class ModelDiscovery: Sendable {
         let architectures = config.architectures ?? []
         let rawType = (config.modelType ?? "").lowercased().replacingOccurrences(of: "-", with: "_")
 
+        // 1. Explicit VLM architectures (highest confidence — these are always multimodal)
         for arch in architectures {
             if Self.vlmArchitectures.contains(arch) { return .vlm }
         }
 
+        // 2. Explicit VLM model_types WITH vision_config present
         if Self.vlmModelTypes.contains(rawType) && config.visionConfig != nil { return .vlm }
 
+        // 3. Ambiguous case: vision_config exists but arch/model_type are NOT in VLM lists.
+        //    This happens with text-only fine-tunes of multimodal base models (e.g. Qwen3.5 distilled).
+        //    The base model's config.json may retain a vestigial vision_config section, but the
+        //    actual model weights lack a vision encoder.
+        //
+        //    Decision heuristic: if the architecture name contains "CausalLM" or "ForCausalLM",
+        //    it's a text-only model by definition (CausalLM = autoregressive language model).
+        //    If it contains "ConditionalGeneration" but is NOT in vlmArchitectures, it's a
+        //    text-only variant (the VLM variant would have been caught by step 1).
+        //
+        //    Only classify as VLM if NEITHER condition above holds — truly unknown architectures
+        //    with vision_config that don't match any known pattern.
         if config.visionConfig != nil {
-            let llmArchs: Set<String> = [
-                "LlamaForCausalLM", "MistralForCausalLM", "Qwen2ForCausalLM",
-                "Gemma2ForCausalLM", "Phi3ForCausalLM",
-            ]
-            let hasLLMArch = architectures.contains { llmArchs.contains($0) }
-            if !hasLLMArch { return .vlm }
+            let isDefinitelyLLM = architectures.contains { arch in
+                arch.hasSuffix("ForCausalLM") || arch.hasSuffix("CausalLM")
+            }
+            if isDefinitelyLLM {
+                // Text-only model that happens to have vestigial vision_config — ignore it
+            } else if !rawType.isEmpty && !Self.vlmModelTypes.contains(rawType) {
+                // model_type is set but NOT a known VLM type — likely a text-only variant
+                // e.g. model_type="qwen3_5" with arch "Qwen3_5ForConditionalGeneration"
+                // The VLM variant would have model_type="qwen3_vl" and be caught by step 2.
+            } else {
+                // Truly ambiguous: unknown architecture + unknown model_type + vision_config
+                return .vlm
+            }
         }
 
         for arch in architectures {

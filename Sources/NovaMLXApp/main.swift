@@ -80,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
 
-        let oldFilePrefix = "file://" + oldPrefix.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!
+        _ = "file://" + oldPrefix.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!
         var changed = false
 
         for (key, value) in json {
@@ -126,6 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         Task {
+            NovaMLXLog.rotateLogFile()
+
             try? await config.initializeDirectories()
 
             let configFile = await config.modelsDirectory
@@ -148,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Restore previously loaded models and detect interrupted downloads
             await inferenceService.restoreModels(modelManager: modelManager)
             appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
+            appState.resumeIncompleteDownloads()
 
             appState.startStatsMonitoring(inferenceService: inferenceService)
 

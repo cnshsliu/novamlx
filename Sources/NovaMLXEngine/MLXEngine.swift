@@ -88,10 +88,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     private var totalInferenceTime: TimeInterval
 
     private var deferredClearCounter: Int = 0
-    private let deferredClearThreshold: Int = 8
+    private let deferredClearThreshold: Int = 2
     private let wiredPolicy = MLXLMCommon.WiredSumPolicy()
 
     public init(kvCacheCapacity: Int = 1024, maxMemoryMB: UInt64 = 2048, maxConcurrent: Int = 8, metricsStore: MetricsStore? = nil) {
+        // Hard cap MLX at 50% of physical RAM — allocations beyond this will fail
+        // rather than consuming all memory and crashing the system.
+        let physMem = ProcessInfo.processInfo.physicalMemory
+        let hardLimitBytes = physMem / 2
+        MLX.Memory.memoryLimit = Int(hardLimitBytes)
+        MLX.Memory.cacheLimit = 512 * 1024 * 1024  // 512MB compute cache cap
+
         self.isReady = false
         self.pool = EnginePool(maxMemoryMB: maxMemoryMB)
         self.metricsStore = metricsStore ?? MetricsStore(baseDirectory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("NovaMLX"))
@@ -100,7 +107,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         self.adapterService = AdapterService()
         self.specDecoder = SpeculativeDecoder()
         self.fusedBatchDecoder = FusedBatchDecoder()
-        self.budgetTracker = MemoryBudgetTracker(gpuLimitBytes: UInt64(GPU.maxRecommendedWorkingSetBytes() ?? 0))
+        self.budgetTracker = MemoryBudgetTracker(gpuLimitBytes: hardLimitBytes)
         self.prefixCacheManagers = [:]
         self.activeCount = 0
         self.activeTasks = [:]
@@ -108,7 +115,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         self.totalTokensGenerated = 0
         self.totalInferenceTime = 0
         FusedSDPARegistration.register()
-        NovaMLXLog.info("MLX Engine initialized (maxMemory: \(maxMemoryMB)MB)")
+        NovaMLXLog.info("MLX Engine initialized (maxMemory: \(maxMemoryMB)MB, hardLimit: \(hardLimitBytes / 1024 / 1024)MB)")
     }
 
     public func loadModel(from url: URL, config: ModelConfig) async throws -> ModelContainer {
@@ -131,8 +138,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let model = await mlxContainer.perform { context in SendableBox(context.model) }
 
-        // Read actual head_dim from config.json — don't guess
-        // Qwen3.5 uses head_dim=256, Phi uses 96, most others use 128
+        // Read model architecture params from config.json.
+        // We need head_dim for KV memory calculation and max_position_embeddings
+        // for context window enforcement. Every HuggingFace model has these.
         var headDim = 128
         let configFile = url.appendingPathComponent("config.json")
         if let data = try? Data(contentsOf: configFile),
@@ -144,6 +152,24 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             } else if let hs = tc["hidden_size"] as? Int,
                       let nah = tc["num_attention_heads"] as? Int, nah > 0 {
                 headDim = hs / nah
+            }
+
+            // Auto-detect context length from max_position_embeddings.
+            // This is the standard HuggingFace field that every LLM model defines.
+            // Without this, all models default to 4096 which is wrong for most modern
+            // models (Phi-3.5=128K, Qwen=128K, Llama-3=128K, etc).
+            if let maxPos = tc["max_position_embeddings"] as? Int, maxPos > 0 {
+                container.config.contextLength = maxPos
+                NovaMLXLog.info("Auto-detected context length: \(maxPos) tokens for \(config.identifier.displayName)")
+            }
+
+            // Detect hybrid linear attention models (e.g. Qwen3.5).
+            // These use MambaCache for linear_attention layers + KVCacheSimple for full_attention layers.
+            // FusedBatchScheduler only supports KVCacheSimple, so these must use ContinuousBatcher.
+            if let layerTypes = tc["layer_types"] as? [String],
+               layerTypes.contains("linear_attention") {
+                container.config.hasLinearAttention = true
+                NovaMLXLog.info("Detected hybrid linear attention model (\(layerTypes.filter { $0 == "linear_attention" }.count)/\(layerTypes.count) linear layers) — will use ContinuousBatcher")
             }
         }
 
@@ -193,7 +219,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         lock.withLock { prefixCacheManagers[modelId]?.clear() }
     }
 
-    private func getOrCreatePrefixCacheManager(modelId: String) -> PrefixCacheManager? {
+    func getOrCreatePrefixCacheManager(modelId: String) -> PrefixCacheManager? {
         lock.withLock {
             if let existing = prefixCacheManagers[modelId] {
                 return existing
@@ -213,7 +239,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
     }
 
-    private func tokenizeMessages(_ messages: [ChatMessage], tokenizer: Tokenizer) -> [Int] {
+    public func tokenizeMessages(_ messages: [ChatMessage], tokenizer: Tokenizer) -> [Int] {
         var allTokens: [Int] = []
         for msg in messages {
             if let content = msg.content {
@@ -268,7 +294,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return wiredPolicy.ticket(size: estimatedBytes, kind: MLX.WiredMemoryTicketKind.active)
     }
 
-    public func preflightCheck(modelId: String, promptTokens: Int, maxTokens: Int) throws {
+    public func preflightCheck(modelId: String, promptTokens: Int, maxTokens: Int) async throws {
         guard let maxGPU = GPU.maxRecommendedWorkingSetBytes(), maxGPU > 0 else { return }
 
         guard let container = getContainer(for: modelId) else { return }
@@ -277,20 +303,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let autoCalculated = container.config.kvMemoryBytesPerToken
         let bytesPerToken = adminOverride ?? autoCalculated ?? 262144
 
-        let currentActive = UInt64(MLX.Memory.activeMemory)
+        // Use budgetTracker's committed bytes (accurate) instead of MLX.Memory.activeMemory (unreliable)
+        let budgetMetrics = await budgetTracker.metrics
+        let currentCommitted = budgetMetrics.weightsMemoryBytes + budgetMetrics.committedKVBytes
         let estimatedKVBytes = UInt64(promptTokens + maxTokens) * UInt64(bytesPerToken)
-        let projectedTotal = currentActive + estimatedKVBytes
+        let projectedTotal = currentCommitted + estimatedKVBytes
 
-        guard projectedTotal <= UInt64(maxGPU) else {
+        // Soft cap at 45% — early warning before hitting hard 50% MLX limit
+        let safeLimit = UInt64(maxGPU) * 45 / 100
+
+        guard projectedTotal <= safeLimit else {
             let neededMB = projectedTotal / 1024 / 1024
-            let availableMB = UInt64(maxGPU) / 1024 / 1024
-            NovaMLXLog.warning("Preflight REJECTED: model=\(modelId), estimated=\(neededMB)MB, available=\(availableMB)MB, active=\(currentActive / 1024 / 1024)MB, kvEstimate=\(estimatedKVBytes / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
+            let limitMB = safeLimit / 1024 / 1024
+            NovaMLXLog.warning("Preflight REJECTED: model=\(modelId), estimated=\(neededMB)MB, limit=\(limitMB)MB, committed=\(currentCommitted / 1024 / 1024)MB, kvEstimate=\(estimatedKVBytes / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
             throw NovaMLXError.inferenceFailed(
-                "Insufficient GPU memory: estimated \(neededMB)MB needed, \(availableMB)MB available. Active: \(currentActive / 1024 / 1024)MB, KV estimate: \(estimatedKVBytes / 1024 / 1024)MB"
+                "Insufficient GPU memory: estimated \(neededMB)MB needed, limit \(limitMB)MB. Committed: \(currentCommitted / 1024 / 1024)MB"
             )
         }
 
-        NovaMLXLog.info("Preflight OK: model=\(modelId), projected=\(projectedTotal / 1024 / 1024)MB, limit=\(UInt64(maxGPU) / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
+        NovaMLXLog.info("Preflight OK: model=\(modelId), projected=\(projectedTotal / 1024 / 1024)MB, limit=\(safeLimit / 1024 / 1024)MB, committed=\(currentCommitted / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
     }
 
     /// Compute effective bytesPerToken for a model, factoring in TurboQuant compression.
@@ -315,12 +346,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     /// Estimate total tokens for a request (prompt + max output).
-    /// Uses conservative defaults when maxTokens is not specified.
+    /// Prompt tokens are already in activeMemory, so we only budget for output tokens.
     public func estimateRequestTokens(modelId: String, request: InferenceRequest) -> Int {
         let maxTokens = request.maxTokens ?? getContainer(for: modelId)?.config.maxTokens ?? 4096
-        // Conservative prompt estimate before tokenization
-        let estimatedPromptTokens = 500
-        return estimatedPromptTokens + maxTokens
+        return maxTokens
     }
 
     func buildGenerateParameters(
@@ -417,7 +446,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Starting generation for \(request.model)")
 
         let maxTokens = request.maxTokens ?? container.config.maxTokens
-        try preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+        try await preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
         let prefixCacheTokens: [Int]? = if let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
             input.text.tokens.asArray(Int32.self).map { Int($0) }
@@ -524,8 +553,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let parameters = self.buildGenerateParameters(request: request, config: container.config, settings: self.settingsProvider?(request.model))
                     let promptTokenCount = input.text.tokens.size
                     let maxTokens = request.maxTokens ?? container.config.maxTokens
-                    try self.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
-                    let ticket = self.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+                    try await self.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+                    let ticketBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262144
+                    let ticket = self.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: ticketBytesPerToken)
                     let stream = try await mlxContainer.generate(input: input, parameters: parameters, wiredMemoryTicket: ticket)
 
                     var finishReason: FinishReason = .stop
@@ -622,7 +652,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let estimatedPromptTokens = tokenizeMessages(request.messages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
         let maxTokens = request.maxTokens ?? container.config.maxTokens
-        try preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
+        try await preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
         let sessionBox = sessionManager.getOrCreate(
             sessionId: sessionId,
@@ -689,7 +719,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let estimatedPromptTokens = engine.tokenizeMessages(request.messages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
                     let maxTokens = request.maxTokens ?? container.config.maxTokens
-                    try engine.preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
+                    try await engine.preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
                     let sessionBox = engine.sessionManager.getOrCreate(
                         sessionId: sessionId,
@@ -804,7 +834,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let promptTokenCount = input.text.tokens.size
         let maxTokens = request.maxTokens ?? container.config.maxTokens
-        try preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+        try await preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
         let sampler = TopPSampler(
             temperature: Float(request.temperature ?? container.config.temperature),
@@ -914,7 +944,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let input = try await mlxContainer.prepare(input: userInput)
                     let promptTokenCount = input.text.tokens.size
                     let maxTokens = request.maxTokens ?? container.config.maxTokens
-                    try engine.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+                    try await engine.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
                     let sampler = TopPSampler(
                         temperature: Float(request.temperature ?? container.config.temperature),

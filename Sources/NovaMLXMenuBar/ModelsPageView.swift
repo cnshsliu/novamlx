@@ -9,7 +9,7 @@ struct ModelsPageView: View {
     let inferenceService: InferenceService
     let modelManager: ModelManager
 
-    @State private var subTab: SubTab = .browse
+    @State private var subTab: SubTab = .myModels
     @State private var searchText = ""
     @State private var searchResults: [HFSearchResult] = []
     @State private var isSearching = false
@@ -27,9 +27,8 @@ struct ModelsPageView: View {
     @State private var loadingModelId: String?
 
     enum SubTab: String, CaseIterable {
-        case browse = "Browse"
-        case downloads = "Downloads"
         case myModels = "My Models"
+        case downloads = "Downloads"
     }
 
     var body: some View {
@@ -53,6 +52,13 @@ struct ModelsPageView: View {
             }
             Button("Delete", role: .destructive) {
                 if let id = modelToDelete {
+                    // Unload from memory first if loaded
+                    if let record = modelManager.getRecord(id) {
+                        Task {
+                            await inferenceService.unloadModel(ModelIdentifier(id: id, family: record.family))
+                        }
+                    }
+                    // Then delete from disk
                     try? modelManager.deleteModel(id)
                     refreshTrigger.toggle()
                 }
@@ -103,27 +109,66 @@ struct ModelsPageView: View {
     @ViewBuilder
     private var subTabContent: some View {
         switch subTab {
-        case .browse:
-            browseTab
-        case .downloads:
-            downloadsTab
         case .myModels:
             myModelsTab
+        case .downloads:
+            downloadsTab
         }
     }
 
-    // MARK: - Browse Tab
+    // MARK: - Downloads Tab (merged browse + downloads)
 
-    private var browseTab: some View {
-        VStack(spacing: 0) {
+    private var downloadsTab: some View {
+        let activeOrFailed = appState.downloadTasks.values
+            .filter { $0.isActive || $0.status == .failed }
+            .sorted { $0.startedAt > $1.startedAt }
+
+        return VStack(spacing: 0) {
+            // Active/failed downloads pinned at top
+            if !activeOrFailed.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    sectionHeader(
+                        activeOrFailed.allSatisfy(\.isActive) ? "Downloading" : "Downloads",
+                        icon: "arrow.down.circle",
+                        count: activeOrFailed.count
+                    )
+                    ForEach(activeOrFailed, id: \.repoId) { task in
+                        topDownloadRow(task)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                Divider()
+            }
+
             searchBar
             Divider()
+
             ScrollView {
                 VStack(spacing: 20) {
                     if !searchResults.isEmpty {
                         searchResultsSection
                     }
                     manualDownloadSection
+
+                    let completed = appState.downloadTasks.values
+                        .filter { $0.status == .completed }
+                        .sorted { $0.startedAt > $1.startedAt }
+
+                    if !completed.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            sectionHeader("Completed", icon: "checkmark.circle", count: completed.count)
+                            ForEach(completed, id: \.repoId) { task in
+                                completedDownloadRow(task)
+                            }
+                        }
+                        .sectionCard()
+                    }
+
+                    if searchResults.isEmpty && activeOrFailed.isEmpty && appState.downloadTasks.isEmpty {
+                        emptyState("No Downloads", subtitle: "Search for models or paste a URL to start downloading.")
+                            .padding(.top, 60)
+                    }
                 }
                 .padding(24)
             }
@@ -207,8 +252,8 @@ struct ModelsPageView: View {
                 .font(.caption)
         } else if let task = appState.downloadTasks[repoId], task.isActive {
             HStack(spacing: 6) {
-                ProgressView(value: task.progress, total: 100)
-                    .frame(width: 60)
+                Text("Downloading")
+                    .font(.caption).foregroundColor(NovaTheme.Colors.accent)
                 Text("\(Int(task.progress))%")
                     .font(.caption2).foregroundColor(.secondary)
                 Button { appState.cancelDownload(repoId: repoId) } label: {
@@ -218,9 +263,21 @@ struct ModelsPageView: View {
                 .buttonStyle(.plain)
             }
         } else if let task = appState.downloadTasks[repoId], task.status == .failed {
-            Button("Retry") { appState.startDownload(repoId: repoId) }
+            HStack(spacing: 6) {
+                Button("Resume") { appState.startDownload(repoId: repoId) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button { appState.cancelAndDeleteDownload(
+                    repoId: repoId,
+                    modelsDirectory: modelManager.modelsDirectory
+                ) } label: {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .foregroundColor(.red)
+            }
         } else {
             Button("Download") { appState.startDownload(repoId: repoId) }
                 .buttonStyle(.bordered)
@@ -267,103 +324,85 @@ struct ModelsPageView: View {
         .sectionCard()
     }
 
-    // MARK: - Downloads Tab
-
-    private var downloadsTab: some View {
-        ScrollView {
-            let active = appState.downloadTasks.values.filter { $0.isActive }.sorted { $0.startedAt > $1.startedAt }
-            let completed = appState.downloadTasks.values.filter { !$0.isActive }.sorted { $0.startedAt > $1.startedAt }
-
-            VStack(spacing: 20) {
-                if active.isEmpty && completed.isEmpty {
-                    emptyState("No Downloads", subtitle: "Search for models or paste a URL to start downloading.")
-                        .padding(.top, 60)
-                }
-
-                if !active.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        sectionHeader("Active", icon: "arrow.down.circle", count: active.count)
-                        ForEach(active, id: \.repoId) { task in
-                            activeDownloadRow(task)
-                        }
-                    }
-                    .sectionCard()
-                }
-
-                if !completed.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        sectionHeader("Recent", icon: "clock", count: completed.count)
-                        ForEach(completed, id: \.repoId) { task in
-                            completedDownloadRow(task)
-                        }
-                    }
-                    .sectionCard()
-                }
-            }
-            .padding(24)
-        }
-    }
-
-    private func activeDownloadRow(_ task: DownloadTaskInfo) -> some View {
+    /// Row shown in the pinned top section for active and failed downloads
+    private func topDownloadRow(_ task: DownloadTaskInfo) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Model header row
             HStack(spacing: 12) {
-                Image(systemName: "arrow.down.circle")
-                    .foregroundColor(NovaTheme.Colors.accent)
+                Image(systemName: task.isActive ? "arrow.down.circle" : "exclamationmark.triangle.fill")
+                    .foregroundColor(task.isActive ? NovaTheme.Colors.accent : NovaTheme.Colors.statusWarn)
                     .font(.title3)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(task.repoId).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                    HStack(spacing: 8) {
-                        ProgressView(value: task.progress, total: 100)
-                            .frame(maxWidth: 200)
-                        Text("\(Int(task.progress))%")
-                            .font(.caption).foregroundColor(.secondary).frame(width: 36, alignment: .trailing)
-                        Text(task.totalBytes > 0
-                             ? "\(formatBytes(task.downloadedBytes)) / \(formatBytes(task.totalBytes))"
-                             : "\(formatBytes(task.downloadedBytes)) downloaded")
-                            .font(.caption2).foregroundColor(.secondary)
+                    if task.isActive {
+                        HStack(spacing: 8) {
+                            ProgressView(value: task.progress, total: 100)
+                                .frame(maxWidth: 200)
+                            Text("\(Int(task.progress))%")
+                                .font(.caption).foregroundColor(.secondary).frame(width: 36, alignment: .trailing)
+                            Text(task.totalBytes > 0
+                                 ? "\(formatBytes(task.downloadedBytes)) / \(formatBytes(task.totalBytes))"
+                                 : "\(formatBytes(task.downloadedBytes)) downloaded")
+                                .font(.caption2).foregroundColor(.secondary)
+                        }
+                    } else if let error = task.errorMessage {
+                        Text(error)
+                            .font(.caption).foregroundColor(NovaTheme.Colors.statusError)
+                            .lineLimit(2)
                     }
                 }
 
                 Spacer()
 
-                Button { appState.cancelDownload(repoId: task.repoId) } label: {
-                    Text("Cancel")
+                if task.isActive {
+                    Button { appState.cancelDownload(repoId: task.repoId) } label: {
+                        Text("Cancel")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Button("Resume") { appState.startDownload(repoId: task.repoId) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    Button("Delete") {
+                        appState.cancelAndDeleteDownload(
+                            repoId: task.repoId,
+                            modelsDirectory: modelManager.modelsDirectory
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .foregroundColor(.red)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
 
-            // Per-file progress: only show currently downloading files
-            let activeFiles = task.fileProgresses.filter { $0.status == "downloading" }
-            let completedCount = task.fileProgresses.filter { $0.status == "completed" }.count
-            let total = task.fileProgresses.count
+            if task.isActive {
+                let activeFiles = task.fileProgresses.filter { $0.status == "downloading" }
+                let completedCount = task.fileProgresses.filter { $0.status == "completed" }.count
+                let total = task.fileProgresses.count
 
-            if total > 0 {
-                VStack(alignment: .leading, spacing: 4) {
-                    if total > 0 {
+                if total > 0 {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("\(completedCount)/\(total) files completed")
                             .font(.caption2).foregroundColor(.secondary)
-                    }
 
-                    ForEach(activeFiles) { file in
-                        fileProgressBar(file)
-                    }
+                        ForEach(activeFiles) { file in
+                            fileProgressBar(file)
+                        }
 
-                    // Show failed files with retry indicator
-                    ForEach(task.fileProgresses.filter { $0.status == "failed" }) { file in
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 9)).foregroundColor(NovaTheme.Colors.statusWarn)
-                            Text(file.filename)
-                                .font(.system(size: 10, design: .monospaced))
-                                .lineLimit(1).foregroundColor(NovaTheme.Colors.statusWarn)
-                            Text("retrying...").font(.system(size: 10)).foregroundColor(NovaTheme.Colors.statusWarn)
+                        ForEach(task.fileProgresses.filter { $0.status == "failed" }) { file in
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 9)).foregroundColor(NovaTheme.Colors.statusWarn)
+                                Text(file.filename)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .lineLimit(1).foregroundColor(NovaTheme.Colors.statusWarn)
+                                Text("retrying...").font(.system(size: 10)).foregroundColor(NovaTheme.Colors.statusWarn)
+                            }
                         }
                     }
+                    .padding(.leading, 32)
                 }
-                .padding(.leading, 32)
             }
         }
         .rowCard()
@@ -424,6 +463,16 @@ struct ModelsPageView: View {
                 Button("Retry") { appState.startDownload(repoId: task.repoId) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                Button { appState.cancelAndDeleteDownload(
+                    repoId: task.repoId,
+                    modelsDirectory: modelManager.modelsDirectory
+                ) } label: {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .foregroundColor(.red)
             }
 
             Button { appState.dismissDownload(repoId: task.repoId) } label: {
@@ -483,7 +532,7 @@ struct ModelsPageView: View {
         let downloaded = allDownloaded.filter { !loaded.contains($0.id) }
 
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Downloaded Models", icon: "arrow.down.circle", count: downloaded.count)
+            sectionHeader("Inactive Models", icon: "arrow.down.circle", count: downloaded.count)
 
             if downloaded.isEmpty {
                 emptyState("No models downloaded", subtitle: "Go to Browse to search and download models.")

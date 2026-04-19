@@ -316,6 +316,7 @@ struct SettingsPageView: View {
             sectionHeader("About", icon: "info.circle")
 
             settingsRow("Version", value: NovaMLXCore.version)
+            settingsRow("Build", value: NovaMLXCore.buildTimestamp)
             settingsRow("License", value: "Apache 2.0")
             settingsRow("Platform", value: "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
 

@@ -217,6 +217,11 @@ public final class PagedBlockPool: @unchecked Sendable {
         lock.withLock { allocatedBlocks[blockId] }
     }
 
+    /// Look up an allocated block by its content hash. Returns nil if not found.
+    public func getBlockByHash(_ hash: BlockHash) -> CacheBlock? {
+        lock.withLock { hashMap.get(hash) }
+    }
+
     public func createBlockTable(requestId: String) -> BlockTable {
         lock.withLock {
             let table = BlockTable(requestId: requestId)

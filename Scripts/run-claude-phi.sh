@@ -120,4 +120,4 @@ export DISABLE_PROMPT_CACHING=1
 export CLAUDE_CODE_DISABLE_THINKING=1
 export ANTHROPIC_CUSTOM_MODEL_OPTION="$MODEL"
 
-claude "$@"
+claude -p "1+1=?" "$@"

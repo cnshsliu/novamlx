@@ -17,7 +17,8 @@ public struct PooledModel: @unchecked Sendable {
         self.loadedAt = Date()
         self.lastAccessed = Date()
         self.isPinned = pinned
-        self.estimatedSizeMB = UInt64(MLX.Memory.activeMemory / 1_048_576)
+        // Use model weight size, not MLX.Memory.activeMemory which includes freed memory
+        self.estimatedSizeMB = container.wiredReservationTicket.map { UInt64($0.size / 1_048_576) } ?? 0
     }
 }
 
@@ -112,8 +113,11 @@ public final class EnginePool: @unchecked Sendable {
         }
     }
 
+    // Sum of actual model weight sizes in pool, not MLX.Memory.activeMemory
     public func totalMemoryMB() -> UInt64 {
-        UInt64(MLX.Memory.activeMemory / 1_048_576)
+        lock.withLock {
+            pool.values.reduce(0) { $0 + $1.estimatedSizeMB }
+        }
     }
 
     public var loadedModelIds: [String] {

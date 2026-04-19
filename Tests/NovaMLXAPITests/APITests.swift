@@ -273,8 +273,8 @@ struct APITypesTests {
     @Test("ServerConfig includes admin port")
     func serverConfigAdminPort() {
         let config = ServerConfig()
-        #expect(config.adminPort == 8081)
-        #expect(config.port == 8080)
+        #expect(config.adminPort == 6591)
+        #expect(config.port == 6590)
 
         let custom = ServerConfig(port: 9090, adminPort: 9091, apiKeys: ["secret"])
         #expect(custom.port == 9090)

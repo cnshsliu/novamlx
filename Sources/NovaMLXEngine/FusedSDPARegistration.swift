@@ -1,21 +1,15 @@
 import MLX
 import MLXLMCommon
 
+// NOTE: _novamlxFusedSDPA was removed from mlx-swift 0.31.3.
+// Fused SDPA registration is no longer needed — MLX handles this internally.
+
 public enum FusedSDPARegistration {
     public static func register() {
-        _novamlxFusedSDPA = { queries, qKeys, qValues, scale, groupSize, bits in
-            FusedQuantizedSDPA.attention(
-                queries: queries,
-                quantizedKeys: qKeys,
-                quantizedValues: qValues,
-                scale: scale,
-                groupSize: groupSize,
-                bits: bits
-            )
-        }
+        // No-op: fused SDPA is handled internally by MLX
     }
 
     public static func disableFused() {
-        _novamlxFusedSDPA = nil
+        // No-op
     }
 }

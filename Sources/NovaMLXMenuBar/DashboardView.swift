@@ -78,7 +78,7 @@ public struct DashboardView: View {
             MetricCard(title: "GPU", value: appState.systemStats.gpuMemoryUsed.bytesFormatted, subtitle: "used")
             MetricCard(title: "Requests", value: "\(appState.inferenceStats.activeRequests)", subtitle: "active")
             MetricCard(title: "Speed", value: String(format: "%.1f", appState.systemStats.tokensPerSecond), subtitle: "tok/s")
-            MetricCard(title: "CPU", value: String(format: "%.0f%%", appState.systemStats.cpuUsage * 100), subtitle: "usage")
+            MetricCard(title: "CPU", value: String(format: "%.0f%%", min(appState.systemStats.cpuUsage, 100.0)), subtitle: "usage")
             MetricCard(title: "Uptime", value: formatUptime(appState.uptime), subtitle: "session")
             MetricCard(title: "Disk", value: modelManager.totalDiskUsage().bytesFormatted, subtitle: "models")
         }

@@ -5,6 +5,16 @@ public enum NovaMLX {}
 
 public let version = "1.0.0"
 
+public var buildTimestamp: String {
+    guard let execURL = Bundle.main.executableURL,
+          let attrs = try? FileManager.default.attributesOfItem(atPath: execURL.path),
+          let modDate = attrs[.modificationDate] as? Date
+    else { return "Unknown" }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return formatter.string(from: modDate)
+}
+
 public enum NovaMLXError: Error, LocalizedError {
     case modelNotFound(String)
     case modelLoadFailed(String, underlying: Error)
@@ -14,6 +24,7 @@ public enum NovaMLXError: Error, LocalizedError {
     case apiError(String)
     case downloadFailed(String, underlying: Error)
     case unsupportedModel(String)
+    case contextWindowExceeded(promptTokens: Int, maxTokens: Int, contextLength: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -25,6 +36,8 @@ public enum NovaMLXError: Error, LocalizedError {
         case .apiError(let msg): "API error: \(msg)"
         case .downloadFailed(let url, let err): "Download failed for \(url): \(err.localizedDescription)"
         case .unsupportedModel(let name): "Unsupported model: \(name)"
+        case .contextWindowExceeded(let promptTokens, let maxTokens, let contextLength):
+            "Context window exceeded: prompt has \(promptTokens) tokens + max_tokens \(maxTokens) = \(promptTokens + maxTokens), but model context length is \(contextLength). Reduce your prompt or max_tokens."
         }
     }
 }
@@ -70,7 +83,8 @@ public enum ModelType: String, Codable, Sendable {
 public struct ModelConfig: Codable, Sendable {
     public let identifier: ModelIdentifier
     public let modelType: ModelType
-    public let contextLength: Int
+    public var hasLinearAttention: Bool
+    public var contextLength: Int
     public let maxTokens: Int
     public let temperature: Double
     public let topP: Double
@@ -84,6 +98,7 @@ public struct ModelConfig: Codable, Sendable {
     public init(
         identifier: ModelIdentifier,
         modelType: ModelType = .llm,
+        hasLinearAttention: Bool = false,
         contextLength: Int = 4096,
         maxTokens: Int = 4096,
         temperature: Double = 0.7,
@@ -97,6 +112,7 @@ public struct ModelConfig: Codable, Sendable {
     ) {
         self.identifier = identifier
         self.modelType = modelType
+        self.hasLinearAttention = hasLinearAttention
         self.contextLength = contextLength
         self.maxTokens = maxTokens
         self.temperature = temperature

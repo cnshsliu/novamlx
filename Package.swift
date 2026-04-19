@@ -169,7 +169,7 @@ let package = Package(
         ),
         .testTarget(
             name: "NovaMLXEngineTests",
-            dependencies: ["NovaMLXEngine"],
+            dependencies: ["NovaMLXEngine", "NovaMLXInference", "NovaMLXCore"],
             swiftSettings: concurrencySettings
         ),
         .testTarget(
@@ -204,6 +204,11 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Hub", package: "swift-transformers"),
             ],
+            swiftSettings: concurrencySettings
+        ),
+        .testTarget(
+            name: "NovaMLXE2ETests",
+            dependencies: [],
             swiftSettings: concurrencySettings
         ),
     ]

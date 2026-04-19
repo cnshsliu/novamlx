@@ -65,7 +65,7 @@ struct StatusPageView: View {
 
     private var metricsGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-            MetricCard(icon: "cpu", title: "CPU", value: String(format: "%.0f%%", appState.systemStats.cpuUsage * 100))
+            MetricCard(icon: "cpu", title: "CPU", value: String(format: "%.0f%%", min(appState.systemStats.cpuUsage, 100.0)))
             MetricCard(icon: "memorychip", title: "Memory", value: appState.systemStats.memoryUsed.bytesFormatted)
             MetricCard(icon: "gpu", title: "GPU", value: appState.systemStats.gpuMemoryUsed.bytesFormatted)
             MetricCard(icon: "arrow.triangle.2.circlepath", title: "Uptime", value: formatUptime(appState.uptime))

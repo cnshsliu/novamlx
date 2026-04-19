@@ -145,7 +145,7 @@ public final class PrefixCacheManager: @unchecked Sendable {
                     modelName: modelName
                 )
 
-                if pool.getBlock(hash: hash) != nil {
+                if pool.getBlockByHash(hash) != nil {
                     parentHash = hash
                     continue
                 }
@@ -204,11 +204,5 @@ public final class PrefixCacheManager: @unchecked Sendable {
                 ssdTotalSize: ssdStore?.totalSize ?? 0
             )
         }
-    }
-}
-
-extension PagedBlockPool {
-    func getBlock(hash: BlockHash) -> CacheBlock? {
-        nil
     }
 }

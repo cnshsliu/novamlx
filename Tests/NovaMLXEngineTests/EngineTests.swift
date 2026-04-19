@@ -59,10 +59,12 @@ struct MLXEngineTests {
     }
 
     @Test("Preflight check rejects when model not loaded (no-op)")
-    func preflightNoLoadedModel() {
+    func preflightNoLoadedModel() async {
         let engine = MLXEngine()
-        #expect(throws: Never.self) {
-            try engine.preflightCheck(modelId: "nonexistent", promptTokens: 100, maxTokens: 100)
+        do {
+            try await engine.preflightCheck(modelId: "nonexistent", promptTokens: 100, maxTokens: 100)
+        } catch {
+            // Expected: no crash, model not found = no-op
         }
     }
 

@@ -319,3 +319,27 @@ public struct AnthropicDelta: Codable, Sendable {
     public let type: String
     public let text: String?
 }
+
+// MARK: - Anthropic Error Types
+
+/// Anthropic API error response format:
+/// `{"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}`
+public struct AnthropicErrorResponse: Codable, Sendable {
+    public let type: String
+    public let error: AnthropicErrorDetail
+
+    public init(type: String = "error", error: AnthropicErrorDetail) {
+        self.type = type
+        self.error = error
+    }
+}
+
+public struct AnthropicErrorDetail: Codable, Sendable {
+    public let type: String
+    public let message: String
+
+    public init(type: String, message: String) {
+        self.type = type
+        self.message = message
+    }
+}

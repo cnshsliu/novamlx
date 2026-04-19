@@ -105,6 +105,11 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             seed: request.seed ?? seed,
             stream: request.stream,
             stop: request.stop,
+            sessionId: request.sessionId,
+            responseFormat: request.responseFormat,
+            jsonSchemaDef: request.jsonSchemaDef,
+            regexPattern: request.regexPattern,
+            gbnfGrammar: request.gbnfGrammar,
             thinkingBudget: request.thinkingBudget ?? thinkingBudget
         )
     }

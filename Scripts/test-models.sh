@@ -73,8 +73,19 @@ print('yes' if '$MODEL2' in ids else 'no')
 echo -e "  $MODEL1: $([ "$model1_loaded" = "yes" ] && echo -e "${GREEN}loaded${NC}" || echo -e "${RED}NOT loaded${NC}")"
 echo -e "  $MODEL2: $([ "$model2_loaded" = "yes" ] && echo -e "${GREEN}loaded${NC}" || echo -e "${RED}NOT loaded${NC}")"
 
-if [ "$model1_loaded" = "no" ] || [ "$model2_loaded" = "no" ]; then
-    echo -e "\n${RED}ERROR: Some models not loaded. Load them first.${NC}"
+skip_model1=""
+skip_model2=""
+if [ "$model1_loaded" = "no" ]; then
+    echo -e "\n  ${YELLOW}SKIP: $MODEL1 — model not loaded. Load via admin API first.${NC}"
+    skip_model1="yes"
+fi
+if [ "$model2_loaded" = "no" ]; then
+    echo -e "\n  ${YELLOW}SKIP: $MODEL2 — model not loaded. Load via admin API first.${NC}"
+    skip_model2="yes"
+fi
+
+if [ "$skip_model1" = "yes" ] && [ "$skip_model2" = "yes" ]; then
+    echo -e "\n${RED}ERROR: No models loaded. Nothing to test.${NC}"
     exit 1
 fi
 
@@ -201,7 +212,8 @@ with open('$tmpfile', 'w') as f:
     rm -f "$tmpfile"
 
     local done_found
-    done_found=$(echo "$output" | grep -c '\[DONE\]' || echo "0")
+    done_found=$(echo "$output" | grep -c '\[DONE\]' 2>/dev/null || echo "0")
+    done_found=$(echo "$done_found" | head -1 | tr -d '[:space:]')
 
     local garbage=0
     if check_garbage "$content"; then
@@ -221,19 +233,31 @@ with open('$tmpfile', 'w') as f:
 
 # ─── Model 1: Qwen3.5-27B ───
 
-print_header "MODEL 1: Qwen3.5-27B-Claude-4.6-Opus-Distilled"
-test_non_stream "$MODEL1" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
-test_stream    "$MODEL1" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
-test_non_stream "$MODEL1" "$Q_EN" "English: What is the meaning of life?"
-test_stream    "$MODEL1" "$Q_EN" "English: What is the meaning of life?"
+if [ "$skip_model1" != "yes" ]; then
+    print_header "MODEL 1: Qwen3.5-27B-Claude-4.6-Opus-Distilled"
+    test_non_stream "$MODEL1" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
+    test_stream    "$MODEL1" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
+    test_non_stream "$MODEL1" "$Q_EN" "English: What is the meaning of life?"
+    test_stream    "$MODEL1" "$Q_EN" "English: What is the meaning of life?"
+else
+    print_header "MODEL 1: Qwen3.5-27B-Claude-4.6-Opus-Distilled (SKIPPED)"
+    echo -e "  ${YELLOW}Model not loaded — skipped. Load via:${NC}"
+    echo -e "  ${DIM}curl -s http://127.0.0.1:6591/admin/models/load -H 'Content-Type: application/json' -H 'Authorization: Bearer \$NOVA_API_KEY' -d '{\"modelId\":\"$MODEL1\"}'${NC}"
+fi
 
 # ─── Model 2: Phi-3.5-mini ───
 
-print_header "MODEL 2: Phi-3.5-mini-instruct"
-test_non_stream "$MODEL2" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
-test_stream    "$MODEL2" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
-test_non_stream "$MODEL2" "$Q_EN" "English: What is the meaning of life?"
-test_stream    "$MODEL2" "$Q_EN" "English: What is the meaning of life?"
+if [ "$skip_model2" != "yes" ]; then
+    print_header "MODEL 2: Phi-3.5-mini-instruct"
+    test_non_stream "$MODEL2" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
+    test_stream    "$MODEL2" "$Q_CN" "Chinese: 一加一等于几？只回答数字"
+    test_non_stream "$MODEL2" "$Q_EN" "English: What is the meaning of life?"
+    test_stream    "$MODEL2" "$Q_EN" "English: What is the meaning of life?"
+else
+    print_header "MODEL 2: Phi-3.5-mini-instruct (SKIPPED)"
+    echo -e "  ${YELLOW}Model not loaded — skipped. Load via:${NC}"
+    echo -e "  ${DIM}curl -s http://127.0.0.1:6591/admin/models/load -H 'Content-Type: application/json' -H 'Authorization: Bearer \$NOVA_API_KEY' -d '{\"modelId\":\"$MODEL2\"}'${NC}"
+fi
 
 # ─── Summary ───
 
