@@ -1,0 +1,36 @@
+# ==================== macOS ====================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ==================== Swift / Xcode / SwiftPM ====================
+.build/
+.swiftpm/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+xcuserdata/
+
+# ==================== Python ====================
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.egg-info/
+
+# ==================== AI / 开发工具缓存 ====================
+.claude/
+.factory/
+.iflow/
+.opencode/
+.playwright-mcp/
+.qwen/
+.superpowers/
+
+# ==================== 其他常见忽略 ====================
+.env
+.env.local
+.vscode/
+.idea/
+*.log
