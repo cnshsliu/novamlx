@@ -28,6 +28,12 @@ build/
 .qwen/
 .superpowers/
 
+# ==================== AI / 开发工具状态文件 ====================
+reference/
+skills/
+skills-lock.json
+MEMORY.md
+
 # ==================== 其他常见忽略 ====================
 .env
 .env.local
