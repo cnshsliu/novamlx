@@ -1199,9 +1199,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let dir: String? = request.uri.query.flatMap { url in
                     URLComponents(string: "/" + url)?.queryItems?.first(where: { $0.name == "directory" })?.value
                 }
-                let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
                 let searchDir = dir.map { URL(fileURLWithPath: $0) }
-                    ?? appSupport.appendingPathComponent("NovaMLX/models", isDirectory: true)
+                    ?? NovaMLXPaths.modelsDir
                 let adapters = inference.engine.adapterService.discoverAdapters(in: searchDir)
                 return try Self.jsonResponse(["adapters": adapters])
             }

@@ -68,8 +68,7 @@ public final class ChatSessionManager: @unchecked Sendable {
     public init(maxSessions: Int = 64, sessionTTL: TimeInterval = 1800, cacheDirectory: URL? = nil) {
         self.maxSessions = maxSessions
         self.sessionTTL = sessionTTL
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        self.cacheDirectory = cacheDirectory ?? appSupport.appendingPathComponent("NovaMLX/sessions", isDirectory: true)
+        self.cacheDirectory = cacheDirectory ?? NovaMLXPaths.sessionsDir
         try? FileManager.default.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
     }
 

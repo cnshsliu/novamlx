@@ -9,10 +9,8 @@ public actor NovaMLXConfiguration {
     private var _defaultModel: String?
 
     private init() {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let base = homeDir.appendingPathComponent(".nova", isDirectory: true)
-        _modelsDirectory = base.appendingPathComponent("models", isDirectory: true)
-        _cacheDirectory = base.appendingPathComponent("cache", isDirectory: true)
+        _modelsDirectory = NovaMLXPaths.modelsDir
+        _cacheDirectory = NovaMLXPaths.cacheDir
         _serverConfig = ServerConfig()
     }
 

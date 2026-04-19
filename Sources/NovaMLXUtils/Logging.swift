@@ -11,29 +11,41 @@ public enum NovaMLXLog {
     }()
 
     private static let logQueue = DispatchQueue(label: "com.novamlx.logfile")
+    private static nonisolated(unsafe) var fileHandle: FileHandle?
 
     /// Clear log file — call once at app startup.
     public static func rotateLogFile() {
-        logQueue.async {
-            try? Data().write(to: logFileURL, options: .atomic)
+        logQueue.sync {
+            fileHandle?.closeFile()
+            fileHandle = nil
+            let fm = FileManager.default
+            try? fm.createDirectory(at: logFileURL.deletingLastPathComponent(),
+                                   withIntermediateDirectories: true)
+            fm.createFile(atPath: logFileURL.path, contents: nil)
+            fileHandle = try? FileHandle(forWritingTo: logFileURL)
         }
     }
 
     private static func writeToFile(_ level: String, _ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let line = "[\(timestamp)] [\(level)] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
         logQueue.async {
-            if let data = line.data(using: .utf8) {
+            if let handle = fileHandle {
+                handle.write(data)
+            } else {
+                // Lazy init if rotateLogFile wasn't called or handle went bad
                 let fm = FileManager.default
                 if !fm.fileExists(atPath: logFileURL.path) {
                     try? fm.createDirectory(at: logFileURL.deletingLastPathComponent(),
-                                       withIntermediateDirectories: true)
+                                           withIntermediateDirectories: true)
                     fm.createFile(atPath: logFileURL.path, contents: nil)
                 }
                 if let handle = try? FileHandle(forWritingTo: logFileURL) {
                     handle.seekToEndOfFile()
                     handle.write(data)
-                    try? handle.close()
+                    // Don't close — keep for next write
+                    fileHandle = handle
                 }
             }
         }

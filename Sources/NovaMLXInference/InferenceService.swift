@@ -18,9 +18,7 @@ public final class InferenceService: @unchecked Sendable {
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
         self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         self.settingsManager = settingsManager
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let baseDir = homeDir.appendingPathComponent(".nova", isDirectory: true)
-        self.loadedModelsFile = baseDir.appendingPathComponent("loaded_models.json")
+        self.loadedModelsFile = NovaMLXPaths.loadedModelsFile
         engine.settingsProvider = { [settingsManager] modelId in
             settingsManager.getSettings(modelId)
         }

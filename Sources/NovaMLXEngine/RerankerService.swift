@@ -2,15 +2,13 @@ import Foundation
 import MLX
 import MLXEmbedders
 import MLXLMCommon
-import Tokenizers
-import Hub
 import NovaMLXCore
 import NovaMLXUtils
 
 public final class RerankerContainer: @unchecked Sendable {
     public let identifier: ModelIdentifier
     public let config: ModelConfig
-    public private(set) var embedderContainer: MLXEmbedders.ModelContainer?
+    public private(set) var embedderContainer: EmbedderModelContainer?
     public private(set) var isLoaded: Bool
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
@@ -19,7 +17,7 @@ public final class RerankerContainer: @unchecked Sendable {
         self.isLoaded = false
     }
 
-    public func setLoaded(_ container: MLXEmbedders.ModelContainer) {
+    public func setLoaded(_ container: EmbedderModelContainer) {
         self.embedderContainer = container
         self.isLoaded = true
         NovaMLXLog.info("Reranker model loaded: \(identifier.displayName)")
@@ -60,9 +58,9 @@ public final class RerankerService: @unchecked Sendable {
         )
         NovaMLXLog.info("Loading reranker model from: \(url.path)")
 
-        let modelConfig = MLXEmbedders.ModelConfiguration(directory: url)
-        let embedderContainer = try await MLXEmbedders.loadModelContainer(
-            configuration: modelConfig
+        let embedderContainer = try await EmbedderModelFactory.shared.loadContainer(
+            from: url,
+            using: MLXEngine.tokenizerLoader
         )
 
         container.setLoaded(embedderContainer)
@@ -96,27 +94,27 @@ public final class RerankerService: @unchecked Sendable {
             throw NovaMLXError.inferenceFailed("Reranker model not loaded")
         }
 
-        let results: [RerankResultInternal] = await embedderContainer.perform { modelObj, tokenizer, pooling in
+        let results: [RerankResultInternal] = await embedderContainer.perform { context in
             var scores: [(index: Int, score: Double, tokens: Int)] = []
             var totalTokens = 0
 
             for (idx, doc) in documents.enumerated() {
                 let pair = "\(query)</s></s>\(doc)"
-                let tokenIds = tokenizer.encode(text: pair, addSpecialTokens: true)
+                let tokenIds = context.tokenizer.encode(text: pair, addSpecialTokens: true)
                 totalTokens += tokenIds.count
 
                 let input = MLXArray(tokenIds)[.newAxis, 0...]
                 let mask = MLXArray.ones(input.shape)
                 let tokenTypes = MLXArray.zeros(input.shape)
 
-                let output = modelObj(
+                let output = context.model(
                     input,
                     positionIds: nil,
                     tokenTypeIds: tokenTypes,
                     attentionMask: mask
                 )
 
-                let pooled = pooling(output, mask: mask, normalize: false)
+                let pooled = context.pooling(output, mask: mask, normalize: false)
                 pooled.eval()
 
                 let scoreValue = pooled.asArray(Float.self).first ?? 0.0

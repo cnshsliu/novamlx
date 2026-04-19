@@ -54,12 +54,14 @@ public final class ModelDiscovery: Sendable {
         "Florence2ForConditionalGeneration",
         "Mistral3ForConditionalGeneration",
         "LlavaQwen2ForCausalLM",
+        "Gemma4ForConditionalGeneration",
     ]
 
     private static let vlmModelTypes: Set<String> = [
         "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
         "gemma3", "llava", "llava_next", "llava-qwen2", "mllama",
         "idefics3", "internvl_chat", "phi3_v", "paligemma", "mistral3",
+        "gemma4",
         "pixtral", "molmo", "multi_modality", "florence2", "minicpmv",
         "phi4_siglip", "phi4mm", "deepseek_vl2",
     ]
@@ -84,7 +86,7 @@ public final class ModelDiscovery: Sendable {
         "mistral": .mistral, "mixtral": .mistral,
         "phi": .phi, "phi3": .phi, "phi3_v": .phi, "phi4mm": .phi,
         "qwen2": .qwen, "qwen2_vl": .qwen, "qwen2_5_vl": .qwen, "qwen3": .qwen, "qwen3_vl": .qwen,
-        "gemma": .gemma, "gemma2": .gemma, "gemma3": .gemma, "gemma4": .gemma, "gemma3_text": .gemma, "gemma3n": .gemma,
+        "gemma": .gemma, "gemma2": .gemma, "gemma3": .gemma, "gemma4": .gemma, "gemma3_text": .gemma, "gemma3n": .gemma, "gemma4_text": .gemma,
         "starcoder2": .starcoder,
     ]
 

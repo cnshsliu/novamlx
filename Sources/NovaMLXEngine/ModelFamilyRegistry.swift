@@ -72,10 +72,12 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
             repeatLastN: 64
         ),
         .gemma: ModelFamilyOptimization(
-            defaultKVBits: 4,
+            defaultKVBits: nil,
+            defaultKVGroupSize: 32,
             prefillStepSize: 256,
             recommendedContextLength: 8192,
-            repeatLastN: 32
+            repeatLastN: 32,
+            headDim: 256
         ),
         .starcoder: ModelFamilyOptimization(
             defaultKVBits: 4,

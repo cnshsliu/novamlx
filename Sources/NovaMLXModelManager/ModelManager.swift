@@ -369,8 +369,9 @@ public final class ModelManager: @unchecked Sendable {
                 let needsURLUpdate = currentRecord.localURL != model.modelPath
                 let needsDownloadUpdate = currentRecord.downloadedAt == nil && model.isComplete
                 let needsCompletenessUpdate = currentRecord.downloadedAt != nil && !model.isComplete
+                let needsModelTypeUpdate = currentRecord.modelType != model.modelType
 
-                if needsURLUpdate || needsDownloadUpdate || needsCompletenessUpdate {
+                if needsURLUpdate || needsDownloadUpdate || needsCompletenessUpdate || needsModelTypeUpdate {
                     let updatedRecord = ModelRecord(
                         id: currentRecord.id,
                         family: currentRecord.family,

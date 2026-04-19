@@ -15,12 +15,11 @@ func runFusedSDPABenchmark() async {
     print("═══════════════════════════════════════════════════════════════════")
     print("")
 
-    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let modelsDir = appSupport.appendingPathComponent("NovaMLX/models", isDirectory: true)
+    let modelsDir = NovaMLXPaths.modelsDir
     let hubDownloadBase = modelsDir.appendingPathComponent("hub")
 
     let engine = MLXEngine()
-    let settingsManager = ModelSettingsManager(baseDirectory: appSupport.appendingPathComponent("NovaMLX"))
+    let settingsManager = ModelSettingsManager(baseDirectory: NovaMLXPaths.baseDir)
     let inferenceService = InferenceService(engine: engine, settingsManager: settingsManager)
     let hubApi = HubApi(downloadBase: hubDownloadBase)
 

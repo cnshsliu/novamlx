@@ -94,19 +94,29 @@ TEST_EXIT=$?
 } >> "$LOG_FILE"
 
 # ─── Parse results ───
-PASSED=$(echo "$TEST_OUTPUT" | grep -c '✔ Test.*passed' 2>/dev/null || echo "0")
-FAILED=$(echo "$TEST_OUTPUT" | grep -c '✘ Test.*failed\|✘ Test.*recorded an issue' 2>/dev/null || echo "0")
-ISSUES=$(echo "$TEST_OUTPUT" | grep -c 'Issue recorded' 2>/dev/null || echo "0")
+PASSED=$(echo "$TEST_OUTPUT" | grep -c '✔ Test.*passed' 2>/dev/null) || PASSED=0
+FAILED=$(echo "$TEST_OUTPUT" | grep -c '✘ Test.*failed\|✘ Test.*recorded an issue' 2>/dev/null) || FAILED=0
+ISSUES=$(echo "$TEST_OUTPUT" | grep -c 'Issue recorded' 2>/dev/null) || ISSUES=0
 TOTAL=$((PASSED + FAILED))
 
+# Write plain text to log
 {
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "RESULTS: $TOTAL tests | ${GREEN}PASS: $PASSED${NC} | ${RED}FAIL: $FAILED${NC} | Issues: $ISSUES"
+    echo "RESULTS: $TOTAL tests | PASS: $PASSED | FAIL: $FAILED | Issues: $ISSUES"
     echo "═══════════════════════════════════════════════════════════════"
     echo ""
     echo "Full log: $LOG_FILE"
     echo "Server log: ~/.nova/novamlx.log"
-} | tee -a "$LOG_FILE"
+} >> "$LOG_FILE"
+
+# Print colored to terminal
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo -e "RESULTS: $TOTAL tests | ${GREEN}PASS: $PASSED${NC} | ${RED}FAIL: $FAILED${NC} | Issues: $ISSUES"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "Full log: $LOG_FILE"
+echo "Server log: ~/.nova/novamlx.log"
 
 exit $TEST_EXIT

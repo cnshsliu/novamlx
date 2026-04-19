@@ -2,15 +2,13 @@ import Foundation
 import MLX
 import MLXEmbedders
 import MLXLMCommon
-import Tokenizers
-import Hub
 import NovaMLXCore
 import NovaMLXUtils
 
 public final class EmbeddingContainer: @unchecked Sendable {
     public let identifier: ModelIdentifier
     public let config: ModelConfig
-    public private(set) var embedderContainer: MLXEmbedders.ModelContainer?
+    public private(set) var embedderContainer: EmbedderModelContainer?
     public private(set) var isLoaded: Bool
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
@@ -19,7 +17,7 @@ public final class EmbeddingContainer: @unchecked Sendable {
         self.isLoaded = false
     }
 
-    public func setLoaded(_ container: MLXEmbedders.ModelContainer) {
+    public func setLoaded(_ container: EmbedderModelContainer) {
         self.embedderContainer = container
         self.isLoaded = true
         NovaMLXLog.info("Embedding model loaded: \(identifier.displayName)")
@@ -62,9 +60,9 @@ public final class EmbeddingService: @unchecked Sendable {
         )
         NovaMLXLog.info("Loading embedding model from: \(url.path)")
 
-        let modelConfig = MLXEmbedders.ModelConfiguration(directory: url)
-        let embedderContainer = try await MLXEmbedders.loadModelContainer(
-            configuration: modelConfig
+        let embedderContainer = try await EmbedderModelFactory.shared.loadContainer(
+            from: url,
+            using: MLXEngine.tokenizerLoader
         )
 
         container.setLoaded(embedderContainer)
@@ -98,12 +96,12 @@ public final class EmbeddingService: @unchecked Sendable {
             throw NovaMLXError.inferenceFailed("Embedding model not loaded")
         }
 
-        let result: [[Float]] = await embedderContainer.perform { modelObj, tokenizer, pooling in
+        let result: [[Float]] = await embedderContainer.perform { context in
             var allTokenIds: [[Int]] = []
             var totalTokenCount = 0
 
             for text in inputs {
-                let tokenIds = tokenizer.encode(text: text, addSpecialTokens: true)
+                let tokenIds = context.tokenizer.encode(text: text, addSpecialTokens: true)
                 allTokenIds.append(tokenIds)
                 totalTokenCount += tokenIds.count
             }
@@ -112,7 +110,7 @@ public final class EmbeddingService: @unchecked Sendable {
                 max = Swift.max(max, tokens.count)
             }
 
-            let padId = tokenizer.eosTokenId ?? 0
+            let padId = context.tokenizer.eosTokenId ?? 0
 
             let padded = MLX.stacked(
                 allTokenIds.map { tokens in
@@ -122,14 +120,14 @@ public final class EmbeddingService: @unchecked Sendable {
             let mask = (padded .!= MLXArray(padId))
             let tokenTypes = MLXArray.zeros(like: padded)
 
-            let modelOutput = modelObj(
+            let modelOutput = context.model(
                 padded,
                 positionIds: nil,
                 tokenTypeIds: tokenTypes,
                 attentionMask: mask
             )
 
-            let pooled = pooling(modelOutput, mask: mask, normalize: true)
+            let pooled = context.pooling(modelOutput, mask: mask, normalize: true)
             pooled.eval()
 
             return pooled.map { $0.asArray(Float.self) }

@@ -147,6 +147,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             modelManager.discoverModels()
             modelManager.cleanupEmptyDirectories()
 
+            // Cleanup orphaned prefix cache dirs and old Application Support directory
+            let downloadedIds = Set(modelManager.downloadedModels().map { $0.id })
+            engine.cleanupOrphanedCacheDirs(downloadedModelIds: downloadedIds)
+            Self.cleanupLegacyAppSupportDir()
+
             // Restore previously loaded models and detect interrupted downloads
             await inferenceService.restoreModels(modelManager: modelManager)
             appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
@@ -218,6 +223,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// Remove the old ~/Library/Application Support/NovaMLX/ directory if it exists
+    private static func cleanupLegacyAppSupportDir() {
+        let fm = FileManager.default
+        let legacyDir = NovaMLXPaths.legacyAppSupportDir
+        guard fm.fileExists(atPath: legacyDir.path) else { return }
+
+        // Move any prefix_cache content to new location first
+        let legacyPrefixCache = legacyDir.appendingPathComponent("prefix_cache")
+        let newPrefixCache = NovaMLXPaths.prefixCacheBaseDir
+        if fm.fileExists(atPath: legacyPrefixCache.path) {
+            try? fm.createDirectory(at: newPrefixCache, withIntermediateDirectories: true)
+            if let contents = try? fm.contentsOfDirectory(at: legacyPrefixCache, includingPropertiesForKeys: nil) {
+                for dir in contents {
+                    let dest = newPrefixCache.appendingPathComponent(dir.lastPathComponent)
+                    if !fm.fileExists(atPath: dest.path) {
+                        try? fm.moveItem(at: dir, to: dest)
+                    }
+                }
+            }
+        }
+
+        // Delete the old directory
+        try? fm.removeItem(at: legacyDir)
+        NovaMLXLog.info("Cleaned up legacy Application Support directory")
     }
 
     func applicationWillTerminate(_ notification: Notification) {

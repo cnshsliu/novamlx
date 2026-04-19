@@ -25,7 +25,7 @@ public final class PrefixCacheManager: @unchecked Sendable {
             modelName: modelName
         )
         if let ssdDir = config.ssdCacheDir {
-            self.ssdStore = SSDCacheStore(cacheDir: ssdDir, maxSize: config.ssdMaxSizeBytes)
+            self.ssdStore = SSDCacheStore(cacheDir: ssdDir, maxSize: config.ssdMaxSizeBytes, ttl: config.ttl)
         } else {
             self.ssdStore = nil
         }

@@ -17,12 +17,11 @@ final class BenchmarkHarness: @unchecked Sendable {
     private let hubApi: HubApi
 
     init() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let modelsDir = appSupport.appendingPathComponent("NovaMLX/models", isDirectory: true)
+        let modelsDir = NovaMLXPaths.modelsDir
         let hubDownloadBase = modelsDir.appendingPathComponent("hub")
 
         self.engine = MLXEngine()
-        self.settingsManager = ModelSettingsManager(baseDirectory: appSupport.appendingPathComponent("NovaMLX"))
+        self.settingsManager = ModelSettingsManager(baseDirectory: NovaMLXPaths.baseDir)
         self.inferenceService = InferenceService(engine: engine, settingsManager: settingsManager)
         self.report = BenchmarkReport()
         self.hubApi = HubApi(downloadBase: hubDownloadBase)

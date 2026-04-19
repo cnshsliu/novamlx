@@ -9,14 +9,16 @@ public struct PrefixCacheConfig: Sendable {
     public let ssdCacheDir: URL?
     public let ssdMaxSizeBytes: UInt64
     public let hotCacheMaxBytes: Int
+    public let ttl: TimeInterval
 
     public init(
         blockSize: Int = 64,
         maxBlocks: Int = 4096,
         initialBlocks: Int = 256,
         ssdCacheDir: URL? = nil,
-        ssdMaxSizeBytes: UInt64 = 100 * 1024 * 1024 * 1024,
-        hotCacheMaxBytes: Int = 0
+        ssdMaxSizeBytes: UInt64 = 5 * 1024 * 1024 * 1024,
+        hotCacheMaxBytes: Int = 0,
+        ttl: TimeInterval = 86400
     ) {
         self.blockSize = blockSize
         self.maxBlocks = maxBlocks
@@ -24,6 +26,7 @@ public struct PrefixCacheConfig: Sendable {
         self.ssdCacheDir = ssdCacheDir
         self.ssdMaxSizeBytes = ssdMaxSizeBytes
         self.hotCacheMaxBytes = hotCacheMaxBytes
+        self.ttl = ttl
     }
 
     public static let `default` = PrefixCacheConfig()

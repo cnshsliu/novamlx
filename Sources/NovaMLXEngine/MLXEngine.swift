@@ -5,8 +5,7 @@ import MLXNN
 import MLXRandom
 import MLXLLM
 import MLXLMCommon
-import Tokenizers
-import Hub
+import MLXVLM
 import NovaMLXCore
 import NovaMLXUtils
 import NovaMLXPrefixCache
@@ -101,7 +100,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         self.isReady = false
         self.pool = EnginePool(maxMemoryMB: maxMemoryMB)
-        self.metricsStore = metricsStore ?? MetricsStore(baseDirectory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("NovaMLX"))
+        self.metricsStore = metricsStore ?? MetricsStore(baseDirectory: NovaMLXPaths.baseDir)
         self.sessionManager = ChatSessionManager()
         self.turboQuantService = TurboQuantService()
         self.adapterService = AdapterService()
@@ -118,25 +117,142 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         NovaMLXLog.info("MLX Engine initialized (maxMemory: \(maxMemoryMB)MB, hardLimit: \(hardLimitBytes / 1024 / 1024)MB)")
     }
 
+    static let tokenizerLoader = LocalTokenizerLoader()
+
+    /// Ensure the model directory has a chat template. If missing, try to copy
+    /// from another downloaded model in the same family, or inject a default template
+    /// for known model families (gemma, qwen, phi, llama).
+    private static func ensureChatTemplate(modelDir: URL, modelId: String, family: ModelFamily) {
+        let fm = FileManager.default
+
+        // Check if chat template already exists in tokenizer_config.json
+        let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
+        if let data = try? Data(contentsOf: tcPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           json["chat_template"] != nil {
+            return // Already has a chat template
+        }
+
+        // Check standalone template files
+        let jinjaPath = modelDir.appendingPathComponent("chat_template.jinja")
+        let jsonPath = modelDir.appendingPathComponent("chat_template.json")
+        if fm.fileExists(atPath: jinjaPath.path) || fm.fileExists(atPath: jsonPath.path) {
+            return
+        }
+
+        NovaMLXLog.warning("[loadModel] \(modelId): no chat template found — attempting to inject one")
+
+        // Try to copy from a sibling model of the same family
+        let modelsDir = modelDir.deletingLastPathComponent()
+        if let siblingTemplate = findChatTemplateInSiblings(modelsDir: modelsDir, currentModel: modelDir) {
+            do {
+                try fm.copyItem(at: siblingTemplate, to: jinjaPath)
+                NovaMLXLog.info("[loadModel] \(modelId): copied chat template from sibling model")
+                return
+            } catch {
+                NovaMLXLog.warning("[loadModel] \(modelId): failed to copy sibling template: \(error)")
+            }
+        }
+
+        // Inject a default template for known families
+        if let defaultTemplate = defaultChatTemplate(for: family) {
+            do {
+                try defaultTemplate.write(to: jinjaPath, atomically: true, encoding: String.Encoding.utf8)
+                NovaMLXLog.info("[loadModel] \(modelId): injected default \(family) chat template")
+            } catch {
+                NovaMLXLog.warning("[loadModel] \(modelId): failed to write default template: \(error)")
+            }
+        } else {
+            NovaMLXLog.warning("[loadModel] \(modelId): no chat template available — inference will fail for chat requests")
+        }
+    }
+
+    private static func findChatTemplateInSiblings(modelsDir: URL, currentModel: URL) -> URL? {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: nil) else { return nil }
+
+        for sibling in contents {
+            guard sibling != currentModel else { continue }
+            let jinja = sibling.appendingPathComponent("chat_template.jinja")
+            if fm.fileExists(atPath: jinja.path) { return jinja }
+        }
+        return nil
+    }
+
+    private static func defaultChatTemplate(for family: ModelFamily) -> String? {
+        switch family {
+        case .gemma:
+            return """
+            {%- set ns = namespace(prev_message_type=None) -%}
+            {%- set loop_messages = messages -%}
+            {{ bos_token }}
+            {%- if messages[0]['role'] in ['system', 'developer'] -%}
+            {{- '<|turn>system\\n' -}}
+            {{- messages[0]['content'] | trim -}}
+            {{- '\\n' -}}
+            {%- set loop_messages = messages[1:] -%}
+            {%- endif -%}
+            {%- for message in loop_messages -%}
+            {%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}
+            {{- '<|turn>' + role + '\\n' -}}
+            {%- if message['content'] is string -%}
+            {{- message['content'] | trim -}}
+            {%- elif message['content'] is sequence -%}
+            {%- for item in message['content'] -%}
+            {%- if item['type'] == 'text' -%}
+            {{- item['text'] | trim -}}
+            {%- endif -%}
+            {%- endfor -%}
+            {%- endif -%}
+            {{- '\\n' -}}
+            {%- endfor -%}
+            {%- if add_generation_prompt -%}
+            {{- '<|turn>model\\n' -}}
+            {%- endif -%}
+            """
+        default:
+            return nil
+        }
+    }
+
     public func loadModel(from url: URL, config: ModelConfig) async throws -> ModelContainer {
         let container = ModelContainer(identifier: config.identifier, config: config)
         NovaMLXLog.info("Loading model from: \(url.path)")
 
-        let modelConfig = ModelConfiguration(directory: url)
-        let mlxContainer = try await LLMModelFactory.shared.loadContainer(configuration: modelConfig)
+        // Ensure chat template exists — models without it will crash on inference.
+        // Check tokenizer_config.json, chat_template.jinja, chat_template.json in order.
+        Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family)
+
+        // VLM models must be loaded via VLMModelFactory — they need vision tower
+        // and VLM-specific prepare()/callAsFunction implementations
+        let isVLM = config.modelType == .vlm
+        let mlxContainer: MLXLMCommon.ModelContainer
+        if isVLM {
+            mlxContainer = try await VLMModelFactory.shared.loadContainer(
+                from: url,
+                using: Self.tokenizerLoader
+            )
+        } else {
+            mlxContainer = try await LLMModelFactory.shared.loadContainer(
+                from: url,
+                using: Self.tokenizerLoader
+            )
+        }
 
         let mlxTokenizer = await mlxContainer.tokenizer
         let eosString = mlxTokenizer.eosToken
         let tokenizer = Tokenizer(
             encode: { text in mlxTokenizer.encode(text: text) },
-            decode: { tokens in mlxTokenizer.decode(tokens: tokens) },
+            decode: { tokens in mlxTokenizer.decode(tokenIds: tokens) },
             eosToken: eosString,
             eosTokenId: mlxTokenizer.eosTokenId
         )
 
         container.setLoaded(mlxContainer: mlxContainer, tokenizer: tokenizer)
 
-        let model = await mlxContainer.perform { context in SendableBox(context.model) }
+        let model = await mlxContainer.perform { (context: ModelContext) in
+            SendableBox(context.model)
+        }
 
         // Read model architecture params from config.json.
         // We need head_dim for KV memory calculation and max_position_embeddings
@@ -201,6 +317,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             Task { await ticket.end() }
             NovaMLXLog.info("Wired memory reservation released for \(identifier.displayName)")
         }
+        // Clear prefix cache for this model
+        if let cacheManager = lock.withLock({ prefixCacheManagers.removeValue(forKey: identifier.id) }) {
+            cacheManager.clear()
+            NovaMLXLog.info("Prefix cache cleared for \(identifier.displayName)")
+        }
         _ = pool.remove(identifier.id)
         metricsStore.recordModelUnload()
         MLX.Memory.clearCache()
@@ -224,18 +345,36 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if let existing = prefixCacheManagers[modelId] {
                 return existing
             }
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let ssdDir = appSupport.appendingPathComponent("NovaMLX/prefix_cache/\(modelId.replacingOccurrences(of: "/", with: "_"))", isDirectory: true)
+            let ssdDir = NovaMLXPaths.prefixCacheDir(for: modelId)
             let config = PrefixCacheConfig(
                 blockSize: 64,
                 maxBlocks: 4096,
                 initialBlocks: 256,
                 ssdCacheDir: ssdDir,
-                ssdMaxSizeBytes: 100 * 1024 * 1024 * 1024
+                ssdMaxSizeBytes: 5 * 1024 * 1024 * 1024  // 5 GB (down from 100 GB)
             )
             let manager = PrefixCacheManager(config: config, modelName: modelId)
             prefixCacheManagers[modelId] = manager
             return manager
+        }
+    }
+
+    public func cleanupOrphanedCacheDirs(downloadedModelIds: Set<String>) {
+        let fm = FileManager.default
+        let cacheBase = NovaMLXPaths.prefixCacheBaseDir
+        guard let contents = try? fm.contentsOfDirectory(at: cacheBase, includingPropertiesForKeys: nil) else { return }
+        var cleaned = 0
+        for dir in contents {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let modelId = dir.lastPathComponent.replacingOccurrences(of: "_", with: "/")
+            if !downloadedModelIds.contains(modelId) {
+                try? fm.removeItem(at: dir)
+                cleaned += 1
+            }
+        }
+        if cleaned > 0 {
+            NovaMLXLog.info("Cleaned \(cleaned) orphaned prefix cache directories")
         }
     }
 
@@ -439,7 +578,27 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         let userInput = try await buildUserInput(request: request, hasImages: hasImages)
-        let input = try await mlxContainer.prepare(input: userInput)
+        let input: LMInput
+        do {
+            input = try await mlxContainer.prepare(input: userInput)
+        } catch {
+            let desc = error.localizedDescription
+            if desc.contains("chat template") {
+                // VLM models can't use plain text fallback — their forward pass expects image embeddings
+                if container.config.modelType == .vlm {
+                    NovaMLXLog.error("[generate] \(request.model): VLM model has no chat template — cannot process request")
+                    throw NovaMLXError.inferenceFailed("Model '\(request.model)' does not have a chat template and is not compatible with text-only requests.")
+                }
+                // LLM models: fall back to plain text encoding
+                NovaMLXLog.warning("[generate] \(request.model): no chat template — falling back to plain text encoding")
+                let plainText = request.messages.compactMap { $0.content }.joined(separator: "\n\n")
+                let tokenizer = await mlxContainer.tokenizer
+                let tokens = tokenizer.encode(text: plainText)
+                input = LMInput(tokens: MLXArray(tokens))
+            } else {
+                throw error
+            }
+        }
 
         let promptTokenCount = input.text.tokens.size
         NovaMLXLog.info("Encoded \(promptTokenCount) tokens via chat template")
@@ -473,6 +632,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 wiredMemoryTicket: ticket
             )
         }
+
 
         var generatedText = ""
         var completionTokens = 0

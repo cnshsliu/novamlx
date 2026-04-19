@@ -101,12 +101,14 @@ struct PendingWrite: @unchecked Sendable {
 public final class SSDCacheStore: @unchecked Sendable {
     private let cacheDir: URL
     private let index: SSDCacheIndex
+    private let ttl: TimeInterval
     private let writeQueue = DispatchQueue(label: "com.novamlx.ssd-cache-writer", qos: .utility)
     private let lock = NovaMLXLock()
 
-    public init(cacheDir: URL, maxSize: UInt64) {
+    public init(cacheDir: URL, maxSize: UInt64, ttl: TimeInterval = 86400) {
         self.cacheDir = cacheDir
         self.index = SSDCacheIndex(maxSize: maxSize)
+        self.ttl = ttl
         initializeDirectories()
         scanExistingFiles()
     }
@@ -127,11 +129,22 @@ public final class SSDCacheStore: @unchecked Sendable {
 
     private func scanExistingFiles() {
         guard let enumerator = FileManager.default.enumerator(at: cacheDir, includingPropertiesForKeys: [.fileSizeKey]) else { return }
+        var pruned = 0
         for case let fileURL as URL in enumerator {
             guard fileURL.pathExtension == "safetensors" else { continue }
             do {
                 let (_, metadata) = try loadArraysAndMetadata(url: fileURL, stream: .cpu)
                 guard let hashHex = metadata["block_hash"] else { continue }
+
+                // TTL check — prune expired entries
+                if let createdAtStr = metadata["created_at"],
+                   let createdAt = Double(createdAtStr),
+                   Date().timeIntervalSince(Date(timeIntervalSince1970: createdAt)) > ttl {
+                    try? FileManager.default.removeItem(at: fileURL)
+                    pruned += 1
+                    continue
+                }
+
                 let hash = hashHex.compactMap { char -> UInt8 in
                     let s = String(char)
                     return UInt8(s, radix: 16) ?? 0
@@ -150,6 +163,9 @@ public final class SSDCacheStore: @unchecked Sendable {
             } catch {
                 NovaMLXLog.debug("SSD cache scan skipped \(fileURL.lastPathComponent): \(error)")
             }
+        }
+        if pruned > 0 {
+            NovaMLXLog.info("SSD cache pruned \(pruned) expired blocks (TTL=\(Int(ttl))s)")
         }
         NovaMLXLog.info("SSD cache store initialized: dir=\(cacheDir.path), blocks=\(index.count), size=\(index.size)")
     }
