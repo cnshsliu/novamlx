@@ -550,6 +550,91 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return params
     }
 
+    // MARK: - Turn Separator Stop Detection
+
+    private static let turnSeparatorLock = NSLock()
+    private nonisolated(unsafe) static var _turnSeparatorCache: [String: Bool] = [:]
+
+    private static func modelUsesTurnSeparators(modelId: String) -> Bool {
+        turnSeparatorLock.lock()
+        if let cached = _turnSeparatorCache[modelId] {
+            turnSeparatorLock.unlock()
+            return cached
+        }
+        turnSeparatorLock.unlock()
+
+        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let result: Bool
+
+        let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
+        if let data = try? Data(contentsOf: tcPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let template = json["chat_template"] as? String {
+            result = template.contains("<|turn>")
+        } else {
+            let jinjaPath = modelDir.appendingPathComponent("chat_template.jinja")
+            if let template = try? String(contentsOf: jinjaPath, encoding: .utf8) {
+                result = template.contains("<|turn>")
+            } else {
+                result = false
+            }
+        }
+
+        turnSeparatorLock.lock()
+        _turnSeparatorCache[modelId] = result
+        turnSeparatorLock.unlock()
+        if result {
+            NovaMLXLog.info("[TurnStop] Detected turn-based chat template for \(modelId)")
+        }
+        return result
+    }
+
+    private func buildTurnStopProcessor(
+        modelId: String,
+        tokenizer: Tokenizer,
+        modelConfig: ModelConfiguration
+    ) -> TurnStopProcessor? {
+        guard Self.modelUsesTurnSeparators(modelId: modelId) else { return nil }
+
+        var eosIds = Set<Int>()
+        if let eosId = tokenizer.eosTokenId { eosIds.insert(eosId) }
+        eosIds = eosIds.union(modelConfig.eosTokenIds)
+
+        return TurnStopProcessor(
+            stopPatterns: ["<|turn>"],
+            eosTokenIds: eosIds,
+            decode: tokenizer.decode
+        )
+    }
+
+    /// Compose a base processor (repetition penalty) with optional turn stop processor.
+    private func composeWithTurnStop(
+        baseProcessor: (any LogitProcessor)?,
+        modelId: String,
+        tokenizer: Tokenizer,
+        modelConfig: ModelConfiguration
+    ) -> (any LogitProcessor)? {
+        guard let tsp = buildTurnStopProcessor(
+            modelId: modelId,
+            tokenizer: tokenizer,
+            modelConfig: modelConfig
+        ) else { return baseProcessor }
+
+        if let base = baseProcessor {
+            return ComposedLogitProcessor(
+                grammarProcessor: base,
+                penaltyProcessor: nil,
+                turnStopProcessor: tsp
+            )
+        }
+        return tsp
+    }
+
+    private static func trimTurnSeparators(_ text: String) -> String {
+        guard let range = text.range(of: "<|turn>") else { return text }
+        return String(text[..<range.lowerBound])
+    }
+
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
         // Dispatch to specialized paths based on request fields
         if let sessionId = request.sessionId {
@@ -624,10 +709,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         // Build processor (repetition penalty only)
-        let processor = parameters.processor()
+        let baseProcessor = parameters.processor()
         let model = await mlxContainer.perform { context in SendableBox(context.model) }
         let mlxTokenizer = await mlxContainer.tokenizer
         let modelConfig = await mlxContainer.configuration
+
+        let processor = composeWithTurnStop(
+            baseProcessor: baseProcessor,
+            modelId: request.model,
+            tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil),
+            modelConfig: modelConfig
+        )
 
         let sampler = parameters.sampler()
 
@@ -776,8 +868,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         NovaMLXLog.info("Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s)")
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Completed: \(completionTokens) tokens, \(String(format: "%.1f", tps)) tok/s")
 
+        let trimmedText = Self.trimTurnSeparators(generatedText)
+
         return InferenceResult(
-            id: request.id, model: request.model, text: generatedText,
+            id: request.id, model: request.model, text: trimmedText,
             tokensPerSecond: tps, promptTokens: promptTokenCount, completionTokens: completionTokens,
             finishReason: finishReason
         )
@@ -832,10 +926,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     }
 
                     // Build processor (repetition penalty only)
-                    let processor = parameters.processor()
+                    let baseProcessor = parameters.processor()
                     let model = await mlxContainer.perform { context in SendableBox(context.model) }
                     let mlxTokenizer = await mlxContainer.tokenizer
                     let modelConfig = await mlxContainer.configuration
+
+                    let processor = self.composeWithTurnStop(
+                        baseProcessor: baseProcessor,
+                        modelId: request.model,
+                        tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil),
+                        modelConfig: modelConfig
+                    )
 
                     let sampler = parameters.sampler()
 
@@ -1071,7 +1172,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
         return InferenceResult(
-            id: request.id, model: request.model, text: generatedText,
+            id: request.id, model: request.model, text: Self.trimTurnSeparators(generatedText),
             tokensPerSecond: tps, promptTokens: promptTokens,
             completionTokens: completionTokens, finishReason: finishReason
         )
@@ -1196,9 +1297,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let modelConfig = await mlxContainer.configuration
 
+        let turnStopProc = buildTurnStopProcessor(
+            modelId: request.model,
+            tokenizer: tokenizer,
+            modelConfig: modelConfig
+        )
+
         let processor: any LogitProcessor
-        if let penalty = penaltyProcessor {
+        if let penalty = penaltyProcessor, let tsp = turnStopProc {
+            processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty, turnStopProcessor: tsp)
+        } else if let penalty = penaltyProcessor {
             processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
+        } else if let tsp = turnStopProc {
+            processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: nil, turnStopProcessor: tsp)
         } else {
             processor = grammarProcessor
         }
@@ -1274,7 +1385,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
         return InferenceResult(
-            id: request.id, model: request.model, text: generatedText,
+            id: request.id, model: request.model, text: Self.trimTurnSeparators(generatedText),
             tokensPerSecond: tps, promptTokens: promptTokenCount,
             completionTokens: completionTokens, finishReason: finishReason
         )
@@ -1312,9 +1423,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let modelConfig = await mlxContainer.configuration
 
+                    let turnStopProc = engine.buildTurnStopProcessor(
+                        modelId: request.model,
+                        tokenizer: tokenizer,
+                        modelConfig: modelConfig
+                    )
+
                     let processor: any LogitProcessor
-                    if let penalty = penaltyProc {
+                    if let penalty = penaltyProc, let tsp = turnStopProc {
+                        processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty, turnStopProcessor: tsp)
+                    } else if let penalty = penaltyProc {
                         processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
+                    } else if let tsp = turnStopProc {
+                        processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: nil, turnStopProcessor: tsp)
                     } else {
                         processor = grammarProcessor
                     }
