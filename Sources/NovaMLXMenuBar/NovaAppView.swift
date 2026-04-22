@@ -28,6 +28,7 @@ public struct NovaAppView: View {
     let modelManager: ModelManager
 
     @State private var selectedPage: AppPage
+    @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
 
     public init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager) {
         self.appState = appState
@@ -37,12 +38,14 @@ public struct NovaAppView: View {
     }
 
     public var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
             detailView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 900, minHeight: 600)
         .onChange(of: appState.requestedPage) { _, newValue in
             if let page = newValue {
@@ -75,9 +78,8 @@ public struct NovaAppView: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 12)
         }
-        .frame(width: 200)
-        .background(.ultraThinMaterial)
-        .background(NovaTheme.Colors.background.opacity(0.85))
+        .background(Color(nsColor: .controlBackgroundColor))
+        .navigationSplitViewColumnWidth(200)
     }
 
     private func sidebarItem(_ page: AppPage) -> some View {

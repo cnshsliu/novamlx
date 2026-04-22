@@ -60,6 +60,7 @@ public final class MetricsStore: @unchecked Sendable {
     private var _metrics: PersistentMetrics
     private let lock = NovaMLXLock()
     private var saveCounter: Int = 0
+    private var _recentTps: Double = 0
 
     public init(baseDirectory: URL) {
         self.metricsFile = baseDirectory.appendingPathComponent("metrics.json")
@@ -72,8 +73,15 @@ public final class MetricsStore: @unchecked Sendable {
         lock.withLock { _metrics }
     }
 
+    public var recentTokensPerSecond: Double {
+        lock.withLock { _recentTps }
+    }
+
     public func recordRequest(model: String, tokens: UInt64, inferenceTime: Double) {
         lock.withLock {
+            if inferenceTime > 0 {
+                _recentTps = Double(tokens) / inferenceTime
+            }
             _metrics.totalRequestsAllTime += 1
             _metrics.totalTokensAllTime += tokens
             _metrics.totalInferenceTimeAllTime += inferenceTime

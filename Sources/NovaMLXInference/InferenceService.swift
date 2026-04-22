@@ -68,7 +68,15 @@ public final class InferenceService: @unchecked Sendable {
 
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
-            return try await worker.sendGenerate(finalRequest)
+            let result = try await worker.sendGenerate(finalRequest)
+            if result.completionTokens > 0 {
+                engine.metricsStore.recordRequest(
+                    model: resolvedId,
+                    tokens: UInt64(result.completionTokens),
+                    inferenceTime: result.tokensPerSecond > 0 ? Double(result.completionTokens) / result.tokensPerSecond : 0
+                )
+            }
+            return result
         }
 
         let reqTag = finalRequest.id.uuidString.prefix(8)
@@ -138,7 +146,23 @@ public final class InferenceService: @unchecked Sendable {
 
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
-            return worker.sendStream(finalRequest)
+            let tracker = StreamTracker(model: resolvedId, metricsStore: engine.metricsStore)
+            let upstream = worker.sendStream(finalRequest)
+            return AsyncThrowingStream { continuation in
+                let task = Task { @Sendable in
+                    do {
+                        for try await token in upstream {
+                            tracker.increment()
+                            continuation.yield(token)
+                        }
+                        tracker.finish()
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
         }
 
         let reqTag = finalRequest.id.uuidString.prefix(8)
@@ -258,7 +282,7 @@ public final class InferenceService: @unchecked Sendable {
     // MARK: - Loaded Models Persistence
 
     private func saveLoadedModelsList() {
-        let ids = engine.pool.loadedModelIds
+        let ids = workerMode ? Array(workerLoadedModels) : engine.pool.loadedModelIds
         guard let data = try? JSONEncoder().encode(ids) else { return }
         try? data.write(to: loadedModelsFile, options: .atomic)
     }
@@ -296,7 +320,8 @@ public final class InferenceService: @unchecked Sendable {
         InferenceStats(
             loadedModels: engine.loadedModelCount,
             activeRequests: batcher.activeRequests + fusedScheduler.activeRequestCount,
-            gpuMemoryUsed: engine.gpuActiveMemory
+            gpuMemoryUsed: engine.gpuActiveMemory,
+            recentTokensPerSecond: engine.metricsStore.recentTokensPerSecond
         )
     }
 
@@ -337,13 +362,36 @@ public final class InferenceService: @unchecked Sendable {
     }
 }
 
+private final class StreamTracker: @unchecked Sendable {
+    let model: String
+    let metricsStore: MetricsStore
+    let startTime = Date()
+    var tokenCount = 0
+
+    init(model: String, metricsStore: MetricsStore) {
+        self.model = model
+        self.metricsStore = metricsStore
+    }
+
+    func increment() { tokenCount += 1 }
+
+    func finish() {
+        let elapsed = Date().timeIntervalSince(startTime)
+        if tokenCount > 0 && elapsed > 0 {
+            metricsStore.recordRequest(model: model, tokens: UInt64(tokenCount), inferenceTime: elapsed)
+        }
+    }
+}
+
 public struct InferenceStats: Sendable {
     public let loadedModels: Int
     public let activeRequests: Int
     public let gpuMemoryUsed: UInt64
-    public init(loadedModels: Int = 0, activeRequests: Int = 0, gpuMemoryUsed: UInt64 = 0) {
+    public let recentTokensPerSecond: Double
+    public init(loadedModels: Int = 0, activeRequests: Int = 0, gpuMemoryUsed: UInt64 = 0, recentTokensPerSecond: Double = 0) {
         self.loadedModels = loadedModels
         self.activeRequests = activeRequests
         self.gpuMemoryUsed = gpuMemoryUsed
+        self.recentTokensPerSecond = recentTokensPerSecond
     }
 }

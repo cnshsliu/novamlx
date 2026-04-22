@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 import NovaMLXCore
 import NovaMLXModelManager
 import NovaMLXUtils
@@ -13,6 +14,7 @@ struct StatusPageView: View {
         ScrollView {
             VStack(spacing: 20) {
                 serverStatusHero
+                tpsChart
                 metricsGrid
                 deviceSection
                 loadedModelsSection
@@ -58,6 +60,66 @@ struct StatusPageView: View {
             }
         }
         .padding(20)
+        .background(NovaTheme.Colors.cardBackground)
+        .overlay(RoundedRectangle(cornerRadius: NovaTheme.Radius.lg).stroke(NovaTheme.Colors.cardBorder, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.lg))
+    }
+
+    private var tpsChart: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Inference Speed")
+                    .font(.headline)
+                Spacer()
+                if let last = appState.tpsHistory.last, last > 0 {
+                    Text(String(format: "%.1f tok/s", last))
+                        .font(.caption)
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .fontWeight(.medium)
+                }
+            }
+
+            if appState.tpsHistory.allSatisfy({ $0 == 0 }) {
+                Text("No inference activity yet")
+                    .foregroundColor(.secondary)
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 24)
+            } else {
+                Chart {
+                    ForEach(Array(appState.tpsHistory.enumerated()), id: \.offset) { index, tps in
+                        LineMark(
+                            x: .value("Time", index),
+                            y: .value("tok/s", tps)
+                        )
+                        .foregroundStyle(NovaTheme.Colors.accent)
+                        .interpolationMethod(.catmullRom)
+
+                        AreaMark(
+                            x: .value("Time", index),
+                            y: .value("tok/s", tps)
+                        )
+                        .foregroundStyle(
+                            .linearGradient(
+                                colors: [NovaTheme.Colors.accent.opacity(0.3), NovaTheme.Colors.accent.opacity(0.05)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .interpolationMethod(.catmullRom)
+                    }
+                }
+                .chartXAxis(.hidden)
+                .chartYAxis {
+                    AxisMarks(position: .leading) { value in
+                        AxisValueLabel()
+                            .font(.caption2)
+                    }
+                }
+                .frame(height: 120)
+            }
+        }
+        .padding(16)
         .background(NovaTheme.Colors.cardBackground)
         .overlay(RoundedRectangle(cornerRadius: NovaTheme.Radius.lg).stroke(NovaTheme.Colors.cardBorder, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.lg))

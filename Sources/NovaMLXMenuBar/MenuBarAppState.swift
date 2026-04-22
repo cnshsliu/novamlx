@@ -17,8 +17,10 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var uptime: TimeInterval = 0
     @Published public var downloadTasks: [String: DownloadTaskInfo] = [:]
     @Published public var requestedPage: AppPage? = nil
+    @Published public var tpsHistory: [Double] = []
 
     private var statsTimer: Timer?
+    private let maxTpsHistory = 90
 
     public init() {}
 
@@ -27,13 +29,18 @@ public final class MenuBarAppState: ObservableObject {
     public func startStatsMonitoring(inferenceService: InferenceService) {
         statsTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
             Task { @MainActor in
+                let currentStats = inferenceService.stats
                 self.systemStats = SystemMonitor.shared.currentStats(
-                    activeRequests: inferenceService.stats.activeRequests,
-                    tokensPerSecond: self.systemStats.tokensPerSecond
+                    activeRequests: currentStats.activeRequests,
+                    tokensPerSecond: currentStats.recentTokensPerSecond
                 )
                 self.inferenceStats = inferenceService.stats
                 self.loadedModels = inferenceService.listLoadedModels()
                 self.uptime = SystemMonitor.shared.uptime
+                self.tpsHistory.append(currentStats.recentTokensPerSecond)
+                if self.tpsHistory.count > self.maxTpsHistory {
+                    self.tpsHistory.removeFirst(self.tpsHistory.count - self.maxTpsHistory)
+                }
                 await self.pollDownloadStatus()
             }
         }

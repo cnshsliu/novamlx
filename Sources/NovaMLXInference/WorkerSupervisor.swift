@@ -243,7 +243,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
         case WorkerMessageType.token:
             let tokenToYield: Token?
             lock.lock()
-            if let token = msg.token, let cont = streamContinuations[requestId] {
+            if let token = msg.token, streamContinuations[requestId] != nil {
                 if let fr = token.finishReason {
                     streamFinishReasons[requestId] = fr
                 }
