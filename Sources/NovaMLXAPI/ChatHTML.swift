@@ -197,11 +197,14 @@ enum ChatHTML {
         </div>
         <div class="settings-panel" id="settingsPanel">
         <div class="settings-inner">
-        <div class="setting-group"><label>Temperature</label><input type="number" id="cfgTemp" min="0" max="2" step="0.1" value="0.7" onchange="saveSettings()"></div>
-        <div class="setting-group"><label>Max Tokens</label><input type="number" id="cfgMaxTokens" min="1" max="65536" step="1" value="4096" onchange="saveSettings()"></div>
-        <div class="setting-group"><label>Top P</label><input type="number" id="cfgTopP" min="0" max="1" step="0.05" value="1.0" onchange="saveSettings()"></div>
+        <div class="setting-group"><label>Temperature</label><input type="number" id="cfgTemp" min="0" max="2" step="0.05" value="0.7" onchange="saveSettings()"></div>
+        <div class="setting-group"><label>Max Tokens</label><input type="number" id="cfgMaxTokens" min="64" max="65536" step="64" value="4096" onchange="saveSettings()"></div>
+        <div class="setting-group"><label>Top P</label><input type="number" id="cfgTopP" min="0" max="1" step="0.05" value="0.9" onchange="saveSettings()"></div>
         <div class="setting-group"><label>Top K</label><input type="number" id="cfgTopK" min="0" max="200" step="1" value="0" onchange="saveSettings()"></div>
+        <div class="setting-group"><label>Min P</label><input type="number" id="cfgMinP" min="0" max="1" step="0.05" value="0" onchange="saveSettings()"></div>
+        <div class="setting-group"><label>Repeat Penalty</label><input type="number" id="cfgRepeatPenalty" min="1" max="2" step="0.05" value="1.0" onchange="saveSettings()"></div>
         <div class="setting-group"><label>Context Limit</label><input type="number" id="cfgContextLimit" min="512" max="131072" step="1024" value="32768" onchange="saveSettings()"></div>
+        <div class="setting-group" style="justify-content:flex-end"><button class="topbar-btn" onclick="resetSettingsToDefault()">Reset to Default</button></div>
         </div>
         </div>
         <div class="context-warning" id="contextWarning">Approaching context limit — older messages will be trimmed</div>
@@ -259,6 +262,8 @@ enum ChatHTML {
         <div class="shortcut-row"><span>Search chats</span><span><span class="kbd">Ctrl</span>+<span class="kbd">K</span></span></div>
         <div class="shortcut-row"><span>Send message</span><span><span class="kbd">Enter</span></span></div>
         <div class="shortcut-row"><span>New line</span><span><span class="kbd">Shift</span>+<span class="kbd">Enter</span></span></div>
+        <div class="shortcut-row"><span>Previous input</span><span><span class="kbd">&uarr;</span></span></div>
+        <div class="shortcut-row"><span>Next input</span><span><span class="kbd">&darr;</span></span></div>
         <div class="shortcut-row"><span>Close modal</span><span><span class="kbd">Esc</span></span></div>
         <div class="modal-actions"><button class="primary" onclick="document.getElementById('shortcutsModal').style.display='none'">Got it</button></div>
         </div>
@@ -268,7 +273,7 @@ enum ChatHTML {
         let apiKey='';
         function apiH(){return apiKey?{'Authorization':'Bearer '+apiKey}:{}}
 
-        let state={chatId:null,messages:[],chatHistory:[],isStreaming:false,abortCtrl:null,models:[],systemPrompt:'',images:[],thinkingContent:'',streamTokens:0,streamStartTime:0,settings:{temperature:0.7,max_tokens:4096,top_p:1.0,top_k:0,context_limit:32768}};
+        let state={chatId:null,messages:[],chatHistory:[],isStreaming:false,abortCtrl:null,models:[],systemPrompt:'',images:[],thinkingContent:'',streamTokens:0,streamStartTime:0,inputHistory:[],inputHistoryIdx:null,savedDraft:'',settings:{temperature:0.7,max_tokens:4096,top_p:0.9,top_k:0,min_p:0,repetition_penalty:1.0,context_limit:32768}};
 
         const renderer=new marked.Renderer();
         renderer.code=function(obj){
@@ -432,7 +437,19 @@ enum ChatHTML {
 
         function renderMd(text){
             if(!text)return '';
-            try{return marked.parse(text)}catch(e){return escHtml(text)}
+            try{return marked.parse(cleanModelOutput(text))}catch(e){return escHtml(text)}
+        }
+
+        function cleanModelOutput(text){
+            // Strip Qwen3.6 <|turn|> separators and partial residuals
+            text=text.split('<'+'|turn|>').join('').split('<'+'|turn>').join('');
+            // Strip legacy Qwen <|im_start|> / <|im_end|> markers
+            text=text.split('<'+'|im_start|>').join('').split('<'+'|im_end|>').join('');
+            // Strip <|endoftext|>
+            text=text.split('<'+'|endoftext|>').join('');
+            // Strip orphaned partial <| at end of stream
+            text=text.replace(/<[|][a-z]*$/, '');
+            return text.trimEnd();
         }
 
         function relativeTime(ts){
@@ -466,6 +483,20 @@ enum ChatHTML {
 
         function handleInputKey(e){
             if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}
+            // Up/Down arrow — navigate input history
+            const ta=document.getElementById('userInput');
+            if(e.key==='ArrowUp'&&ta.selectionStart===0&&ta.selectionEnd===0){
+                e.preventDefault();
+                if(state.inputHistory.length===0)return;
+                if(state.inputHistoryIdx===null){state.savedDraft=ta.value;state.inputHistoryIdx=state.inputHistory.length}
+                if(state.inputHistoryIdx>0){state.inputHistoryIdx--;ta.value=state.inputHistory[state.inputHistoryIdx];autoResize(ta)}
+            }
+            if(e.key==='ArrowDown'&&ta.selectionStart===ta.value.length&&ta.selectionEnd===ta.value.length){
+                e.preventDefault();
+                if(state.inputHistoryIdx===null)return;
+                if(state.inputHistoryIdx>=state.inputHistory.length-1){state.inputHistoryIdx=null;ta.value=state.savedDraft;autoResize(ta)}
+                else{state.inputHistoryIdx++;ta.value=state.inputHistory[state.inputHistoryIdx];autoResize(ta)}
+            }
         }
 
         function autoResize(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px'}
@@ -485,6 +516,9 @@ enum ChatHTML {
             const model=document.getElementById('modelSelect').value;
             if(!model){setStatus('No model selected');return}
             if(!state.chatId)newChat();
+            // Push to input history
+            if(text&&state.inputHistory[state.inputHistory.length-1]!==text){state.inputHistory.push(text)}
+            state.inputHistoryIdx=null;state.savedDraft='';
             const userMsg={role:'user',content:text,images:state.images.length?[...state.images]:undefined,ts:Date.now()};
             state.messages.push(userMsg);
             state.images=[];
@@ -533,6 +567,8 @@ enum ChatHTML {
             const apiMessages=buildApiMessages();
             const body={model,model:document.getElementById('modelSelect').value,messages:apiMessages,stream:true,stream_options:{include_usage:true},temperature:state.settings.temperature,max_tokens:state.settings.max_tokens,top_p:state.settings.top_p};
             if(state.settings.top_k>0)body.top_k=state.settings.top_k;
+            if(state.settings.min_p>0)body.min_p=state.settings.min_p;
+            if(state.settings.repetition_penalty&&state.settings.repetition_penalty!==1.0)body.repetition_penalty=state.settings.repetition_penalty;
 
             try{
                 const resp=await fetch(BASE+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',...apiH()},body:JSON.stringify(body),signal:state.abortCtrl.signal});
@@ -667,17 +703,37 @@ enum ChatHTML {
 
         function toggleSettings(){document.getElementById('settingsPanel').classList.toggle('open')}
         function saveSettings(){
-            state.settings={temperature:parseFloat(document.getElementById('cfgTemp').value)||0.7,max_tokens:parseInt(document.getElementById('cfgMaxTokens').value)||4096,top_p:parseFloat(document.getElementById('cfgTopP').value)||1.0,top_k:parseInt(document.getElementById('cfgTopK').value)||0,context_limit:parseInt(document.getElementById('cfgContextLimit').value)||32768};
+            state.settings={
+                temperature:parseFloat(document.getElementById('cfgTemp').value)||0.7,
+                max_tokens:parseInt(document.getElementById('cfgMaxTokens').value)||4096,
+                top_p:parseFloat(document.getElementById('cfgTopP').value)||0.9,
+                top_k:parseInt(document.getElementById('cfgTopK').value)||0,
+                min_p:parseFloat(document.getElementById('cfgMinP').value)||0,
+                repetition_penalty:parseFloat(document.getElementById('cfgRepeatPenalty').value)||1.0,
+                context_limit:parseInt(document.getElementById('cfgContextLimit').value)||32768
+            };
             localStorage.setItem('novamlx_settings',JSON.stringify(state.settings));
         }
         function loadSettings(){
             const saved=JSON.parse(localStorage.getItem('novamlx_settings')||'null');
             if(saved)state.settings={...state.settings,...saved};
+            syncSettingsUI();
+        }
+        function syncSettingsUI(){
             document.getElementById('cfgTemp').value=state.settings.temperature;
             document.getElementById('cfgMaxTokens').value=state.settings.max_tokens;
             document.getElementById('cfgTopP').value=state.settings.top_p;
             document.getElementById('cfgTopK').value=state.settings.top_k;
+            document.getElementById('cfgMinP').value=state.settings.min_p||0;
+            document.getElementById('cfgRepeatPenalty').value=state.settings.repetition_penalty||1.0;
             document.getElementById('cfgContextLimit').value=state.settings.context_limit;
+        }
+        function resetSettingsToDefault(){
+            const defaults={temperature:0.7,max_tokens:4096,top_p:0.9,top_k:0,min_p:0,repetition_penalty:1.0,context_limit:32768};
+            state.settings={...defaults};
+            localStorage.removeItem('novamlx_settings');
+            syncSettingsUI();
+            setStatus('Settings reset to defaults');
         }
 
         function toggleExportMenu(){document.getElementById('exportMenu').classList.toggle('open')}
