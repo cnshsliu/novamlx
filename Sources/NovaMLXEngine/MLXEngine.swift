@@ -491,6 +491,21 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return maxTokens
     }
 
+    /// Build EOS token IDs from tokenizer + model config
+    private func buildEOSTokenIds(tokenizer: Tokenizer, modelConfiguration: ModelConfiguration) -> Set<Int> {
+        var ids = modelConfiguration.eosTokenIds
+        if let eosId = tokenizer.eosTokenId {
+            ids.insert(eosId)
+        }
+        return ids
+    }
+
+    /// Create a ThinkingEOSSuppressor if the model has EOS tokens. Inert for non-thinking models.
+    private func buildThinkingSuppressor(eosTokenIds: Set<Int>, decode: @Sendable @escaping ([Int]) -> String) -> ThinkingEOSSuppressor? {
+        guard !eosTokenIds.isEmpty else { return nil }
+        return ThinkingEOSSuppressor(eosTokenIds: eosTokenIds, maxPenalty: 20.0, decayTokens: 128, decode: decode)
+    }
+
     func buildGenerateParameters(
         request: InferenceRequest, config: ModelConfig, settings: ModelSettings? = nil
     ) -> GenerateParameters {
@@ -607,36 +622,139 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let maxTokens = request.maxTokens ?? container.config.maxTokens
         try await preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
-        let prefixCacheTokens: [Int]? = if let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
-            input.text.tokens.asArray(Int32.self).map { Int($0) }
-        } else {
-            nil
-        }
-
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
 
-        let kvCacheBox = MutableSendableBox<[KVCache]?>(nil)
-        let inputBox = SendableBox(input)
+        // Capture prompt tokens for prefix cache storage + loading
+        let allPromptTokens: [Int]?
+        if let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
+            let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
+            allPromptTokens = tokens
+        } else {
+            allPromptTokens = nil
+        }
+
+        // Try prefix cache load
+        let prefixResult = allPromptTokens.flatMap { tokens in
+            getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
+        }
+
+        // Build composed processor: penalty + thinking suppressor
+        let penaltyProcessor = parameters.processor()
+        let model = await mlxContainer.perform { context in SendableBox(context.model) }
+        let mlxTokenizer = await mlxContainer.tokenizer
+        let modelConfig = await mlxContainer.configuration
+        let eosIds = buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
+        let decode = container.tokenizer!.decode
+        let suppressor = buildThinkingSuppressor(eosTokenIds: eosIds, decode: decode)
+
+        let processor: (any LogitProcessor)?
+        if let penalty = penaltyProcessor, let sup = suppressor {
+            processor = ComposedLogitProcessor(grammarProcessor: penalty, penaltyProcessor: nil, thinkingSuppressor: sup)
+        } else if let penalty = penaltyProcessor {
+            processor = penalty
+        } else {
+            processor = suppressor
+        }
+
+        let sampler = parameters.sampler()
+
+        // Build effective input and cache — use prefix cache hit if valid
+        var effectiveInput = input
+        let kvCache: [KVCache]
+        if let result = prefixResult, result.cachedTokenCount > 0, let restored = result.cache {
+            let freshCaches = model.value.newCache(parameters: parameters)
+            var cacheValid = restored.count == freshCaches.count
+            // Validate: layer types must match, KV cache states must be 4D with 2 arrays
+            if cacheValid {
+                for i in 0..<restored.count {
+                    let restoredType = String(describing: type(of: restored[i]))
+                    let freshType = String(describing: type(of: freshCaches[i]))
+                    guard restoredType == freshType else {
+                        NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: L\(i) type mismatch (\(restoredType) vs \(freshType))")
+                        cacheValid = false
+                        break
+                    }
+                    let isKV = restored[i] is KVCacheSimple
+                        || restored[i] is RotatingKVCache
+                        || restored[i] is ChunkedKVCache
+                        || restored[i] is QuantizedKVCache
+                    if isKV {
+                        // KV caches: must have exactly 2 state arrays (keys, values), both 4D
+                        let state = restored[i].state
+                        guard state.count == 2 else {
+                            NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: L\(i) KV state count=\(state.count), expected 2")
+                            cacheValid = false
+                            break
+                        }
+                        for j in 0..<2 {
+                            guard state[j].ndim == 4 else {
+                                NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: L\(i).S\(j) ndim=\(state[j].ndim), expected 4")
+                                cacheValid = false
+                                break
+                            }
+                        }
+                    }
+                    // Fixed-size caches (MambaCache, etc.): type match is sufficient
+                    if !cacheValid { break }
+                }
+            }
+
+            if cacheValid {
+                let cachedTokenCount = result.cachedTokenCount
+                for layer in restored {
+                    if let kv = layer as? BaseKVCache {
+                        kv.offset = cachedTokenCount
+                    }
+                }
+                NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache HIT: \(cachedTokenCount) cached, \(result.remainingTokenIds.count) remaining")
+                let remainingTokens = MLXArray(result.remainingTokenIds.map { Int32($0) })
+                effectiveInput = LMInput(text: .init(tokens: remainingTokens))
+                kvCache = restored
+            } else {
+                NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: validation failed — using fresh cache")
+                kvCache = model.value.newCache(parameters: parameters)
+            }
+        } else {
+            kvCache = model.value.newCache(parameters: parameters)
+        }
+        let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
+
+        // Try creating iterator with restored cache; fall back to fresh on error
+        let iterator: TokenIterator
+        do {
+            iterator = try TokenIterator(
+                input: effectiveInput, model: model.value,
+                cache: kvCache,
+                processor: processor, sampler: sampler,
+                maxTokens: maxTokens
+            )
+        } catch {
+            NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+            let freshCache = model.value.newCache(parameters: parameters)
+            kvCacheBox.value = freshCache
+            iterator = try TokenIterator(
+                input: input, model: model.value,
+                cache: freshCache,
+                processor: processor, sampler: sampler,
+                maxTokens: maxTokens
+            )
+        }
 
         let bytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
         let ticket = createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: bytesPerToken)
 
-        let stream = try await mlxContainer.perform { context in
-            let cache = context.model.newCache(parameters: parameters)
-            kvCacheBox.value = cache
-            return try MLXLMCommon.generate(
-                input: inputBox.value,
-                cache: cache,
-                parameters: parameters,
-                context: context,
-                wiredMemoryTicket: ticket
-            )
-        }
-
+        let (stream, _) = generateTask(
+            promptTokenCount: promptTokenCount,
+            modelConfiguration: modelConfig,
+            tokenizer: mlxTokenizer,
+            iterator: iterator,
+            wiredMemoryTicket: ticket
+        )
 
         var generatedText = ""
         var completionTokens = 0
         var finishReason: FinishReason = .stop
+        var genStopReason: String = "none"
 
         for await generation in stream {
             switch generation {
@@ -645,12 +763,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 completionTokens += 1
             case .info(let info):
                 completionTokens = info.generationTokenCount
+                genStopReason = String(describing: info.stopReason)
                 if case .length = info.stopReason { finishReason = .length }
+                NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
             case .toolCall: break
             }
         }
 
-        if let tokenArray = prefixCacheTokens,
+        NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Done: completionTokens=\(completionTokens), stopReason=\(genStopReason)")
+
+        // Store KV cache in prefix cache for future requests with same prompt prefix
+        if let tokenArray = allPromptTokens,
            let prefixCache = getOrCreatePrefixCacheManager(modelId: request.model),
            let kvCache = kvCacheBox.value {
             prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
@@ -714,25 +837,144 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let promptTokenCount = input.text.tokens.size
                     let maxTokens = request.maxTokens ?? container.config.maxTokens
                     try await self.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
+
+                    // Capture prompt tokens for prefix cache storage + loading
+                    let allPromptTokens: [Int]? = if let _ = self.getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
+                        input.text.tokens.asArray(Int32.self).map { Int($0) }
+                    } else {
+                        nil
+                    }
+
+                    // Try prefix cache load
+                    let prefixResult = allPromptTokens.flatMap { tokens in
+                        self.getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
+                    }
+
+                    // Build composed processor: penalty + thinking suppressor
+                    let penaltyProcessor = parameters.processor()
+                    let model = await mlxContainer.perform { context in SendableBox(context.model) }
+                    let mlxTokenizer = await mlxContainer.tokenizer
+                    let modelConfig = await mlxContainer.configuration
+                    let eosIds = self.buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
+                    let decode = container.tokenizer!.decode
+                    let suppressor = self.buildThinkingSuppressor(eosTokenIds: eosIds, decode: decode)
+
+                    let processor: (any LogitProcessor)?
+                    if let penalty = penaltyProcessor, let sup = suppressor {
+                        processor = ComposedLogitProcessor(grammarProcessor: penalty, penaltyProcessor: nil, thinkingSuppressor: sup)
+                    } else if let penalty = penaltyProcessor {
+                        processor = penalty
+                    } else {
+                        processor = suppressor
+                    }
+
+                    let sampler = parameters.sampler()
+
+                    // Build effective input and cache — use prefix cache hit if valid
+                    var effectiveInput = input
+                    let kvCache: [KVCache]
+                    if let result = prefixResult, result.cachedTokenCount > 0, let restored = result.cache {
+                        let freshCaches = model.value.newCache(parameters: parameters)
+                        var cacheValid = restored.count == freshCaches.count
+                        if cacheValid {
+                            for i in 0..<restored.count {
+                                let rType = String(describing: type(of: restored[i]))
+                                let fType = String(describing: type(of: freshCaches[i]))
+                                guard rType == fType else { cacheValid = false; break }
+                                let isKV = restored[i] is KVCacheSimple
+                                    || restored[i] is RotatingKVCache
+                                    || restored[i] is ChunkedKVCache
+                                    || restored[i] is QuantizedKVCache
+                                if isKV {
+                                    let state = restored[i].state
+                                    guard state.count == 2, state.allSatisfy({ $0.ndim == 4 }) else {
+                                        cacheValid = false; break
+                                    }
+                                }
+                                // Fixed-size caches: type match is sufficient
+                                if !cacheValid { break }
+                            }
+                        }
+                        if cacheValid {
+                            let cachedTokenCount = result.cachedTokenCount
+                            for layer in restored {
+                                if let kv = layer as? BaseKVCache { kv.offset = cachedTokenCount }
+                            }
+                            NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache HIT: \(cachedTokenCount) cached, \(result.remainingTokenIds.count) remaining")
+                            let remainingTokens = MLXArray(result.remainingTokenIds.map { Int32($0) })
+                            effectiveInput = LMInput(text: .init(tokens: remainingTokens))
+                            kvCache = restored
+                        } else {
+                            NovaMLXLog.warning("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache: validation failed — using fresh cache")
+                            kvCache = model.value.newCache(parameters: parameters)
+                        }
+                    } else {
+                        kvCache = model.value.newCache(parameters: parameters)
+                    }
+                    let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
+
+                    // Try creating iterator with restored cache; fall back to fresh on error
+                    let iterator: TokenIterator
+                    do {
+                        iterator = try TokenIterator(
+                            input: effectiveInput, model: model.value,
+                            cache: kvCache,
+                            processor: processor, sampler: sampler,
+                            maxTokens: maxTokens
+                        )
+                    } catch {
+                        NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                        let freshCache = model.value.newCache(parameters: parameters)
+                        kvCacheBox.value = freshCache
+                        iterator = try TokenIterator(
+                            input: input, model: model.value,
+                            cache: freshCache,
+                            processor: processor, sampler: sampler,
+                            maxTokens: maxTokens
+                        )
+                    }
+
                     let ticketBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262144
                     let ticket = self.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: ticketBytesPerToken)
-                    let stream = try await mlxContainer.generate(input: input, parameters: parameters, wiredMemoryTicket: ticket)
+                    let (stream, _) = generateTask(
+                        promptTokenCount: promptTokenCount,
+                        modelConfiguration: modelConfig,
+                        tokenizer: mlxTokenizer,
+                        iterator: iterator,
+                        wiredMemoryTicket: ticket
+                    )
 
                     var finishReason: FinishReason = .stop
                     var completionTokens = 0
+                    var infoStopReason: String = "none"
                     let startTime = Date()
+                    let reqTag = request.id.uuidString.prefix(8).description
 
                     for await generation in stream {
-                        if Task.isCancelled { break }
+                        if Task.isCancelled {
+                            NovaMLXLog.error("[STREAM:\(reqTag)] Task cancelled during generation after \(completionTokens) tokens")
+                            break
+                        }
                         switch generation {
                         case .chunk(let text):
                             completionTokens += 1
                             continuation.yield(Token(id: 0, text: text))
                         case .info(let info):
                             completionTokens = info.generationTokenCount
+                            infoStopReason = String(describing: info.stopReason)
                             if case .length = info.stopReason { finishReason = .length }
+                            NovaMLXLog.info("[STREAM:\(reqTag)] Info: tokens=\(info.generationTokenCount), stopReason=\(infoStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
                         case .toolCall: break
                         }
+                    }
+
+                    NovaMLXLog.info("[STREAM:\(reqTag)] Loop ended: completionTokens=\(completionTokens), taskCancelled=\(Task.isCancelled), infoStopReason=\(infoStopReason)")
+
+                    // Store KV cache in prefix cache for future requests
+                    if let tokenArray = allPromptTokens,
+                       let prefixCache = self.getOrCreatePrefixCacheManager(modelId: request.model),
+                       let kvCache = kvCacheBox.value {
+                        prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
                     }
 
                     let elapsed = Date().timeIntervalSince(startTime)
@@ -973,9 +1215,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
         let penaltyProcessor = parameters.processor()
+
+        // Build thinking suppressor for grammar path
+        let modelConfig = await mlxContainer.configuration
+        let eosIds = buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
+        let suppressor = buildThinkingSuppressor(eosTokenIds: eosIds, decode: container.tokenizer!.decode)
+
         let processor: any LogitProcessor
-        if let penalty = penaltyProcessor {
+        if let penalty = penaltyProcessor, let sup = suppressor {
+            processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty, thinkingSuppressor: sup)
+        } else if let penalty = penaltyProcessor {
             processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
+        } else if let sup = suppressor {
+            processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: nil, thinkingSuppressor: sup)
         } else {
             processor = grammarProcessor
         }
@@ -1003,7 +1255,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let model = await mlxContainer.perform { context in SendableBox(context.model) }
         let tokenizer = await mlxContainer.tokenizer
-        let config = await mlxContainer.configuration
 
         let iterator = try TokenIterator(
             input: input, model: model.value,
@@ -1014,7 +1265,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let ticketBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
         let (stream, task) = generateTask(
             promptTokenCount: promptTokenCount,
-            modelConfiguration: config,
+            modelConfiguration: modelConfig,
             tokenizer: tokenizer,
             iterator: iterator,
             wiredMemoryTicket: createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: ticketBytesPerToken)
@@ -1084,9 +1335,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let parameters = engine.buildGenerateParameters(request: request, config: container.config, settings: engine.settingsProvider?(request.model))
                     let penaltyProc = parameters.processor()
+
+                    // Build thinking suppressor for grammar stream path
+                    let modelConfig = await mlxContainer.configuration
+                    let eosIds = engine.buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
+                    let suppressor = engine.buildThinkingSuppressor(eosTokenIds: eosIds, decode: container.tokenizer!.decode)
+
                     let processor: any LogitProcessor
-                    if let penalty = penaltyProc {
+                    if let penalty = penaltyProc, let sup = suppressor {
+                        processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty, thinkingSuppressor: sup)
+                    } else if let penalty = penaltyProc {
                         processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
+                    } else if let sup = suppressor {
+                        processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: nil, thinkingSuppressor: sup)
                     } else {
                         processor = grammarProcessor
                     }
@@ -1113,7 +1374,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let model = await mlxContainer.perform { context in SendableBox(context.model) }
                     let tokenizer = await mlxContainer.tokenizer
-                    let config = await mlxContainer.configuration
 
                     let iterator = try TokenIterator(
                         input: input, model: model.value,
@@ -1124,7 +1384,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let sessionBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
                     let (stream, genTask) = generateTask(
                         promptTokenCount: promptTokenCount,
-                        modelConfiguration: config,
+                        modelConfiguration: modelConfig,
                         tokenizer: tokenizer,
                         iterator: iterator,
                         wiredMemoryTicket: engine.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: sessionBytesPerToken)
