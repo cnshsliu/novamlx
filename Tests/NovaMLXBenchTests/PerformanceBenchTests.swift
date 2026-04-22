@@ -6,7 +6,7 @@ import NovaMLXInference
 import NovaMLXModelManager
 import Testing
 
-@Suite("NovaMLX Performance Benchmarks", .serialized)
+@Suite("NovaMLX Performance Benchmarks", .serialized, .enabled(if: ProcessInfo.processInfo.environment["NOVA_BENCH"] == "1"))
 @MainActor
 struct PerformanceBenchTests {
 

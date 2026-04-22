@@ -14,6 +14,7 @@ struct ChatPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            infoBanner
             chatToolbar
             Divider()
             messageList
@@ -60,6 +61,29 @@ struct ChatPageView: View {
                 selectedModel = first
             }
         }
+    }
+
+    private var infoBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .foregroundColor(NovaTheme.Colors.accent)
+                .font(.system(size: 12))
+
+            Text("Raw model output viewer — not designed for daily chat use.")
+                .font(.system(size: 11))
+                .foregroundColor(NovaTheme.Colors.textSecondary)
+
+            Spacer()
+
+            Button("For daily use, Open Web Chat") {
+                NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.serverPort))/chat")!)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(NovaTheme.Colors.accentDim)
     }
 
     private var messageList: some View {

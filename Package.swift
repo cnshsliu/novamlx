@@ -11,6 +11,7 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "NovaMLX", targets: ["NovaMLXApp"]),
+        .executable(name: "NovaMLXWorker", targets: ["NovaMLXWorker"]),
         .executable(name: "nova", targets: ["NovaMLXCLI"]),
         .library(name: "NovaMLXCore", targets: ["NovaMLXCore"]),
         .library(name: "NovaMLXUtils", targets: ["NovaMLXUtils"]),
@@ -23,8 +24,8 @@ let package = Package(
         .library(name: "NovaMLXMenuBar", targets: ["NovaMLXMenuBar"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.31.3"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm", .exact("3.31.3")),
+        .package(path: "vendors/mlx-swift"),
+        .package(path: "mlx-swift-lm"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
@@ -128,6 +129,15 @@ let package = Package(
                 "NovaMLXAPI",
             ],
             resources: [.copy("Resources")],
+            swiftSettings: concurrencySettings
+        ),
+        .executableTarget(
+            name: "NovaMLXWorker",
+            dependencies: [
+                "NovaMLXCore",
+                "NovaMLXUtils",
+                "NovaMLXEngine",
+            ],
             swiftSettings: concurrencySettings
         ),
         .executableTarget(

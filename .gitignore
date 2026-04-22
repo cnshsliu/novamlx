@@ -1,3 +1,12 @@
+# ==================== Vendors (local forks of external deps) ====================
+# Include source, exclude build artifacts
+vendors/*/.build/
+vendors/*/.swiftpm/
+vendors/*/*.xcodeproj/
+vendors/*/*.xcworkspace/
+vendors/*/DerivedData/
+vendors/*/xcuserdata/
+
 # ==================== macOS ====================
 .DS_Store
 .AppleDouble

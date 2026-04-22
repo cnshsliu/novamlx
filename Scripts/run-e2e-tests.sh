@@ -84,7 +84,7 @@ echo "" >> "$LOG_FILE"
 echo -e "${CYAN}Running E2E tests...${NC}" | tee -a "$LOG_FILE"
 echo "───────────────────────────────────────────────────────────────" >> "$LOG_FILE"
 
-TEST_OUTPUT=$(swift test --filter NovaMLXE2ETests 2>&1)
+TEST_OUTPUT=$(NOVA_E2E=1 swift test --filter NovaMLXE2ETests 2>&1)
 TEST_EXIT=$?
 
 {

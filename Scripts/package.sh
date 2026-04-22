@@ -18,8 +18,10 @@ mkdir -p "$APP_CONTENTS/MacOS"
 mkdir -p "$APP_CONTENTS/Resources"
 
 cp "$BUILD_DIR/NovaMLX" "$APP_CONTENTS/MacOS/"
+cp "$BUILD_DIR/NovaMLXWorker" "$APP_CONTENTS/MacOS/"
 cp "$BUILD_DIR/nova" "$APP_CONTENTS/MacOS/"
-cp "$BUILD_DIR/mlx.metallib" "$APP_CONTENTS/MacOS/"
+[ -f "$BUILD_DIR/mlx.metallib" ] && cp "$BUILD_DIR/mlx.metallib" "$APP_CONTENTS/MacOS/"
+[ -f ".build/default.metallib" ] && cp ".build/default.metallib" "$APP_CONTENTS/MacOS/mlx.metallib"
 
 if [ -f "docs/AppIcon.icns" ]; then
 	cp "docs/AppIcon.icns" "$APP_CONTENTS/Resources/AppIcon.icns"

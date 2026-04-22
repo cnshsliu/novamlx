@@ -13,15 +13,38 @@ public final class InferenceService: @unchecked Sendable {
     public let settingsManager: ModelSettingsManager
     private let loadedModelsFile: URL
 
-    public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8) {
+    // Worker subprocess mode
+    public let workerMode: Bool
+    private var worker: WorkerSupervisor?
+    private var workerLoadedModels: Set<String> = []
+
+    public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil) {
         self.engine = engine
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
         self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         self.settingsManager = settingsManager
         self.loadedModelsFile = NovaMLXPaths.loadedModelsFile
+        self.workerMode = workerMode
+
+        if workerMode, let path = workerBinaryPath {
+            self.worker = WorkerSupervisor(workerBinaryPath: path)
+        }
+
         engine.settingsProvider = { [settingsManager] modelId in
             settingsManager.getSettings(modelId)
         }
+    }
+
+    // MARK: - Worker Lifecycle
+
+    public func startWorker() throws {
+        guard workerMode, let worker = worker else { return }
+        try worker.start()
+        NovaMLXLog.info("[InferenceService] Worker mode started")
+    }
+
+    public func stopWorker() {
+        worker?.stop()
     }
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
@@ -42,6 +65,11 @@ public final class InferenceService: @unchecked Sendable {
             gbnfGrammar: finalRequest.gbnfGrammar,
             thinkingBudget: finalRequest.thinkingBudget
         )
+
+        // Worker mode: route through subprocess
+        if workerMode, let worker = worker {
+            return try await worker.sendGenerate(finalRequest)
+        }
 
         let reqTag = finalRequest.id.uuidString.prefix(8)
 
@@ -108,6 +136,11 @@ public final class InferenceService: @unchecked Sendable {
             thinkingBudget: finalRequest.thinkingBudget
         )
 
+        // Worker mode: route through subprocess
+        if workerMode, let worker = worker {
+            return worker.sendStream(finalRequest)
+        }
+
         let reqTag = finalRequest.id.uuidString.prefix(8)
 
         // Context window check — fail fast with an error stream instead of hanging.
@@ -156,32 +189,53 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     public func abort(requestId: UUID) async {
-        engine.abort(requestId: requestId)
+        if workerMode, let worker = worker {
+            worker.sendAbort(requestId: requestId)
+        } else {
+            engine.abort(requestId: requestId)
+        }
     }
 
     public func loadModel(at url: URL, config: ModelConfig) async throws {
-        _ = try await engine.loadModel(from: url, config: config)
         let modelId = config.identifier.id
-        let settings = settingsManager.getSettings(modelId)
-        if settings.isPinned {
-            engine.pool.pin(modelId)
+
+        if workerMode, let worker = worker {
+            try await worker.sendLoad(modelId: modelId, path: url.path, config: config)
+            workerLoadedModels.insert(modelId)
+        } else {
+            _ = try await engine.loadModel(from: url, config: config)
+            let settings = settingsManager.getSettings(modelId)
+            if settings.isPinned {
+                engine.pool.pin(modelId)
+            }
         }
         saveLoadedModelsList()
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) async {
-        engine.unloadModel(identifier)
+        if workerMode, let worker = worker {
+            try? await worker.sendUnload(modelId: identifier.id)
+            workerLoadedModels.remove(identifier.id)
+        } else {
+            engine.unloadModel(identifier)
+        }
         saveLoadedModelsList()
     }
 
     public func isModelLoaded(_ modelId: String) -> Bool {
         let resolvedId = settingsManager.resolveModelId(modelId)
+        if workerMode {
+            return workerLoadedModels.contains(resolvedId)
+        }
         guard let container = engine.getContainer(for: resolvedId) else { return false }
         return container.isLoaded
     }
 
     public func listLoadedModels() -> [String] {
-        engine.listLoadedModels()
+        if workerMode {
+            return Array(workerLoadedModels)
+        }
+        return engine.listLoadedModels()
     }
 
     public func checkTTLExpirations() {

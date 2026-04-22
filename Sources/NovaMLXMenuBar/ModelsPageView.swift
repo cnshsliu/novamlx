@@ -535,7 +535,7 @@ struct ModelsPageView: View {
             sectionHeader("Inactive Models", icon: "arrow.down.circle", count: downloaded.count)
 
             if downloaded.isEmpty {
-                emptyState("No models downloaded", subtitle: "Go to Browse to search and download models.")
+                emptyState("No inactive models", subtitle: "Go to Browse to search and download models.")
             } else {
                 ForEach(downloaded, id: \.id) { record in
                     modelRow(

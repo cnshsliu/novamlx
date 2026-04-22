@@ -7,6 +7,14 @@ let apiBase = URL(string: ProcessInfo.processInfo.environment["NOVA_API_URL"] ??
 let adminBase = URL(string: ProcessInfo.processInfo.environment["NOVA_ADMIN_URL"] ?? "http://127.0.0.1:6591")!
 let apiKey = ProcessInfo.processInfo.environment["NOVA_API_KEY"] ?? "abcd1234"
 
+// ─── E2E Gate ───
+// Must set NOVA_E2E=1 to run. Prevents DispatchSemaphore from blocking test runner.
+// Usage: NOVA_E2E=1 swift test          (all tests: unit + E2E)
+//        swift test                       (unit tests only, E2E skipped)
+//        ./Scripts/run-e2e-tests.sh       (E2E only, with formatting)
+
+private let e2eEnabled = ProcessInfo.processInfo.environment["NOVA_E2E"] == "1"
+
 // ─── HTTP Client ───
 
 struct HTTPClient: Sendable {
@@ -279,7 +287,7 @@ func buildClaudeCodeConversation(turns: Int) -> [[String: Any]] {
 // Each test loads its model individually, tests, then unloads
 // ═══════════════════════════════════════════════════════════════════
 
-@Suite("E2E Tests", .serialized)
+@Suite("E2E Tests", .serialized, .enabled(if: e2eEnabled))
 struct E2ETests {
     let client = HTTPClient()
 

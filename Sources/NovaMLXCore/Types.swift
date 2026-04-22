@@ -255,7 +255,7 @@ public enum FinishReason: String, Codable, Sendable {
     case toolCalls = "tool_calls"
 }
 
-public struct Token: Sendable {
+public struct Token: Codable, Sendable {
     public let id: Int
     public let text: String
     public let logprob: Float?

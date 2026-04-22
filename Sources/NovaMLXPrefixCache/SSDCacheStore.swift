@@ -119,6 +119,14 @@ public final class SSDCacheStore: @unchecked Sendable {
             let subdir = cacheDir.appendingPathComponent(String(char))
             try? FileManager.default.createDirectory(at: subdir, withIntermediateDirectories: true)
         }
+        // Clean up stale .tmp writes from crashed sessions
+        if let enumerator = FileManager.default.enumerator(at: cacheDir, includingPropertiesForKeys: nil) {
+            for case let fileURL as URL in enumerator {
+                if fileURL.lastPathComponent.contains(".tmp.safetensors") {
+                    try? FileManager.default.removeItem(at: fileURL)
+                }
+            }
+        }
     }
 
     private func filePath(for hash: BlockHash) -> URL {
@@ -131,7 +139,8 @@ public final class SSDCacheStore: @unchecked Sendable {
         guard let enumerator = FileManager.default.enumerator(at: cacheDir, includingPropertiesForKeys: [.fileSizeKey]) else { return }
         var pruned = 0
         for case let fileURL as URL in enumerator {
-            guard fileURL.pathExtension == "safetensors" else { continue }
+            // Skip partial/temp writes
+            guard fileURL.pathExtension == "safetensors" && !fileURL.lastPathComponent.contains(".tmp.") else { continue }
             do {
                 let (_, metadata) = try loadArraysAndMetadata(url: fileURL, stream: .cpu)
                 guard let hashHex = metadata["block_hash"] else { continue }
@@ -145,9 +154,17 @@ public final class SSDCacheStore: @unchecked Sendable {
                     continue
                 }
 
-                let hash = hashHex.compactMap { char -> UInt8 in
-                    let s = String(char)
-                    return UInt8(s, radix: 16) ?? 0
+                // Parse hex string byte-by-byte: "eecabcec..." → [0xee, 0xca, 0xbc, ...]
+                let chars = Array(hashHex)
+                var hash: [UInt8] = []
+                hash.reserveCapacity(chars.count / 2)
+                var i = 0
+                while i + 1 < chars.count {
+                    let byteStr = String(chars[i]) + String(chars[i + 1])
+                    if let byte = UInt8(byteStr, radix: 16) {
+                        hash.append(byte)
+                    }
+                    i += 2
                 }
                 let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
                 let fileSize = attrs[.size] as? UInt64 ?? 0
@@ -246,7 +263,7 @@ public final class SSDCacheStore: @unchecked Sendable {
             metadata: meta,
             filePath: path
         )
-        writeQueue.async { [weak self] in
+        writeQueue.sync { [weak self] in
             self?.writePending(pending)
         }
     }
@@ -260,7 +277,9 @@ public final class SSDCacheStore: @unchecked Sendable {
             do {
                 let (flatArrays, fileMeta) = try loadArraysAndMetadata(url: entry.filePath, stream: .cpu)
                 let numLayers = Int(fileMeta["num_layers"] ?? "0") ?? 0
-                guard numLayers > 0 else { return nil }
+                guard numLayers > 0 else {
+                    return nil
+                }
 
                 var reconstructed: [String: [MLXArray]] = [:]
                 for i in 0..<numLayers {

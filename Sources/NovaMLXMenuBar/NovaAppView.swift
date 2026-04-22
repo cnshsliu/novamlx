@@ -4,35 +4,36 @@ import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
 
+public enum AppPage: String, CaseIterable, Identifiable, Sendable {
+    case status = "Status"
+    case models = "Models"
+    case chat = "Chat"
+    case settings = "Settings"
+
+    public var id: String { rawValue }
+
+    public var icon: String {
+        switch self {
+        case .status: return "gauge.with.dots.needle.bottom.50percent"
+        case .models: return "cube.box"
+        case .chat: return "bubble.left.and.bubble.right"
+        case .settings: return "gearshape"
+        }
+    }
+}
+
 public struct NovaAppView: View {
     @ObservedObject var appState: MenuBarAppState
     let inferenceService: InferenceService
     let modelManager: ModelManager
 
-    @State private var selectedPage: Page = .status
-
-    enum Page: String, CaseIterable, Identifiable {
-        case status = "Status"
-        case models = "Models"
-        case chat = "Chat"
-        case settings = "Settings"
-
-        var id: String { rawValue }
-
-        var icon: String {
-            switch self {
-            case .status: return "gauge.with.dots.needle.bottom.50percent"
-            case .models: return "cube.box"
-            case .chat: return "bubble.left.and.bubble.right"
-            case .settings: return "gearshape"
-            }
-        }
-    }
+    @State private var selectedPage: AppPage
 
     public init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager) {
         self.appState = appState
         self.inferenceService = inferenceService
         self.modelManager = modelManager
+        _selectedPage = State(initialValue: appState.requestedPage ?? .status)
     }
 
     public var body: some View {
@@ -43,6 +44,12 @@ public struct NovaAppView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 900, minHeight: 600)
+        .onChange(of: appState.requestedPage) { _, newValue in
+            if let page = newValue {
+                selectedPage = page
+                appState.requestedPage = nil
+            }
+        }
     }
 
     private var sidebar: some View {
@@ -55,7 +62,7 @@ public struct NovaAppView: View {
             Divider()
 
             VStack(spacing: 2) {
-                ForEach(Page.allCases) { page in
+                ForEach(AppPage.allCases) { page in
                     sidebarItem(page)
                 }
             }
@@ -73,7 +80,7 @@ public struct NovaAppView: View {
         .background(NovaTheme.Colors.background.opacity(0.85))
     }
 
-    private func sidebarItem(_ page: Page) -> some View {
+    private func sidebarItem(_ page: AppPage) -> some View {
         Button {
             selectedPage = page
         } label: {

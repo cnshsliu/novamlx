@@ -322,13 +322,13 @@ struct SettingsPageView: View {
 
             HStack(spacing: 12) {
                 Button("GitHub") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/novamlx/novamlx")!)
+                    NSWorkspace.shared.open(URL(string: "https://github.com/cnshsliu/novamlx")!)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
                 Button("Documentation") {
-                    NSWorkspace.shared.open(URL(string: "https://github.com/novamlx/novamlx#readme")!)
+                    NSWorkspace.shared.open(URL(string: "https://github.com/cnshsliu/novamlx#readme")!)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

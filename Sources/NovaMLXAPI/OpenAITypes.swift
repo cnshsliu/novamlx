@@ -146,6 +146,10 @@ private struct DynamicCodingKey: CodingKey {
 public struct OpenAIStreamOptions: Codable, Sendable {
     public let includeUsage: Bool?
 
+    private enum CodingKeys: String, CodingKey {
+        case includeUsage = "include_usage"
+    }
+
     public init(includeUsage: Bool? = nil) {
         self.includeUsage = includeUsage
     }
@@ -449,10 +453,17 @@ public struct OpenAIStreamChoice: Codable, Sendable {
 public struct OpenAIDelta: Codable, Sendable {
     public let role: String?
     public let content: String?
+    public let reasoningContent: String?
 
-    public init(role: String? = nil, content: String? = nil) {
+    private enum CodingKeys: String, CodingKey {
+        case role, content
+        case reasoningContent = "reasoning_content"
+    }
+
+    public init(role: String? = nil, content: String? = nil, reasoningContent: String? = nil) {
         self.role = role
         self.content = content
+        self.reasoningContent = reasoningContent
     }
 }
 

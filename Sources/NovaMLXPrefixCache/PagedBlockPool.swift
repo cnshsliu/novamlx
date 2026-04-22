@@ -190,7 +190,9 @@ public final class PagedBlockPool: @unchecked Sendable {
                     tokenIds: blockTokens,
                     modelName: modelName
                 )
-                guard let block = hashMap.get(hash) else { break }
+                guard let block = hashMap.get(hash) else {
+                    break
+                }
                 matchedIds.append(block.blockId)
                 parentHash = hash
             }

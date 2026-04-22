@@ -16,6 +16,7 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var totalTokensGenerated: UInt64 = 0
     @Published public var uptime: TimeInterval = 0
     @Published public var downloadTasks: [String: DownloadTaskInfo] = [:]
+    @Published public var requestedPage: AppPage? = nil
 
     private var statsTimer: Timer?
 

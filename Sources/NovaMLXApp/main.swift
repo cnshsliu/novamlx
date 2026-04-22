@@ -13,13 +13,24 @@ struct NovaMLXApp: App {
 
     var body: some Scene {
         MenuBarExtra("NovaMLX", systemImage: "brain.head.profile.fill") {
-            MenuBarContentView(
-                appState: appDelegate.appState,
-                inferenceService: appDelegate.inferenceService,
-                modelManager: appDelegate.modelManager
-            )
+            Button { appDelegate.openMainWindow(to: .status) } label: {
+                Label("Status", systemImage: "gauge.with.dots.needle.bottom.50percent")
+            }
+            Button { appDelegate.openMainWindow(to: .models) } label: {
+                Label("Models", systemImage: "cube.box")
+            }
+            Button { appDelegate.openMainWindow(to: .chat) } label: {
+                Label("Chat", systemImage: "bubble.left.and.bubble.right")
+            }
+            Button { appDelegate.openMainWindow(to: .settings) } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            Divider()
+            Button { NSApp.terminate(nil) } label: {
+                Label("Quit", systemImage: "power")
+            }
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
     }
 }
 
@@ -28,7 +39,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = MenuBarAppState()
     let engine = MLXEngine()
     let settingsManager: ModelSettingsManager
-    lazy var inferenceService = InferenceService(engine: engine, settingsManager: settingsManager)
+    let workerMode: Bool
+    lazy var inferenceService: InferenceService = {
+        if workerMode {
+            let workerPath = Bundle.main.executableURL!
+                .deletingLastPathComponent()
+                .appendingPathComponent("NovaMLXWorker")
+                .path
+            return InferenceService(
+                engine: engine,
+                settingsManager: settingsManager,
+                workerMode: true,
+                workerBinaryPath: workerPath
+            )
+        }
+        return InferenceService(engine: engine, settingsManager: settingsManager)
+    }()
     let modelManager: ModelManager
     var apiServer: NovaMLXAPIServer?
     var serverTask: Task<Void, Never>?
@@ -46,6 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         self.modelManager = ModelManager(modelsDirectory: modelsDir)
         self.settingsManager = ModelSettingsManager(baseDirectory: baseDir)
+
+        // Enable worker subprocess for crash isolation
+        self.workerMode = true
+
         super.init()
     }
 
@@ -80,7 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
 
-        _ = "file://" + oldPrefix.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!
+        guard let encoded = oldPrefix.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return }
+        _ = "file://" + encoded
         var changed = false
 
         for (key, value) in json {
@@ -93,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 with: "file:///Users/lucas/.nova/models/"
             )
             // Also handle non-percent-encoded variant
-            record["localURL"] = (record["localURL"] as! String).replacingOccurrences(
+            record["localURL"] = (record["localURL"] as? String ?? localURL).replacingOccurrences(
                 of: "file:///Users/lucas/Library/Application Support/NovaMLX/models/",
                 with: "file:///Users/lucas/.nova/models/"
             )
@@ -153,6 +184,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Self.cleanupLegacyAppSupportDir()
 
             // Restore previously loaded models and detect interrupted downloads
+            if workerMode {
+                do {
+                    try inferenceService.startWorker()
+                    NovaMLXLog.info("Worker subprocess started")
+                } catch {
+                    NovaMLXLog.error("Failed to start worker: \(error)")
+                }
+            }
             await inferenceService.restoreModels(modelManager: modelManager)
             appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
             appState.resumeIncompleteDownloads()
@@ -254,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         memoryPressureHandler?.stop()
         appState.stopStatsMonitoring()
+        inferenceService.stopWorker()
     }
 
     nonisolated func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -267,7 +307,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openMainWindow()
     }
 
-    func openMainWindow() {
+    func openMainWindow(to page: AppPage = .status) {
+        appState.requestedPage = page
+
         if let window = mainWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

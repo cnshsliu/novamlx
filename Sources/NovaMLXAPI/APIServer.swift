@@ -126,12 +126,20 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
 
     let validKeys: [String]
 
+    private static let publicPaths: Set<String> = ["/chat", "/health", "/v1/models"]
+    private static let publicPrefixes: Set<String> = ["/v1/chat/history"]
+
     func handle(
         _ request: Request,
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
         if validKeys.isEmpty { return try await next(request, context) }
+
+        let path = request.uri.path
+        if Self.publicPaths.contains(path) || Self.publicPrefixes.contains(where: { path.hasPrefix($0) }) {
+            return try await next(request, context)
+        }
 
         // 1. Authorization: Bearer xxx (OpenAI / standard)
         let authHeader = request.headers[.authorization]
@@ -314,7 +322,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             APIKeyAuthMiddleware(validKeys: cfg.apiKeys)
             NovaMLXErrorMiddleware()
             Get("/v1/models") { request, context in
-                let modelList = models.downloadedModels().map { OpenAIModel(id: $0.id) }
+                let modelList = models.downloadedModels()
+                    .filter { inference.isModelLoaded($0.id) }
+                    .map { OpenAIModel(id: $0.id) }
                 let response = OpenAIModelsResponse(data: modelList)
                 return try Self.jsonResponse(response)
             }
@@ -592,6 +602,28 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     body: .init(byteBuffer: ByteBuffer(string: html))
                 )
             }
+            Get("/v1/chat/history") { _, _ in
+                let summaries = ChatHistoryStore.shared.list()
+                return try Self.jsonResponse(summaries)
+            }
+            Get("/v1/chat/history/{id}") { _, context in
+                let id = try context.parameters.require("id")
+                guard let record = ChatHistoryStore.shared.get(id: id) else {
+                    throw HTTPError(.notFound, message: "Chat not found")
+                }
+                return try Self.jsonResponse(record)
+            }
+            Post("/v1/chat/history") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                let record = try JSONDecoder().decode(ChatHistoryStore.ChatRecord.self, from: body)
+                try ChatHistoryStore.shared.save(record)
+                return Response(status: .ok)
+            }
+            Delete("/v1/chat/history/{id}") { _, context in
+                let id = try context.parameters.require("id")
+                try ChatHistoryStore.shared.delete(id: id)
+                return Response(status: .ok)
+            }
             Get("/v1/stats") { _, context in
                 let stats = inference.stats
                 let sessionMetrics = inference.engine.metrics
@@ -759,7 +791,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
 
                 if models.isDownloaded(req.modelId) {
-                    let record = models.getRecord(req.modelId)!
+                    guard let record = models.getRecord(req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
                     return try Self.jsonResponse(AdminModelStatus(
                         id: req.modelId, family: record.family.rawValue,
                         downloaded: true, loaded: inference.isModelLoaded(req.modelId),
@@ -1457,6 +1491,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try await writer.write(ByteBuffer(string: "data: \(String(data: roleData, encoding: .utf8) ?? "")\n\n"))
 
                 var completionTokenCount = 0
+                let thinkingParser = ThinkingParser()
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
@@ -1476,16 +1511,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             try await writer.write(ByteBuffer(string: "data: \(String(data: finalData, encoding: .utf8) ?? "")\n\n"))
                         } else {
                             completionTokenCount += 1
+                            let parsed = thinkingParser.feed(token.text)
+                            if parsed.text.isEmpty { continue }
+                            let delta: OpenAIDelta = parsed.type == .thinking
+                                ? OpenAIDelta(reasoningContent: parsed.text)
+                                : OpenAIDelta(content: parsed.text)
                             let chunk = OpenAIStreamChunk(
                                 id: chunkId,
                                 model: openAIReq.model,
-                                choices: [
-                                    OpenAIStreamChoice(index: 0, delta: OpenAIDelta(content: token.text))
-                                ]
+                                choices: [OpenAIStreamChoice(index: 0, delta: delta)]
                             )
                             let data = try JSONEncoder().encode(chunk)
-                            let sseData = "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"
-                            try await writer.write(ByteBuffer(string: sseData))
+                            try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                         }
                     case .keepAlive:
                         try await writer.write(ByteBuffer(string: ": keep-alive\n\n"))
@@ -1527,7 +1564,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
         return Response(
             status: .ok,
-            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive"],
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive", .init("X-Accel-Buffering")!: "no"],
             body: body
         )
     }
@@ -1607,7 +1644,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
         return Response(
             status: .ok,
-            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive"],
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive", .init("X-Accel-Buffering")!: "no"],
             body: body
         )
     }
@@ -1716,7 +1753,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
         return Response(
             status: .ok,
-            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive"],
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive", .init("X-Accel-Buffering")!: "no"],
             body: body
         )
     }

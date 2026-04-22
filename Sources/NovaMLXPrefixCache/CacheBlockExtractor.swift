@@ -17,15 +17,29 @@ public enum CacheBlockExtractor {
             var sliced: [MLXArray] = []
             sliced.reserveCapacity(state.count)
 
-            for array in state {
-                if array.ndim == 4 && array.shape[2] >= endIdx && startIdx < endIdx {
-                    let slice = array[.ellipsis, ..<endIdx, 0...]
-                    sliced.append(slice)
-                } else if array.ndim == 4 && array.shape[2] > startIdx {
-                    let actualEnd = min(endIdx, array.shape[2])
-                    let slice = array[.ellipsis, startIdx..<actualEnd, 0...]
-                    sliced.append(slice)
-                } else {
+            // KV-type caches have sequence-dependent 4D arrays [B, heads, seqLen, dim].
+            // MambaCache/ArraysCache have fixed-size state — must NOT be sliced.
+            let isKVType = layer is KVCacheSimple
+                || layer is RotatingKVCache
+                || layer is ChunkedKVCache
+                || layer is QuantizedKVCache
+
+            if isKVType {
+                for array in state {
+                    if array.ndim == 4 && array.shape[2] >= endIdx && startIdx < endIdx {
+                        let slice = array[.ellipsis, ..<endIdx, 0...]
+                        sliced.append(slice)
+                    } else if array.ndim == 4 && array.shape[2] > startIdx {
+                        let actualEnd = min(endIdx, array.shape[2])
+                        let slice = array[.ellipsis, startIdx..<actualEnd, 0...]
+                        sliced.append(slice)
+                    } else {
+                        sliced.append(array)
+                    }
+                }
+            } else {
+                // Fixed-size state (MambaCache, ArraysCache, etc.) — store as-is
+                for array in state {
                     sliced.append(array)
                 }
             }
@@ -43,14 +57,25 @@ public enum CacheBlockExtractor {
         guard numLayers > 0, !blockDataList.isEmpty else { return nil }
 
         var mergedLayers: [[MLXArray]] = Array(repeating: [], count: numLayers)
+        let isKVMask: [Bool] = (0..<numLayers).map { i in
+            let cls = i < layerClasses.count ? layerClasses[i] : "KVCache"
+            return cls == "KVCache" || cls == "RotatingKVCache" || cls == "ChunkedKVCache" || cls == "QuantizedKVCache"
+        }
+
         for blockData in blockDataList {
             for i in 0..<min(blockData.count, numLayers) {
                 let layerState = blockData[i]
                 if mergedLayers[i].isEmpty {
                     mergedLayers[i] = layerState
                 } else if mergedLayers[i].count == layerState.count {
-                    for j in 0..<layerState.count {
-                        mergedLayers[i][j] = concatenated([mergedLayers[i][j], layerState[j]], axis: 2)
+                    if isKVMask[i] {
+                        // KV caches: concatenate along sequence axis
+                        for j in 0..<layerState.count {
+                            mergedLayers[i][j] = concatenated([mergedLayers[i][j], layerState[j]], axis: 2)
+                        }
+                    } else {
+                        // Fixed-size state (MambaCache, etc.): use latest block only
+                        mergedLayers[i] = layerState
                     }
                 }
             }

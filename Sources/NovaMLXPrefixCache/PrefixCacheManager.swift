@@ -68,7 +68,9 @@ public final class PrefixCacheManager: @unchecked Sendable {
         var metaStatesList: [[String]] = []
 
         for blockId in matchedBlockIds {
-            guard let block = pool.getBlock(blockId), let hash = block.blockHash else { continue }
+            guard let block = pool.getBlock(blockId), let hash = block.blockHash else {
+                continue
+            }
 
             if let loaded = ssd.loadBlock(hash) {
                 var layerData: [[MLXArray]] = []
@@ -150,7 +152,9 @@ public final class PrefixCacheManager: @unchecked Sendable {
                     continue
                 }
 
-                guard let block = pool.allocateBlock() else { break }
+                guard let block = pool.allocateBlock() else {
+                    break
+                }
 
                 pool.registerBlock(block: block, tokenIds: blockTokens, parentHash: parentHash)
 

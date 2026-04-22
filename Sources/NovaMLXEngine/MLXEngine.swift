@@ -491,21 +491,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return maxTokens
     }
 
-    /// Build EOS token IDs from tokenizer + model config
-    private func buildEOSTokenIds(tokenizer: Tokenizer, modelConfiguration: ModelConfiguration) -> Set<Int> {
-        var ids = modelConfiguration.eosTokenIds
-        if let eosId = tokenizer.eosTokenId {
-            ids.insert(eosId)
-        }
-        return ids
-    }
-
-    /// Create a ThinkingEOSSuppressor if the model has EOS tokens. Inert for non-thinking models.
-    private func buildThinkingSuppressor(eosTokenIds: Set<Int>, decode: @Sendable @escaping ([Int]) -> String) -> ThinkingEOSSuppressor? {
-        guard !eosTokenIds.isEmpty else { return nil }
-        return ThinkingEOSSuppressor(eosTokenIds: eosTokenIds, maxPenalty: 20.0, decayTokens: 128, decode: decode)
-    }
-
     func buildGenerateParameters(
         request: InferenceRequest, config: ModelConfig, settings: ModelSettings? = nil
     ) -> GenerateParameters {
@@ -638,23 +623,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
         }
 
-        // Build composed processor: penalty + thinking suppressor
-        let penaltyProcessor = parameters.processor()
+        // Build processor (repetition penalty only)
+        let processor = parameters.processor()
         let model = await mlxContainer.perform { context in SendableBox(context.model) }
         let mlxTokenizer = await mlxContainer.tokenizer
         let modelConfig = await mlxContainer.configuration
-        let eosIds = buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
-        let decode = container.tokenizer!.decode
-        let suppressor = buildThinkingSuppressor(eosTokenIds: eosIds, decode: decode)
-
-        let processor: (any LogitProcessor)?
-        if let penalty = penaltyProcessor, let sup = suppressor {
-            processor = ComposedLogitProcessor(grammarProcessor: penalty, penaltyProcessor: nil, thinkingSuppressor: sup)
-        } else if let penalty = penaltyProcessor {
-            processor = penalty
-        } else {
-            processor = suppressor
-        }
 
         let sampler = parameters.sampler()
 
@@ -701,15 +674,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
             if cacheValid {
                 let cachedTokenCount = result.cachedTokenCount
-                for layer in restored {
-                    if let kv = layer as? BaseKVCache {
-                        kv.offset = cachedTokenCount
+                // RotatingKVCache (sliding window) is incompatible with prefix cache:
+                // offset > maxSize breaks invariants, and shared KV across layers
+                // means any mismatched layer corrupts the entire attention.
+                // Fall back to full prefill if any RotatingKVCache present.
+                let hasRotating = restored.contains { $0 is RotatingKVCache }
+                if hasRotating {
+                    NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: model has RotatingKVCache layers — skipping (incompatible with sliding window)")
+                    kvCache = model.value.newCache(parameters: parameters)
+                } else {
+                    for layer in restored {
+                        if let kv = layer as? BaseKVCache { kv.offset = cachedTokenCount }
                     }
+                    NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache HIT: \(cachedTokenCount) cached, \(result.remainingTokenIds.count) remaining")
+                    let remainingTokens = MLXArray(result.remainingTokenIds.map { Int32($0) })
+                    effectiveInput = LMInput(text: .init(tokens: remainingTokens))
+                    kvCache = restored
                 }
-                NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache HIT: \(cachedTokenCount) cached, \(result.remainingTokenIds.count) remaining")
-                let remainingTokens = MLXArray(result.remainingTokenIds.map { Int32($0) })
-                effectiveInput = LMInput(text: .init(tokens: remainingTokens))
-                kvCache = restored
             } else {
                 NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: validation failed — using fresh cache")
                 kvCache = model.value.newCache(parameters: parameters)
@@ -850,23 +831,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         self.getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
                     }
 
-                    // Build composed processor: penalty + thinking suppressor
-                    let penaltyProcessor = parameters.processor()
+                    // Build processor (repetition penalty only)
+                    let processor = parameters.processor()
                     let model = await mlxContainer.perform { context in SendableBox(context.model) }
                     let mlxTokenizer = await mlxContainer.tokenizer
                     let modelConfig = await mlxContainer.configuration
-                    let eosIds = self.buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
-                    let decode = container.tokenizer!.decode
-                    let suppressor = self.buildThinkingSuppressor(eosTokenIds: eosIds, decode: decode)
-
-                    let processor: (any LogitProcessor)?
-                    if let penalty = penaltyProcessor, let sup = suppressor {
-                        processor = ComposedLogitProcessor(grammarProcessor: penalty, penaltyProcessor: nil, thinkingSuppressor: sup)
-                    } else if let penalty = penaltyProcessor {
-                        processor = penalty
-                    } else {
-                        processor = suppressor
-                    }
 
                     let sampler = parameters.sampler()
 
@@ -897,13 +866,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                         if cacheValid {
                             let cachedTokenCount = result.cachedTokenCount
-                            for layer in restored {
-                                if let kv = layer as? BaseKVCache { kv.offset = cachedTokenCount }
+                            let hasRotating = restored.contains { $0 is RotatingKVCache }
+                            if hasRotating {
+                                NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache: model has RotatingKVCache layers — skipping (incompatible with sliding window)")
+                                kvCache = model.value.newCache(parameters: parameters)
+                            } else {
+                                for layer in restored {
+                                    if let kv = layer as? BaseKVCache { kv.offset = cachedTokenCount }
+                                }
+                                NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache HIT: \(cachedTokenCount) cached, \(result.remainingTokenIds.count) remaining")
+                                let remainingTokens = MLXArray(result.remainingTokenIds.map { Int32($0) })
+                                effectiveInput = LMInput(text: .init(tokens: remainingTokens))
+                                kvCache = restored
                             }
-                            NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache HIT: \(cachedTokenCount) cached, \(result.remainingTokenIds.count) remaining")
-                            let remainingTokens = MLXArray(result.remainingTokenIds.map { Int32($0) })
-                            effectiveInput = LMInput(text: .init(tokens: remainingTokens))
-                            kvCache = restored
                         } else {
                             NovaMLXLog.warning("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache: validation failed — using fresh cache")
                             kvCache = model.value.newCache(parameters: parameters)
@@ -1201,33 +1176,29 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         guard let mlxContainer = container.mlxContainer else {
             throw NovaMLXError.inferenceFailed("Model not loaded")
         }
+        guard let tokenizer = container.tokenizer else {
+            throw NovaMLXError.inferenceFailed("Tokenizer not available for \(request.model)")
+        }
 
         let grammarProcessor: any LogitProcessor
         if let schema = request.jsonSchemaDef {
-            grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: container.tokenizer!)
+            grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: tokenizer)
         } else if let pattern = request.regexPattern {
-            grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: container.tokenizer!)
+            grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: tokenizer)
         } else if let grammar = request.gbnfGrammar {
-            grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: container.tokenizer!)
+            grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: tokenizer)
         } else {
-            grammarProcessor = JSONLogitProcessor(tokenizer: container.tokenizer!)
+            grammarProcessor = JSONLogitProcessor(tokenizer: tokenizer)
         }
 
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
         let penaltyProcessor = parameters.processor()
 
-        // Build thinking suppressor for grammar path
         let modelConfig = await mlxContainer.configuration
-        let eosIds = buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
-        let suppressor = buildThinkingSuppressor(eosTokenIds: eosIds, decode: container.tokenizer!.decode)
 
         let processor: any LogitProcessor
-        if let penalty = penaltyProcessor, let sup = suppressor {
-            processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty, thinkingSuppressor: sup)
-        } else if let penalty = penaltyProcessor {
+        if let penalty = penaltyProcessor {
             processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
-        } else if let sup = suppressor {
-            processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: nil, thinkingSuppressor: sup)
         } else {
             processor = grammarProcessor
         }
@@ -1254,7 +1225,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         )
 
         let model = await mlxContainer.perform { context in SendableBox(context.model) }
-        let tokenizer = await mlxContainer.tokenizer
+        let mlxTokenizer = await mlxContainer.tokenizer
 
         let iterator = try TokenIterator(
             input: input, model: model.value,
@@ -1266,7 +1237,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let (stream, task) = generateTask(
             promptTokenCount: promptTokenCount,
             modelConfiguration: modelConfig,
-            tokenizer: tokenizer,
+            tokenizer: mlxTokenizer,
             iterator: iterator,
             wiredMemoryTicket: createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: ticketBytesPerToken)
         )
@@ -1321,33 +1292,29 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                           let mlxContainer = container.mlxContainer else {
                         throw NovaMLXError.modelNotFound(request.model)
                     }
+                    guard let tokenizer = container.tokenizer else {
+                        throw NovaMLXError.inferenceFailed("Tokenizer not available for \(request.model)")
+                    }
 
                     let grammarProcessor: any LogitProcessor
                     if let schema = request.jsonSchemaDef {
-                        grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: container.tokenizer!)
+                        grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: tokenizer)
                     } else if let pattern = request.regexPattern {
-                        grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: container.tokenizer!)
+                        grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: tokenizer)
                     } else if let grammar = request.gbnfGrammar {
-                        grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: container.tokenizer!)
+                        grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: tokenizer)
                     } else {
-                        grammarProcessor = JSONLogitProcessor(tokenizer: container.tokenizer!)
+                        grammarProcessor = JSONLogitProcessor(tokenizer: tokenizer)
                     }
 
                     let parameters = engine.buildGenerateParameters(request: request, config: container.config, settings: engine.settingsProvider?(request.model))
                     let penaltyProc = parameters.processor()
 
-                    // Build thinking suppressor for grammar stream path
                     let modelConfig = await mlxContainer.configuration
-                    let eosIds = engine.buildEOSTokenIds(tokenizer: container.tokenizer!, modelConfiguration: modelConfig)
-                    let suppressor = engine.buildThinkingSuppressor(eosTokenIds: eosIds, decode: container.tokenizer!.decode)
 
                     let processor: any LogitProcessor
-                    if let penalty = penaltyProc, let sup = suppressor {
-                        processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty, thinkingSuppressor: sup)
-                    } else if let penalty = penaltyProc {
+                    if let penalty = penaltyProc {
                         processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: penalty)
-                    } else if let sup = suppressor {
-                        processor = ComposedLogitProcessor(grammarProcessor: grammarProcessor, penaltyProcessor: nil, thinkingSuppressor: sup)
                     } else {
                         processor = grammarProcessor
                     }
@@ -1373,7 +1340,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     )
 
                     let model = await mlxContainer.perform { context in SendableBox(context.model) }
-                    let tokenizer = await mlxContainer.tokenizer
+                    let mlxTokenizer = await mlxContainer.tokenizer
 
                     let iterator = try TokenIterator(
                         input: input, model: model.value,
@@ -1385,7 +1352,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let (stream, genTask) = generateTask(
                         promptTokenCount: promptTokenCount,
                         modelConfiguration: modelConfig,
-                        tokenizer: tokenizer,
+                        tokenizer: mlxTokenizer,
                         iterator: iterator,
                         wiredMemoryTicket: engine.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: sessionBytesPerToken)
                     )
