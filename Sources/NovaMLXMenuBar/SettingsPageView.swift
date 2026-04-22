@@ -16,6 +16,19 @@ struct SettingsPageView: View {
     @State private var cliInstalled: Bool = false
     @State private var cliInstallMessage: String? = nil
 
+    // Config editor state
+    @State private var showConfigEditor = false
+    @State private var cfgHost = "127.0.0.1"
+    @State private var cfgPort = 6590
+    @State private var cfgAdminPort = 6591
+    @State private var cfgApiKeys = ""
+    @State private var cfgMaxConcurrent = 16
+    @State private var cfgTimeout = 300
+    @State private var cfgMaxBodyMB = 100.0
+    @State private var cfgDefaultModel = ""
+    @State private var cfgSaveMessage: String? = nil
+    @State private var cfgHasUnsavedChanges = false
+
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
@@ -33,7 +46,18 @@ struct SettingsPageView: View {
 
     private var serverConfigSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Server", icon: "server.rack")
+            HStack {
+                sectionHeader("Server", icon: "server.rack")
+                Spacer()
+                Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showConfigEditor.toggle() } }) {
+                    Image(systemName: showConfigEditor ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10))
+                    Text("Edit Config")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
 
             settingsRow("Inference API", value: "http://127.0.0.1:\(String(appState.serverPort))")
             settingsRow("Admin API", value: "http://127.0.0.1:\(String(appState.adminPort))")
@@ -41,6 +65,11 @@ struct SettingsPageView: View {
             settingsRow("Admin Dashboard", value: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")
 
             configPathRow
+
+            if showConfigEditor {
+                Divider().padding(.vertical, 4)
+                configEditorPanel
+            }
 
             HStack {
                 Button("Open Chat in Browser") {
@@ -54,10 +83,21 @@ struct SettingsPageView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+
+                Spacer()
+
+                Button("Open Config File") {
+                    let path = FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent(".nova/config.json").path
+                    NSWorkspace.shared.open(URL(string: "file://\(path)")!)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
         .padding(16)
         .sectionCard()
+        .task { loadCurrentConfig() }
     }
 
     private var configPathRow: some View {
@@ -80,6 +120,190 @@ struct SettingsPageView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    private var configEditorPanel: some View {
+        VStack(spacing: 10) {
+            Text("Server Configuration")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 12) {
+                configField("Host", text: $cfgHost, width: 140, placeholder: "127.0.0.1")
+                configFieldInt("Port", value: $cfgPort, width: 80, range: 1...65535)
+                configFieldInt("Admin Port", value: $cfgAdminPort, width: 80, range: 1...65535)
+            }
+
+            HStack(spacing: 12) {
+                configFieldInt("Max Concurrent", value: $cfgMaxConcurrent, width: 80, range: 1...128)
+                configFieldInt("Timeout (s)", value: $cfgTimeout, width: 80, range: 10...3600)
+                configFieldDouble("Max Body (MB)", value: $cfgMaxBodyMB, width: 100, range: 1...1024)
+            }
+
+            HStack(spacing: 12) {
+                configField("Default Model", text: $cfgDefaultModel, width: nil, placeholder: "e.g. mlx-community/Qwen3-35B-4bit")
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Keys (one per line)")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                TextEditor(text: $cfgApiKeys)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(height: 60)
+                    .padding(4)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.gray.opacity(0.3)))
+            }
+
+            HStack {
+                if let msg = cfgSaveMessage {
+                    Text(msg)
+                        .font(.system(size: 11))
+                        .foregroundColor(msg.contains("Error") ? .red : NovaTheme.Colors.statusOK)
+                }
+                Spacer()
+                Button("Reset to Current") { loadCurrentConfig() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                Button("Save to Disk") { saveConfig() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func configField(_ label: String, text: Binding<String>, width: CGFloat?, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.system(size: 11)).foregroundColor(.secondary)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .frame(width: width)
+        }
+    }
+
+    private func configFieldInt(_ label: String, value: Binding<Int>, width: CGFloat, range: ClosedRange<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.system(size: 11)).foregroundColor(.secondary)
+            TextField("", value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .frame(width: width)
+        }
+    }
+
+    private func configFieldDouble(_ label: String, value: Binding<Double>, width: CGFloat, range: ClosedRange<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.system(size: 11)).foregroundColor(.secondary)
+            TextField("", value: value, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .frame(width: width)
+        }
+    }
+
+    private func loadCurrentConfig() {
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let configPath = homeDir.appendingPathComponent(".nova/config.json")
+
+        guard let data = try? Data(contentsOf: configPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+        if let server = json["server"] as? [String: Any] {
+            cfgHost = server["host"] as? String ?? "127.0.0.1"
+            cfgPort = server["port"] as? Int ?? 6590
+            cfgAdminPort = server["adminPort"] as? Int ?? 6591
+            cfgMaxConcurrent = server["maxConcurrentRequests"] as? Int ?? 16
+            cfgTimeout = server["requestTimeout"] as? Int ?? 300
+            cfgMaxBodyMB = server["maxRequestSizeMB"] as? Double ?? 100.0
+            if let keys = server["apiKeys"] as? [String] {
+                cfgApiKeys = keys.joined(separator: "\n")
+            }
+        }
+        cfgDefaultModel = json["defaultModel"] as? String ?? ""
+        if let rootKeys = json["apiKeys"] as? [String], !rootKeys.isEmpty {
+            // Prefer server.apiKeys if both exist
+        } else if let rootKeys = json["apiKeys"] as? [String] {
+            cfgApiKeys = rootKeys.joined(separator: "\n")
+        }
+        cfgSaveMessage = nil
+        cfgHasUnsavedChanges = false
+    }
+
+    private func saveConfig() {
+        // Validation
+        guard cfgPort > 0 && cfgPort <= 65535 else {
+            cfgSaveMessage = "Error: Port must be 1-65535"
+            return
+        }
+        guard cfgAdminPort > 0 && cfgAdminPort <= 65535 else {
+            cfgSaveMessage = "Error: Admin port must be 1-65535"
+            return
+        }
+        guard cfgPort != cfgAdminPort else {
+            cfgSaveMessage = "Error: Port and Admin Port must differ"
+            return
+        }
+        guard cfgMaxConcurrent > 0 else {
+            cfgSaveMessage = "Error: Max Concurrent must be > 0"
+            return
+        }
+
+        let apiKeysArray = cfgApiKeys
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        var serverDict: [String: Any] = [
+            "host": cfgHost,
+            "port": cfgPort,
+            "adminPort": cfgAdminPort,
+            "maxConcurrentRequests": cfgMaxConcurrent,
+            "requestTimeout": cfgTimeout,
+            "maxRequestSizeMB": cfgMaxBodyMB
+        ]
+        if !apiKeysArray.isEmpty {
+            serverDict["apiKeys"] = apiKeysArray
+        }
+
+        var configDict: [String: Any] = ["server": serverDict]
+        if !cfgDefaultModel.isEmpty {
+            configDict["defaultModel"] = cfgDefaultModel
+        }
+
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser
+        let configPath = homeDir.appendingPathComponent(".nova/config.json")
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: configDict, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: configPath, options: .atomic)
+            cfgSaveMessage = "Saved! Restart app to apply changes."
+            cfgHasUnsavedChanges = false
+
+            // Also update the in-memory config via NovaMLXConfiguration
+            Task {
+                let config = NovaMLXConfiguration.shared
+                let newServerConfig = ServerConfig(
+                    host: cfgHost,
+                    port: cfgPort,
+                    adminPort: cfgAdminPort,
+                    apiKeys: apiKeysArray,
+                    maxConcurrentRequests: cfgMaxConcurrent,
+                    requestTimeout: TimeInterval(cfgTimeout),
+                    maxRequestSizeMB: cfgMaxBodyMB
+                )
+                await config.setServerConfig(newServerConfig)
+                await config.setDefaultModel(cfgDefaultModel.isEmpty ? nil : cfgDefaultModel)
+            }
+        } catch {
+            cfgSaveMessage = "Error: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - CLI Tool
