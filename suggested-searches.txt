@@ -1,0 +1,7 @@
+mlx-community/gemma4
+mlx-community/qwen3.6
+mlx-community/kimi
+mlx-community/glm
+mlx-community/llama4
+mlx-community/deepseek-r1
+mlx-community/phi

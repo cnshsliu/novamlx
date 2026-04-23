@@ -23,6 +23,8 @@ struct ModelsPageView: View {
     @State private var isSavingApiKey = false
     @State private var selectedModelCard: ModelCardData?
     @State private var isLoadingCard = false
+
+    @State private var suggestedSearches = ["mlx-community/gemma4", "mlx-community/qwen3.6"]
     @State private var modelToDelete: String?
     @State private var showDeleteConfirmation = false
     @State private var loadingModelId: String?
@@ -30,6 +32,23 @@ struct ModelsPageView: View {
     enum SubTab: String, CaseIterable {
         case myModels = "myModels"
         case downloads = "downloads"
+    }
+
+    private func fetchSuggestedSearches() async {
+        guard let url = URL(string: "https://raw.githubusercontent.com/cnshsliu/novamlx/main/suggested-searches.txt") else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else { return }
+            let text = String(data: data, encoding: .utf8) ?? ""
+            let lines = text.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            if !lines.isEmpty {
+                suggestedSearches = lines
+            }
+        } catch {
+            // silently keep hardcoded defaults
+        }
     }
 
     var body: some View {
@@ -68,6 +87,9 @@ struct ModelsPageView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
             refreshTrigger.toggle()
+        }
+        .task {
+            await fetchSuggestedSearches()
         }
     }
 
@@ -174,29 +196,53 @@ struct ModelsPageView: View {
     }
 
     private var searchBar: some View {
-        HStack(spacing: 12) {
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                TextField(l10n.tr("models.searchPlaceholder"), text: $searchText)
-                    .textFieldStyle(.plain)
-                    .onSubmit { performSearch() }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(NovaTheme.Colors.rowBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            Button(action: { performSearch() }) {
-                if isSearching {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label(l10n.tr("models.search"), systemImage: "magnifyingglass")
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+                    TextField(l10n.tr("models.searchPlaceholder"), text: $searchText)
+                        .textFieldStyle(.plain)
+                        .onSubmit { performSearch() }
                 }
-            }
-            .buttonStyle(.bordered)
-            .disabled(searchText.isEmpty || isSearching)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(NovaTheme.Colors.rowBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            Spacer()
+                Button(action: { performSearch() }) {
+                    if isSearching {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label(l10n.tr("models.search"), systemImage: "magnifyingglass")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(searchText.isEmpty || isSearching)
+
+                Spacer()
+            }
+
+            HStack(spacing: 8) {
+                ForEach(suggestedSearches, id: \.self) { suggestion in
+                    Button(action: {
+                        searchText = suggestion
+                        performSearch()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkle")
+                                .font(.caption2)
+                            Text(suggestion)
+                                .font(.caption)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(NovaTheme.Colors.rowBackground)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
+            }
         }
         .padding(16)
     }
