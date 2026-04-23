@@ -5,7 +5,7 @@ enum CLIClient {
     private static let adminURL = "http://127.0.0.1:8081"
 
     // Read server config from ~/.nova/config.json (same file the server uses)
-    private static func configFromFile() -> [String: Any]? {
+    static func configFromFile() -> [String: Any]? {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser
         let configURL = homeDir.appendingPathComponent(".nova/config.json")
         guard let data = try? Data(contentsOf: configURL),
@@ -14,7 +14,7 @@ enum CLIClient {
         return json
     }
 
-    private static func portFromFile() -> (inference: Int, admin: Int) {
+    static func portFromFile() -> (inference: Int, admin: Int) {
         guard let json = configFromFile(),
               let server = json["server"] as? [String: Any]
         else { return (6590, 6591) }
@@ -22,7 +22,7 @@ enum CLIClient {
     }
 
     /// Resolve API key: env var > config file > nil
-    private static func resolveAPIKey() -> String? {
+    static func resolveAPIKey() -> String? {
         // 1. Environment variable takes priority
         if let envKey = ProcessInfo.processInfo.environment["NOVA_API_KEY"], !envKey.isEmpty {
             return envKey

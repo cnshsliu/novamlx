@@ -7,14 +7,15 @@ struct ModelsMenuView: View {
     let modelManager: ModelManager
 
     var body: some View {
+        let l10n = L10n.shared
         VStack(alignment: .leading, spacing: 8) {
-            Text("Models")
+            Text(l10n.tr("app.models"))
                 .font(.headline)
 
             Divider()
 
             if appState.loadedModels.isEmpty {
-                Text("No models loaded")
+                Text(l10n.tr("menu.noModels"))
                     .foregroundColor(.secondary)
                     .font(.caption)
             } else {
@@ -34,12 +35,12 @@ struct ModelsMenuView: View {
             Divider()
 
             let downloaded = modelManager.downloadedModels()
-            Text("Downloaded: \(downloaded.count) models")
+            Text(l10n.tr("menu.downloadedCount", downloaded.count))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             let totalSize = modelManager.totalDiskUsage()
-            Text("Disk usage: \(totalSize.bytesFormatted)")
+            Text(l10n.tr("menu.diskUsage", totalSize.bytesFormatted))
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

@@ -325,7 +325,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let modelList = models.downloadedModels()
                     .filter { inference.isModelLoaded($0.id) }
                     .map { OpenAIModel(id: $0.id) }
-                let response = OpenAIModelsResponse(data: modelList)
+
+                // Append cloud models
+                let cloudModelList = await inference.listCloudModels().map { OpenAIModel(id: $0) }
+                let response = OpenAIModelsResponse(data: modelList + cloudModelList)
                 return try Self.jsonResponse(response)
             }
             Post("/v1/chat/completions") { request, context in

@@ -38,10 +38,11 @@ public struct DashboardView: View {
     }
 
     private var headerSection: some View {
-        HStack {
+        let l10n = L10n.shared
+        return HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Nova").foregroundColor(.primary) +
-                Text("MLX").foregroundColor(NovaTheme.Colors.accent)
+                Text(l10n.tr("app.nova")).foregroundColor(.primary) +
+                Text(l10n.tr("app.mlx")).foregroundColor(NovaTheme.Colors.accent)
                 Text("v\(NovaMLXCore.version)")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -54,7 +55,7 @@ public struct DashboardView: View {
                 Circle()
                     .fill(appState.isServerRunning ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
                     .frame(width: 10, height: 10)
-                Text(appState.isServerRunning ? "Running" : "Stopped")
+                Text(appState.isServerRunning ? l10n.tr("app.running") : l10n.tr("app.stopped"))
                     .font(.subheadline)
             }
 
@@ -65,6 +66,7 @@ public struct DashboardView: View {
     }
 
     private var statsGrid: some View {
+        let l10n = L10n.shared
         let gridItems = [
             GridItem(.flexible(), spacing: 12),
             GridItem(.flexible(), spacing: 12),
@@ -73,29 +75,30 @@ public struct DashboardView: View {
         ]
 
         return LazyVGrid(columns: gridItems, spacing: 12) {
-            MetricCard(title: "Models", value: "\(appState.loadedModels.count)", subtitle: "loaded")
-            MetricCard(title: "Memory", value: appState.systemStats.memoryUsed.bytesFormatted, subtitle: "system")
-            MetricCard(title: "GPU", value: appState.systemStats.gpuMemoryUsed.bytesFormatted, subtitle: "used")
-            MetricCard(title: "Requests", value: "\(appState.inferenceStats.activeRequests)", subtitle: "active")
-            MetricCard(title: "Speed", value: String(format: "%.1f", appState.systemStats.tokensPerSecond), subtitle: "tok/s")
-            MetricCard(title: "CPU", value: String(format: "%.0f%%", min(appState.systemStats.cpuUsage, 100.0)), subtitle: "usage")
-            MetricCard(title: "Uptime", value: formatUptime(appState.uptime), subtitle: "session")
-            MetricCard(title: "Disk", value: modelManager.totalDiskUsage().bytesFormatted, subtitle: "models")
+            MetricCard(title: l10n.tr("status.models"), value: "\(appState.loadedModels.count)", subtitle: l10n.tr("status.loaded"))
+            MetricCard(title: l10n.tr("status.memory"), value: appState.systemStats.memoryUsed.bytesFormatted, subtitle: l10n.tr("dashboard.system"))
+            MetricCard(title: l10n.tr("status.gpu"), value: appState.systemStats.gpuMemoryUsed.bytesFormatted, subtitle: l10n.tr("dashboard.used"))
+            MetricCard(title: l10n.tr("status.requests"), value: "\(appState.inferenceStats.activeRequests)", subtitle: l10n.tr("status.active"))
+            MetricCard(title: l10n.tr("status.inferenceSpeed"), value: String(format: "%.1f", appState.systemStats.tokensPerSecond), subtitle: "tok/s")
+            MetricCard(title: l10n.tr("status.cpu"), value: String(format: "%.0f%%", min(appState.systemStats.cpuUsage, 100.0)), subtitle: l10n.tr("dashboard.usage"))
+            MetricCard(title: l10n.tr("status.uptime"), value: formatUptime(appState.uptime), subtitle: l10n.tr("dashboard.session"))
+            MetricCard(title: l10n.tr("status.disk"), value: modelManager.totalDiskUsage().bytesFormatted, subtitle: l10n.tr("status.models").lowercased())
         }
     }
 
     private var deviceInfoSection: some View {
-        Group {
+        let l10n = L10n.shared
+        return Group {
             if let info = deviceInfo {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Device")
+                    Text(l10n.tr("status.device"))
                         .font(.headline)
 
                     HStack(spacing: 24) {
-                        infoRow(label: "Chip", value: info.chipVariant.isEmpty ? info.chipName : "\(info.chipName) (\(info.chipVariant))")
-                        infoRow(label: "Memory", value: "\(info.memoryGB) GB")
-                        infoRow(label: "GPU", value: "\(info.gpuCores) cores")
-                        infoRow(label: "CPU", value: "\(info.cpuCores) cores")
+                        infoRow(label: l10n.tr("status.chip"), value: info.chipVariant.isEmpty ? info.chipName : "\(info.chipName) (\(info.chipVariant))")
+                        infoRow(label: l10n.tr("status.memory"), value: "\(info.memoryGB) GB")
+                        infoRow(label: l10n.tr("status.gpu"), value: "\(info.gpuCores) \(l10n.tr("dashboard.cores"))")
+                        infoRow(label: l10n.tr("status.cpu"), value: "\(info.cpuCores) \(l10n.tr("dashboard.cores"))")
                     }
                 }
                 .padding(12)
@@ -117,12 +120,13 @@ public struct DashboardView: View {
     }
 
     private var loadedModelsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Loaded Models")
+        let l10n = L10n.shared
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(l10n.tr("dashboard.loadedModels"))
                 .font(.headline)
 
             if appState.loadedModels.isEmpty {
-                Text("No models loaded")
+                Text(l10n.tr("dashboard.noModelsLoaded"))
                     .foregroundColor(.secondary)
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -164,13 +168,14 @@ public struct DashboardView: View {
     }
 
     private var availableModelsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Available Models")
+        let l10n = L10n.shared
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(l10n.tr("dashboard.availableModels"))
                 .font(.headline)
 
             let downloaded = availableModels.filter { modelManager.isDownloaded($0.id) }
             if downloaded.isEmpty {
-                Text("No downloaded models found")
+                Text(l10n.tr("dashboard.noDownloadedModels"))
                     .foregroundColor(.secondary)
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -204,7 +209,7 @@ public struct DashboardView: View {
                                 .foregroundColor(NovaTheme.Colors.statusOK)
                                 .font(.caption)
                         } else {
-                            Button("Load") {
+                            Button(l10n.tr("dashboard.load")) {
                                 Task {
                                     let config = ModelConfig(
                                         identifier: ModelIdentifier(id: record.id, family: record.family),
@@ -233,10 +238,11 @@ public struct DashboardView: View {
     }
 
     private func formatUptime(_ interval: TimeInterval) -> String {
+        let l10n = L10n.shared
         let hours = Int(interval) / 3600
         let minutes = Int(interval) % 3600 / 60
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        return "\(minutes)m"
+        if hours > 0 { return "\(hours)\(l10n.tr("status.hour")) \(minutes)\(l10n.tr("status.minute"))" }
+        return "\(minutes)\(l10n.tr("status.minute"))"
     }
 
     private func startRefresh() {

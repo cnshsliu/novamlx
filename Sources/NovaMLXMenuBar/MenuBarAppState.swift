@@ -11,6 +11,7 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var adminPort: Int = 6591
     @Published public var apiKey: String? = nil
     @Published public var loadedModels: [String] = []
+    @Published public var cloudModels: [String] = []
     @Published public var systemStats: SystemStats = SystemStats()
     @Published public var inferenceStats: InferenceStats = InferenceStats()
     @Published public var totalTokensGenerated: UInt64 = 0
@@ -36,6 +37,7 @@ public final class MenuBarAppState: ObservableObject {
                 )
                 self.inferenceStats = inferenceService.stats
                 self.loadedModels = inferenceService.listLoadedModels()
+                self.cloudModels = await inferenceService.listCloudModels()
                 self.uptime = SystemMonitor.shared.uptime
                 self.tpsHistory.append(currentStats.recentTokensPerSecond)
                 if self.tpsHistory.count > self.maxTpsHistory {

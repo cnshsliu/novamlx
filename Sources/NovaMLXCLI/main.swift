@@ -40,6 +40,8 @@ struct NovaMLXCLI {
                 try await handleTurboQuant(subArgs)
             case "bench":
                 try await handleBench(subArgs)
+            case "launch":
+                try await LaunchCommand.handleLaunch(subArgs)
             case "--help", "-h":
                 printUsage()
             case "--version", "-v":
@@ -94,6 +96,12 @@ struct NovaMLXCLI {
         BENCHMARKING
           nova bench start [model-id]     Run benchmark
           nova bench status               Show benchmark progress
+
+        AGENTS
+          nova launch list                List available agents
+          nova launch openclaw            Launch OpenClaw with NovaMLX backend
+          nova launch hermes              Launch Hermes Agent with NovaMLX backend
+          nova launch opencode            Launch OpenCode with NovaMLX backend
 
         OPTIONS
           --help, -h     Show this help

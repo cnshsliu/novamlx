@@ -36,14 +36,15 @@ public struct MenuBarContentView: View {
     }
 
     public var body: some View {
+        let l10n = L10n.shared
         VStack(spacing: 0) {
             TabView(selection: $selectedTab) {
                 StatusMenuView(appState: appState)
-                    .tabItem { Label("Status", systemImage: "circle.fill") }
+                    .tabItem { Label(l10n.tr("app.status"), systemImage: "circle.fill") }
                     .tag(0)
 
                 ModelsMenuView(appState: appState, modelManager: modelManager)
-                    .tabItem { Label("Models", systemImage: "cube.box") }
+                    .tabItem { Label(l10n.tr("app.models"), systemImage: "cube.box") }
                     .tag(1)
             }
             .frame(width: 280, height: 200)
@@ -55,7 +56,7 @@ public struct MenuBarContentView: View {
                     NotificationCenter.default.post(name: .openNovaAppWindow, object: nil)
                 } label: {
                     Image(systemName: "macwindow")
-                    Text("Open Window")
+                    Text(l10n.tr("menuBar.openWindow"))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -66,7 +67,7 @@ public struct MenuBarContentView: View {
                     NSApp.terminate(nil)
                 } label: {
                     Image(systemName: "power")
-                    Text("Quit")
+                    Text(l10n.tr("menuBar.quit"))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

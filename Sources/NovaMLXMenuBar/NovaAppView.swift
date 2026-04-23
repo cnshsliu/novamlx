@@ -8,6 +8,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
     case models = "Models"
     case chat = "Chat"
+    case agents = "Agents"
     case settings = "Settings"
 
     public var id: String { rawValue }
@@ -17,6 +18,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
         case .models: return "cube.box"
         case .chat: return "bubble.left.and.bubble.right"
+        case .agents: return "app.badge.checkmark"
         case .settings: return "gearshape"
         }
     }
@@ -27,6 +29,7 @@ public struct NovaAppView: View {
     let inferenceService: InferenceService
     let modelManager: ModelManager
 
+    @EnvironmentObject var l10n: L10n
     @State private var selectedPage: AppPage
     @State private var columnVisibility: NavigationSplitViewVisibility = .doubleColumn
 
@@ -92,7 +95,7 @@ public struct NovaAppView: View {
                     .frame(width: 20)
                     .foregroundColor(selectedPage == page ? .primary : .secondary)
 
-                Text(page.rawValue)
+                Text(localizedName(page))
                     .font(.system(size: 13, weight: selectedPage == page ? .semibold : .regular))
 
                 Spacer()
@@ -142,7 +145,7 @@ public struct NovaAppView: View {
                         Circle()
                             .fill(appState.isServerRunning ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
                             .frame(width: 6, height: 6)
-                        Text(appState.isServerRunning ? "Running" : "Stopped")
+                        Text(appState.isServerRunning ? l10n.tr("app.running") : l10n.tr("app.stopped"))
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -154,26 +157,45 @@ public struct NovaAppView: View {
     private var sidebarFooter: some View {
         VStack(alignment: .leading, spacing: 4) {
             if !appState.loadedModels.isEmpty {
-                Text("\(appState.loadedModels.count) model\(appState.loadedModels.count == 1 ? "" : "s") loaded")
+                Text(l10n.tr("app.modelsLoaded", appState.loadedModels.count))
                     .font(.caption2)
                     .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             Text("v\(NovaMLXCore.version)")
                 .font(.caption2)
                 .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var detailView: some View {
         ZStack {
             StatusPageView(appState: appState, modelManager: modelManager)
+                .environmentObject(l10n)
                 .opacity(selectedPage == .status ? 1 : 0)
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+                .environmentObject(l10n)
                 .opacity(selectedPage == .models ? 1 : 0)
             ChatPageView(appState: appState, inferenceService: inferenceService)
+                .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
+            AgentsPageView(appState: appState)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .agents ? 1 : 0)
             SettingsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+                .environmentObject(l10n)
                 .opacity(selectedPage == .settings ? 1 : 0)
+        }
+    }
+
+    private func localizedName(_ page: AppPage) -> String {
+        switch page {
+        case .status: return l10n.tr("app.status")
+        case .models: return l10n.tr("app.models")
+        case .chat: return l10n.tr("app.chat")
+        case .agents: return l10n.tr("app.agents")
+        case .settings: return l10n.tr("app.settings")
         }
     }
 }

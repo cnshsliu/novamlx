@@ -9,6 +9,7 @@ struct SettingsPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let inferenceService: InferenceService
     let modelManager: ModelManager
+    @EnvironmentObject var l10n: L10n
 
     @State private var turboQuantConfigs: [String: TQConfig] = [:]
     @State private var sessions: [SessionInfo] = []
@@ -34,6 +35,7 @@ struct SettingsPageView: View {
             VStack(spacing: 20) {
                 serverConfigSection
                 cliSection
+                languageSection
                 turboQuantSection
                 sessionsSection
                 aboutSection
@@ -47,22 +49,22 @@ struct SettingsPageView: View {
     private var serverConfigSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                sectionHeader("Server", icon: "server.rack")
+                sectionHeader(l10n.tr("settings.server"), icon: "server.rack")
                 Spacer()
                 Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showConfigEditor.toggle() } }) {
                     Image(systemName: showConfigEditor ? "chevron.up" : "chevron.down")
                         .font(.system(size: 10))
-                    Text("Edit Config")
+                    Text(l10n.tr("settings.editConfig"))
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
 
-            settingsRow("Inference API", value: "http://127.0.0.1:\(String(appState.serverPort))")
-            settingsRow("Admin API", value: "http://127.0.0.1:\(String(appState.adminPort))")
-            settingsRow("Web Chat", value: "http://127.0.0.1:\(String(appState.serverPort))/chat")
-            settingsRow("Admin Dashboard", value: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")
+            settingsRow(l10n.tr("settings.inferenceApi"), value: "http://127.0.0.1:\(String(appState.serverPort))")
+            settingsRow(l10n.tr("settings.adminApi"), value: "http://127.0.0.1:\(String(appState.adminPort))")
+            settingsRow(l10n.tr("settings.webChat"), value: "http://127.0.0.1:\(String(appState.serverPort))/chat")
+            settingsRow(l10n.tr("settings.adminDashboard"), value: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")
 
             configPathRow
 
@@ -72,13 +74,13 @@ struct SettingsPageView: View {
             }
 
             HStack {
-                Button("Open Chat in Browser") {
+                Button(l10n.tr("settings.openChat")) {
                     NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.serverPort))/chat")!)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button("Open Dashboard") {
+                Button(l10n.tr("settings.openDashboard")) {
                     NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")!)
                 }
                 .buttonStyle(.bordered)
@@ -86,7 +88,7 @@ struct SettingsPageView: View {
 
                 Spacer()
 
-                Button("Open Config File") {
+                Button(l10n.tr("settings.openConfig")) {
                     let path = FileManager.default.homeDirectoryForCurrentUser
                         .appendingPathComponent(".nova/config.json").path
                     NSWorkspace.shared.open(URL(string: "file://\(path)")!)
@@ -105,14 +107,14 @@ struct SettingsPageView: View {
         let configPath = homeDir.appendingPathComponent(".nova/config.json").path
 
         return HStack {
-            Text("Config File").font(.system(size: 13)).foregroundColor(.secondary)
+            Text(l10n.tr("settings.configFile")).font(.system(size: 13)).foregroundColor(.secondary)
             Spacer()
             Text(configPath)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundColor(NovaTheme.Colors.accent)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .help("Click to copy path")
+                .help(l10n.tr("settings.clickCopy"))
                 .onTapGesture {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(configPath, forType: .string)
@@ -124,29 +126,29 @@ struct SettingsPageView: View {
 
     private var configEditorPanel: some View {
         VStack(spacing: 10) {
-            Text("Server Configuration")
+            Text(l10n.tr("settings.serverConfig"))
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 12) {
-                configField("Host", text: $cfgHost, width: 140, placeholder: "127.0.0.1")
-                configFieldInt("Port", value: $cfgPort, width: 80, range: 1...65535)
-                configFieldInt("Admin Port", value: $cfgAdminPort, width: 80, range: 1...65535)
+                configField(l10n.tr("settings.host"), text: $cfgHost, width: 140, placeholder: l10n.tr("settings.hostPlaceholder"))
+                configFieldInt(l10n.tr("settings.port"), value: $cfgPort, width: 80, range: 1...65535)
+                configFieldInt(l10n.tr("settings.adminPort"), value: $cfgAdminPort, width: 80, range: 1...65535)
             }
 
             HStack(spacing: 12) {
-                configFieldInt("Max Concurrent", value: $cfgMaxConcurrent, width: 80, range: 1...128)
-                configFieldInt("Timeout (s)", value: $cfgTimeout, width: 80, range: 10...3600)
-                configFieldDouble("Max Body (MB)", value: $cfgMaxBodyMB, width: 100, range: 1...1024)
+                configFieldInt(l10n.tr("settings.maxConcurrent"), value: $cfgMaxConcurrent, width: 80, range: 1...128)
+                configFieldInt(l10n.tr("settings.timeout"), value: $cfgTimeout, width: 80, range: 10...3600)
+                configFieldDouble(l10n.tr("settings.maxBody"), value: $cfgMaxBodyMB, width: 100, range: 1...1024)
             }
 
             HStack(spacing: 12) {
-                configField("Default Model", text: $cfgDefaultModel, width: nil, placeholder: "e.g. mlx-community/Qwen3-35B-4bit")
+                configField(l10n.tr("settings.defaultModel"), text: $cfgDefaultModel, width: nil, placeholder: l10n.tr("settings.modelPlaceholder"))
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("API Keys (one per line)")
+                Text(l10n.tr("settings.apiKeys"))
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                 TextEditor(text: $cfgApiKeys)
@@ -165,10 +167,10 @@ struct SettingsPageView: View {
                         .foregroundColor(msg.contains("Error") ? .red : NovaTheme.Colors.statusOK)
                 }
                 Spacer()
-                Button("Reset to Current") { loadCurrentConfig() }
+                Button(l10n.tr("settings.resetCurrent")) { loadCurrentConfig() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                Button("Save to Disk") { saveConfig() }
+                Button(l10n.tr("settings.saveToDisk")) { saveConfig() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
             }
@@ -228,7 +230,6 @@ struct SettingsPageView: View {
         }
         cfgDefaultModel = json["defaultModel"] as? String ?? ""
         if let rootKeys = json["apiKeys"] as? [String], !rootKeys.isEmpty {
-            // Prefer server.apiKeys if both exist
         } else if let rootKeys = json["apiKeys"] as? [String] {
             cfgApiKeys = rootKeys.joined(separator: "\n")
         }
@@ -237,21 +238,20 @@ struct SettingsPageView: View {
     }
 
     private func saveConfig() {
-        // Validation
         guard cfgPort > 0 && cfgPort <= 65535 else {
-            cfgSaveMessage = "Error: Port must be 1-65535"
+            cfgSaveMessage = l10n.tr("settings.portError")
             return
         }
         guard cfgAdminPort > 0 && cfgAdminPort <= 65535 else {
-            cfgSaveMessage = "Error: Admin port must be 1-65535"
+            cfgSaveMessage = l10n.tr("settings.adminPortError")
             return
         }
         guard cfgPort != cfgAdminPort else {
-            cfgSaveMessage = "Error: Port and Admin Port must differ"
+            cfgSaveMessage = l10n.tr("settings.portConflict")
             return
         }
         guard cfgMaxConcurrent > 0 else {
-            cfgSaveMessage = "Error: Max Concurrent must be > 0"
+            cfgSaveMessage = l10n.tr("settings.concurrentError")
             return
         }
 
@@ -283,10 +283,9 @@ struct SettingsPageView: View {
         do {
             let data = try JSONSerialization.data(withJSONObject: configDict, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: configPath, options: .atomic)
-            cfgSaveMessage = "Saved! Restart app to apply changes."
+            cfgSaveMessage = l10n.tr("settings.savedRestart")
             cfgHasUnsavedChanges = false
 
-            // Also update the in-memory config via NovaMLXConfiguration
             Task {
                 let config = NovaMLXConfiguration.shared
                 let newServerConfig = ServerConfig(
@@ -306,15 +305,44 @@ struct SettingsPageView: View {
         }
     }
 
+    // MARK: - Language
+
+    private var languageSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(l10n.tr("settings.language"), icon: "globe")
+
+            HStack(spacing: 12) {
+                Text(l10n.tr("settings.systemDefault"))
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                Picker("", selection: Binding(
+                    get: { l10n.currentLanguage },
+                    set: { lang in l10n.setLanguage(lang) }
+                )) {
+                    ForEach(AppLanguage.allCases) { lang in
+                        Text(lang.displayName).tag(lang)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 220)
+            }
+        }
+        .padding(16)
+        .sectionCard()
+    }
+
     // MARK: - CLI Tool
 
     private var cliSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Command Line Tool", icon: "terminal")
+            sectionHeader(l10n.tr("settings.cli"), icon: "terminal")
 
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Install the `nova` CLI to your PATH")
+                    Text(l10n.tr("settings.installCli"))
                         .font(.system(size: 13))
                     Text(cliInstallPath)
                         .font(.system(size: 12, design: .monospaced))
@@ -322,7 +350,7 @@ struct SettingsPageView: View {
                 }
                 Spacer()
                 if cliInstalled {
-                    Label("Installed", systemImage: "checkmark.circle.fill")
+                    Label(l10n.tr("settings.installed"), systemImage: "checkmark.circle.fill")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(NovaTheme.Colors.statusOK)
                 } else {
@@ -355,12 +383,12 @@ struct SettingsPageView: View {
 
         if FileManager.default.fileExists(atPath: linkPath) {
             cliInstalled = true
-            cliInstallMessage = "Already installed"
+            cliInstallMessage = l10n.tr("settings.alreadyInstalled")
             return
         }
 
         guard FileManager.default.fileExists(atPath: binaryPath) else {
-            cliInstallMessage = "CLI binary not found in app bundle"
+            cliInstallMessage = l10n.tr("settings.cliNotFound")
             return
         }
 
@@ -371,7 +399,7 @@ struct SettingsPageView: View {
 
             try FileManager.default.createSymbolicLink(atPath: linkPath, withDestinationPath: binaryPath)
             cliInstalled = true
-            cliInstallMessage = "Installed! Add ~/.local/bin to your PATH if needed."
+            cliInstallMessage = l10n.tr("settings.cliInstallSuccess")
         } catch {
             cliInstallMessage = "Error: \(error.localizedDescription)"
         }
@@ -381,13 +409,13 @@ struct SettingsPageView: View {
 
     private var turboQuantSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("KV Quantization (TurboQuant)", icon: "waveform.path.badge.minus")
+            sectionHeader(l10n.tr("settings.turboQuant"), icon: "waveform.path.badge.minus")
 
-            Text("Compresses KV cache to reduce GPU memory. Check Status page GPU metric to see the effect.")
+            Text(l10n.tr("settings.turboQuantDesc"))
                 .font(.caption).foregroundColor(.secondary)
 
             if appState.loadedModels.isEmpty {
-                Text("Load a model to configure KV quantization.")
+                Text(l10n.tr("settings.loadModel"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -418,10 +446,10 @@ struct SettingsPageView: View {
 
             let config = turboQuantConfigs[modelId]
             Group {
-                tqButton("Off", bits: nil, modelId: modelId, isActive: config?.bits == nil)
-                tqButton("8-bit", bits: 8, modelId: modelId, isActive: config?.bits == 8)
-                tqButton("4-bit", bits: 4, modelId: modelId, isActive: config?.bits == 4)
-                tqButton("2-bit", bits: 2, modelId: modelId, isActive: config?.bits == 2)
+                tqButton(l10n.tr("settings.off"), bits: nil, modelId: modelId, isActive: config?.bits == nil)
+                tqButton(l10n.tr("settings.bit8"), bits: 8, modelId: modelId, isActive: config?.bits == 8)
+                tqButton(l10n.tr("settings.bit4"), bits: 4, modelId: modelId, isActive: config?.bits == 4)
+                tqButton(l10n.tr("settings.bit2"), bits: 2, modelId: modelId, isActive: config?.bits == 2)
             }
         }
         .padding(.horizontal, 12)
@@ -443,7 +471,6 @@ struct SettingsPageView: View {
     }
 
     private func tqAction(bits: Int?, modelId: String) {
-        // Update TurboQuant runtime config (in-memory)
         if let bits {
             let config = TurboQuantService.Config(bits: bits, groupSize: 64)
             inferenceService.engine.turboQuantService.setConfig(config, forModel: modelId)
@@ -451,7 +478,6 @@ struct SettingsPageView: View {
             inferenceService.engine.turboQuantService.removeConfig(forModel: modelId)
         }
 
-        // Persist to model_settings.json
         inferenceService.settingsManager.updateSettings(modelId) { settings in
             if let bits {
                 settings.kvBits = bits
@@ -462,7 +488,6 @@ struct SettingsPageView: View {
             }
         }
 
-        // Update local UI state
         if let bits {
             turboQuantConfigs[modelId] = TQConfig(bits: bits)
         } else {
@@ -474,16 +499,16 @@ struct SettingsPageView: View {
 
     private var sessionsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Sessions", icon: "clock.arrow.circlepath")
+            sectionHeader(l10n.tr("settings.sessions"), icon: "clock.arrow.circlepath")
 
             HStack {
-                Button("Refresh") {
+                Button(l10n.tr("settings.refresh")) {
                     Task { await loadSessions() }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button("Clear All") {
+                Button(l10n.tr("settings.clearAll")) {
                     Task {
                         let adminPort = appState.adminPort
                         let url = URL(string: "http://127.0.0.1:\(adminPort)/admin/sessions")!
@@ -499,7 +524,7 @@ struct SettingsPageView: View {
             }
 
             if sessions.isEmpty {
-                Text("No active sessions")
+                Text(l10n.tr("settings.noSessions"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -537,12 +562,12 @@ struct SettingsPageView: View {
 
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("About", icon: "info.circle")
+            sectionHeader(l10n.tr("settings.about"), icon: "info.circle")
 
-            settingsRow("Version", value: NovaMLXCore.version)
-            settingsRow("Build", value: NovaMLXCore.buildTimestamp)
-            settingsRow("License", value: "Apache 2.0")
-            settingsRow("Platform", value: "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
+            settingsRow(l10n.tr("settings.version"), value: NovaMLXCore.version)
+            settingsRow(l10n.tr("settings.build"), value: NovaMLXCore.buildTimestamp)
+            settingsRow(l10n.tr("settings.license"), value: l10n.tr("settings.licenseValue"))
+            settingsRow(l10n.tr("settings.platform"), value: "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
 
             HStack(spacing: 12) {
                 Button("GitHub") {
@@ -576,7 +601,6 @@ struct SettingsPageView: View {
 
     private func loadPersistedTurboQuantConfigs() async {
         for modelId in appState.loadedModels {
-            // Check runtime TurboQuant config first, then persisted settings
             if let config = inferenceService.engine.turboQuantService.getConfig(forModel: modelId) {
                 turboQuantConfigs[modelId] = TQConfig(bits: config.bits)
             } else {

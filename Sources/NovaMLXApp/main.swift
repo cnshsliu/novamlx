@@ -12,22 +12,23 @@ struct NovaMLXApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        MenuBarExtra("NovaMLX", systemImage: "brain.head.profile.fill") {
+        let l10n = L10n.shared
+        return MenuBarExtra("NovaMLX", systemImage: "brain.head.profile.fill") {
             Button { appDelegate.openMainWindow(to: .status) } label: {
-                Label("Status", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                Label(l10n.tr("app.status"), systemImage: "gauge.with.dots.needle.bottom.50percent")
             }
             Button { appDelegate.openMainWindow(to: .models) } label: {
-                Label("Models", systemImage: "cube.box")
+                Label(l10n.tr("app.models"), systemImage: "cube.box")
             }
             Button { appDelegate.openMainWindow(to: .chat) } label: {
-                Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                Label(l10n.tr("app.chat"), systemImage: "bubble.left.and.bubble.right")
             }
             Button { appDelegate.openMainWindow(to: .settings) } label: {
-                Label("Settings", systemImage: "gearshape")
+                Label(l10n.tr("app.settings"), systemImage: "gearshape")
             }
             Divider()
             Button { NSApp.terminate(nil) } label: {
-                Label("Quit", systemImage: "power")
+                Label(l10n.tr("menuBar.quit"), systemImage: "power")
             }
         }
         .menuBarExtraStyle(.menu)
@@ -198,6 +199,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             appState.startStatsMonitoring(inferenceService: inferenceService)
 
+            // Discover cloud models from remote endpoint
+            Task {
+                let _ = await CloudBackend.shared.fetchModels()
+                appState.cloudModels = await inferenceService.listCloudModels()
+                NovaMLXLog.info("Cloud models discovered: \(appState.cloudModels.count)")
+            }
+
             let memHandler = MemoryPressureHandler(engine: engine, settingsManager: settingsManager)
             memHandler.start()
             memoryPressureHandler = memHandler
@@ -330,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "NovaMLX"
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: contentView)
+        window.contentView = NSHostingView(rootView: contentView.environmentObject(L10n.shared))
         window.center()
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()

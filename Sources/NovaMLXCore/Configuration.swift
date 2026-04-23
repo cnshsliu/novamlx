@@ -66,7 +66,8 @@ public actor NovaMLXConfiguration {
         let config = PersistedConfig(
             server: _serverConfig,
             defaultModel: _defaultModel,
-            modelsDirectory: _modelsDirectory.path
+            modelsDirectory: _modelsDirectory.path,
+            language: nil
         )
         let data = try JSONEncoder().encode(config)
         try data.write(to: url, options: .atomic)
@@ -100,4 +101,5 @@ private struct PersistedConfig: Codable {
     let server: ServerConfig
     let defaultModel: String?
     let modelsDirectory: String?
+    let language: String?
 }

@@ -7,6 +7,7 @@ import NovaMLXUtils
 struct StatusPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let modelManager: ModelManager
+    @EnvironmentObject var l10n: L10n
     @State private var deviceInfo: DeviceInfo?
     @State private var tqStats: [String: TQStatInfo] = [:]
 
@@ -36,7 +37,7 @@ struct StatusPageView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(appState.isServerRunning ? "Server Online" : "Server Offline")
+                Text(appState.isServerRunning ? l10n.tr("status.serverOnline") : l10n.tr("status.serverOffline"))
                     .font(.title2.bold())
                 Text("http://127.0.0.1:\(String(appState.serverPort))")
                     .font(.subheadline)
@@ -53,7 +54,7 @@ struct StatusPageView: View {
                     Text(String(format: "%.1f", appState.systemStats.tokensPerSecond))
                         .font(.title.bold())
                         .foregroundColor(NovaTheme.Colors.accent)
-                    Text("tokens/sec")
+                    Text(l10n.tr("status.tokensPerSec"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -68,7 +69,7 @@ struct StatusPageView: View {
     private var tpsChart: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Inference Speed")
+                Text(l10n.tr("status.inferenceSpeed"))
                     .font(.headline)
                 Spacer()
                 if let last = appState.tpsHistory.last, last > 0 {
@@ -80,7 +81,7 @@ struct StatusPageView: View {
             }
 
             if appState.tpsHistory.allSatisfy({ $0 == 0 }) {
-                Text("No inference activity yet")
+                Text(l10n.tr("status.noActivity"))
                     .foregroundColor(.secondary)
                     .font(.subheadline)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -127,28 +128,28 @@ struct StatusPageView: View {
 
     private var metricsGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-            MetricCard(icon: "cpu", title: "CPU", value: String(format: "%.0f%%", min(appState.systemStats.cpuUsage, 100.0)))
-            MetricCard(icon: "memorychip", title: "Memory", value: appState.systemStats.memoryUsed.bytesFormatted)
-            MetricCard(icon: "gpu", title: "GPU", value: appState.systemStats.gpuMemoryUsed.bytesFormatted)
-            MetricCard(icon: "arrow.triangle.2.circlepath", title: "Uptime", value: formatUptime(appState.uptime))
-            MetricCard(icon: "text.bubble", title: "Requests", value: "\(appState.inferenceStats.activeRequests) active")
-            MetricCard(icon: "cube.box", title: "Models", value: "\(appState.loadedModels.count) loaded")
-            MetricCard(icon: "externaldrive", title: "Disk", value: modelManager.totalDiskUsage().bytesFormatted)
-            MetricCard(icon: "chart.line.uptrend.xyaxis", title: "Total Tokens", value: formatNumber(appState.totalTokensGenerated))
+            MetricCard(icon: "cpu", title: l10n.tr("status.cpu"), value: String(format: "%.0f%%", min(appState.systemStats.cpuUsage, 100.0)))
+            MetricCard(icon: "memorychip", title: l10n.tr("status.memory"), value: appState.systemStats.memoryUsed.bytesFormatted)
+            MetricCard(icon: "gpu", title: l10n.tr("status.gpu"), value: appState.systemStats.gpuMemoryUsed.bytesFormatted)
+            MetricCard(icon: "arrow.triangle.2.circlepath", title: l10n.tr("status.uptime"), value: formatUptime(appState.uptime))
+            MetricCard(icon: "text.bubble", title: l10n.tr("status.requests"), value: "\(appState.inferenceStats.activeRequests) \(l10n.tr("status.active"))")
+            MetricCard(icon: "cube.box", title: l10n.tr("status.models"), value: "\(appState.loadedModels.count) \(l10n.tr("status.loaded"))")
+            MetricCard(icon: "externaldrive", title: l10n.tr("status.disk"), value: modelManager.totalDiskUsage().bytesFormatted)
+            MetricCard(icon: "chart.line.uptrend.xyaxis", title: l10n.tr("status.totalTokens"), value: formatNumber(appState.totalTokensGenerated))
         }
     }
 
     private var deviceSection: some View {
         let info = deviceInfo ?? DeviceInfo.current()
         return VStack(alignment: .leading, spacing: 12) {
-            Text("Device")
+            Text(l10n.tr("status.device"))
                 .font(.headline)
 
             HStack(spacing: 32) {
-                deviceItem(label: "Chip", value: info.chipVariant.isEmpty ? info.chipName : "\(info.chipName) (\(info.chipVariant))")
-                deviceItem(label: "Memory", value: "\(info.memoryGB) GB")
-                deviceItem(label: "GPU Cores", value: "\(info.gpuCores)")
-                deviceItem(label: "CPU Cores", value: "\(info.cpuCores)")
+                deviceItem(label: l10n.tr("status.chip"), value: info.chipVariant.isEmpty ? info.chipName : "\(info.chipName) (\(info.chipVariant))")
+                deviceItem(label: l10n.tr("status.memory"), value: "\(info.memoryGB) GB")
+                deviceItem(label: l10n.tr("status.gpuCores"), value: "\(info.gpuCores)")
+                deviceItem(label: l10n.tr("status.cpuCores"), value: "\(info.cpuCores)")
             }
         }
         .padding(16)
@@ -167,11 +168,11 @@ struct StatusPageView: View {
 
     private var loadedModelsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Active Models")
+            Text(l10n.tr("status.activeModels"))
                 .font(.headline)
 
             if appState.loadedModels.isEmpty {
-                Text("No models loaded. Go to Models to download and load one.")
+                Text(l10n.tr("status.noModelsLoaded"))
                     .foregroundColor(.secondary)
                     .font(.subheadline)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -198,7 +199,7 @@ struct StatusPageView: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 4))
                             }
                         }
-                        Text("Ready")
+                        Text(l10n.tr("status.ready"))
                             .font(.caption)
                             .foregroundColor(NovaTheme.Colors.statusOK)
                     }
