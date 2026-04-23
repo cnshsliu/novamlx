@@ -18,6 +18,8 @@ public final class ModelContainer: @unchecked Sendable {
     public private(set) var isLoaded: Bool
     public private(set) var wiredReservationTicket: WiredMemoryTicket?
     public var kvMemoryOverride: Int?
+    /// Control tokens extracted from tokenizer.json + chat_template (e.g. "<|turn>", "<|im_end|>")
+    public private(set) var controlTokens: [String] = []
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -29,6 +31,10 @@ public final class ModelContainer: @unchecked Sendable {
         self.mlxContainer = mlxContainer
         self.tokenizer = tokenizer
         self.isLoaded = true
+        self.controlTokens = Self.extractControlTokens(for: identifier.id)
+        if !controlTokens.isEmpty {
+            NovaMLXLog.info("[ControlTokens] \(identifier.displayName): \(controlTokens)")
+        }
         NovaMLXLog.info("Model loaded: \(identifier.displayName)")
     }
 
@@ -41,7 +47,59 @@ public final class ModelContainer: @unchecked Sendable {
         tokenizer = nil
         isLoaded = false
         wiredReservationTicket = nil
+        controlTokens = []
         NovaMLXLog.info("Model unloaded: \(identifier.displayName)")
+    }
+
+    // MARK: - Control Token Extraction
+
+    /// Extract control/special tokens from tokenizer.json added_tokens + chat_template
+    public static func extractControlTokens(for modelId: String) -> [String] {
+        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        var tokens = Set<String>()
+
+        // 1. From tokenizer.json added_tokens where special=true
+        let tokenizerPath = modelDir.appendingPathComponent("tokenizer.json")
+        if let data = try? Data(contentsOf: tokenizerPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let added = json["added_tokens"] as? [[String: Any]] {
+            for entry in added {
+                if entry["special"] as? Bool == true,
+                   let content = entry["content"] as? String,
+                   content.hasPrefix("<") {
+                    tokens.insert(content)
+                }
+            }
+        }
+
+        // 2. From chat_template: extract all <|xxx> and <|xxx|> patterns
+        let template = loadChatTemplate(modelDir: modelDir)
+        if let template {
+            // Match <|xxx> and <|xxx|> patterns
+            if let regex = try? NSRegularExpression(pattern: "<\\|[a-zA-Z_][a-zA-Z0-9_]*\\|?>") {
+                let nsRange = NSRange(template.startIndex..., in: template)
+                for match in regex.matches(in: template, range: nsRange) {
+                    if let range = Range(match.range, in: template) {
+                        tokens.insert(String(template[range]))
+                    }
+                }
+            }
+        }
+
+        // Remove EOS/BOS/PAD/UNK — those are structural, not output separators
+        tokens.remove("")
+        return tokens.sorted()
+    }
+
+    private static func loadChatTemplate(modelDir: URL) -> String? {
+        let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
+        if let data = try? Data(contentsOf: tcPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let template = json["chat_template"] as? String {
+            return template
+        }
+        let jinjaPath = modelDir.appendingPathComponent("chat_template.jinja")
+        return try? String(contentsOf: jinjaPath, encoding: .utf8)
     }
 }
 
@@ -550,43 +608,29 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return params
     }
 
-    // MARK: - Turn Separator Stop Detection
+    // MARK: - Control Token Stop Detection
 
-    private static let turnSeparatorLock = NSLock()
-    private nonisolated(unsafe) static var _turnSeparatorCache: [String: Bool] = [:]
+    private static let controlTokenLock = NSLock()
+    private nonisolated(unsafe) static var _controlTokenCache: [String: [String]] = [:]
 
-    private static func modelUsesTurnSeparators(modelId: String) -> Bool {
-        turnSeparatorLock.lock()
-        if let cached = _turnSeparatorCache[modelId] {
-            turnSeparatorLock.unlock()
+    /// Get cached control tokens for a model, extracting if needed
+    static func controlTokensForModel(modelId: String) -> [String] {
+        controlTokenLock.lock()
+        if let cached = _controlTokenCache[modelId] {
+            controlTokenLock.unlock()
             return cached
         }
-        turnSeparatorLock.unlock()
+        controlTokenLock.unlock()
 
-        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
-        let result: Bool
+        let tokens = ModelContainer.extractControlTokens(for: modelId)
 
-        let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
-        if let data = try? Data(contentsOf: tcPath),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let template = json["chat_template"] as? String {
-            result = template.contains("<|turn>")
-        } else {
-            let jinjaPath = modelDir.appendingPathComponent("chat_template.jinja")
-            if let template = try? String(contentsOf: jinjaPath, encoding: .utf8) {
-                result = template.contains("<|turn>")
-            } else {
-                result = false
-            }
+        controlTokenLock.lock()
+        _controlTokenCache[modelId] = tokens
+        controlTokenLock.unlock()
+        if !tokens.isEmpty {
+            NovaMLXLog.info("[ControlTokens] Detected \(tokens.count) control tokens for \(modelId)")
         }
-
-        turnSeparatorLock.lock()
-        _turnSeparatorCache[modelId] = result
-        turnSeparatorLock.unlock()
-        if result {
-            NovaMLXLog.info("[TurnStop] Detected turn-based chat template for \(modelId)")
-        }
-        return result
+        return tokens
     }
 
     private func buildTurnStopProcessor(
@@ -594,14 +638,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         tokenizer: Tokenizer,
         modelConfig: ModelConfiguration
     ) -> TurnStopProcessor? {
-        guard Self.modelUsesTurnSeparators(modelId: modelId) else { return nil }
+        let patterns = Self.controlTokensForModel(modelId: modelId)
+        guard !patterns.isEmpty else { return nil }
 
         var eosIds = Set<Int>()
         if let eosId = tokenizer.eosTokenId { eosIds.insert(eosId) }
         eosIds = eosIds.union(modelConfig.eosTokenIds)
 
         return TurnStopProcessor(
-            stopPatterns: ["<|turn>"],
+            stopPatterns: patterns,
             eosTokenIds: eosIds,
             decode: tokenizer.decode
         )
@@ -630,9 +675,35 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return tsp
     }
 
-    private static func trimTurnSeparators(_ text: String) -> String {
-        guard let range = text.range(of: "<|turn>") else { return text }
-        return String(text[..<range.lowerBound])
+    private static func trimControlTokens(_ text: String, patterns: [String]) -> String {
+        guard !patterns.isEmpty else { return text }
+        var result = text
+        for pattern in patterns {
+            if let range = result.range(of: pattern) {
+                result = String(result[..<range.lowerBound])
+            }
+        }
+        return result
+    }
+
+    /// Filter a streaming chunk for control tokens. Returns (cleanText, shouldStop).
+    /// If any control pattern is found, returns only text before it and signals stop.
+    private static func filterControlInChunk(_ text: String, accumulated: inout String, patterns: [String]) -> (String, Bool) {
+        accumulated += text
+        for pattern in patterns {
+            if let range = accumulated.range(of: pattern) {
+                let cleanAccumulated = String(accumulated[..<range.lowerBound])
+                let alreadyEmitted = accumulated.count - text.count
+                let cleanChunk: String
+                if alreadyEmitted < cleanAccumulated.count {
+                    cleanChunk = String(cleanAccumulated.dropFirst(alreadyEmitted))
+                } else {
+                    cleanChunk = ""
+                }
+                return (cleanChunk, true)
+            }
+        }
+        return (text, false)
     }
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
@@ -868,7 +939,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         NovaMLXLog.info("Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s)")
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Completed: \(completionTokens) tokens, \(String(format: "%.1f", tps)) tok/s")
 
-        let trimmedText = Self.trimTurnSeparators(generatedText)
+        let trimmedText = Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model))
 
         return InferenceResult(
             id: request.id, model: request.model, text: trimmedText,
@@ -1023,6 +1094,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     var finishReason: FinishReason = .stop
                     var completionTokens = 0
                     var infoStopReason: String = "none"
+                    var streamAccumulated = ""
+                    let controlPatterns = Self.controlTokensForModel(modelId: request.model)
                     let startTime = Date()
                     let reqTag = request.id.uuidString.prefix(8).description
 
@@ -1033,8 +1106,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                         switch generation {
                         case .chunk(let text):
-                            completionTokens += 1
-                            continuation.yield(Token(id: 0, text: text))
+                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, patterns: controlPatterns)
+                            if !cleanText.isEmpty {
+                                completionTokens += 1
+                                continuation.yield(Token(id: 0, text: cleanText))
+                            }
+                            if shouldStop { break }
                         case .info(let info):
                             completionTokens = info.generationTokenCount
                             infoStopReason = String(describing: info.stopReason)
@@ -1172,7 +1249,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
         return InferenceResult(
-            id: request.id, model: request.model, text: Self.trimTurnSeparators(generatedText),
+            id: request.id, model: request.model, text: Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model)),
             tokensPerSecond: tps, promptTokens: promptTokens,
             completionTokens: completionTokens, finishReason: finishReason
         )
@@ -1211,14 +1288,20 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let startTime = Date()
                     var finishReason: FinishReason = .stop
                     var completionTokens = 0
+                    var streamAccumulated = ""
+                    let controlPatterns = Self.controlTokensForModel(modelId: request.model)
 
                     let stream = sessionBox.streamDetails(to: lastUserMessage)
                     for try await generation in stream {
                         if Task.isCancelled { break }
                         switch generation {
                         case .chunk(let text):
-                            completionTokens += 1
-                            continuation.yield(Token(id: 0, text: text))
+                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, patterns: controlPatterns)
+                            if !cleanText.isEmpty {
+                                completionTokens += 1
+                                continuation.yield(Token(id: 0, text: cleanText))
+                            }
+                            if shouldStop { break }
                         case .info(let info):
                             completionTokens = info.generationTokenCount
                             if case .length = info.stopReason { finishReason = .length }
@@ -1385,7 +1468,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
         return InferenceResult(
-            id: request.id, model: request.model, text: Self.trimTurnSeparators(generatedText),
+            id: request.id, model: request.model, text: Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model)),
             tokensPerSecond: tps, promptTokens: promptTokenCount,
             completionTokens: completionTokens, finishReason: finishReason
         )
@@ -1481,13 +1564,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let startTime = Date()
                     var finishReason: FinishReason = .stop
                     var completionTokens = 0
+                    var streamAccumulated = ""
+                    let controlPatterns = Self.controlTokensForModel(modelId: request.model)
 
                     for await generation in stream {
                         if Task.isCancelled { break }
                         switch generation {
                         case .chunk(let text):
-                            completionTokens += 1
-                            continuation.yield(Token(id: 0, text: text))
+                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, patterns: controlPatterns)
+                            if !cleanText.isEmpty {
+                                completionTokens += 1
+                                continuation.yield(Token(id: 0, text: cleanText))
+                            }
+                            if shouldStop { break }
                         case .info(let info):
                             completionTokens = info.generationTokenCount
                             if case .length = info.stopReason { finishReason = .length }
