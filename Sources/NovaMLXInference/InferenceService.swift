@@ -66,6 +66,12 @@ public final class InferenceService: @unchecked Sendable {
             thinkingBudget: finalRequest.thinkingBudget
         )
 
+        // Cloud mode: proxy to remote inference engine
+        if CloudBackend.isCloudModel(resolvedId) {
+            NovaMLXLog.info("[Cloud] → proxy generate (model=\(resolvedId))")
+            return try await CloudBackend.shared.proxy(finalRequest)
+        }
+
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
             let result = try await worker.sendGenerate(finalRequest)
@@ -143,6 +149,12 @@ public final class InferenceService: @unchecked Sendable {
             gbnfGrammar: finalRequest.gbnfGrammar,
             thinkingBudget: finalRequest.thinkingBudget
         )
+
+        // Cloud mode: proxy stream to remote inference engine
+        if CloudBackend.isCloudModel(resolvedId) {
+            NovaMLXLog.info("[Cloud] → proxy stream (model=\(resolvedId))")
+            return CloudBackend.proxyStreamStatic(finalRequest)
+        }
 
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
@@ -248,6 +260,8 @@ public final class InferenceService: @unchecked Sendable {
 
     public func isModelLoaded(_ modelId: String) -> Bool {
         let resolvedId = settingsManager.resolveModelId(modelId)
+        // Cloud models are always "loaded" (available remotely)
+        if CloudBackend.isCloudModel(resolvedId) { return true }
         if workerMode {
             return workerLoadedModels.contains(resolvedId)
         }
@@ -256,10 +270,18 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     public func listLoadedModels() -> [String] {
+        var models: [String]
         if workerMode {
-            return Array(workerLoadedModels)
+            models = Array(workerLoadedModels)
+        } else {
+            models = engine.listLoadedModels()
         }
-        return engine.listLoadedModels()
+        return models
+    }
+
+    /// Return cloud model names (with ":cloud" suffix) from cached discovery
+    public func listCloudModels() async -> [String] {
+        await CloudBackend.shared.getModels()
     }
 
     public func checkTTLExpirations() {

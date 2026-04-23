@@ -8,6 +8,7 @@ struct ModelsPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let inferenceService: InferenceService
     let modelManager: ModelManager
+    @EnvironmentObject var l10n: L10n
 
     @State private var subTab: SubTab = .myModels
     @State private var searchText = ""
@@ -27,8 +28,8 @@ struct ModelsPageView: View {
     @State private var loadingModelId: String?
 
     enum SubTab: String, CaseIterable {
-        case myModels = "My Models"
-        case downloads = "Downloads"
+        case myModels = "myModels"
+        case downloads = "downloads"
     }
 
     var body: some View {
@@ -46,26 +47,24 @@ struct ModelsPageView: View {
         .sheet(item: $selectedModelCard) { card in
             modelCardSheet(card)
         }
-        .alert("Delete Model?", isPresented: $showDeleteConfirmation) {
-            Button("Cancel", role: .cancel) {
+        .alert(l10n.tr("models.deleteConfirm"), isPresented: $showDeleteConfirmation) {
+            Button(l10n.tr("models.cancel"), role: .cancel) {
                 modelToDelete = nil
             }
-            Button("Delete", role: .destructive) {
+            Button(l10n.tr("models.delete"), role: .destructive) {
                 if let id = modelToDelete {
-                    // Unload from memory first if loaded
                     if let record = modelManager.getRecord(id) {
                         Task {
                             await inferenceService.unloadModel(ModelIdentifier(id: id, family: record.family))
                         }
                     }
-                    // Then delete from disk
                     try? modelManager.deleteModel(id)
                     refreshTrigger.toggle()
                 }
                 modelToDelete = nil
             }
         } message: {
-            Text("This will permanently remove '\(modelToDelete ?? "")' from disk. This cannot be undone.")
+            Text(l10n.tr("models.deleteMessage", modelToDelete ?? ""))
         }
         .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
             refreshTrigger.toggle()
@@ -81,7 +80,7 @@ struct ModelsPageView: View {
                     subTab = tab
                 } label: {
                     HStack(spacing: 6) {
-                        Text(tab.rawValue)
+                        Text(tab == .myModels ? l10n.tr("models.myModels") : l10n.tr("models.downloads"))
                             .font(.system(size: 13, weight: subTab == tab ? .semibold : .regular))
                         if tab == .downloads && appState.activeDownloadCount > 0 {
                             Text("\(appState.activeDownloadCount)")
@@ -116,7 +115,7 @@ struct ModelsPageView: View {
         }
     }
 
-    // MARK: - Downloads Tab (merged browse + downloads)
+    // MARK: - Downloads Tab
 
     private var downloadsTab: some View {
         let activeOrFailed = appState.downloadTasks.values
@@ -124,11 +123,10 @@ struct ModelsPageView: View {
             .sorted { $0.startedAt > $1.startedAt }
 
         return VStack(spacing: 0) {
-            // Active/failed downloads pinned at top
             if !activeOrFailed.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     sectionHeader(
-                        activeOrFailed.allSatisfy(\.isActive) ? "Downloading" : "Downloads",
+                        activeOrFailed.allSatisfy(\.isActive) ? l10n.tr("models.downloading") : l10n.tr("models.downloads"),
                         icon: "arrow.down.circle",
                         count: activeOrFailed.count
                     )
@@ -157,7 +155,7 @@ struct ModelsPageView: View {
 
                     if !completed.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
-                            sectionHeader("Completed", icon: "checkmark.circle", count: completed.count)
+                            sectionHeader(l10n.tr("models.completed"), icon: "checkmark.circle", count: completed.count)
                             ForEach(completed, id: \.repoId) { task in
                                 completedDownloadRow(task)
                             }
@@ -166,7 +164,7 @@ struct ModelsPageView: View {
                     }
 
                     if searchResults.isEmpty && activeOrFailed.isEmpty && appState.downloadTasks.isEmpty {
-                        emptyState("No Downloads", subtitle: "Search for models or paste a URL to start downloading.")
+                        emptyState(l10n.tr("models.noDownloads"), subtitle: l10n.tr("models.noDownloadsSub"))
                             .padding(.top, 60)
                     }
                 }
@@ -179,7 +177,7 @@ struct ModelsPageView: View {
         HStack(spacing: 12) {
             HStack {
                 Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                TextField("Search HuggingFace models...", text: $searchText)
+                TextField(l10n.tr("models.searchPlaceholder"), text: $searchText)
                     .textFieldStyle(.plain)
                     .onSubmit { performSearch() }
             }
@@ -192,7 +190,7 @@ struct ModelsPageView: View {
                 if isSearching {
                     ProgressView().controlSize(.small)
                 } else {
-                    Label("Search", systemImage: "magnifyingglass")
+                    Label(l10n.tr("models.search"), systemImage: "magnifyingglass")
                 }
             }
             .buttonStyle(.bordered)
@@ -207,7 +205,7 @@ struct ModelsPageView: View {
 
     private var searchResultsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Search Results", icon: "magnifyingglass", count: searchResults.count)
+            sectionHeader(l10n.tr("models.searchResults"), icon: "magnifyingglass", count: searchResults.count)
 
             ForEach(searchResults, id: \.id) { result in
                 searchResultRow(result)
@@ -221,7 +219,7 @@ struct ModelsPageView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(result.id).font(.system(size: 13, weight: .medium)).lineLimit(1)
                     .foregroundColor(NovaTheme.Colors.accent)
-                    .help("Click to view model details")
+                    .help(l10n.tr("models.clickDetails"))
                     .onTapGesture { fetchModelCard(repoId: result.id) }
                 if !result.tags.isEmpty {
                     HStack(spacing: 4) {
@@ -247,12 +245,12 @@ struct ModelsPageView: View {
     @ViewBuilder
     private func downloadActionButton(for repoId: String) -> some View {
         if modelManager.isDownloaded(repoId) {
-            Label("Downloaded", systemImage: "checkmark.circle.fill")
+            Label(l10n.tr("models.downloaded"), systemImage: "checkmark.circle.fill")
                 .foregroundColor(NovaTheme.Colors.statusOK)
                 .font(.caption)
         } else if let task = appState.downloadTasks[repoId], task.isActive {
             HStack(spacing: 6) {
-                Text("Downloading")
+                Text(l10n.tr("models.downloading"))
                     .font(.caption).foregroundColor(NovaTheme.Colors.accent)
                 Text("\(Int(task.progress))%")
                     .font(.caption2).foregroundColor(.secondary)
@@ -264,7 +262,7 @@ struct ModelsPageView: View {
             }
         } else if let task = appState.downloadTasks[repoId], task.status == .failed {
             HStack(spacing: 6) {
-                Button("Resume") { appState.startDownload(repoId: repoId) }
+                Button(l10n.tr("models.resume")) { appState.startDownload(repoId: repoId) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button { appState.cancelAndDeleteDownload(
@@ -279,7 +277,7 @@ struct ModelsPageView: View {
                 .foregroundColor(.red)
             }
         } else {
-            Button("Download") { appState.startDownload(repoId: repoId) }
+            Button(l10n.tr("models.download")) { appState.startDownload(repoId: repoId) }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
         }
@@ -289,18 +287,18 @@ struct ModelsPageView: View {
 
     private var manualDownloadSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Manual Download", icon: "link.badge.plus", count: nil)
+            sectionHeader(l10n.tr("models.manualDownload"), icon: "link.badge.plus", count: nil)
 
-            Text("Paste a HuggingFace repo ID or URL to download directly.")
+            Text(l10n.tr("models.urlHint"))
                 .font(.caption).foregroundColor(.secondary)
 
             HStack(spacing: 8) {
-                TextField("mlx-community/model-name or https://huggingface.co/...", text: $manualDownloadInput)
+                TextField(l10n.tr("models.urlPlaceholder"), text: $manualDownloadInput)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                     .onSubmit { manualDownload() }
 
-                Button("Download") { manualDownload() }
+                Button(l10n.tr("models.download")) { manualDownload() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(manualDownloadInput.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -310,12 +308,12 @@ struct ModelsPageView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Open download folder")
+                .help(l10n.tr("models.openFolder"))
             }
 
-            Text("Saved to: \(modelManager.modelsDirectory.path)")
+            Text(l10n.tr("models.savedTo", modelManager.modelsDirectory.path))
                 .font(.caption2).foregroundColor(.secondary)
-                .help("Click to copy path")
+                .help(l10n.tr("models.clickCopy"))
                 .onTapGesture {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(modelManager.modelsDirectory.path, forType: .string)
@@ -342,7 +340,7 @@ struct ModelsPageView: View {
                                 .font(.caption).foregroundColor(.secondary).frame(width: 36, alignment: .trailing)
                             Text(task.totalBytes > 0
                                  ? "\(formatBytes(task.downloadedBytes)) / \(formatBytes(task.totalBytes))"
-                                 : "\(formatBytes(task.downloadedBytes)) downloaded")
+                                 : "\(formatBytes(task.downloadedBytes)) \(l10n.tr("models.downloadedLabel"))")
                                 .font(.caption2).foregroundColor(.secondary)
                         }
                     } else if let error = task.errorMessage {
@@ -356,15 +354,15 @@ struct ModelsPageView: View {
 
                 if task.isActive {
                     Button { appState.cancelDownload(repoId: task.repoId) } label: {
-                        Text("Cancel")
+                        Text(l10n.tr("models.cancel"))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 } else {
-                    Button("Resume") { appState.startDownload(repoId: task.repoId) }
+                    Button(l10n.tr("models.resume")) { appState.startDownload(repoId: task.repoId) }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                    Button("Delete") {
+                    Button(l10n.tr("models.delete")) {
                         appState.cancelAndDeleteDownload(
                             repoId: task.repoId,
                             modelsDirectory: modelManager.modelsDirectory
@@ -383,7 +381,7 @@ struct ModelsPageView: View {
 
                 if total > 0 {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("\(completedCount)/\(total) files completed")
+                        Text(l10n.tr("models.filesCompleted", completedCount, total))
                             .font(.caption2).foregroundColor(.secondary)
 
                         ForEach(activeFiles) { file in
@@ -397,7 +395,7 @@ struct ModelsPageView: View {
                                 Text(file.filename)
                                     .font(.system(size: 10, design: .monospaced))
                                     .lineLimit(1).foregroundColor(NovaTheme.Colors.statusWarn)
-                                Text("retrying...").font(.system(size: 10)).foregroundColor(NovaTheme.Colors.statusWarn)
+                                Text(l10n.tr("models.retrying")).font(.system(size: 10)).foregroundColor(NovaTheme.Colors.statusWarn)
                             }
                         }
                     }
@@ -432,7 +430,7 @@ struct ModelsPageView: View {
 
             Text(file.totalBytes > 0
                  ? "\(formatBytes(file.downloadedBytes))/\(formatBytes(file.totalBytes))"
-                 : "\(formatBytes(file.downloadedBytes)) downloaded")
+                 : "\(formatBytes(file.downloadedBytes)) \(l10n.tr("models.downloadedLabel"))")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.secondary)
         }
@@ -447,7 +445,7 @@ struct ModelsPageView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(task.repoId).font(.system(size: 13, weight: .medium)).lineLimit(1)
                 HStack(spacing: 6) {
-                    Text(task.status == .completed ? "Downloaded successfully" : (task.errorMessage ?? "Failed"))
+                    Text(task.status == .completed ? l10n.tr("models.downloadedOk") : (task.errorMessage ?? "Failed"))
                         .font(.caption2).foregroundColor(.secondary)
                     if task.downloadedBytes > 0 {
                         Text("(\(formatBytes(task.downloadedBytes)))")
@@ -460,7 +458,7 @@ struct ModelsPageView: View {
             Spacer()
 
             if task.status == .failed {
-                Button("Retry") { appState.startDownload(repoId: task.repoId) }
+                Button(l10n.tr("models.retry")) { appState.startDownload(repoId: task.repoId) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button { appState.cancelAndDeleteDownload(
@@ -489,6 +487,7 @@ struct ModelsPageView: View {
         ScrollView {
             VStack(spacing: 20) {
                 loadedSection
+                cloudModelsSection
                 downloadedSection
             }
             .padding(24)
@@ -497,18 +496,18 @@ struct ModelsPageView: View {
 
     private var loadedSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Active Models", icon: "bolt.fill", count: appState.loadedModels.count)
+            sectionHeader(l10n.tr("status.activeModels"), icon: "bolt.fill", count: appState.loadedModels.count)
 
             if appState.loadedModels.isEmpty {
-                emptyState("No models loaded", subtitle: "Load a downloaded model to start using it.")
+                emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
             } else {
                 ForEach(appState.loadedModels, id: \.self) { modelId in
                     modelRow(
                         modelId,
-                        subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? "unknown",
+                        subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
                         isLoaded: true,
                         actions: {
-                            Button("Unload") {
+                            Button(l10n.tr("models.unload")) {
                                 Task {
                                     if let record = modelManager.getRecord(modelId) {
                                         await inferenceService.unloadModel(ModelIdentifier(id: modelId, family: record.family))
@@ -526,16 +525,56 @@ struct ModelsPageView: View {
         .sectionCard()
     }
 
+    private var cloudModelsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(l10n.tr("models.cloudModels"), icon: "cloud.fill", count: appState.cloudModels.count)
+
+            if appState.cloudModels.isEmpty {
+                emptyState(l10n.tr("models.noCloudModels"), subtitle: l10n.tr("models.noCloudModelsSub"))
+            } else {
+                ForEach(appState.cloudModels, id: \.self) { modelId in
+                    cloudModelRow(modelId)
+                }
+            }
+        }
+        .sectionCard()
+    }
+
+    private func cloudModelRow(_ modelId: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "cloud.fill")
+                .foregroundColor(NovaTheme.Colors.accent)
+                .font(.system(size: 14))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(modelId)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundColor(NovaTheme.Colors.accent)
+            }
+
+            Spacer()
+
+            Text("Cloud")
+                .font(.caption2)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(NovaTheme.Colors.accentDim)
+                .clipShape(Capsule())
+        }
+        .rowCard()
+    }
+
     private var downloadedSection: some View {
         let allDownloaded = modelManager.downloadedModels()
         let loaded = Set(inferenceService.listLoadedModels())
         let downloaded = allDownloaded.filter { !loaded.contains($0.id) }
 
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Inactive Models", icon: "arrow.down.circle", count: downloaded.count)
+            sectionHeader(l10n.tr("models.noInactiveModels"), icon: "arrow.down.circle", count: downloaded.count)
 
             if downloaded.isEmpty {
-                emptyState("No inactive models", subtitle: "Go to Browse to search and download models.")
+                emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
             } else {
                 ForEach(downloaded, id: \.id) { record in
                     modelRow(
@@ -544,15 +583,14 @@ struct ModelsPageView: View {
                         isLoaded: false,
                         actions: {
                             if loadingModelId == record.id {
-                                // Loading animation
                                 HStack(spacing: 8) {
                                     ProgressView()
                                         .controlSize(.small)
-                                    Text("Loading...")
+                                    Text(l10n.tr("models.loading"))
                                         .font(.caption).foregroundColor(NovaTheme.Colors.accent)
                                 }
                             } else {
-                                Button("Load") {
+                                Button(l10n.tr("models.load")) {
                                     loadingModelId = record.id
                                     Task {
                                         let config = ModelConfig(
@@ -600,7 +638,7 @@ struct ModelsPageView: View {
                 HStack(spacing: 4) {
                     Text(modelId).font(.system(size: 13, weight: .medium)).lineLimit(1)
                         .foregroundColor(NovaTheme.Colors.accent)
-                        .help("Click to view model details")
+                        .help(l10n.tr("models.clickDetails"))
                         .onTapGesture { fetchModelCard(repoId: modelId) }
                     CopyIDButton(id: modelId)
                 }
@@ -624,8 +662,8 @@ struct ModelsPageView: View {
 
     private func formatBytes(_ bytes: Int64) -> String {
         let mb = Double(bytes) / 1024 / 1024
-        if mb >= 1024 { return String(format: "%.1f GB", mb / 1024) }
-        return String(format: "%.0f MB", mb)
+        if mb >= 1024 { return String(format: "%.1f \(l10n.tr("models.gb"))", mb / 1024) }
+        return String(format: "%.0f \(l10n.tr("models.mb"))", mb)
     }
 
     // MARK: - Model Card
@@ -675,7 +713,6 @@ struct ModelsPageView: View {
                         card.totalSize = totalSize
                     }
 
-                    // For local models, compute actual disk usage
                     if let record = modelManager.getRecord(repoId) {
                         let dirSize = FileManager.default.directorySize(at: record.localURL)
                         card.localDiskSize = Int64(dirSize)
@@ -716,7 +753,7 @@ struct ModelsPageView: View {
 
                 // Tags
                 if !card.tags.isEmpty {
-                    cardSection("Tags") {
+                    cardSection(l10n.tr("models.tags")) {
                         FlowLayout(spacing: 4) {
                             ForEach(card.tags.filter { !$0.isEmpty }.prefix(12), id: \.self) { tag in
                                 Text(tag)
@@ -732,23 +769,23 @@ struct ModelsPageView: View {
                 // Technical specs
                 let hasSpecs = !card.architectures.isEmpty || card.modelType != nil || card.license != nil || !card.language.isEmpty
                 if hasSpecs {
-                    cardSection("Specifications") {
+                    cardSection(l10n.tr("models.specifications")) {
                         VStack(alignment: .leading, spacing: 6) {
                             if !card.architectures.isEmpty {
-                                specRow("Architecture", value: card.architectures.joined(separator: ", "))
+                                specRow(l10n.tr("models.architecture"), value: card.architectures.joined(separator: ", "))
                             }
                             if let mt = card.modelType {
-                                specRow("Model Type", value: mt)
+                                specRow(l10n.tr("models.modelType"), value: mt)
                             }
                             if let license = card.license {
-                                specRow("License", value: license)
+                                specRow(l10n.tr("models.license"), value: license)
                             }
                             if !card.language.isEmpty {
-                                specRow("Language", value: card.language.joined(separator: ", "))
+                                specRow(l10n.tr("models.language"), value: card.language.joined(separator: ", "))
                             }
                             if let record = modelManager.getRecord(card.repoId) {
-                                specRow("Family", value: record.family.rawValue)
-                                specRow("Type", value: record.modelType.rawValue.uppercased())
+                                specRow(l10n.tr("models.family"), value: record.family.rawValue)
+                                specRow(l10n.tr("models.type"), value: record.modelType.rawValue.uppercased())
                             }
                         }
                     }
@@ -758,13 +795,13 @@ struct ModelsPageView: View {
                 let totalHF = card.totalSize
                 let totalLocal = card.localDiskSize
                 if totalHF > 0 || (totalLocal ?? 0) > 0 {
-                    cardSection("Size") {
+                    cardSection(l10n.tr("models.size")) {
                         VStack(alignment: .leading, spacing: 6) {
                             if totalHF > 0 {
-                                specRow("Download Size", value: formatBytes(totalHF))
+                                specRow(l10n.tr("models.downloadSize"), value: formatBytes(totalHF))
                             }
                             if let local = totalLocal, local > 0 {
-                                specRow("Disk Usage", value: formatBytes(local))
+                                specRow(l10n.tr("models.diskUsage"), value: formatBytes(local))
                             }
                         }
                     }
@@ -772,7 +809,7 @@ struct ModelsPageView: View {
 
                 // File listing
                 if !card.files.isEmpty {
-                    cardSection("Files (\(card.files.count))") {
+                    cardSection(l10n.tr("models.files", card.files.count)) {
                         VStack(alignment: .leading, spacing: 3) {
                             ForEach(card.files, id: \.name) { file in
                                 HStack {
@@ -795,7 +832,7 @@ struct ModelsPageView: View {
                 // Actions
                 HStack {
                     Spacer()
-                    Button("Close") { selectedModelCard = nil }
+                    Button(l10n.tr("models.close")) { selectedModelCard = nil }
                         .keyboardShortcut(.cancelAction)
                 }
             }
@@ -841,7 +878,7 @@ struct ModelsPageView: View {
             let adminPort = appState.adminPort
             let query = searchText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? searchText
             guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/search?q=\(query)") else {
-                alertMessage = "Invalid URL"
+                alertMessage = l10n.tr("models.invalidUrl")
                 showAlert = true
                 isSearching = false
                 return
@@ -853,7 +890,7 @@ struct ModelsPageView: View {
                 }
                 let (data, response) = try await URLSession.shared.data(for: request)
                 if let httpResp = response as? HTTPURLResponse, httpResp.statusCode != 200 {
-                    alertMessage = "Search failed (HTTP \(httpResp.statusCode))"
+                    alertMessage = l10n.tr("models.searchFailed", httpResp.statusCode)
                     showAlert = true
                     isSearching = false
                     return
@@ -865,15 +902,15 @@ struct ModelsPageView: View {
                         return HFSearchResult(id: id, tags: r["tags"] as? [String] ?? [])
                     }
                     if searchResults.isEmpty {
-                        alertMessage = "No results found for '\(searchText)'"
+                        alertMessage = l10n.tr("models.noResults", searchText)
                         showAlert = true
                     }
                 } else {
-                    alertMessage = "Unexpected response format"
+                    alertMessage = l10n.tr("models.unexpectedFormat")
                     showAlert = true
                 }
             } catch {
-                alertMessage = "Search failed: \(error.localizedDescription)"
+                alertMessage = l10n.tr("models.searchFailedMsg", error.localizedDescription)
                 showAlert = true
             }
             isSearching = false
@@ -891,13 +928,13 @@ struct ModelsPageView: View {
             guard let url = URLComponents(string: input),
                   let host = url.host, host.contains("huggingface.co"),
                   let path = url.path.removingPercentEncoding else {
-                alertMessage = "Invalid HuggingFace URL"
+                alertMessage = l10n.tr("models.invalidHfUrl")
                 showAlert = true
                 return
             }
             let segments = path.split(separator: "/").map(String.init)
             guard segments.count >= 2 else {
-                alertMessage = "Invalid URL. Expected: https://huggingface.co/owner/repo"
+                alertMessage = l10n.tr("models.invalidUrlMsg")
                 showAlert = true
                 return
             }
@@ -915,21 +952,21 @@ struct ModelsPageView: View {
 
     private var apiKeySetupSheet: some View {
         VStack(spacing: 20) {
-            Text("API Key Required").font(.headline)
-            Text("The Admin API requires an API key to enable model search. A key has been auto-generated below.")
+            Text(l10n.tr("models.apiKeyRequired")).font(.headline)
+            Text(l10n.tr("models.apiKeyMessage"))
                 .font(.subheadline).foregroundColor(.secondary).multilineTextAlignment(.center)
 
             HStack {
-                Text("API Key:").font(.subheadline)
-                TextField("sk-novamlx-...", text: $newApiKey)
+                Text(l10n.tr("models.apiKeyLabel")).font(.subheadline)
+                TextField(l10n.tr("models.apiKeyPlaceholder"), text: $newApiKey)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
             }
 
             HStack(spacing: 12) {
-                Button("Cancel") { showApiKeyPrompt = false }
+                Button(l10n.tr("models.cancel")) { showApiKeyPrompt = false }
                     .keyboardShortcut(.cancelAction)
-                Button("Save & Restart") { saveApiKeyAndRestart() }
+                Button(l10n.tr("models.saveRestart")) { saveApiKeyAndRestart() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(newApiKey.trimmingCharacters(in: .whitespaces).isEmpty || isSavingApiKey)
             }
@@ -953,7 +990,7 @@ struct ModelsPageView: View {
                 isSavingApiKey = false
                 performSearch()
             } catch {
-                alertMessage = "Failed to save API key: \(error.localizedDescription)"
+                alertMessage = l10n.tr("models.saveFailed", error.localizedDescription)
                 showAlert = true
                 isSavingApiKey = false
             }
