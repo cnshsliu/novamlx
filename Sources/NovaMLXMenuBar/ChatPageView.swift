@@ -8,6 +8,7 @@ struct ChatPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let inferenceService: InferenceService
 
+    @EnvironmentObject var l10n: L10n
     @State private var messages: [ChatMessageRow] = []
     @State private var inputText = ""
     @State private var selectedModel = ""
@@ -17,9 +18,9 @@ struct ChatPageView: View {
     @State private var sentHistory: [String] = []
     @State private var historyIndex: Int? = nil
     @State private var savedDraft: String? = nil
-    @FocusState private var isInputFocused: Bool
 
     // Parameter controls
+    @FocusState private var isInputFocused: Bool
     @State private var showParams = false
     @State private var paramTemp: Double = 0.7
     @State private var paramMaxTokens: Double = 4096
@@ -42,12 +43,23 @@ struct ChatPageView: View {
 
     private var chatToolbar: some View {
         HStack(spacing: 12) {
-            Picker("Model", selection: $selectedModel) {
-                if appState.loadedModels.isEmpty {
-                    Text("No models loaded").tag("")
+            Picker(l10n.tr("chat.model"), selection: $selectedModel) {
+                if appState.loadedModels.isEmpty && appState.cloudModels.isEmpty {
+                    Text(l10n.tr("chat.noModels")).tag("")
                 }
                 ForEach(appState.loadedModels, id: \.self) { model in
                     Text(model.components(separatedBy: "/").last ?? model).tag(model)
+                }
+                if !appState.cloudModels.isEmpty {
+                    Divider()
+                    ForEach(appState.cloudModels, id: \.self) { model in
+                        HStack {
+                            Image(systemName: "cloud.fill")
+                                .font(.system(size: 10))
+                            Text(model.components(separatedBy: ":cloud").first ?? model)
+                        }
+                        .tag(model)
+                    }
                 }
             }
             .frame(width: 240)
@@ -66,9 +78,9 @@ struct ChatPageView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("Toggle parameter settings")
+            .help(l10n.tr("chat.toggleParams"))
 
-            Button("Clear") {
+            Button(l10n.tr("chat.clear")) {
                 messages.removeAll()
             }
             .buttonStyle(.bordered)
@@ -78,19 +90,29 @@ struct ChatPageView: View {
         .background(NovaTheme.Colors.cardBackground)
         .overlay(Rectangle().fill(NovaTheme.Colors.cardBorder).frame(height: 1), alignment: .top)
         .onAppear {
-            if selectedModel.isEmpty, let first = appState.loadedModels.first {
-                selectedModel = first
-                loadDefaultsFromModel(first)
+            if selectedModel.isEmpty {
+                if let first = appState.loadedModels.first {
+                    selectedModel = first
+                    loadDefaultsFromModel(first)
+                } else if let first = appState.cloudModels.first {
+                    selectedModel = first
+                }
             }
         }
         .onChange(of: appState.loadedModels) { _, newModels in
-            if !newModels.contains(selectedModel), let first = newModels.first {
-                selectedModel = first
-                loadDefaultsFromModel(first)
+            if !newModels.contains(selectedModel) && !appState.cloudModels.contains(selectedModel) {
+                if let first = newModels.first {
+                    selectedModel = first
+                    loadDefaultsFromModel(first)
+                } else if let first = appState.cloudModels.first {
+                    selectedModel = first
+                }
             }
         }
         .onChange(of: selectedModel) { _, newModel in
-            if !newModel.isEmpty { loadDefaultsFromModel(newModel) }
+            if !newModel.isEmpty && !CloudBackend.isCloudModel(newModel) {
+                loadDefaultsFromModel(newModel)
+            }
         }
     }
 
@@ -100,13 +122,13 @@ struct ChatPageView: View {
                 .foregroundColor(NovaTheme.Colors.accent)
                 .font(.system(size: 12))
 
-            Text("Raw model output viewer — not designed for daily chat use.")
+            Text(l10n.tr("chat.rawOutput"))
                 .font(.system(size: 11))
                 .foregroundColor(NovaTheme.Colors.textSecondary)
 
             Spacer()
 
-            Button("Web Chat") {
+            Button(l10n.tr("chat.webChat")) {
                 NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.serverPort))/chat")!)
             }
             .buttonStyle(.bordered)
@@ -120,18 +142,18 @@ struct ChatPageView: View {
     private var paramsPanel: some View {
         VStack(spacing: 8) {
             HStack(spacing: 16) {
-                ParamSlider(label: "Temperature", value: $paramTemp, min: 0, max: 2, step: 0.05)
-                ParamSlider(label: "Top P", value: $paramTopP, min: 0, max: 1, step: 0.05)
-                ParamSlider(label: "Top K", value: $paramTopK, min: 0, max: 200, step: 1)
-                ParamSlider(label: "Min P", value: $paramMinP, min: 0, max: 1, step: 0.05)
+                ParamSlider(label: l10n.tr("chat.temperature"), value: $paramTemp, min: 0, max: 2, step: 0.05)
+                ParamSlider(label: l10n.tr("chat.topP"), value: $paramTopP, min: 0, max: 1, step: 0.05)
+                ParamSlider(label: l10n.tr("chat.topK"), value: $paramTopK, min: 0, max: 200, step: 1)
+                ParamSlider(label: l10n.tr("chat.minP"), value: $paramMinP, min: 0, max: 1, step: 0.05)
             }
             HStack(spacing: 16) {
-                ParamSlider(label: "Max Tokens", value: $paramMaxTokens, min: 64, max: 32768, step: 64)
-                ParamSlider(label: "Repeat Penalty", value: $paramRepeatPenalty, min: 1.0, max: 2.0, step: 0.05)
+                ParamSlider(label: l10n.tr("chat.maxTokens"), value: $paramMaxTokens, min: 64, max: 32768, step: 64)
+                ParamSlider(label: l10n.tr("chat.repeatPenalty"), value: $paramRepeatPenalty, min: 1.0, max: 2.0, step: 0.05)
 
                 Spacer()
 
-                Button("Reset to Default") {
+                Button(l10n.tr("chat.resetDefault")) {
                     loadDefaultsFromModel(selectedModel)
                 }
                 .buttonStyle(.bordered)
@@ -163,10 +185,10 @@ struct ChatPageView: View {
                             Image(systemName: "bubble.left.and.bubble.right")
                                 .font(.system(size: 40))
                                 .foregroundColor(.secondary.opacity(0.5))
-                            Text("Start a conversation")
+                            Text(l10n.tr("chat.startConversation"))
                                 .font(.title3)
                                 .foregroundColor(.secondary)
-                            Text("Select a model above and type a message below.")
+                            Text(l10n.tr("chat.selectModel"))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -192,7 +214,7 @@ struct ChatPageView: View {
         HStack {
             if msg.isUser { Spacer(minLength: 60) }
             VStack(alignment: msg.isUser ? .trailing : .leading, spacing: 4) {
-                Text(msg.isUser ? "You" : "Assistant")
+                Text(msg.isUser ? l10n.tr("chat.you") : l10n.tr("chat.assistant"))
                     .font(.caption2)
                     .foregroundColor(.secondary)
 
@@ -214,14 +236,43 @@ struct ChatPageView: View {
 
     private var inputBar: some View {
         HStack(spacing: 12) {
-            HistoryTextField(
-                placeholder: "Type a message...",
-                text: $inputText,
-                isFocused: _isInputFocused,
-                onNavigateUp: { navigateHistory(.up) },
-                onNavigateDown: { navigateHistory(.down) },
-                onSubmit: { sendMessage() }
-            )
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $inputText)
+                    .font(.system(size: NSFont.systemFontSize))
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 28, maxHeight: 120)
+                    .focused($isInputFocused)
+                    .onKeyPress(.return, phases: .down) { press in
+                        if press.modifiers.contains(.shift) {
+                            sendMessage()
+                            return .handled
+                        }
+                        return .ignored
+                    }
+                    .onKeyPress(.upArrow, phases: .down) { _ in
+                        if !inputText.contains("\n") {
+                            navigateHistory(.up)
+                            return .handled
+                        }
+                        return .ignored
+                    }
+                    .onKeyPress(.downArrow, phases: .down) { _ in
+                        if !inputText.contains("\n") {
+                            navigateHistory(.down)
+                            return .handled
+                        }
+                        return .ignored
+                    }
+
+                if inputText.isEmpty && !isInputFocused {
+                    Text("Type a message...")
+                        .foregroundColor(Color(NSColor.placeholderTextColor))
+                        .font(.system(size: NSFont.systemFontSize))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 5)
+                        .allowsHitTesting(false)
+                }
+            }
 
             Button(action: { sendMessage() }) {
                 Image(systemName: "arrow.up.circle.fill")
@@ -306,11 +357,11 @@ struct ChatPageView: View {
                     messages[assistantIdx].content += token.text
                 }
                 if messages[assistantIdx].content.isEmpty {
-                    messages[assistantIdx].content = "(no response)"
+                    messages[assistantIdx].content = l10n.tr("chat.noResponse")
                 }
             } catch {
                 if messages[assistantIdx].content.isEmpty {
-                    messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                    messages[assistantIdx].content = l10n.tr("chat.error", error.localizedDescription)
                 }
             }
             isLoading = false
@@ -348,139 +399,5 @@ private struct ParamSlider: View {
                 .controlSize(.mini)
         }
         .frame(width: 140)
-    }
-}
-
-// MARK: - Multiline TextField with arrow key history navigation
-
-private struct HistoryTextField: NSViewRepresentable {
-    let placeholder: String
-    @Binding var text: String
-    @FocusState var isFocused: Bool
-    let onNavigateUp: () -> Void
-    let onNavigateDown: () -> Void
-    let onSubmit: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
-        guard let textView = scrollView.documentView as? NSTextView else {
-            return scrollView
-        }
-
-        textView.delegate = context.coordinator
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.drawsBackground = false
-        textView.isEditable = true
-        textView.isSelectable = true
-        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        textView.insertionPointColor = NSColor.controlTextColor
-        textView.textContainerInset = NSSize(width: 2, height: 4)
-
-        // Placeholder via NSTextFieldCell overlay
-        context.coordinator.placeholderText = placeholder
-        if textView.string.isEmpty {
-            textView.textColor = NSColor.placeholderTextColor
-            textView.string = placeholder
-            context.coordinator.showingPlaceholder = true
-        }
-
-        // Min/max height for 1-5 lines
-        textView.minSize = NSSize(width: 0, height: 28)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.textContainer?.widthTracksTextView = true
-        textView.sizeToFit()
-
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = false
-        scrollView.hasHorizontalScroller = false
-
-        context.coordinator.textView = textView
-        return scrollView
-    }
-
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView else { return }
-        if context.coordinator.showingPlaceholder {
-            // Don't sync while showing placeholder
-            if !text.isEmpty {
-                context.coordinator.showingPlaceholder = false
-                textView.textColor = NSColor.controlTextColor
-                textView.string = text
-            }
-        } else if textView.string != text {
-            textView.string = text
-        }
-    }
-
-    class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: HistoryTextField
-        weak var textView: NSTextView?
-        var placeholderText: String = ""
-        var showingPlaceholder: Bool = false
-
-        init(_ parent: HistoryTextField) {
-            self.parent = parent
-        }
-
-        func textDidBeginEditing(_ notification: Notification) {
-            guard let tv = textView, showingPlaceholder else { return }
-            showingPlaceholder = false
-            tv.textColor = NSColor.controlTextColor
-            tv.string = ""
-        }
-
-        func textDidChange(_ notification: Notification) {
-            guard let tv = textView else { return }
-            if showingPlaceholder {
-                return
-            }
-            parent.text = tv.string
-            // Show placeholder if emptied
-            if tv.string.isEmpty {
-                showingPlaceholder = true
-                tv.textColor = NSColor.placeholderTextColor
-                tv.string = placeholderText
-            }
-        }
-
-        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            // Don't navigate history while showing placeholder
-            guard !showingPlaceholder else { return false }
-
-            // Up arrow — navigate history when cursor is on first line
-            if commandSelector == #selector(NSResponder.moveUp(_:)) {
-                let cursor = textView.selectedRanges.first?.rangeValue.location ?? 0
-                let prefix = (textView.string as NSString).substring(to: min(cursor, textView.string.count))
-                if !prefix.contains("\n") {
-                    parent.onNavigateUp()
-                    return true
-                }
-            }
-            // Down arrow — navigate history when cursor is on last line
-            if commandSelector == #selector(NSResponder.moveDown(_:)) {
-                let cursor = textView.selectedRanges.first?.rangeValue.location ?? 0
-                let suffix = (textView.string as NSString).substring(from: min(cursor, textView.string.count))
-                if !suffix.contains("\n") {
-                    parent.onNavigateDown()
-                    return true
-                }
-            }
-            // Enter — submit; Shift+Enter inserts newline
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                if NSEvent.modifierFlags.contains(.shift) {
-                    return false
-                }
-                parent.onSubmit()
-                return true
-            }
-            return false
-        }
     }
 }
