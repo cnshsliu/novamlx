@@ -687,23 +687,53 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     /// Filter a streaming chunk for control tokens. Returns (cleanText, shouldStop).
-    /// If any control pattern is found, returns only text before it and signals stop.
-    private static func filterControlInChunk(_ text: String, accumulated: inout String, patterns: [String]) -> (String, Bool) {
+    /// Handles both full matches and partial matches (where TurnStopProcessor
+    /// forces EOS mid-token, leaving e.g. "<|turn" without the closing ">").
+    private static func filterControlInChunk(
+        _ text: String,
+        accumulated: inout String,
+        yieldedCount: inout Int,
+        patterns: [String]
+    ) -> (String, Bool) {
         accumulated += text
+        let totalLen = accumulated.count
+
+        // 1. Full control token match — trim and stop
         for pattern in patterns {
             if let range = accumulated.range(of: pattern) {
-                let cleanAccumulated = String(accumulated[..<range.lowerBound])
-                let alreadyEmitted = accumulated.count - text.count
-                let cleanChunk: String
-                if alreadyEmitted < cleanAccumulated.count {
-                    cleanChunk = String(cleanAccumulated.dropFirst(alreadyEmitted))
+                let safeEnd = accumulated.distance(from: accumulated.startIndex, to: range.lowerBound)
+                let cleanText: String
+                if safeEnd > yieldedCount {
+                    cleanText = String(accumulated.dropFirst(yieldedCount).prefix(safeEnd - yieldedCount))
                 } else {
-                    cleanChunk = ""
+                    cleanText = ""
                 }
-                return (cleanChunk, true)
+                yieldedCount = totalLen
+                return (cleanText, true)
             }
         }
-        return (text, false)
+
+        // 2. Partial prefix check — if tail could be start of a control token, buffer it
+        let maxLen = patterns.map(\.count).max() ?? 0
+        let checkLen = min(totalLen, maxLen)
+        var safeEnd = totalLen
+        for i in 1...checkLen {
+            let suffixStart = accumulated.index(accumulated.endIndex, offsetBy: -i)
+            let suffix = accumulated[suffixStart...]
+            for pattern in patterns {
+                if pattern.hasPrefix(suffix) {
+                    safeEnd = min(safeEnd, totalLen - i)
+                }
+            }
+        }
+
+        // Yield safe portion (everything before the potential control token prefix)
+        if safeEnd > yieldedCount {
+            let cleanText = String(accumulated.dropFirst(yieldedCount).prefix(safeEnd - yieldedCount))
+            yieldedCount = safeEnd
+            return (cleanText, false)
+        }
+        return ("", false)
     }
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
@@ -1095,6 +1125,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     var completionTokens = 0
                     var infoStopReason: String = "none"
                     var streamAccumulated = ""
+                    var streamYieldedCount = 0
                     let controlPatterns = Self.controlTokensForModel(modelId: request.model)
                     let startTime = Date()
                     let reqTag = request.id.uuidString.prefix(8).description
@@ -1106,7 +1137,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                         switch generation {
                         case .chunk(let text):
-                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, patterns: controlPatterns)
+                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
                             if !cleanText.isEmpty {
                                 completionTokens += 1
                                 continuation.yield(Token(id: 0, text: cleanText))
@@ -1289,6 +1320,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     var finishReason: FinishReason = .stop
                     var completionTokens = 0
                     var streamAccumulated = ""
+                    var streamYieldedCount = 0
                     let controlPatterns = Self.controlTokensForModel(modelId: request.model)
 
                     let stream = sessionBox.streamDetails(to: lastUserMessage)
@@ -1296,7 +1328,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         if Task.isCancelled { break }
                         switch generation {
                         case .chunk(let text):
-                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, patterns: controlPatterns)
+                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
                             if !cleanText.isEmpty {
                                 completionTokens += 1
                                 continuation.yield(Token(id: 0, text: cleanText))
@@ -1565,13 +1597,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     var finishReason: FinishReason = .stop
                     var completionTokens = 0
                     var streamAccumulated = ""
+                    var streamYieldedCount = 0
                     let controlPatterns = Self.controlTokensForModel(modelId: request.model)
 
                     for await generation in stream {
                         if Task.isCancelled { break }
                         switch generation {
                         case .chunk(let text):
-                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, patterns: controlPatterns)
+                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
                             if !cleanText.isEmpty {
                                 completionTokens += 1
                                 continuation.yield(Token(id: 0, text: cleanText))
