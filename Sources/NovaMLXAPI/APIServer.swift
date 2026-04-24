@@ -12,6 +12,42 @@ import NovaMLXUtils
 
 typealias AppContext = BasicRouterRequestContext
 
+private final class LockedCounter: @unchecked Sendable {
+    private var value = 0
+    private let lock = NSLock()
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let v = value
+        value += 1
+        return v
+    }
+}
+
+private func unwrapAnyCodable(_ ac: AnyCodable) -> Any {
+    switch ac {
+    case .string(let s): return s
+    case .int(let i): return i
+    case .double(let d): return d
+    case .bool(let b): return b
+    case .null: return NSNull()
+    case .array(let a): return a.map { unwrapAnyCodable($0) }
+    case .dictionary(let d): return d.mapValues { unwrapAnyCodable($0) }
+    }
+}
+
+private func anyToAnyCodable(_ value: Any) -> AnyCodable {
+    switch value {
+    case let s as String: return .string(s)
+    case let i as Int: return .int(i)
+    case let d as Double: return .double(d)
+    case let b as Bool: return .bool(b)
+    case let a as [Any]: return .array(a.map { anyToAnyCodable($0) })
+    case let d as [String: Any]: return .dictionary(d.mapValues { anyToAnyCodable($0) })
+    default: return .string("\(value)")
+    }
+}
+
 struct NovaMLXErrorMiddleware: RouterMiddleware {
     typealias Context = AppContext
 
@@ -416,6 +452,17 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 let request = InferenceRequest(
                     model: anthropicReq.model, messages: messages,
+                    tools: anthropicReq.tools?.map { tool in
+                        var dict: [String: Any] = ["name": tool.name]
+                        if let desc = tool.description { dict["description"] = desc }
+                        dict["type"] = "function"
+                        dict["function"] = [
+                            "name": tool.name,
+                            "description": tool.description ?? "",
+                            "parameters": unwrapAnyCodable(tool.inputSchema)
+                        ] as [String: Any]
+                        return dict
+                    },
                     temperature: anthropicReq.temperature, maxTokens: anthropicReq.maxTokens,
                     topP: anthropicReq.topP, stream: false, stop: anthropicReq.stopSequences
                 )
@@ -423,10 +470,34 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let result = try await inference.generate(request)
                 let scaledInput = cfg.scaleTokenCount(result.promptTokens, modelContextWindow: inference.getContextWindow(for: anthropicReq.model) ?? 0)
                 let scaledOutput = cfg.scaleTokenCount(result.completionTokens, modelContextWindow: inference.getContextWindow(for: anthropicReq.model) ?? 0)
+
+                var content: [AnthropicContentBlock] = []
+                if !result.text.isEmpty {
+                    content.append(AnthropicContentBlock(text: result.text))
+                }
+                if let toolCalls = result.toolCalls {
+                    for tc in toolCalls {
+                        let inputCodable: AnyCodable
+                        if let data = tc.arguments.data(using: .utf8),
+                           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            inputCodable = .dictionary(obj.mapValues { anyToAnyCodable($0) })
+                        } else {
+                            inputCodable = .dictionary([:])
+                        }
+                        content.append(AnthropicContentBlock(
+                            type: "tool_use",
+                            id: tc.id,
+                            name: tc.functionName,
+                            input: inputCodable
+                        ))
+                    }
+                }
+                if content.isEmpty { content.append(AnthropicContentBlock(text: "")) }
+
                 let response = AnthropicResponse(
                     id: result.id.uuidString, model: result.model,
-                    content: [AnthropicContentBlock(text: result.text)],
-                    stopReason: result.finishReason.rawValue,
+                    content: content,
+                    stopReason: (result.toolCalls != nil && !result.toolCalls!.isEmpty) ? "tool_use" : result.finishReason.rawValue,
                     usage: AnthropicUsage(inputTokens: scaledInput, outputTokens: scaledOutput)
                 )
                 return try Self.jsonResponse(response)
@@ -1410,6 +1481,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     ) async throws -> Response {
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
+            tools: openAIReq.tools?.map { tool in
+                tool.mapValues { unwrapAnyCodable($0) }
+            },
             temperature: openAIReq.temperature, maxTokens: openAIReq.maxTokens,
             topP: openAIReq.topP, topK: openAIReq.topK,
             minP: openAIReq.minP.map { Float($0) },
@@ -1425,21 +1499,35 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         )
 
         let result = try await inference.generate(request)
-        let parsed = ToolCallParser.parse(result.text)
         let finishReason: String
         let message: OpenAIChatMessage
-        if let toolCalls = parsed.toolCalls {
+
+        // Engine-produced tool calls take priority
+        if let engineToolCalls = result.toolCalls, !engineToolCalls.isEmpty {
             finishReason = "tool_calls"
             message = OpenAIChatMessage(
                 role: "assistant",
-                content: parsed.content.isEmpty ? nil : parsed.content,
-                toolCalls: toolCalls.map { tc in
-                    OpenAIToolCall(id: tc.id, function: OpenAIFunctionCall(name: tc.function.name, arguments: tc.function.arguments))
+                content: result.text.isEmpty ? nil : result.text,
+                toolCalls: engineToolCalls.map { tc in
+                    OpenAIToolCall(id: tc.id, function: OpenAIFunctionCall(name: tc.functionName, arguments: tc.arguments))
                 }
             )
         } else {
-            finishReason = result.finishReason.rawValue
-            message = OpenAIChatMessage(role: "assistant", content: result.text)
+            // Fallback: post-hoc text parsing
+            let parsed = ToolCallParser.parse(result.text)
+            if let toolCalls = parsed.toolCalls {
+                finishReason = "tool_calls"
+                message = OpenAIChatMessage(
+                    role: "assistant",
+                    content: parsed.content.isEmpty ? nil : parsed.content,
+                    toolCalls: toolCalls.map { tc in
+                        OpenAIToolCall(id: tc.id, function: OpenAIFunctionCall(name: tc.function.name, arguments: tc.function.arguments))
+                    }
+                )
+            } else {
+                finishReason = result.finishReason.rawValue
+                message = OpenAIChatMessage(role: "assistant", content: result.text)
+            }
         }
         let response = OpenAIResponse(
             id: "chatcmpl-\(result.id.uuidString.prefix(8))",
@@ -1463,6 +1551,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     ) async throws -> Response {
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
+            tools: openAIReq.tools?.map { tool in
+                tool.mapValues { unwrapAnyCodable($0) }
+            },
             temperature: openAIReq.temperature, maxTokens: openAIReq.maxTokens,
             topP: openAIReq.topP, topK: openAIReq.topK,
             minP: openAIReq.minP.map { Float($0) },
@@ -1480,6 +1571,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request))
         let chunkId = "chatcmpl-\(request.id.uuidString.prefix(8))"
         let includeUsage = openAIReq.streamOptions?.includeUsage == true
+        let toolCallCounter = LockedCounter()
 
         let body: ResponseBody = .init { writer in
             do {
@@ -1498,7 +1590,22 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
-                        if let finish = token.finishReason {
+                        if let tc = token.toolCall {
+                            let idx = toolCallCounter.increment()
+                            let tcDelta = OpenAIToolCallDelta(
+                                index: idx,
+                                id: tc.id,
+                                type: "function",
+                                function: OpenAIFunctionCallDelta(name: tc.functionName, arguments: tc.arguments)
+                            )
+                            let chunk = OpenAIStreamChunk(
+                                id: chunkId,
+                                model: openAIReq.model,
+                                choices: [OpenAIStreamChoice(index: 0, delta: OpenAIDelta(toolCalls: [tcDelta]))]
+                            )
+                            let data = try JSONEncoder().encode(chunk)
+                            try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
+                        } else if let finish = token.finishReason {
                             let finalChunk = OpenAIStreamChunk(
                                 id: chunkId,
                                 model: openAIReq.model,

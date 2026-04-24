@@ -158,6 +158,8 @@ public struct OpenAIStreamOptions: Codable, Sendable {
 public struct OpenAIRequest: Codable, Sendable {
     public let model: String
     public let messages: [OpenAIChatMessage]
+    public let tools: [[String: AnyCodable]]?
+    public let toolChoice: AnyCodable?
     public let temperature: Double?
     public let topP: Double?
     public let topK: Int?
@@ -176,7 +178,8 @@ public struct OpenAIRequest: Codable, Sendable {
     public let thinkingBudget: Int?
 
     private enum CodingKeys: String, CodingKey {
-        case model, messages, temperature, stream, stop, n, seed
+        case model, messages, temperature, stream, stop, n, seed, tools
+        case toolChoice = "tool_choice"
         case topP = "top_p"
         case topK = "top_k"
         case minP = "min_p"
@@ -193,6 +196,8 @@ public struct OpenAIRequest: Codable, Sendable {
     public init(
         model: String,
         messages: [OpenAIChatMessage],
+        tools: [[String: AnyCodable]]? = nil,
+        toolChoice: AnyCodable? = nil,
         temperature: Double? = nil,
         topP: Double? = nil,
         topK: Int? = nil,
@@ -212,6 +217,8 @@ public struct OpenAIRequest: Codable, Sendable {
     ) {
         self.model = model
         self.messages = messages
+        self.tools = tools
+        self.toolChoice = toolChoice
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -321,22 +328,29 @@ public struct OpenAIChatMessage: Codable, Sendable {
     public let role: String
     public let content: MessageContent?
     public let toolCalls: [OpenAIToolCall]?
+    public let toolCallId: String?
+    public let name: String?
 
     private enum CodingKeys: String, CodingKey {
-        case role, content
+        case role, content, name
         case toolCalls = "tool_calls"
+        case toolCallId = "tool_call_id"
     }
 
-    public init(role: String, content: String? = nil, toolCalls: [OpenAIToolCall]? = nil) {
+    public init(role: String, content: String? = nil, toolCalls: [OpenAIToolCall]? = nil, toolCallId: String? = nil, name: String? = nil) {
         self.role = role
         self.content = content.map { .text($0) }
         self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+        self.name = name
     }
 
-    public init(role: String, content: MessageContent?, toolCalls: [OpenAIToolCall]? = nil) {
+    public init(role: String, content: MessageContent?, toolCalls: [OpenAIToolCall]? = nil, toolCallId: String? = nil, name: String? = nil) {
         self.role = role
         self.content = content
         self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+        self.name = name
     }
 }
 
@@ -454,16 +468,43 @@ public struct OpenAIDelta: Codable, Sendable {
     public let role: String?
     public let content: String?
     public let reasoningContent: String?
+    public let toolCalls: [OpenAIToolCallDelta]?
 
     private enum CodingKeys: String, CodingKey {
         case role, content
         case reasoningContent = "reasoning_content"
+        case toolCalls = "tool_calls"
     }
 
-    public init(role: String? = nil, content: String? = nil, reasoningContent: String? = nil) {
+    public init(role: String? = nil, content: String? = nil, reasoningContent: String? = nil, toolCalls: [OpenAIToolCallDelta]? = nil) {
         self.role = role
         self.content = content
         self.reasoningContent = reasoningContent
+        self.toolCalls = toolCalls
+    }
+}
+
+public struct OpenAIToolCallDelta: Codable, Sendable {
+    public let index: Int
+    public let id: String?
+    public let type: String?
+    public let function: OpenAIFunctionCallDelta?
+
+    public init(index: Int, id: String? = nil, type: String? = nil, function: OpenAIFunctionCallDelta? = nil) {
+        self.index = index
+        self.id = id
+        self.type = type
+        self.function = function
+    }
+}
+
+public struct OpenAIFunctionCallDelta: Codable, Sendable {
+    public let name: String?
+    public let arguments: String?
+
+    public init(name: String? = nil, arguments: String? = nil) {
+        self.name = name
+        self.arguments = arguments
     }
 }
 

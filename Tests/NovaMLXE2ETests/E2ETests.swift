@@ -8,12 +8,32 @@ let adminBase = URL(string: ProcessInfo.processInfo.environment["NOVA_ADMIN_URL"
 let apiKey = ProcessInfo.processInfo.environment["NOVA_API_KEY"] ?? "abcd1234"
 
 // ─── E2E Gate ───
-// Must set NOVA_E2E=1 to run. Prevents DispatchSemaphore from blocking test runner.
-// Usage: NOVA_E2E=1 swift test          (all tests: unit + E2E)
-//        swift test                       (unit tests only, E2E skipped)
-//        ./Scripts/run-e2e-tests.sh       (E2E only, with formatting)
+// Auto-detect: if NovaMLX server is running at 127.0.0.1:6590, run E2E tests.
+// If not, skip. No environment variable needed.
+// Usage: swift test                       (unit + E2E if server is up)
+//        NOVA_E2E=0 swift test            (force skip E2E)
 
-private let e2eEnabled = ProcessInfo.processInfo.environment["NOVA_E2E"] == "1"
+private let e2eForceDisabled = ProcessInfo.processInfo.environment["NOVA_E2E"] == "0"
+
+private func detectServerAlive() -> Bool {
+    guard !e2eForceDisabled else { return false }
+    let url = URL(string: ProcessInfo.processInfo.environment["NOVA_API_URL"] ?? "http://127.0.0.1:6590")!
+    let healthURL = url.appendingPathComponent("health")
+    var request = URLRequest(url: healthURL)
+    request.httpMethod = "GET"
+    request.timeoutInterval = 3
+    let sem = DispatchSemaphore(value: 0)
+    var result = false
+    let task = URLSession.shared.dataTask(with: request) { _, response, _ in
+        result = (response as? HTTPURLResponse)?.statusCode == 200
+        sem.signal()
+    }
+    task.resume()
+    _ = sem.wait(timeout: .now() + 5)
+    return result
+}
+
+private let e2eEnabled = detectServerAlive()
 
 // ─── HTTP Client ───
 

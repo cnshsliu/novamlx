@@ -94,6 +94,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             id: request.id,
             model: request.model,
             messages: request.messages,
+            tools: request.tools,
             temperature: request.temperature ?? temperature,
             maxTokens: request.maxTokens ?? maxTokens,
             topP: request.topP ?? topP,

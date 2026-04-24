@@ -6,6 +6,7 @@ public struct CodableInferenceRequest: Codable, Sendable {
     public let id: String
     public let model: String
     public let messages: [ChatMessage]
+    public let toolsJSON: String?
     public let temperature: Double?
     public let maxTokens: Int?
     public let topP: Double?
@@ -28,6 +29,13 @@ public struct CodableInferenceRequest: Codable, Sendable {
         self.id = request.id.uuidString
         self.model = request.model
         self.messages = request.messages
+        if let tools = request.tools, !tools.isEmpty,
+           let data = try? JSONSerialization.data(withJSONObject: tools),
+           let str = String(data: data, encoding: .utf8) {
+            self.toolsJSON = str
+        } else {
+            self.toolsJSON = nil
+        }
         self.temperature = request.temperature
         self.maxTokens = request.maxTokens
         self.topP = request.topP
@@ -61,10 +69,17 @@ public struct CodableInferenceRequest: Codable, Sendable {
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             schema = obj
         }
+        var tools: [[String: Any]]?
+        if let json = toolsJSON,
+           let data = json.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            tools = obj
+        }
         return InferenceRequest(
             id: UUID(uuidString: id) ?? UUID(),
             model: model,
             messages: messages,
+            tools: tools,
             temperature: temperature,
             maxTokens: maxTokens,
             topP: topP,

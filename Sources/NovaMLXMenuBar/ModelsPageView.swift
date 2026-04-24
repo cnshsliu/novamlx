@@ -222,7 +222,7 @@ struct ModelsPageView: View {
                 Spacer()
             }
 
-            HStack(spacing: 8) {
+            FlowLayout(spacing: 8) {
                 ForEach(suggestedSearches, id: \.self) { suggestion in
                     Button(action: {
                         searchText = suggestion
@@ -241,7 +241,6 @@ struct ModelsPageView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                Spacer()
             }
         }
         .padding(16)

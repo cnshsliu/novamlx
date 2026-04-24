@@ -446,7 +446,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return allTokens
     }
 
+    private func toSendable(_ value: Any) -> any Sendable {
+        switch value {
+        case let s as String: return s
+        case let i as Int: return i
+        case let d as Double: return d
+        case let b as Bool: return b
+        case let a as [Any]: return a.map { toSendable($0) } as any Sendable
+        case let d as [String: Any]: return d.mapValues { toSendable($0) } as any Sendable
+        default: return "\(value)"
+        }
+    }
+
     func buildUserInput(request: InferenceRequest, hasImages: Bool) async throws -> UserInput {
+        let toolSpecs: [[String: any Sendable]]? = request.tools?.map { tool in
+            tool.mapValues { toSendable($0) }
+        }
+
         if hasImages {
             let chatMessages = request.messages.compactMap { msg -> Chat.Message? in
                 let images: [UserInput.Image] = (msg.images ?? []).compactMap { urlString -> UserInput.Image? in
@@ -462,16 +478,24 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         return .url(url)
                     } else {
                         return .url(URL(fileURLWithPath: urlString))
-    }
-}
+                    }
+                }
                 return .user(msg.content ?? "", images: images)
             }
-            return UserInput(prompt: .chat(chatMessages))
+            return UserInput(prompt: .chat(chatMessages), tools: toolSpecs)
         } else {
             let messages: [Message] = request.messages.map { msg in
-                ["role": msg.role.rawValue, "content": msg.content ?? ""]
+                var m: Message = ["role": msg.role.rawValue, "content": msg.content ?? ""]
+                if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
+                if let name = msg.name { m["name"] = name }
+                if let tcs = msg.toolCalls {
+                    m["tool_calls"] = tcs.map { tc in
+                        ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
+                    }
+                }
+                return m
             }
-            return UserInput(prompt: .messages(messages))
+            return UserInput(prompt: .messages(messages), tools: toolSpecs)
         }
     }
 
@@ -681,6 +705,26 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         for pattern in patterns {
             if let range = result.range(of: pattern) {
                 result = String(result[..<range.lowerBound])
+            }
+        }
+        return result
+    }
+
+    /// Regex-based scrub: strip any <|xxx|> or <|xxx> patterns from output.
+    /// Catches multi-token control sequences (mask_start, tool_call, etc.)
+    /// that aren't registered as special tokens in the tokenizer.
+    private static let controlTokenRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "<\\|[a-zA-Z_][a-zA-Z0-9_]*\\|?>")
+    }()
+
+    private static func scrubControlTokens(_ text: String) -> String {
+        let nsRange = NSRange(text.startIndex..., in: text)
+        let matches = controlTokenRegex.matches(in: text, range: nsRange)
+        guard !matches.isEmpty else { return text }
+        var result = text
+        for match in matches.reversed() {
+            if let range = Range(match.range, in: result) {
+                result.removeSubrange(range)
             }
         }
         return result
@@ -929,6 +973,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         var completionTokens = 0
         var finishReason: FinishReason = .stop
         var genStopReason: String = "none"
+        var collectedToolCalls: [ToolCallResult] = []
 
         for await generation in stream {
             switch generation {
@@ -940,7 +985,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 genStopReason = String(describing: info.stopReason)
                 if case .length = info.stopReason { finishReason = .length }
                 NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
-            case .toolCall: break
+            case .toolCall(let tc):
+                let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
+                let tcResult = ToolCallResult(
+                    id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+                    functionName: tc.function.name,
+                    arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                )
+                collectedToolCalls.append(tcResult)
+                finishReason = .toolCalls
             }
         }
 
@@ -969,10 +1022,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         NovaMLXLog.info("Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s)")
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Completed: \(completionTokens) tokens, \(String(format: "%.1f", tps)) tok/s")
 
-        let trimmedText = Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model))
+        let trimmedText = Self.scrubControlTokens(Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model)))
 
         return InferenceResult(
             id: request.id, model: request.model, text: trimmedText,
+            toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls,
             tokensPerSecond: tps, promptTokens: promptTokenCount, completionTokens: completionTokens,
             finishReason: finishReason
         )
@@ -1137,7 +1191,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                         switch generation {
                         case .chunk(let text):
-                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
+                            let (rawText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
+                            let cleanText = Self.scrubControlTokens(rawText)
                             if !cleanText.isEmpty {
                                 completionTokens += 1
                                 continuation.yield(Token(id: 0, text: cleanText))
@@ -1148,7 +1203,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             infoStopReason = String(describing: info.stopReason)
                             if case .length = info.stopReason { finishReason = .length }
                             NovaMLXLog.info("[STREAM:\(reqTag)] Info: tokens=\(info.generationTokenCount), stopReason=\(infoStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
-                        case .toolCall: break
+                        case .toolCall(let tc):
+                let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
+                let tcResult = ToolCallResult(
+                    id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+                    functionName: tc.function.name,
+                    arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                )
+                continuation.yield(Token(id: 0, text: "", toolCall: tcResult))
                         }
                     }
 
@@ -1254,6 +1316,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         var promptTokens = 0
         var completionTokens = 0
         var finishReason: FinishReason = .stop
+        var collectedToolCalls: [ToolCallResult] = []
 
         let stream = sessionBox.streamDetails(to: lastUserMessage)
         for try await generation in stream {
@@ -1264,7 +1327,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 promptTokens = info.promptTokenCount
                 completionTokens = info.generationTokenCount
                 if case .length = info.stopReason { finishReason = .length }
-            case .toolCall: break
+            case .toolCall(let tc):
+                let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
+                let tcResult = ToolCallResult(
+                    id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+                    functionName: tc.function.name,
+                    arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                )
+                collectedToolCalls.append(tcResult)
+                finishReason = .toolCalls
             }
         }
 
@@ -1280,7 +1351,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
         return InferenceResult(
-            id: request.id, model: request.model, text: Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model)),
+            id: request.id, model: request.model, text: Self.scrubControlTokens(Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model))),
+            toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls,
             tokensPerSecond: tps, promptTokens: promptTokens,
             completionTokens: completionTokens, finishReason: finishReason
         )
@@ -1328,7 +1400,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         if Task.isCancelled { break }
                         switch generation {
                         case .chunk(let text):
-                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
+                            let (rawText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
+                            let cleanText = Self.scrubControlTokens(rawText)
                             if !cleanText.isEmpty {
                                 completionTokens += 1
                                 continuation.yield(Token(id: 0, text: cleanText))
@@ -1337,7 +1410,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         case .info(let info):
                             completionTokens = info.generationTokenCount
                             if case .length = info.stopReason { finishReason = .length }
-                        case .toolCall: break
+                        case .toolCall(let tc):
+                let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
+                let tcResult = ToolCallResult(
+                    id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+                    functionName: tc.function.name,
+                    arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                )
+                continuation.yield(Token(id: 0, text: "", toolCall: tcResult))
                         }
                     }
 
@@ -1472,6 +1552,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         var generatedText = ""
         var completionTokens = 0
         var finishReason: FinishReason = .stop
+        var collectedToolCalls: [ToolCallResult] = []
 
         for await generation in stream {
             switch generation {
@@ -1481,7 +1562,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             case .info(let info):
                 completionTokens = info.generationTokenCount
                 if case .length = info.stopReason { finishReason = .length }
-            case .toolCall: break
+            case .toolCall(let tc):
+                let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
+                let tcResult = ToolCallResult(
+                    id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+                    functionName: tc.function.name,
+                    arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                )
+                collectedToolCalls.append(tcResult)
+                finishReason = .toolCalls
             }
         }
         _ = task
@@ -1500,7 +1589,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
         return InferenceResult(
-            id: request.id, model: request.model, text: Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model)),
+            id: request.id, model: request.model, text: Self.scrubControlTokens(Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model))),
+            toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls,
             tokensPerSecond: tps, promptTokens: promptTokenCount,
             completionTokens: completionTokens, finishReason: finishReason
         )
@@ -1604,7 +1694,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         if Task.isCancelled { break }
                         switch generation {
                         case .chunk(let text):
-                            let (cleanText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
+                            let (rawText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
+                            let cleanText = Self.scrubControlTokens(rawText)
                             if !cleanText.isEmpty {
                                 completionTokens += 1
                                 continuation.yield(Token(id: 0, text: cleanText))
@@ -1613,7 +1704,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         case .info(let info):
                             completionTokens = info.generationTokenCount
                             if case .length = info.stopReason { finishReason = .length }
-                        case .toolCall: break
+                        case .toolCall(let tc):
+                let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
+                let tcResult = ToolCallResult(
+                    id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+                    functionName: tc.function.name,
+                    arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                )
+                continuation.yield(Token(id: 0, text: "", toolCall: tcResult))
                         }
                     }
                     _ = genTask

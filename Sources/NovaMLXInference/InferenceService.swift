@@ -53,6 +53,7 @@ public final class InferenceService: @unchecked Sendable {
         var finalRequest = settings.applySamplingOverrides(to: request)
         finalRequest = InferenceRequest(
             id: finalRequest.id, model: resolvedId, messages: finalRequest.messages,
+            tools: finalRequest.tools,
             temperature: finalRequest.temperature, maxTokens: finalRequest.maxTokens,
             topP: finalRequest.topP, topK: finalRequest.topK, minP: finalRequest.minP,
             frequencyPenalty: finalRequest.frequencyPenalty, presencePenalty: finalRequest.presencePenalty,
@@ -137,6 +138,7 @@ public final class InferenceService: @unchecked Sendable {
         var finalRequest = settings.applySamplingOverrides(to: request)
         finalRequest = InferenceRequest(
             id: finalRequest.id, model: resolvedId, messages: finalRequest.messages,
+            tools: finalRequest.tools,
             temperature: finalRequest.temperature, maxTokens: finalRequest.maxTokens,
             topP: finalRequest.topP, topK: finalRequest.topK, minP: finalRequest.minP,
             frequencyPenalty: finalRequest.frequencyPenalty, presencePenalty: finalRequest.presencePenalty,

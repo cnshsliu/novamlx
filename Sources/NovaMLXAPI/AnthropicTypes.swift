@@ -2,6 +2,23 @@ import Foundation
 import NovaMLXCore
 import NovaMLXUtils
 
+public struct AnthropicTool: Codable, Sendable {
+    public let name: String
+    public let description: String?
+    public let inputSchema: AnyCodable
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description
+        case inputSchema = "input_schema"
+    }
+
+    public init(name: String, description: String? = nil, inputSchema: AnyCodable) {
+        self.name = name
+        self.description = description
+        self.inputSchema = inputSchema
+    }
+}
+
 public struct AnthropicRequest: Codable, Sendable {
     public let model: String
     public let messages: [AnthropicMessage]
@@ -11,10 +28,13 @@ public struct AnthropicRequest: Codable, Sendable {
     public let topP: Double?
     public let stream: Bool?
     public let stopSequences: [String]?
+    public let tools: [AnthropicTool]?
+    public let toolChoice: AnyCodable?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, maxTokens = "max_tokens", system, temperature
         case topP = "top_p", stream, stopSequences = "stop_sequences"
+        case tools, toolChoice = "tool_choice"
     }
 
     public init(
@@ -25,7 +45,9 @@ public struct AnthropicRequest: Codable, Sendable {
         temperature: Double? = nil,
         topP: Double? = nil,
         stream: Bool? = nil,
-        stopSequences: [String]? = nil
+        stopSequences: [String]? = nil,
+        tools: [AnthropicTool]? = nil,
+        toolChoice: AnyCodable? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -35,6 +57,8 @@ public struct AnthropicRequest: Codable, Sendable {
         self.topP = topP
         self.stream = stream
         self.stopSequences = stopSequences
+        self.tools = tools
+        self.toolChoice = toolChoice
     }
 }
 

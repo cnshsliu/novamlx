@@ -131,10 +131,23 @@ public enum ResponseFormat: String, Codable, Sendable {
     case jsonObject = "json_object"
 }
 
+public struct ToolCallResult: Codable, Sendable {
+    public let id: String
+    public let functionName: String
+    public let arguments: String
+
+    public init(id: String, functionName: String, arguments: String) {
+        self.id = id
+        self.functionName = functionName
+        self.arguments = arguments
+    }
+}
+
 public struct InferenceRequest: @unchecked Sendable {
     public let id: UUID
     public let model: String
     public let messages: [ChatMessage]
+    public let tools: [[String: Any]]?
     public let temperature: Double?
     public let maxTokens: Int?
     public let topP: Double?
@@ -157,6 +170,7 @@ public struct InferenceRequest: @unchecked Sendable {
         id: UUID = UUID(),
         model: String,
         messages: [ChatMessage],
+        tools: [[String: Any]]? = nil,
         temperature: Double? = nil,
         maxTokens: Int? = nil,
         topP: Double? = nil,
@@ -178,6 +192,7 @@ public struct InferenceRequest: @unchecked Sendable {
         self.id = id
         self.model = model
         self.messages = messages
+        self.tools = tools
         self.temperature = temperature
         self.maxTokens = maxTokens
         self.topP = topP
@@ -211,13 +226,15 @@ public struct ChatMessage: Codable, Sendable {
     public let images: [String]?
     public let name: String?
     public let toolCallId: String?
+    public let toolCalls: [ToolCallResult]?
 
-    public init(role: Role, content: String? = nil, images: [String]? = nil, name: String? = nil, toolCallId: String? = nil) {
+    public init(role: Role, content: String? = nil, images: [String]? = nil, name: String? = nil, toolCallId: String? = nil, toolCalls: [ToolCallResult]? = nil) {
         self.role = role
         self.content = content
         self.images = images
         self.name = name
         self.toolCallId = toolCallId
+        self.toolCalls = toolCalls
     }
 }
 
@@ -225,6 +242,7 @@ public struct InferenceResult: Codable, Sendable {
     public let id: UUID
     public let model: String
     public let text: String
+    public let toolCalls: [ToolCallResult]?
     public let tokensPerSecond: Double
     public let promptTokens: Int
     public let completionTokens: Int
@@ -234,6 +252,7 @@ public struct InferenceResult: Codable, Sendable {
         id: UUID,
         model: String,
         text: String,
+        toolCalls: [ToolCallResult]? = nil,
         tokensPerSecond: Double,
         promptTokens: Int,
         completionTokens: Int,
@@ -242,6 +261,7 @@ public struct InferenceResult: Codable, Sendable {
         self.id = id
         self.model = model
         self.text = text
+        self.toolCalls = toolCalls
         self.tokensPerSecond = tokensPerSecond
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
@@ -260,12 +280,14 @@ public struct Token: Codable, Sendable {
     public let text: String
     public let logprob: Float?
     public let finishReason: FinishReason?
+    public let toolCall: ToolCallResult?
 
-    public init(id: Int, text: String, logprob: Float? = nil, finishReason: FinishReason? = nil) {
+    public init(id: Int, text: String, logprob: Float? = nil, finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil) {
         self.id = id
         self.text = text
         self.logprob = logprob
         self.finishReason = finishReason
+        self.toolCall = toolCall
     }
 }
 

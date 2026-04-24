@@ -45,8 +45,6 @@ struct AgentsPageView: View {
 
     @State private var agents: [AgentInfo] = AgentInfo.builtIn
     @State private var isRefreshing = false
-    @State private var launchMessage: String? = nil
-    @State private var launchError: String? = nil
 
     var body: some View {
         ScrollView {
@@ -103,10 +101,11 @@ struct AgentsPageView: View {
             Spacer()
 
             Button(action: { checkInstalledAgents() }) {
-                Image(systemName: isRefreshing ? "arrow.clockwise" : "arrow.clockwise")
+                Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11))
                     .rotationEffect(.degrees(isRefreshing ? 360 : 0))
-                    .animation(isRefreshing ? .linear(duration: 0.6).repeatForever(autoreverses: false) : .default, value: isRefreshing)
+                    .frame(width: 16, height: 16)
+                    .animation(isRefreshing ? .linear(duration: 0.6).repeatForever(autoreverses: false) : nil, value: isRefreshing)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -169,15 +168,7 @@ struct AgentsPageView: View {
 
             // Action buttons
             HStack(spacing: 8) {
-                if agent.isInstalled {
-                    Button(action: { launchAgent(agent.id) }) {
-                        Label(l10n.tr("agents.launch"), systemImage: "play.fill")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(!appState.isServerRunning)
-                } else {
+                if !agent.isInstalled {
                     Button(action: {
                         if let url = URL(string: agent.installURL) {
                             NSWorkspace.shared.open(url)
@@ -208,18 +199,6 @@ struct AgentsPageView: View {
                 }
 
                 Spacer()
-
-                if let msg = launchMessage, msg.hasPrefix(agent.id) {
-                    Text(msg)
-                        .font(.system(size: 10))
-                        .foregroundColor(NovaTheme.Colors.statusOK)
-                }
-            }
-
-            if let err = launchError, err.hasPrefix(agent.id) {
-                Text(err)
-                    .font(.system(size: 10))
-                    .foregroundColor(NovaTheme.Colors.statusError)
             }
         }
         .padding(16)
@@ -290,13 +269,6 @@ struct AgentsPageView: View {
         let text = generateConfigText(for: agentId)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-        launchMessage = l10n.tr("agents.configCopied", agentId)
-        launchError = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            if self.launchMessage == self.l10n.tr("agents.configCopied", agentId) {
-                self.launchMessage = nil
-            }
-        }
     }
 
     private func checkInstalledAgents() {
@@ -330,46 +302,6 @@ struct AgentsPageView: View {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let fallbacks = ["/usr/local/bin/\(name)", "/opt/homebrew/bin/\(name)", "\(home)/.local/bin/\(name)"]
         return fallbacks.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    private func launchAgent(_ agentId: String) {
-        guard let idx = agents.firstIndex(where: { $0.id == agentId }),
-              let binaryPath = agents[idx].resolvedPath else { return }
-
-        let port = appState.serverPort
-        let apiKey = appState.apiKey
-        let baseURL = "http://127.0.0.1:\(port)/v1"
-
-        do {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: binaryPath)
-
-            var env = ProcessInfo.processInfo.environment
-
-            if agentId == "opencode" {
-                var keyField = ""
-                if let apiKey { keyField = ",\"apiKey\":\"\(apiKey)\"" }
-                let configStr = "{\"providers\":{\"novamlx\":{\"type\":\"openai-compatible\",\"baseURL\":\"http://127.0.0.1:\(port)/v1\"\(keyField)}},\"defaultProvider\":\"novamlx\"}"
-                env["OPENCODE_CONFIG_CONTENT"] = configStr
-            }
-
-            process.environment = env
-            process.standardOutput = FileHandle.standardOutput
-            process.standardError = FileHandle.standardError
-
-            if agentId == "openclaw" {
-                try writeOpenClawConfig(baseURL: baseURL, apiKey: apiKey)
-            } else if agentId == "hermes" {
-                try writeHermesConfig(baseURL: baseURL, apiKey: apiKey)
-            }
-
-            try process.run()
-            launchMessage = l10n.tr("agents.launched", agentId)
-            launchError = nil
-        } catch {
-            launchError = l10n.tr("agents.launchError", agentId, error.localizedDescription)
-            launchMessage = nil
-        }
     }
 
     private func writeOpenClawConfig(baseURL: String, apiKey: String?) throws {
