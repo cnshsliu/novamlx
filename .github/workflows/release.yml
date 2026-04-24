@@ -11,6 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 env:
   MLX_SWIFT_REF: "main"
   MLX_SWIFT_LM_REF: "main"
