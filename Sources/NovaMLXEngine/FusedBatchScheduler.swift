@@ -13,9 +13,20 @@ final class FusedCachesBox: @unchecked Sendable {
     init(caches: [KVCache]) { self.caches = caches }
 }
 
-/// Result of sampling a single token within a decode step.
+/// Result of a single-token decode (fallback path, no speculation).
 struct DecodeResult: Sendable {
     let tokenId: Int
+    let sequenceId: UUID
+}
+
+/// Result of a speculative decode round: accepted tokens + bonus token.
+struct SpecDecodeResult: Sendable {
+    /// Accepted + bonus token IDs, in order. Always >= 1 (the bonus token).
+    let acceptedTokens: [Int]
+    /// How many of the drafted tokens were accepted (excluding bonus).
+    let draftAccepted: Int
+    /// How many draft tokens were proposed.
+    let draftProposed: Int
     let sequenceId: UUID
 }
 
@@ -45,6 +56,8 @@ struct ActiveStreamSequence: @unchecked Sendable {
     let startTime: Date
     let admittedAt: Date       // When this sequence was admitted (for preemption ordering)
     var isFinished: Bool
+    /// Recent token IDs for N-gram speculation context.
+    var recentTokenIds: [Int]
 }
 
 // MARK: - Queued Stream Request
@@ -115,13 +128,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     public var metrics: FusedSchedulerMetrics {
         lock.withLock {
-            FusedSchedulerMetrics(
+            let specStats = engine.specDecoder.speculatorStats
+            return FusedSchedulerMetrics(
                 activeSequences: activeByModel.values.reduce(0) { $0 + $1.count },
                 queueDepth: streamQueue.count + generateQueue.count,
                 totalDecodeSteps: totalDecodeSteps,
                 totalTokensViaFused: totalTokensViaFused,
                 peakBatchWidth: peakBatchWidth,
-                totalPreemptions: totalPreemptions
+                totalPreemptions: totalPreemptions,
+                specAcceptanceRate: engine.specDecoder.acceptanceRate,
+                specCacheSize: specStats.cacheSize
             )
         }
     }
@@ -574,7 +590,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             promptTokenIds: allTokens,
             startTime: Date(),
             admittedAt: Date(),
-            isFinished: isFinished
+            isFinished: isFinished,
+            recentTokenIds: Array(allTokens.suffix(20))
         )
     }
 
@@ -651,7 +668,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             promptTokenIds: allTokens,
             startTime: Date(),
             admittedAt: Date(),
-            isFinished: false
+            isFinished: false,
+            recentTokenIds: Array(allTokens.suffix(20))
         )
     }
 
@@ -890,62 +908,149 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             let eosId = container.tokenizer?.eosTokenId
 
             // Run decode step per-sequence inside perform.
+            // N-gram speculation: propose draft tokens, verify in one forward pass.
 
-            var decodeResults: [DecodeResult] = []
+            let specDecoder = engine.specDecoder
+            var specResults: [SpecDecodeResult] = []
+
             for seq in active {
-                let token = MLXArray(Int32(seq.lastTokenId)).reshaped(1, 1)
-                let seqCaches = seq.caches
-                let seqSampler = seq.sampler
-                let tidBox = await mlxContainer.perform(nonSendable: (token, seqCaches)) { context, values in
-                    let (tokenInput, caches) = values
-                    let logits = context.model(tokenInput, cache: caches)
-                    eval(logits)
-                    let lastLogits = logits[0..., -1, 0...]
-                    let sampled = seqSampler.sample(logits: lastLogits)
-                    eval(sampled)
-                    return SendableBox(sampled.item(Int.self))
+                let draftTokens = specDecoder.speculate(context: seq.recentTokenIds)
+
+                if draftTokens.isEmpty {
+                    // No draft — standard single-token decode (zero overhead).
+                    let token = MLXArray(Int32(seq.lastTokenId)).reshaped(1, 1)
+                    let seqCaches = seq.caches
+                    let seqSampler = seq.sampler
+                    let tidBox = await mlxContainer.perform(nonSendable: (token, seqCaches)) { context, values in
+                        let (tokenInput, caches) = values
+                        let logits = context.model(tokenInput, cache: caches)
+                        eval(logits)
+                        let lastLogits = logits[0..., -1, 0...]
+                        let sampled = seqSampler.sample(logits: lastLogits)
+                        eval(sampled)
+                        return SendableBox(sampled.item(Int.self))
+                    }
+                    let tid = tidBox.value
+                    specResults.append(SpecDecodeResult(
+                        acceptedTokens: [tid], draftAccepted: 0, draftProposed: 0, sequenceId: seq.id
+                    ))
+                } else {
+                    // Speculative decode: [lastToken] + draftTokens in one forward pass.
+                    let allTokens = [seq.lastTokenId] + draftTokens
+                    let tokenInput = MLXArray(allTokens.map { Int32($0) }).reshaped(1, allTokens.count)
+                    let seqCaches = seq.caches
+                    let numDraft = draftTokens.count
+
+                    let verifyBox = await mlxContainer.perform(nonSendable: (tokenInput, seqCaches, numDraft)) { context, values in
+                        let (input, caches, nDraft) = values
+                        let logits = context.model(input, cache: caches)
+                        eval(logits)
+
+                        // Verify each draft position against the main model's greedy argmax.
+                        var accepted = 0
+                        var allAccepted: [Int] = []
+                        for pos in 0..<(1 + nDraft) {
+                            let posLogits = logits[0..., pos, 0...]
+                            let mainToken = argMax(posLogits, axis: -1).item(Int.self)
+                            if pos == 0 {
+                                // Position 0: this is the "free" bonus token from the real last token.
+                                allAccepted.append(mainToken)
+                            } else {
+                                // Compare main's greedy output vs the draft at this position.
+                                if mainToken == draftTokens[pos - 1] {
+                                    accepted += 1
+                                    allAccepted.append(mainToken)
+                                } else {
+                                    // Rejection — keep the main model's token as bonus, stop here.
+                                    allAccepted.append(mainToken)
+                                    break
+                                }
+                            }
+                        }
+
+                        // If all drafts accepted, the bonus token is already the last in allAccepted.
+                        // Trim KV cache to remove rejected positions.
+                        let excessDraft = nDraft - accepted
+                        if excessDraft > 0 {
+                            for cache in caches {
+                                let trimmed = cache.trim(excessDraft)
+                                NovaMLXLog.debug("[Spec] Trimmed \(trimmed) excess KV entries from \(type(of: cache))")
+                            }
+                        }
+
+                        return SendableBox((allAccepted, accepted))
+                    }
+                    let (acceptedTokens, draftAccepted) = verifyBox.value
+                    specResults.append(SpecDecodeResult(
+                        acceptedTokens: acceptedTokens,
+                        draftAccepted: draftAccepted,
+                        draftProposed: numDraft,
+                        sequenceId: seq.id
+                    ))
                 }
-                let tid = tidBox.value
-                decodeResults.append(DecodeResult(tokenId: tid, sequenceId: seq.id))
             }
 
-            // Apply decode results: update sequences in-place, yield tokens, check stop
+            // Apply spec decode results: yield accepted tokens per sequence.
             var updatedActive = active
             for (i, var seq) in updatedActive.enumerated() {
-                guard i < decodeResults.count else { break }
-                let tokenId = decodeResults[i].tokenId
+                guard i < specResults.count else { break }
+                let result = specResults[i]
 
-                seq.lastTokenId = tokenId
-                seq.completionTokens += 1
+                // Record speculation stats and update N-gram cache.
+                if result.draftProposed > 0 {
+                    specDecoder.recordAccepted(tokens: result.acceptedTokens, accepted: result.draftAccepted)
+                }
 
-                let decoded = container.tokenizer?.decode([tokenId]) ?? ""
-                seq.generatedText += decoded
-                seq.continuation.yield(Token(id: 0, text: decoded))
+                // Yield all accepted tokens.
+                var sequenceFinished = false
+                for tokenId in result.acceptedTokens {
+                    seq.lastTokenId = tokenId
+                    seq.completionTokens += 1
 
-                lock.withLock { totalTokensViaFused += 1 }
+                    // Update N-gram context buffer.
+                    seq.recentTokenIds.append(tokenId)
+                    if seq.recentTokenIds.count > 30 {
+                        seq.recentTokenIds = Array(seq.recentTokenIds.suffix(20))
+                    }
 
-                let isEOS = eosId == tokenId
-                let atMax = seq.completionTokens >= seq.maxTokens
+                    // Record into N-gram cache for future speculation.
+                    specDecoder.recordToken(tokenId)
 
-                // Check custom stop sequences (string suffix match)
-                var hitStop = false
-                if let stopSeqs = seq.request.stop {
-                    for stopStr in stopSeqs where !stopStr.isEmpty {
-                        if seq.generatedText.hasSuffix(stopStr) {
-                            hitStop = true
-                            break
+                    let decoded = container.tokenizer?.decode([tokenId]) ?? ""
+                    seq.generatedText += decoded
+                    seq.continuation.yield(Token(id: 0, text: decoded))
+
+                    lock.withLock { totalTokensViaFused += 1 }
+
+                    let isEOS = eosId == tokenId
+                    let atMax = seq.completionTokens >= seq.maxTokens
+
+                    // Check custom stop sequences
+                    var hitStop = false
+                    if let stopSeqs = seq.request.stop {
+                        for stopStr in stopSeqs where !stopStr.isEmpty {
+                            if seq.generatedText.hasSuffix(stopStr) {
+                                hitStop = true
+                                break
+                            }
                         }
+                    }
+
+                    if isEOS || atMax || hitStop {
+                        let finishReason: FinishReason = atMax ? .length : .stop
+                        seq.continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
+                        seq.continuation.finish()
+                        seq.isFinished = true
+                        sequenceFinished = true
+                        break
                     }
                 }
 
-                if isEOS || atMax || hitStop {
-                    let finishReason: FinishReason = atMax ? .length : .stop
-                    seq.continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
-                    seq.continuation.finish()
-                    seq.isFinished = true
+                if !sequenceFinished {
+                    updatedActive[i] = seq
+                } else {
+                    updatedActive[i] = seq
                 }
-
-                updatedActive[i] = seq  // Write back the updated sequence
             }
 
             // Update state — use updatedActive (with new lastTokenIds, completionTokens, etc.)
@@ -1052,6 +1157,8 @@ public struct FusedSchedulerMetrics: Sendable {
     public let totalTokensViaFused: UInt64
     public let peakBatchWidth: Int
     public let totalPreemptions: UInt64
+    public let specAcceptanceRate: Double
+    public let specCacheSize: Int
 
     public init(
         activeSequences: Int = 0,
@@ -1059,7 +1166,9 @@ public struct FusedSchedulerMetrics: Sendable {
         totalDecodeSteps: UInt64 = 0,
         totalTokensViaFused: UInt64 = 0,
         peakBatchWidth: Int = 0,
-        totalPreemptions: UInt64 = 0
+        totalPreemptions: UInt64 = 0,
+        specAcceptanceRate: Double = 0,
+        specCacheSize: Int = 0
     ) {
         self.activeSequences = activeSequences
         self.queueDepth = queueDepth
@@ -1067,5 +1176,7 @@ public struct FusedSchedulerMetrics: Sendable {
         self.totalTokensViaFused = totalTokensViaFused
         self.peakBatchWidth = peakBatchWidth
         self.totalPreemptions = totalPreemptions
+        self.specAcceptanceRate = specAcceptanceRate
+        self.specCacheSize = specCacheSize
     }
 }
