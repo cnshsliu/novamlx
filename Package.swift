@@ -195,7 +195,7 @@ let package = Package(
         ),
         .testTarget(
             name: "NovaMLXAPITests",
-            dependencies: ["NovaMLXAPI"],
+            dependencies: ["NovaMLXAPI", "NovaMLXEngine"],
             swiftSettings: concurrencySettings
         ),
         .testTarget(

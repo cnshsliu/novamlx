@@ -151,6 +151,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "Type a message...",
         "chat.noResponse": "(no response)",
         "chat.error": "Error: %@",
+        "chat.thinking": "Thinking",
 
         // Settings Page
         "settings.server": "Server",
@@ -385,6 +386,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "输入消息...",
         "chat.noResponse": "（无回复）",
         "chat.error": "错误：%@",
+        "chat.thinking": "思考过程",
 
         "settings.server": "服务器",
         "settings.cli": "命令行工具",
@@ -614,6 +616,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "輸入訊息...",
         "chat.noResponse": "（無回覆）",
         "chat.error": "錯誤：%@",
+        "chat.thinking": "思考過程",
 
         "settings.server": "伺服器",
         "settings.cli": "命令行工具",
@@ -843,6 +846,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "輸入訊息...",
         "chat.noResponse": "（無回應）",
         "chat.error": "錯誤：%@",
+        "chat.thinking": "思考過程",
 
         "settings.server": "伺服器",
         "settings.cli": "命令列工具",
@@ -1072,6 +1076,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "メッセージを入力...",
         "chat.noResponse": "（応答なし）",
         "chat.error": "エラー：%@",
+        "chat.thinking": "思考",
 
         "settings.server": "サーバー",
         "settings.cli": "コマンドラインツール",
@@ -1301,6 +1306,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "메시지를 입력하세요...",
         "chat.noResponse": "（응답 없음）",
         "chat.error": "오류：%@",
+        "chat.thinking": "생각",
 
         "settings.server": "서버",
         "settings.cli": "명령줄 도구",
@@ -1530,6 +1536,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "Tapez un message...",
         "chat.noResponse": "(aucune réponse)",
         "chat.error": "Erreur : %@",
+        "chat.thinking": "Réflexion",
 
         "settings.server": "Serveur",
         "settings.cli": "Outil en ligne de commande",
@@ -1759,6 +1766,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "Nachricht eingeben...",
         "chat.noResponse": "(keine Antwort)",
         "chat.error": "Fehler: %@",
+        "chat.thinking": "Denken",
 
         "settings.server": "Server",
         "settings.cli": "Kommandozeilen-Tool",
@@ -1988,6 +1996,7 @@ enum LocalizationStrings {
         "chat.typePlaceholder": "Введите сообщение...",
         "chat.noResponse": "(нет ответа)",
         "chat.error": "Ошибка: %@",
+        "chat.thinking": "Размышление",
 
         "settings.server": "Сервер",
         "settings.cli": "Утилита командной строки",

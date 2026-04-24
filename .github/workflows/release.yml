@@ -5,10 +5,15 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  MLX_SWIFT_REF: "main"
+  MLX_SWIFT_LM_REF: "main"
 
 jobs:
   build:
@@ -20,15 +25,19 @@ jobs:
           - name: "Apple Silicon"
             runner: macos-15
             suffix: "arm64"
-          - name: "Intel"
-            runner: macos-15-large
-            suffix: "x86_64"
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer || true
+      - name: Clone vendor dependencies
+        run: |
+          # mlx-swift — Apple's MLX Swift bindings (local fork target)
+          git clone --depth 1 --branch "${MLX_SWIFT_REF}" \
+            https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
+
+          # mlx-swift-lm — LM/VLM layer on top of mlx-swift
+          git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
+            https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
 
       - name: Build
         run: |
@@ -51,26 +60,17 @@ jobs:
           path: dist/
 
   release:
-    name: Create Release
+    name: Create GitHub Release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-15
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer || true
-
-      - name: Build release
-        run: |
-          chmod +x build.sh
-          ./build.sh -c release
-
-      - name: Package
-        run: |
-          chmod +x Scripts/package.sh
-          ./Scripts/package.sh "${GITHUB_REF_NAME#v}"
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

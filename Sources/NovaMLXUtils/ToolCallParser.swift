@@ -132,7 +132,9 @@ public enum ToolCallParser {
     }
 
     private static func parseXMLToolCalls(_ text: String) -> ParseResult? {
-        let pattern = "<tool>(.*?)</tool>"
+        // Match both <tool>...</tool> (Claude Code, Open Code, Open Claw)
+        // and <tool_call>...</tool_call> (Hermes)
+        let pattern = "<tool(?:_call)?>(.*?)</tool(?:_call)?>"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return nil }
 
         let range = NSRange(text.startIndex..., in: text)
@@ -484,7 +486,7 @@ public enum ToolCallParser {
     private static func stripToolCallMarkup(_ text: String) -> String {
         var result = text
         let patterns = [
-            "<tool>.*?</tool>",
+            "<tool(?:_call)?>.*?</tool(?:_call)?>",
             "<\\|tool_call\\|>.*?(<\\|/tool_call\\|>|$)",
             "\\[TOOL_CALLS\\].*?\\]",
         ]
@@ -508,6 +510,8 @@ public final class ToolCallStreamFilter: @unchecked Sendable {
         for pattern in [
             "<tool>",
             "</tool>",
+            "<tool_call>",
+            "</tool_call>",
             "<function=",
             "</function>",
             "<parameter=",

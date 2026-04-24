@@ -22,6 +22,8 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     public private(set) var isRunning = false
 
+    public var onCrash: (() -> Void)?
+
     public init(workerBinaryPath: String) {
         self.workerBinaryPath = workerBinaryPath
     }
@@ -300,7 +302,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
         if wasRunning {
             NovaMLXLog.error("[WorkerSupervisor] Worker crashed! All pending requests failed.")
-            // TODO: auto-restart worker
+            onCrash?()
         }
     }
 }

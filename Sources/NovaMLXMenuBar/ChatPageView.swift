@@ -28,6 +28,7 @@ struct ChatPageView: View {
     @State private var paramTopK: Double = 0
     @State private var paramMinP: Double = 0
     @State private var paramRepeatPenalty: Double = 1.0
+    @State private var thinkingExpanded: Set<UUID> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -213,22 +214,54 @@ struct ChatPageView: View {
     private func messageBubble(_ msg: ChatMessageRow) -> some View {
         HStack {
             if msg.isUser { Spacer(minLength: 60) }
-            VStack(alignment: msg.isUser ? .trailing : .leading, spacing: 4) {
+            VStack(alignment: msg.isUser ? .trailing : .leading, spacing: 6) {
                 Text(msg.isUser ? l10n.tr("chat.you") : l10n.tr("chat.assistant"))
                     .font(.caption2)
                     .foregroundColor(.secondary)
 
-                Text(msg.content)
-                    .font(.system(size: 13))
-                    .textSelection(.enabled)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: msg.isUser ? .trailing : .leading)
-                    .background(
-                        msg.isUser
-                            ? NovaTheme.Colors.accentDim
-                            : NovaTheme.Colors.cardBackground
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                // Thinking section — collapsible, only for assistant messages with thinking content
+                if !msg.isUser && !msg.thinkingContent.isEmpty {
+                    DisclosureGroup(
+                        isExpanded: Binding(
+                            get: { thinkingExpanded.contains(msg.id) },
+                            set: { expanded in
+                                if expanded {
+                                    thinkingExpanded.insert(msg.id)
+                                } else {
+                                    thinkingExpanded.remove(msg.id)
+                                }
+                            }
+                        )
+                    ) {
+                        Text(msg.thinkingContent)
+                            .font(.system(size: 12))
+                            .textSelection(.enabled)
+                            .foregroundColor(NovaTheme.Colors.textSecondary)
+                            .padding(.top, 4)
+                    } label: {
+                        Text(l10n.tr("chat.thinking") + " (\(msg.thinkingContent.count) chars)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(NovaTheme.Colors.accent)
+                    }
+                    .padding(10)
+                    .background(NovaTheme.Colors.accentDim.opacity(0.3))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+
+                // Response content
+                if !msg.content.isEmpty {
+                    Text(msg.content)
+                        .font(.system(size: 13))
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: msg.isUser ? .trailing : .leading)
+                        .background(
+                            msg.isUser
+                                ? NovaTheme.Colors.accentDim
+                                : NovaTheme.Colors.cardBackground
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
             }
             if !msg.isUser { Spacer(minLength: 60) }
         }
@@ -339,6 +372,13 @@ struct ChatPageView: View {
         let model = selectedModel
 
         Task {
+            // Guard: model must be loaded before we attempt inference
+            guard inferenceService.isModelLoaded(model) else {
+                messages[assistantIdx].content = l10n.tr("chat.error", "Model '\(model.components(separatedBy: "/").last ?? model)' is not loaded. Load it from the Models page first.")
+                isLoading = false
+                return
+            }
+
             let request = InferenceRequest(
                 model: model,
                 messages: [ChatMessage(role: .user, content: text)],
@@ -353,10 +393,20 @@ struct ChatPageView: View {
 
             do {
                 let tokenStream = inferenceService.stream(request)
+                let thinkingParser = ThinkingParser()
                 for try await token in tokenStream {
-                    messages[assistantIdx].content += token.text
+                    let parsed = thinkingParser.feed(token.text)
+                    if !parsed.text.isEmpty {
+                        messages[assistantIdx].content += parsed.text
+                    }
                 }
-                if messages[assistantIdx].content.isEmpty {
+                // Separate thinking from response after stream completes
+                let finalized = thinkingParser.finalize()
+                if !finalized.thinking.isEmpty {
+                    messages[assistantIdx].thinkingContent = finalized.thinking
+                    messages[assistantIdx].content = finalized.response
+                }
+                if messages[assistantIdx].content.isEmpty && messages[assistantIdx].thinkingContent.isEmpty {
                     messages[assistantIdx].content = l10n.tr("chat.noResponse")
                 }
             } catch {
@@ -372,6 +422,7 @@ struct ChatPageView: View {
 private struct ChatMessageRow: Identifiable {
     let id = UUID()
     var content: String
+    var thinkingContent: String = ""
     let isUser: Bool
 }
 

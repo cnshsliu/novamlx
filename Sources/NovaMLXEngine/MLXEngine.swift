@@ -88,6 +88,21 @@ public final class ModelContainer: @unchecked Sendable {
 
         // Remove EOS/BOS/PAD/UNK — those are structural, not output separators
         tokens.remove("")
+
+        // Exclude semantic content tags — parsed by ThinkingParser, not stream delimiters.
+        // These mark thinking/response boundaries and carry meaning for the application
+        // layer. They must pass through unfiltered so the frontend can parse them.
+        //
+        // Control tokens (<|turn|>, <|im_end|>, etc.) are protocol-level separators:
+        // they trigger generation stop (TurnStopProcessor) and must NOT appear in output.
+        // Semantic tags are the opposite: they SHOULD appear in output.
+        //
+        // Keep in sync with ThinkingParser.swift supported tag patterns.
+        tokens.subtract([
+            "<think", "</think",             // DeepSeek-R1, Qwen-thinking
+            "<thinking", "</thinking",       // alternative format (Claude, some OS models)
+        ])
+
         return tokens.sorted()
     }
 
@@ -301,7 +316,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let eosString = mlxTokenizer.eosToken
         let tokenizer = Tokenizer(
             encode: { text in mlxTokenizer.encode(text: text) },
-            decode: { tokens in mlxTokenizer.decode(tokenIds: tokens) },
+            decode: { tokens in
+                let result = mlxTokenizer.decode(tokenIds: tokens)
+                // Fallback for special tokens (e.g. <think) that decode may skip:
+                // if single-token decode returns empty, look up the token text directly
+                if result.isEmpty && tokens.count == 1,
+                   let tokenText = mlxTokenizer.convertIdToToken(tokens[0]) {
+                    return tokenText
+                }
+                return result
+            },
             eosToken: eosString,
             eosTokenId: mlxTokenizer.eosTokenId
         )
@@ -699,7 +723,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return tsp
     }
 
-    private static func trimControlTokens(_ text: String, patterns: [String]) -> String {
+    static func trimControlTokens(_ text: String, patterns: [String]) -> String {
         guard !patterns.isEmpty else { return text }
         var result = text
         for pattern in patterns {
@@ -713,11 +737,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// Regex-based scrub: strip any <|xxx|> or <|xxx> patterns from output.
     /// Catches multi-token control sequences (mask_start, tool_call, etc.)
     /// that aren't registered as special tokens in the tokenizer.
-    private static let controlTokenRegex: NSRegularExpression = {
+    static let controlTokenRegex: NSRegularExpression = {
         try! NSRegularExpression(pattern: "<\\|[a-zA-Z_][a-zA-Z0-9_]*\\|?>")
     }()
 
-    private static func scrubControlTokens(_ text: String) -> String {
+    static func scrubControlTokens(_ text: String) -> String {
         let nsRange = NSRange(text.startIndex..., in: text)
         let matches = controlTokenRegex.matches(in: text, range: nsRange)
         guard !matches.isEmpty else { return text }
@@ -733,7 +757,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// Filter a streaming chunk for control tokens. Returns (cleanText, shouldStop).
     /// Handles both full matches and partial matches (where TurnStopProcessor
     /// forces EOS mid-token, leaving e.g. "<|turn" without the closing ">").
-    private static func filterControlInChunk(
+    static func filterControlInChunk(
         _ text: String,
         accumulated: inout String,
         yieldedCount: inout Int,

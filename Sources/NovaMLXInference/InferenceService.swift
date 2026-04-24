@@ -39,6 +39,12 @@ public final class InferenceService: @unchecked Sendable {
 
     public func startWorker() throws {
         guard workerMode, let worker = worker else { return }
+        worker.onCrash = { [weak self] in
+            guard let self = self else { return }
+            NovaMLXLog.warning("[InferenceService] Worker crashed — clearing loaded models state")
+            self.workerLoadedModels.removeAll()
+            self.saveLoadedModelsList()
+        }
         try worker.start()
         NovaMLXLog.info("[InferenceService] Worker mode started")
     }

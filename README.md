@@ -22,24 +22,28 @@ Run 50+ model families — Llama, Qwen, Gemma, DeepSeek, Mistral — natively on
 
 ## Install
 
-**Option 1: Download** (recommended)
-
-Go to [Releases](https://github.com/nova/nova/releases) and download the latest `NovaMLX-vX.X.X-arm64.tar.gz`:
+**Option 1: Homebrew** (recommended)
 
 ```bash
-tar -xzf NovaMLX-*.tar.gz
-sudo mv NovaMLX /usr/local/bin/
-sudo mv nova /usr/local/bin/
+brew tap cnshsliu/novamlx
+brew install novamlx
+brew services start novamlx
 ```
 
-**Option 2: Build from source**
+**Option 2: Download DMG**
+
+Go to [Releases](https://github.com/cnshsliu/novamlx/releases) and download the latest `NovaMLX-X.X.X-arm64.dmg`:
+
+1. Open the `.dmg` file
+2. Drag **NovaMLX** to your **Applications** folder
+3. Launch NovaMLX — the menu bar icon appears and the server starts on `localhost:8080`
+
+**Option 3: Build from source**
 
 ```bash
-git clone https://github.com/nova/nova.git
-cd nova
+git clone https://github.com/cnshsliu/novamlx.git
+cd novamlx
 ./build.sh -c release
-sudo cp .build/release/NovaMLX /usr/local/bin/
-sudo cp .build/release/nova /usr/local/bin/
 ```
 
 > Requires macOS 15 (Sequoia), Apple Silicon, and Xcode 16+.
@@ -50,25 +54,31 @@ sudo cp .build/release/nova /usr/local/bin/
 
 ### 1. Start the server
 
-```bash
-NovaMLX
-```
+Launch **NovaMLX** from your Applications folder (or Spotlight).
 
 A **menu bar icon** appears. The server runs on `localhost:8080`.
 
-### 2. Download a model
+### 2. (Optional) Add `nova` CLI to your PATH
+
+The `nova` CLI is bundled inside the app. Symlink it for easy access:
+
+```bash
+sudo ln -s /Applications/NovaMLX.app/Contents/MacOS/nova /usr/local/bin/nova
+```
+
+### 3. Download a model
 
 ```bash
 nova download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 ```
 
-### 3. Load it
+### 4. Load it
 
 ```bash
 nova load mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 ```
 
-### 4. Use it
+### 5. Use it
 
 ```bash
 # Interactive chat
@@ -125,10 +135,10 @@ Add to your opencode config (`~/.config/opencode/config.json`):
 
 Settings → Models → OpenAI API Compatible:
 
-| Field | Value |
-|-------|-------|
-| Base URL | `http://localhost:8080/v1` |
-| API Key | `unused` |
+| Field    | Value                                           |
+| -------- | ----------------------------------------------- |
+| Base URL | `http://localhost:8080/v1`                      |
+| API Key  | `unused`                                        |
 | Model ID | `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` |
 
 ### Continue.dev
@@ -137,13 +147,15 @@ Add to `~/.continue/config.json`:
 
 ```json
 {
-  "models": [{
-    "title": "NovaMLX Local",
-    "provider": "openai",
-    "apiBase": "http://localhost:8080/v1",
-    "apiKey": "unused",
-    "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
-  }]
+  "models": [
+    {
+      "title": "NovaMLX Local",
+      "provider": "openai",
+      "apiBase": "http://localhost:8080/v1",
+      "apiKey": "unused",
+      "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+    }
+  ]
 }
 ```
 
@@ -276,6 +288,7 @@ nova bench status          # Check benchmark progress
 ### macOS Menu Bar App
 
 When you start `NovaMLX`, a menu bar icon appears showing:
+
 - Server status (running/stopped)
 - Loaded models
 - GPU memory usage
@@ -375,13 +388,13 @@ curl http://localhost:8080/v1/audio/speech \
 
 Same server, both APIs:
 
-| API | Endpoint |
-|-----|----------|
-| OpenAI Chat | `POST /v1/chat/completions` |
-| OpenAI Completions | `POST /v1/completions` |
-| OpenAI Responses | `POST /v1/responses` |
-| OpenAI Embeddings | `POST /v1/embeddings` |
-| Anthropic Messages | `POST /v1/messages` |
+| API                | Endpoint                    |
+| ------------------ | --------------------------- |
+| OpenAI Chat        | `POST /v1/chat/completions` |
+| OpenAI Completions | `POST /v1/completions`      |
+| OpenAI Responses   | `POST /v1/responses`        |
+| OpenAI Embeddings  | `POST /v1/embeddings`       |
+| Anthropic Messages | `POST /v1/messages`         |
 
 ---
 
@@ -389,14 +402,14 @@ Same server, both APIs:
 
 Any SafeTensors model from HuggingFace in 4-bit, 8-bit, or FP16. Popular choices:
 
-| Model | Size | Download Command |
-|-------|------|-----------------|
-| Llama 3.1 8B | ~4.5 GB | `nova download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` |
-| Qwen 2.5 7B | ~4.5 GB | `nova download mlx-community/Qwen2.5-7B-Instruct-4bit` |
-| Gemma 2 9B | ~5.5 GB | `nova download mlx-community/gemma-2-9b-it-4bit` |
-| Phi 3.5 Mini | ~2 GB | `nova download mlx-community/Phi-3.5-mini-instruct-4bit` |
-| Mistral 7B | ~4 GB | `nova download mlx-community/Mistral-7B-Instruct-v0.3-4bit` |
-| Qwen 2.5 VL 7B | ~4.5 GB | `nova download mlx-community/Qwen2.5-VL-7B-Instruct-4bit` |
+| Model          | Size    | Download Command                                              |
+| -------------- | ------- | ------------------------------------------------------------- |
+| Llama 3.1 8B   | ~4.5 GB | `nova download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` |
+| Qwen 2.5 7B    | ~4.5 GB | `nova download mlx-community/Qwen2.5-7B-Instruct-4bit`        |
+| Gemma 2 9B     | ~5.5 GB | `nova download mlx-community/gemma-2-9b-it-4bit`              |
+| Phi 3.5 Mini   | ~2 GB   | `nova download mlx-community/Phi-3.5-mini-instruct-4bit`      |
+| Mistral 7B     | ~4 GB   | `nova download mlx-community/Mistral-7B-Instruct-v0.3-4bit`   |
+| Qwen 2.5 VL 7B | ~4.5 GB | `nova download mlx-community/Qwen2.5-VL-7B-Instruct-4bit`     |
 
 Search for more: `nova search "your model name"`
 
@@ -421,7 +434,7 @@ curl -X PUT http://localhost:8081/admin/models/my-model/settings \
 
 ### Config File
 
-`~/Library/Application Support/NovaMLX/config.json`:
+`~/.config/opencode/config.json`:
 
 ```json
 {
@@ -445,6 +458,7 @@ curl -X PUT http://localhost:8081/admin/models/my-model/settings \
 ## For Developers
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for:
+
 - Architecture overview (11-module design)
 - Building from source
 - Running tests

@@ -232,6 +232,72 @@ struct CoreTypesTests {
         #expect(result.response == "No thinking here, just response.")
     }
 
+    @Test("ThinkingParser implicit open tag — close without open")
+    func thinkingParserImplicitOpen() {
+        let parser = ThinkingParser()
+        // Simulates reasoning model where <think> is in chat template prompt,
+        // only </think> appears in generated output
+        _ = parser.feed("Let me think: 2+2=4\n")
+        _ = parser.feed("The answer is straightforward.\n")
+        _ = parser.feed("</think")
+        _ = parser.feed(">\n\n")
+        _ = parser.feed("2+2=4")
+
+        let result = parser.finalize()
+        #expect(result.thinking.contains("Let me think"))
+        #expect(result.thinking.contains("straightforward"))
+        // Newlines after </think> are part of the response content
+        #expect(result.response == "\n\n2+2=4")
+        // Verify no </think> tag leaked into thinking or response
+        #expect(!result.response.contains("</think"))
+        #expect(!result.thinking.contains("</think>"))
+    }
+
+    @Test("ThinkingParser implicit open tag — close in single token")
+    func thinkingParserImplicitOpenSingleToken() {
+        let parser = ThinkingParser()
+        // </think> arrives as one token (common with special tokens)
+        _ = parser.feed("reasoning process here")
+        _ = parser.feed("</think>")
+        _ = parser.feed("final answer")
+
+        let result = parser.finalize()
+        #expect(result.thinking == "reasoning process here")
+        #expect(result.response == "final answer")
+    }
+
+    @Test("ThinkingParser implicit open tag — streaming char by char")
+    func thinkingParserImplicitOpenStreaming() {
+        let parser = ThinkingParser()
+        // Character-by-character streaming of implicit thinking block
+        let tokens = ["I", " am", " thinking", ".", ".", ".", "<", "/think", ">", "Result"]
+        var thinkingText = ""
+        var responseText = ""
+
+        for token in tokens {
+            let r = parser.feed(token)
+            if r.type == .thinking {
+                thinkingText += r.text
+            } else {
+                responseText += r.text
+            }
+        }
+
+        let result = parser.finalize()
+        #expect(thinkingText.contains("I am thinking..."))
+        #expect(result.thinking.contains("I am thinking..."))
+        #expect(result.response == "Result")
+    }
+
+    @Test("ThinkingParser no think tags at all — pure response")
+    func thinkingParserNoTagsPureResponse() {
+        let parser = ThinkingParser()
+        _ = parser.feed("Hello! How can I help you today?")
+        let result = parser.finalize()
+        #expect(result.thinking == "")
+        #expect(result.response == "Hello! How can I help you today?")
+    }
+
     @Test("StreamingDetokenizer basic text")
     func streamingDetokenizerBasic() {
         let detok = StreamingDetokenizer(decode: { tokens in
