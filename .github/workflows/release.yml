@@ -31,8 +31,8 @@ jobs:
 
       - name: Clone vendor dependencies
         run: |
-          # mlx-swift — Apple's MLX Swift bindings (local fork target)
-          git clone --depth 1 --branch "${MLX_SWIFT_REF}" \
+          # mlx-swift — Apple's MLX Swift bindings (has mlx C++ submodule)
+          git clone --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
             https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
 
           # mlx-swift-lm — LM/VLM layer on top of mlx-swift
