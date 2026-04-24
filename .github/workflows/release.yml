@@ -39,6 +39,12 @@ jobs:
           git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
             https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
 
+      - name: Patch upstream StrictConcurrency issues
+        run: |
+          # mlx-swift-lm MediaProcessing.swift: CIContext is non-Sendable
+          sed -i '' 's/^private let context = CIContext()/private nonisolated(unsafe) let context = CIContext()/' \
+            mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift
+
       - name: Build
         run: |
           chmod +x build.sh
