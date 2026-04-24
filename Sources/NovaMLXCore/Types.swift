@@ -165,6 +165,12 @@ public struct InferenceRequest: @unchecked Sendable {
     public let regexPattern: String?
     public let gbnfGrammar: String?
     public let thinkingBudget: Int?
+    /// Draft model ID for speculative decoding. If provided, the engine uses
+    /// SpeculativeTokenIterator (draft-model verify) instead of plain autoregressive decode.
+    /// Both models must share the same tokenizer.
+    public let draftModel: String?
+    /// Number of tokens the draft model proposes per speculation round (default: 4).
+    public let numDraftTokens: Int?
 
     public init(
         id: UUID = UUID(),
@@ -187,7 +193,9 @@ public struct InferenceRequest: @unchecked Sendable {
         jsonSchemaDef: [String: Any]? = nil,
         regexPattern: String? = nil,
         gbnfGrammar: String? = nil,
-        thinkingBudget: Int? = nil
+        thinkingBudget: Int? = nil,
+        draftModel: String? = nil,
+        numDraftTokens: Int? = nil
     ) {
         self.id = id
         self.model = model
@@ -210,6 +218,8 @@ public struct InferenceRequest: @unchecked Sendable {
         self.regexPattern = regexPattern
         self.gbnfGrammar = gbnfGrammar
         self.thinkingBudget = thinkingBudget
+        self.draftModel = draftModel
+        self.numDraftTokens = numDraftTokens
     }
 }
 

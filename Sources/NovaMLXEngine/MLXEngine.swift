@@ -964,24 +964,69 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
 
         // Try creating iterator with restored cache; fall back to fresh on error
-        let iterator: TokenIterator
-        do {
-            iterator = try TokenIterator(
-                input: effectiveInput, model: model.value,
-                cache: kvCache,
-                processor: processor, sampler: sampler,
-                maxTokens: maxTokens
-            )
-        } catch {
-            NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
-            let freshCache = model.value.newCache(parameters: parameters)
-            kvCacheBox.value = freshCache
-            iterator = try TokenIterator(
-                input: input, model: model.value,
-                cache: freshCache,
-                processor: processor, sampler: sampler,
-                maxTokens: maxTokens
-            )
+        let iterator: any TokenIteratorProtocol
+        if let draftModelId = request.draftModel,
+           let draftContainer = getContainer(for: draftModelId),
+           let draftMlxContainer = draftContainer.mlxContainer {
+            // Speculative decoding with a draft model
+            let draftModel = await draftMlxContainer.perform { context in SendableBox(context.model) }
+            var draftParams = parameters
+            draftParams.kvBits = nil  // No quantized KV for draft
+            let draftCache = draftModel.value.newCache(parameters: draftParams)
+            let numDraft = request.numDraftTokens ?? 4
+
+            do {
+                let specIterator = try SpeculativeTokenIterator(
+                    input: effectiveInput,
+                    mainModel: model.value,
+                    draftModel: draftModel.value,
+                    mainCache: kvCache,
+                    draftCache: draftCache,
+                    parameters: parameters,
+                    numDraftTokens: numDraft
+                )
+                NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Speculative decoding: draft=\(draftModelId), numDraft=\(numDraft)")
+                iterator = specIterator
+            } catch {
+                NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] SpeculativeTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
+                do {
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                } catch {
+                    NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                    let freshCache = model.value.newCache(parameters: parameters)
+                    kvCacheBox.value = freshCache
+                    iterator = try TokenIterator(
+                        input: input, model: model.value,
+                        cache: freshCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
+            }
+        } else {
+            do {
+                iterator = try TokenIterator(
+                    input: effectiveInput, model: model.value,
+                    cache: kvCache,
+                    processor: processor, sampler: sampler,
+                    maxTokens: maxTokens
+                )
+            } catch {
+                NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                let freshCache = model.value.newCache(parameters: parameters)
+                kvCacheBox.value = freshCache
+                iterator = try TokenIterator(
+                    input: input, model: model.value,
+                    cache: freshCache,
+                    processor: processor, sampler: sampler,
+                    maxTokens: maxTokens
+                )
+            }
         }
 
         let bytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
@@ -1171,24 +1216,69 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
 
                     // Try creating iterator with restored cache; fall back to fresh on error
-                    let iterator: TokenIterator
-                    do {
-                        iterator = try TokenIterator(
-                            input: effectiveInput, model: model.value,
-                            cache: kvCache,
-                            processor: processor, sampler: sampler,
-                            maxTokens: maxTokens
-                        )
-                    } catch {
-                        NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
-                        let freshCache = model.value.newCache(parameters: parameters)
-                        kvCacheBox.value = freshCache
-                        iterator = try TokenIterator(
-                            input: input, model: model.value,
-                            cache: freshCache,
-                            processor: processor, sampler: sampler,
-                            maxTokens: maxTokens
-                        )
+                    let iterator: any TokenIteratorProtocol
+                    if let draftModelId = request.draftModel,
+                       let draftContainer = self.getContainer(for: draftModelId),
+                       let draftMlxContainer = draftContainer.mlxContainer {
+                        // Speculative decoding with a draft model
+                        let draftModel = await draftMlxContainer.perform { context in SendableBox(context.model) }
+                        var draftParams = parameters
+                        draftParams.kvBits = nil
+                        let draftCache = draftModel.value.newCache(parameters: draftParams)
+                        let numDraft = request.numDraftTokens ?? 4
+
+                        do {
+                            let specIterator = try SpeculativeTokenIterator(
+                                input: effectiveInput,
+                                mainModel: model.value,
+                                draftModel: draftModel.value,
+                                mainCache: kvCache,
+                                draftCache: draftCache,
+                                parameters: parameters,
+                                numDraftTokens: numDraft
+                            )
+                            NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Speculative decoding: draft=\(draftModelId), numDraft=\(numDraft)")
+                            iterator = specIterator
+                        } catch {
+                            NovaMLXLog.warning("[STREAM:\(request.id.uuidString.prefix(8))] SpeculativeTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
+                            do {
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            } catch {
+                                NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] TokenIterator failed: \(error.localizedDescription) — falling back to full prefill")
+                                let freshCache = model.value.newCache(parameters: parameters)
+                                kvCacheBox.value = freshCache
+                                iterator = try TokenIterator(
+                                    input: input, model: model.value,
+                                    cache: freshCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
+                        }
+                    } else {
+                        do {
+                            iterator = try TokenIterator(
+                                input: effectiveInput, model: model.value,
+                                cache: kvCache,
+                                processor: processor, sampler: sampler,
+                                maxTokens: maxTokens
+                            )
+                        } catch {
+                            NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                            let freshCache = model.value.newCache(parameters: parameters)
+                            kvCacheBox.value = freshCache
+                            iterator = try TokenIterator(
+                                input: input, model: model.value,
+                                cache: freshCache,
+                                processor: processor, sampler: sampler,
+                                maxTokens: maxTokens
+                            )
+                        }
                     }
 
                     let ticketBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262144

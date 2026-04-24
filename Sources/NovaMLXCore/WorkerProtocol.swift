@@ -24,6 +24,8 @@ public struct CodableInferenceRequest: Codable, Sendable {
     public let regexPattern: String?
     public let gbnfGrammar: String?
     public let thinkingBudget: Int?
+    public let draftModel: String?
+    public let numDraftTokens: Int?
 
     public init(from request: InferenceRequest) {
         self.id = request.id.uuidString
@@ -59,6 +61,8 @@ public struct CodableInferenceRequest: Codable, Sendable {
         self.regexPattern = request.regexPattern
         self.gbnfGrammar = request.gbnfGrammar
         self.thinkingBudget = request.thinkingBudget
+        self.draftModel = request.draftModel
+        self.numDraftTokens = request.numDraftTokens
     }
 
     public func toInferenceRequest() -> InferenceRequest {
@@ -96,7 +100,9 @@ public struct CodableInferenceRequest: Codable, Sendable {
             jsonSchemaDef: schema,
             regexPattern: regexPattern,
             gbnfGrammar: gbnfGrammar,
-            thinkingBudget: thinkingBudget
+            thinkingBudget: thinkingBudget,
+            draftModel: draftModel,
+            numDraftTokens: numDraftTokens
         )
     }
 }
