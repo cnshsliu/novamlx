@@ -2,7 +2,7 @@ class Novamlx < Formula
   desc "Apple Silicon MLX inference server — OpenAI & Anthropic compatible API"
   homepage "https://github.com/cnshsliu/novamlx"
   url "https://github.com/cnshsliu/novamlx/releases/download/v1.0.0/NovaMLX-1.0.0-arm64.tar.gz"
-  sha256 "PLACEHOLDER_REPLACE_WITH_ACTUAL_SHA256"
+  sha256 "cbabe73b0f3443c81c839967835daa91ef5098f3dfcd18d56f69d22c5ca97054"
   version "1.0.0"
 
   depends_on :macos => :sequoia

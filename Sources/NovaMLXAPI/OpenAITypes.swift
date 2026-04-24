@@ -889,13 +889,15 @@ public struct OpenAICompletionStreamChunk: Codable, Sendable {
     public let created: Int
     public let model: String
     public let choices: [OpenAICompletionStreamChoice]
+    public let usage: OpenAIUsage?
 
-    public init(id: String, model: String, choices: [OpenAICompletionStreamChoice]) {
+    public init(id: String, model: String, choices: [OpenAICompletionStreamChoice], usage: OpenAIUsage? = nil) {
         self.id = id
         self.object = "text_completion"
         self.created = Int(Date().timeIntervalSince1970)
         self.model = model
         self.choices = choices
+        self.usage = usage
     }
 }
 

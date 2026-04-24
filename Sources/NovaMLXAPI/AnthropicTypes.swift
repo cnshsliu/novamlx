@@ -319,6 +319,15 @@ public struct AnthropicStreamEvent: Codable, Sendable {
         )
     }
 
+    public static func messageDelta(stopReason: String, usage: AnthropicUsage) -> AnthropicStreamEvent {
+        AnthropicStreamEvent(
+            type: "message_delta",
+            message: nil, contentBlock: nil,
+            delta: AnthropicDelta(type: "message_delta", stopReason: stopReason),
+            usage: usage
+        )
+    }
+
     public static func messageStop() -> AnthropicStreamEvent {
         AnthropicStreamEvent(
             type: "message_stop",
@@ -342,6 +351,19 @@ public struct AnthropicContentBlockStart: Codable, Sendable {
 public struct AnthropicDelta: Codable, Sendable {
     public let type: String
     public let text: String?
+    public let stopReason: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case stopReason = "stop_reason"
+    }
+
+    public init(type: String, text: String? = nil, stopReason: String? = nil) {
+        self.type = type
+        self.text = text
+        self.stopReason = stopReason
+    }
 }
 
 // MARK: - Anthropic Error Types

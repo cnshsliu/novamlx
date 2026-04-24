@@ -131,6 +131,30 @@ Add to your opencode config (`~/.config/opencode/config.json`):
 }
 ```
 
+### Agent Context Scaling (automatic)
+
+When using local models with AI coding agents (Claude Code, OpenCode, OpenClaw, Hermes), the model's context window is often smaller than Anthropic's 200K. NovaMLX **auto-detects** agent tools from their HTTP headers and scales reported token counts so that auto-compact triggers at the right time — before your local model runs out of context. Normal chat clients (curl, Python SDK, web UI) always get real token counts.
+
+**No setup needed.** Detection is automatic via `Anthropic-Version` header (Claude Code) or `User-Agent` substring matching (OpenCode, OpenClaw, Hermes).
+
+Set `contextScalingTarget` in `~/.nova/config.json` to enable:
+
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "adminPort": 8081,
+    "apiKeys": [],
+    "contextScalingTarget": 200000
+  }
+}
+```
+
+If your model has a 128K context window and `contextScalingTarget` is 200000, token counts are scaled by `200000 / 128000 = 1.56×` — but **only for detected agent tools**. If `contextScalingTarget` is omitted, no scaling occurs (default).
+
+> **How it works:** Claude Code and other agents auto-compact conversation history at ~80% of what they believe the context window to be. By scaling the usage numbers, NovaMLX ensures that 80% of the virtual window maps to the actual limit of your local model, preventing context overflow errors.
+
 ### Cursor
 
 Settings → Models → OpenAI API Compatible:
@@ -395,6 +419,10 @@ Same server, both APIs:
 | OpenAI Responses   | `POST /v1/responses`        |
 | OpenAI Embeddings  | `POST /v1/embeddings`       |
 | Anthropic Messages | `POST /v1/messages`         |
+
+### Agent-Aware Token Scaling
+
+Automatically detects AI coding agents (Claude Code, OpenCode, OpenClaw, Hermes) from request headers and scales reported token counts so auto-compact triggers at the right time for local model context windows. Normal chat clients get real token counts — no configuration needed. [See details →](#agent-context-scaling-automatic)
 
 ---
 

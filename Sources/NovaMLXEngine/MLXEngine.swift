@@ -785,12 +785,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let maxLen = patterns.map(\.count).max() ?? 0
         let checkLen = min(totalLen, maxLen)
         var safeEnd = totalLen
-        for i in 1...checkLen {
-            let suffixStart = accumulated.index(accumulated.endIndex, offsetBy: -i)
-            let suffix = accumulated[suffixStart...]
-            for pattern in patterns {
-                if pattern.hasPrefix(suffix) {
-                    safeEnd = min(safeEnd, totalLen - i)
+        if checkLen > 0 {
+            for i in 1...checkLen {
+                let suffixStart = accumulated.index(accumulated.endIndex, offsetBy: -i)
+                let suffix = accumulated[suffixStart...]
+                for pattern in patterns {
+                    if pattern.hasPrefix(suffix) {
+                        safeEnd = min(safeEnd, totalLen - i)
+                    }
                 }
             }
         }

@@ -412,17 +412,20 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     responseFormat = nil
                 }
 
+                let clientType = ClientDetector.detect(request: request)
                 if openAIReq.stream ?? false {
                     return try await Self.handleStreamChat(
                         openAIReq: openAIReq, messages: messages, inference: inference,
                         sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
-                        regexPattern: regexPattern, gbnfGrammar: gbnfGrammar
+                        regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
+                        cfg: cfg, clientType: clientType
                     )
                 } else {
                     return try await Self.handleChat(
                         openAIReq: openAIReq, messages: messages, inference: inference,
                         sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
-                        regexPattern: regexPattern, gbnfGrammar: gbnfGrammar
+                        regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
+                        cfg: cfg, clientType: clientType
                     )
                 }
             }
@@ -444,9 +447,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.modelNotFound(anthropicReq.model)
                 }
 
+                let anthropicClientType = ClientDetector.detect(request: request)
                 if anthropicReq.stream ?? false {
                     return try await Self.handleStreamAnthropic(
-                        anthropicReq: anthropicReq, messages: messages, inference: inference
+                        anthropicReq: anthropicReq, messages: messages, inference: inference,
+                        cfg: cfg, clientType: anthropicClientType
                     )
                 }
 
@@ -468,8 +473,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 )
 
                 let result = try await inference.generate(request)
-                let scaledInput = cfg.scaleTokenCount(result.promptTokens, modelContextWindow: inference.getContextWindow(for: anthropicReq.model) ?? 0)
-                let scaledOutput = cfg.scaleTokenCount(result.completionTokens, modelContextWindow: inference.getContextWindow(for: anthropicReq.model) ?? 0)
+                let ctxWin = inference.getContextWindow(for: anthropicReq.model) ?? 0
+                let scaledInput = anthropicClientType.shouldScaleContext
+                    ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin)
+                    : result.promptTokens
+                let scaledOutput = anthropicClientType.shouldScaleContext
+                    ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin)
+                    : result.completionTokens
 
                 var content: [AnthropicContentBlock] = []
                 if !result.text.isEmpty {
@@ -522,7 +532,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.inferenceFailed("Failed to count tokens: model tokenizer not available")
                 }
 
-                let response = AnthropicTokenCountResponse(inputTokens: tokenCount)
+                let ctClientType = ClientDetector.detect(request: request)
+                let ctCtxWin = inference.getContextWindow(for: req.model) ?? 0
+                let scaledCount = ctClientType.shouldScaleContext
+                    ? cfg.scaleTokenCount(tokenCount, modelContextWindow: ctCtxWin) : tokenCount
+
+                let response = AnthropicTokenCountResponse(inputTokens: scaledCount)
                 return try Self.jsonResponse(response)
             }
             Post("/v1/completions") { request, context in
@@ -533,13 +548,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.modelNotFound(compReq.model)
                 }
 
+                let compClientType = ClientDetector.detect(request: request)
                 if compReq.stream ?? false {
                     return try await Self.handleStreamCompletion(
-                        compReq: compReq, inference: inference
+                        compReq: compReq, inference: inference,
+                        cfg: cfg, clientType: compClientType
                     )
                 } else {
                     return try await Self.handleCompletion(
-                        compReq: compReq, inference: inference
+                        compReq: compReq, inference: inference,
+                        cfg: cfg, clientType: compClientType
                     )
                 }
             }
@@ -554,6 +572,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let texts = embReq.input.texts
                 let result = try await embeddings.embed(model: embReq.model, inputs: texts)
 
+                let clientType = ClientDetector.detect(request: request)
+                let ctxWin = inference.getContextWindow(for: embReq.model) ?? 0
+                let scaledPrompt = clientType.shouldScaleContext
+                    ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
+                let scaledTotal = clientType.shouldScaleContext
+                    ? cfg.scaleTokenCount(result.totalTokens, modelContextWindow: ctxWin) : result.totalTokens
+
                 let data = result.embeddings.enumerated().map { idx, vec in
                     OpenAIEmbeddingData(index: idx, embedding: vec)
                 }
@@ -561,8 +586,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     model: result.model,
                     data: data,
                     usage: OpenAIEmbeddingUsage(
-                        promptTokens: result.promptTokens,
-                        totalTokens: result.totalTokens
+                        promptTokens: scaledPrompt,
+                        totalTokens: scaledTotal
                     )
                 )
                 return try Self.jsonResponse(response)
@@ -575,7 +600,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.modelNotFound(req.model)
                 }
 
-                return try await Self.handleResponsesRequest(req: req, inference: inference)
+                let respClientType = ClientDetector.detect(request: request)
+                return try await Self.handleResponsesRequest(req: req, inference: inference, cfg: cfg, clientType: respClientType)
             }
             Get("/v1/responses/{id}") { request, context in
                 let responseId = try context.parameters.require("id")
@@ -766,6 +792,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         topN: rerankReq.topN
                     )
 
+                    let rrClientType = ClientDetector.detect(request: request)
+                    let rrCtxWin = inference.getContextWindow(for: rerankReq.model) ?? 0
+                    let rawTotal = results.first?.totalTokens ?? 0
+                    let scaledTotal = rrClientType.shouldScaleContext
+                        ? cfg.scaleTokenCount(rawTotal, modelContextWindow: rrCtxWin) : rawTotal
                     let returnDocs = rerankReq.returnDocuments ?? true
                     let rerankResp = RerankResponse(
                         id: "rerank-\(UUID().uuidString.prefix(8))",
@@ -774,7 +805,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             return RerankResult(index: r.index, relevanceScore: r.score, document: doc)
                         },
                         model: rerankReq.model,
-                        usage: RerankUsage(totalTokens: results.first?.totalTokens ?? 0)
+                        usage: RerankUsage(totalTokens: scaledTotal)
                     )
                     return try Self.jsonResponse(rerankResp)
                 }
@@ -1477,7 +1508,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private static func handleChat(
         openAIReq: OpenAIRequest, messages: [ChatMessage], inference: InferenceService,
         sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
-        regexPattern: String? = nil, gbnfGrammar: String? = nil
+        regexPattern: String? = nil, gbnfGrammar: String? = nil,
+        cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
@@ -1539,7 +1571,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     finishReason: finishReason
                 )
             ],
-            usage: OpenAIUsage(promptTokens: result.promptTokens, completionTokens: result.completionTokens)
+            usage: {
+                let ctxWin = inference.getContextWindow(for: openAIReq.model) ?? 0
+                let p = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
+                let c = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin) : result.completionTokens
+                return OpenAIUsage(promptTokens: p, completionTokens: c)
+            }()
         )
         return try jsonResponse(response)
     }
@@ -1547,7 +1584,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private static func handleStreamChat(
         openAIReq: OpenAIRequest, messages: [ChatMessage], inference: InferenceService,
         sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
-        regexPattern: String? = nil, gbnfGrammar: String? = nil
+        regexPattern: String? = nil, gbnfGrammar: String? = nil,
+        cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
@@ -1647,11 +1685,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     } else {
                         promptTokenCount = 0
                     }
+                    let ctxWin = inference.getContextWindow(for: openAIReq.model) ?? 0
+                    let scaledPrompt = clientType.shouldScaleContext
+                        ? cfg.scaleTokenCount(promptTokenCount, modelContextWindow: ctxWin) : promptTokenCount
+                    let scaledCompletion = clientType.shouldScaleContext
+                        ? cfg.scaleTokenCount(completionTokenCount, modelContextWindow: ctxWin) : completionTokenCount
                     let usageChunk = OpenAIStreamChunk(
                         id: chunkId,
                         model: openAIReq.model,
                         choices: [],
-                        usage: OpenAIUsage(promptTokens: promptTokenCount, completionTokens: completionTokenCount)
+                        usage: OpenAIUsage(promptTokens: scaledPrompt, completionTokens: scaledCompletion)
                     )
                     let usageData = try JSONEncoder().encode(usageChunk)
                     try await writer.write(ByteBuffer(string: "data: \(String(data: usageData, encoding: .utf8) ?? "")\n\n"))
@@ -1680,7 +1723,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     }
 
     private static func handleStreamAnthropic(
-        anthropicReq: AnthropicRequest, messages: [ChatMessage], inference: InferenceService
+        anthropicReq: AnthropicRequest, messages: [ChatMessage], inference: InferenceService,
+        cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
         let request = InferenceRequest(
             model: anthropicReq.model, messages: messages,
@@ -1716,10 +1760,17 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     case .token(let token):
                         if token.finishReason != nil {
                             try await writer.write(ByteBuffer(string: "event: content_block_stop\ndata: {}\n\n"))
-                            try await writer.write(ByteBuffer(string: "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+                            let ctxWin = inference.getContextWindow(for: anthropicReq.model) ?? 0
+                            let promptCount = inference.countTokens(model: anthropicReq.model, messages: messages) ?? 0
+                            let scaledIn = clientType.shouldScaleContext ? cfg.scaleTokenCount(promptCount, modelContextWindow: ctxWin) : promptCount
+                            let scaledOut = clientType.shouldScaleContext ? cfg.scaleTokenCount(tokenCount, modelContextWindow: ctxWin) : tokenCount
+                            let stopReason = token.finishReason?.rawValue ?? "end_turn"
+                            let deltaEv = AnthropicStreamEvent.messageDelta(stopReason: stopReason, usage: AnthropicUsage(inputTokens: scaledIn, outputTokens: scaledOut))
+                            let deltaData = try JSONEncoder().encode(deltaEv)
+                            try await writer.write(ByteBuffer(string: "event: message_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
                             try await writer.write(ByteBuffer(string: "event: message_stop\ndata: {}\n\n"))
                             let elapsed = Date().timeIntervalSince(streamStart)
-                            NovaMLXLog.info("[SSE:\(reqTag)] Stream complete — \(tokenCount) tokens in \(String(format: "%.1f", elapsed))s")
+                            NovaMLXLog.info("[SSE:\(reqTag)] Stream complete — \(tokenCount) tokens in \(String(format: "%.1f", elapsed))s, usage: input=\(scaledIn) output=\(scaledOut)")
                         } else if !token.text.isEmpty {
                             if tokenCount == 0 {
                                 let ttft = Date().timeIntervalSince(streamStart)
@@ -1760,7 +1811,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     }
 
     private static func handleCompletion(
-        compReq: OpenAICompletionRequest, inference: InferenceService
+        compReq: OpenAICompletionRequest, inference: InferenceService,
+        cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
         let messages = [ChatMessage(role: .user, content: compReq.prompt)]
         let request = InferenceRequest(
@@ -1776,6 +1828,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         )
 
         let result = try await inference.generate(request)
+        let ctxWin = inference.getContextWindow(for: compReq.model) ?? 0
+        let scaledP = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
+        let scaledC = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin) : result.completionTokens
         let response = OpenAICompletionResponse(
             id: "cmpl-\(result.id.uuidString.prefix(8))",
             model: result.model,
@@ -1786,13 +1841,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     finishReason: result.finishReason.rawValue
                 )
             ],
-            usage: OpenAIUsage(promptTokens: result.promptTokens, completionTokens: result.completionTokens)
+            usage: OpenAIUsage(promptTokens: scaledP, completionTokens: scaledC)
         )
         return try jsonResponse(response)
     }
 
     private static func handleStreamCompletion(
-        compReq: OpenAICompletionRequest, inference: InferenceService
+        compReq: OpenAICompletionRequest, inference: InferenceService,
+        cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
         let messages = [ChatMessage(role: .user, content: compReq.prompt)]
         let request = InferenceRequest(
@@ -1811,6 +1867,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let chunkId = "cmpl-\(request.id.uuidString.prefix(8))"
 
         let body: ResponseBody = .init { writer in
+            var completionTokenCount = 0
             do {
                 for try await event in keepAliveStream {
                     switch event {
@@ -1830,6 +1887,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let finalData = try JSONEncoder().encode(finalChunk)
                             try await writer.write(ByteBuffer(string: "data: \(String(data: finalData, encoding: .utf8) ?? "")\n\n"))
                         } else {
+                            completionTokenCount += 1
                             let chunk = OpenAICompletionStreamChunk(
                                 id: chunkId,
                                 model: compReq.model,
@@ -1845,6 +1903,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     case .done:
                         break
                     }
+                }
+                if clientType.shouldScaleContext, completionTokenCount > 0 {
+                    let promptCount = inference.countTokens(model: compReq.model, messages: messages) ?? 0
+                    let ctxWin = inference.getContextWindow(for: compReq.model) ?? 0
+                    let sp = clientType.shouldScaleContext ? cfg.scaleTokenCount(promptCount, modelContextWindow: ctxWin) : promptCount
+                    let sc = clientType.shouldScaleContext ? cfg.scaleTokenCount(completionTokenCount, modelContextWindow: ctxWin) : completionTokenCount
+                    let usageChunk = OpenAICompletionStreamChunk(
+                        id: chunkId, model: compReq.model, choices: [],
+                        usage: OpenAIUsage(promptTokens: sp, completionTokens: sc)
+                    )
+                    let usageData = try JSONEncoder().encode(usageChunk)
+                    try await writer.write(ByteBuffer(string: "data: \(String(data: usageData, encoding: .utf8) ?? "")\n\n"))
                 }
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
                 try await writer.finish(nil)
@@ -1869,7 +1939,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     }
 
     private static func handleResponsesRequest(
-        req: OpenAIResponseRequest, inference: InferenceService
+        req: OpenAIResponseRequest, inference: InferenceService,
+        cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
         var messages: [ChatMessage] = []
         if let instructions = req.instructions {
@@ -1905,7 +1976,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     content: [ResponseContentItem(text: result.text)]
                 )
             ],
-            usage: OpenAIUsage(promptTokens: result.promptTokens, completionTokens: result.completionTokens)
+            usage: {
+                let ctxWin = inference.getContextWindow(for: req.model) ?? 0
+                let p = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
+                let c = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin) : result.completionTokens
+                return OpenAIUsage(promptTokens: p, completionTokens: c)
+            }()
         )
         ResponseStore.shared.put(response)
         return try jsonResponse(response)
