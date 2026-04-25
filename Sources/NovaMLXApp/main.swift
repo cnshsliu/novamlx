@@ -210,6 +210,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             memHandler.start()
             memoryPressureHandler = memHandler
 
+            // Start ProcessMemoryEnforcer (1s polling, configurable limits)
+            await engine.startMemoryEnforcer()
+            await engine.configureEnforcerSettings { [settingsManager] modelId in
+                settingsManager.getSettings(modelId)
+            }
+
             let serverConfig = await config.serverConfig
             apiServer = NovaMLXAPIServer(
                 inferenceService: inferenceService,

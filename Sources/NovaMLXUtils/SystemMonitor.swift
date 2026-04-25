@@ -12,7 +12,7 @@ public final class SystemMonitor: @unchecked Sendable {
         Date().timeIntervalSince(startTime)
     }
 
-    public func currentStats(activeRequests: Int = 0, tokensPerSecond: Double = 0) -> SystemStats {
+    public func currentStats(activeRequests: Int = 0, tokensPerSecond: Double = 0, gpuMemoryUsed: UInt64 = 0) -> SystemStats {
         var totalMemory: UInt64 = 0
         var usedMemory: UInt64 = 0
 
@@ -26,7 +26,7 @@ public final class SystemMonitor: @unchecked Sendable {
             cpuUsage: cpuUsage(),
             memoryUsed: usedMemory,
             memoryTotal: totalMemory,
-            gpuMemoryUsed: 0,
+            gpuMemoryUsed: gpuMemoryUsed,
             activeRequests: activeRequests,
             tokensPerSecond: tokensPerSecond,
             uptime: uptime

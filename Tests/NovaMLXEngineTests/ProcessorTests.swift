@@ -35,7 +35,7 @@ struct TurnStopProcessorTests {
             eosTokenIds: [2],
             decode: asciiDecode
         )
-        let logits = MLXArray([0.1, 0.2, 0.3, 0.4], [1, 4])
+        let logits = MLXArray([0.1, 0.2, 0.3, 0.4] as [Float], [1, 4])
         let result = tsp.process(logits: logits)
         // Should be same shape, same values (not force-EOS)
         #expect(result.shape == logits.shape)
@@ -56,7 +56,7 @@ struct TurnStopProcessorTests {
         // Reset with new prompt
         tsp.prompt(MLXArray(0))
         // Should be back to active — process should return logits unchanged
-        let logits = MLXArray([0.5, 0.5], [1, 2])
+        let logits = MLXArray([0.5, 0.5] as [Float], [1, 2])
         let result = tsp.process(logits: logits)
         #expect(result.shape == logits.shape)
     }
@@ -80,7 +80,7 @@ struct TurnStopProcessorTests {
         tsp.didSample(token: MLXArray(100)) // "<|turn|>"
 
         // Now process should force EOS
-        let logits = MLXArray([1.0, 2.0, 3.0, 4.0], [1, 4])
+        let logits = MLXArray([1.0, 2.0, 3.0, 4.0] as [Float], [1, 4])
         let result = tsp.process(logits: logits)
         // Token at index 2 (EOS) should keep its value, others should be -inf
         let eosVal = result[0, 2].item(Float.self)
@@ -104,7 +104,7 @@ struct TurnStopProcessorTests {
         }
 
         // Process should pass through normally
-        let logits = MLXArray([1.0, 2.0, 3.0], [1, 3])
+        let logits = MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])
         let result = tsp.process(logits: logits)
         #expect(result.shape == logits.shape)
     }
@@ -120,10 +120,10 @@ struct TurnStopProcessorTests {
         )
         tsp.prompt(MLXArray(0))
         tsp.didSample(token: MLXArray(100)) // triggers stopDetected
-        _ = tsp.process(logits: MLXArray([1.0, 2.0, 3.0], [1, 3])) // transitions to done
+        _ = tsp.process(logits: MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])) // transitions to done
 
         // Now in done state — subsequent process should pass through
-        let logits = MLXArray([5.0, 6.0, 7.0], [1, 3])
+        let logits = MLXArray([5.0, 6.0, 7.0] as [Float], [1, 3])
         let result = tsp.process(logits: logits)
         #expect(result[0, 0].item(Float.self) == 5.0)
     }
@@ -137,7 +137,7 @@ struct TurnStopProcessorTests {
         )
         tsp.prompt(MLXArray(0))
         tsp.didSample(token: MLXArray(100)) // triggers stopDetected
-        _ = tsp.process(logits: MLXArray([1.0, 2.0, 3.0], [1, 3])) // → done
+        _ = tsp.process(logits: MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])) // → done
         tsp.didSample(token: MLXArray(101)) // should be ignored (done state)
         // No crash = pass
     }
@@ -154,7 +154,7 @@ struct TurnStopProcessorTests {
         tsp.prompt(MLXArray(0))
         tsp.didSample(token: MLXArray(101)) // "<|im_end|>" → stopDetected
 
-        let logits = MLXArray([1.0, 2.0, 3.0, 4.0], [1, 4])
+        let logits = MLXArray([1.0, 2.0, 3.0, 4.0] as [Float], [1, 4])
         let result = tsp.process(logits: logits)
         // Both EOS tokens (indices 2, 3) should be un-masked
         #expect(result[0, 2].item(Float.self) == 3.0)
@@ -178,7 +178,7 @@ struct TurnStopProcessorTests {
         tsp.didSample(token: MLXArray(72)) // H
         tsp.didSample(token: MLXArray(73)) // I — now decode() returns "HI"
 
-        let logits = MLXArray([1.0, 2.0, 3.0], [1, 3])
+        let logits = MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])
         let result = tsp.process(logits: logits)
         // Should detect "HI" and force EOS
         #expect(result[0, 0].item(Float.self) == -Float.infinity)
@@ -197,7 +197,7 @@ struct TurnStopProcessorTests {
         tsp.prompt(MLXArray(0))
         tsp.didSample(token: MLXArray(100)) // triggers stopDetected
 
-        let logits = MLXArray([1.0, 2.0, 3.0], [1, 3])
+        let logits = MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])
         let result = tsp.process(logits: logits)
         // EOS token 99999 >= vocab size 3 — all values should be -inf
         // since no valid EOS tokens survived the mask
@@ -216,7 +216,7 @@ struct TurnStopProcessorTests {
         tsp.prompt(MLXArray(0))
         tsp.didSample(token: MLXArray(100)) // triggers stopDetected
 
-        let logits = MLXArray([1.0, 2.0, 3.0], [1, 3])
+        let logits = MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])
         let result = tsp.process(logits: logits)
         // No EOS tokens — all masked to -inf
         for i in 0..<3 {
@@ -234,7 +234,7 @@ struct TurnStopProcessorTests {
         tsp.prompt(MLXArray(0))
         tsp.didSample(token: MLXArray(100)) // no patterns to match
 
-        let logits = MLXArray([1.0, 2.0, 3.0], [1, 3])
+        let logits = MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])
         let result = tsp.process(logits: logits)
         // Should pass through
         #expect(result[0, 0].item(Float.self) == 1.0)
@@ -257,7 +257,7 @@ struct ComposedLogitProcessorTests {
         func process(logits: MLXArray) -> MLXArray {
             var vals = logits.asArray(Float.self)
             vals[0] += 1.0
-            return MLXArray(vals, logits.shape)
+            return MLXArray(vals as [Float], logits.shape)
         }
         func didSample(token: MLXArray) { sampled = true }
     }
@@ -286,7 +286,7 @@ struct ComposedLogitProcessorTests {
             turnStopProcessor: turnStop
         )
 
-        let logits = MLXArray([1.0, 2.0, 3.0], [1, 3])
+        let logits = MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])
         let result = composed.process(logits: logits)
         // penalty adds 1, grammar adds 1, turnStop adds 1 = 3 total
         #expect(result[0, 0].item(Float.self) == 4.0)
@@ -298,7 +298,7 @@ struct ComposedLogitProcessorTests {
         let composed = ComposedLogitProcessor(
             grammarProcessor: grammar, penaltyProcessor: nil, turnStopProcessor: nil
         )
-        let logits = MLXArray([1.0, 2.0, 3.0], [1, 3])
+        let logits = MLXArray([1.0, 2.0, 3.0] as [Float], [1, 3])
         let result = composed.process(logits: logits)
         // Only grammar adds 1
         #expect(result[0, 0].item(Float.self) == 2.0)

@@ -148,6 +148,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public let specDecoder: SpeculativeDecoder
     public let fusedBatchDecoder: FusedBatchDecoder
     public let budgetTracker: MemoryBudgetTracker
+    public let memoryEnforcer: ProcessMemoryEnforcer?
     public lazy var batchScheduler = BatchScheduler(engine: self)
     public var settingsProvider: (@Sendable (String) -> ModelSettings?)?
     private var prefixCacheManagers: [String: PrefixCacheManager]
@@ -163,12 +164,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     private let deferredClearThreshold: Int = 2
     private let wiredPolicy = MLXLMCommon.WiredSumPolicy()
 
-    public init(kvCacheCapacity: Int = 1024, maxMemoryMB: UInt64 = 2048, maxConcurrent: Int = 8, metricsStore: MetricsStore? = nil) {
-        // Hard cap MLX at 50% of physical RAM — allocations beyond this will fail
-        // rather than consuming all memory and crashing the system.
+    public init(kvCacheCapacity: Int = 1024, maxMemoryMB: UInt64 = 2048, maxConcurrent: Int = 8, metricsStore: MetricsStore? = nil, maxProcessMemory: String = "auto") {
+        // Safety net: physMem - 2GB for MLX allocator. Our ProcessMemoryEnforcer
+        // runs at a lower soft limit and evicts proactively. This is only hit
+        // if our enforcement layer fails.
         let physMem = ProcessInfo.processInfo.physicalMemory
-        let hardLimitBytes = physMem / 2
-        MLX.Memory.memoryLimit = Int(hardLimitBytes)
+        let safetyReserve: UInt64 = 2 * 1024 * 1024 * 1024
+        let mlxLimitBytes = physMem > safetyReserve ? physMem - safetyReserve : physMem / 2
+        MLX.Memory.memoryLimit = Int(mlxLimitBytes)
         MLX.Memory.cacheLimit = 512 * 1024 * 1024  // 512MB compute cache cap
 
         self.isReady = false
@@ -179,7 +182,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         self.adapterService = AdapterService()
         self.specDecoder = SpeculativeDecoder()
         self.fusedBatchDecoder = FusedBatchDecoder()
-        self.budgetTracker = MemoryBudgetTracker(gpuLimitBytes: hardLimitBytes)
+        self.budgetTracker = MemoryBudgetTracker(gpuLimitBytes: mlxLimitBytes)
+
+        // ProcessMemoryEnforcer — configurable soft/hard limit with 1s polling
+        let limit = ProcessMemoryLimit.parse(maxProcessMemory)
+        self.memoryEnforcer = ProcessMemoryEnforcer(
+            pool: pool,
+            settingsProvider: nil, // set later via configureSettingsProvider
+            limit: limit,
+            physicalRAM: physMem
+        )
+
         self.prefixCacheManagers = [:]
         self.activeCount = 0
         self.activeTasks = [:]
@@ -187,7 +200,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         self.totalTokensGenerated = 0
         self.totalInferenceTime = 0
         FusedSDPARegistration.register()
-        NovaMLXLog.info("MLX Engine initialized (maxMemory: \(maxMemoryMB)MB, hardLimit: \(hardLimitBytes / 1024 / 1024)MB)")
+        NovaMLXLog.info("MLX Engine initialized (maxMemory: \(maxMemoryMB)MB, mlxLimit: \(mlxLimitBytes / 1024 / 1024)MB)")
     }
 
     static let tokenizerLoader = LocalTokenizerLoader()
@@ -1379,6 +1392,26 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public var loadedModelCount: Int { pool.loadedModelCount }
     public func listLoadedModels() -> [String] { pool.loadedModelIds }
     public var gpuActiveMemory: UInt64 { UInt64(MLX.Memory.activeMemory) }
+
+    /// Wire settings provider into the memory enforcer and start 1s polling.
+    /// Call once after config is loaded. The abortAllHandler cancels active
+    /// inference tasks so KV cache is freed in single-model scenarios.
+    public func startMemoryEnforcer() async {
+        guard let enforcer = memoryEnforcer else { return }
+        await enforcer.setAbortAllHandler { [weak self] in
+            guard let self else { return }
+            let tasks = self.lock.withLock { self.activeTasks.values }
+            for task in tasks { task.cancel() }
+            self.lock.withLock { self.activeTasks.removeAll() }
+        }
+        await enforcer.start()
+    }
+
+    /// Update settings provider for TTL checks in the enforcer.
+    public func configureEnforcerSettings(_ provider: @escaping @Sendable (String) -> ModelSettings?) async {
+        self.settingsProvider = provider
+        await memoryEnforcer?.updateSettingsProvider(provider)
+    }
 
     public func saveSession(_ sessionId: String) async throws {
         try await sessionManager.saveSession(sessionId)

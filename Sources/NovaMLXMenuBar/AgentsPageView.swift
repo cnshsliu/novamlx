@@ -88,15 +88,9 @@ struct AgentsPageView: View {
                 .fill(appState.isServerRunning ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
                 .frame(width: 8, height: 8)
 
-            if appState.isServerRunning {
-                Text(l10n.tr("agents.serverRunning", "http://127.0.0.1:\(appState.serverPort)"))
-                    .font(.system(size: 12))
-                    .foregroundColor(NovaTheme.Colors.textSecondary)
-            } else {
-                Text(l10n.tr("agents.serverNotRunning"))
-                    .font(.system(size: 12))
-                    .foregroundColor(NovaTheme.Colors.statusError)
-            }
+            Text(l10n.tr("agents.checkInstalled"))
+                .font(.system(size: 12))
+                .foregroundColor(NovaTheme.Colors.textSecondary)
 
             Spacer()
 
@@ -104,8 +98,8 @@ struct AgentsPageView: View {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11))
                     .rotationEffect(.degrees(isRefreshing ? 360 : 0))
-                    .frame(width: 16, height: 16)
                     .animation(isRefreshing ? .linear(duration: 0.6).repeatForever(autoreverses: false) : nil, value: isRefreshing)
+                    .frame(width: 16, height: 16)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)

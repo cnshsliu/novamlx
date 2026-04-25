@@ -329,6 +329,80 @@ public protocol ModelRegistryProtocol: Sendable {
     func isLoaded(_ identifier: ModelIdentifier) async -> Bool
 }
 
+public enum ProcessMemoryLimit: Codable, Sendable, Equatable {
+    case auto
+    case disabled
+    case percent(Double)
+    case bytes(UInt64)
+
+    private static let _4GB: UInt64 = 4 * 1024 * 1024 * 1024
+    private static let _8GB: UInt64 = 8 * 1024 * 1024 * 1024
+    private static let _2GB: UInt64 = 2 * 1024 * 1024 * 1024
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        self = Self.parse(raw)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .auto: try container.encode("auto")
+        case .disabled: try container.encode("disabled")
+        case .percent(let p): try container.encode("\(Int(p))%")
+        case .bytes(let b):
+            if b >= 1024 * 1024 * 1024 {
+                try container.encode("\(b / (1024 * 1024 * 1024))GB")
+            } else {
+                try container.encode("\(b / (1024 * 1024))MB")
+            }
+        }
+    }
+
+    public static func parse(_ raw: String) -> Self {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        if trimmed == "auto" { return .auto }
+        if trimmed == "disabled" || trimmed == "none" || trimmed == "off" { return .disabled }
+        if trimmed.hasSuffix("%"), let p = Double(trimmed.dropLast()) {
+            return .percent(min(max(p, 10), 90))
+        }
+        if trimmed.hasSuffix("gb"), let v = Double(trimmed.dropLast(2)) {
+            return .bytes(UInt64(v * 1024 * 1024 * 1024))
+        }
+        if trimmed.hasSuffix("mb"), let v = Double(trimmed.dropLast(2)) {
+            return .bytes(UInt64(v * 1024 * 1024))
+        }
+        if let v = UInt64(trimmed) { return .bytes(v) }
+        return .auto
+    }
+
+    /// Resolve to concrete byte limit. Returns nil for .disabled.
+    /// Result is capped at physMem - 4GB (absolute minimum reserve for macOS).
+    public func resolveBytes(physicalRAM: UInt64 = UInt64(ProcessInfo.processInfo.physicalMemory)) -> UInt64? {
+        switch self {
+        case .auto:
+            let reserve = max(Self._4GB, min(Self._8GB, physicalRAM / 5))
+            let limit = physicalRAM > reserve ? physicalRAM - reserve : 0
+            return min(limit, physicalRAM - Self._4GB)
+        case .disabled:
+            return nil
+        case .percent(let p):
+            let limit = UInt64(Double(physicalRAM) * p / 100.0)
+            return min(limit, physicalRAM - Self._4GB)
+        case .bytes(let b):
+            return min(b, physicalRAM - Self._4GB)
+        }
+    }
+
+    /// Hard limit = max(softLimit, physMem - 4GB). Always has a floor.
+    public func resolveHardLimit(
+        physicalRAM: UInt64 = UInt64(ProcessInfo.processInfo.physicalMemory)
+    ) -> UInt64 {
+        return physicalRAM > Self._4GB ? physicalRAM - Self._4GB : physicalRAM / 2
+    }
+}
+
 public struct ServerConfig: Codable, Sendable {
     public let host: String
     public let port: Int
@@ -341,11 +415,13 @@ public struct ServerConfig: Codable, Sendable {
     public let tlsKeyPath: String?
     public let tlsKeyPassword: String?
     public let maxRequestSizeMB: Double
+    public let maxProcessMemory: String
 
     private enum CodingKeys: String, CodingKey {
         case host, port, adminPort, apiKeys, maxConcurrentRequests
         case requestTimeout, contextScalingTarget
         case tlsCertPath, tlsKeyPath, tlsKeyPassword, maxRequestSizeMB
+        case maxProcessMemory
     }
 
     public init(
@@ -359,7 +435,8 @@ public struct ServerConfig: Codable, Sendable {
         tlsCertPath: String? = nil,
         tlsKeyPath: String? = nil,
         tlsKeyPassword: String? = nil,
-        maxRequestSizeMB: Double = 100
+        maxRequestSizeMB: Double = 100,
+        maxProcessMemory: String = "auto"
     ) {
         self.host = host
         self.port = port
@@ -372,6 +449,7 @@ public struct ServerConfig: Codable, Sendable {
         self.tlsKeyPath = tlsKeyPath
         self.tlsKeyPassword = tlsKeyPassword
         self.maxRequestSizeMB = maxRequestSizeMB
+        self.maxProcessMemory = maxProcessMemory
     }
 
     public var isTLSEnabled: Bool { tlsCertPath != nil }
@@ -389,6 +467,7 @@ public struct ServerConfig: Codable, Sendable {
         tlsKeyPath = try container.decodeIfPresent(String.self, forKey: .tlsKeyPath)
         tlsKeyPassword = try container.decodeIfPresent(String.self, forKey: .tlsKeyPassword)
         maxRequestSizeMB = try container.decodeIfPresent(Double.self, forKey: .maxRequestSizeMB) ?? 100
+        maxProcessMemory = try container.decodeIfPresent(String.self, forKey: .maxProcessMemory) ?? "auto"
     }
 
     public func scaleTokenCount(_ count: Int, modelContextWindow: Int) -> Int {

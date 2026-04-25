@@ -156,23 +156,27 @@ public final class PagedBlockPool: @unchecked Sendable {
     }
 
     public func freeBlock(_ blockId: Int) {
-        lock.withLock {
-            guard let block = allocatedBlocks[blockId], !block.isNull else { return }
-            block.refCount -= 1
-            if block.refCount <= 0 {
-                if block.blockHash != nil { _ = hashMap.remove(block.blockHash!) }
-                allocatedBlocks.removeValue(forKey: blockId)
-                freeQueue.append(block)
-            }
-        }
+        lock.withLock { freeBlockUnlocked(blockId) }
     }
 
     public func incrementRef(_ blockId: Int) {
-        lock.withLock {
-            guard let block = allocatedBlocks[blockId] else { return }
-            block.refCount += 1
-            block.touch()
+        lock.withLock { incrementRefUnlocked(blockId) }
+    }
+
+    private func freeBlockUnlocked(_ blockId: Int) {
+        guard let block = allocatedBlocks[blockId], !block.isNull else { return }
+        block.refCount -= 1
+        if block.refCount <= 0 {
+            if block.blockHash != nil { _ = hashMap.remove(block.blockHash!) }
+            allocatedBlocks.removeValue(forKey: blockId)
+            freeQueue.append(block)
         }
+    }
+
+    private func incrementRefUnlocked(_ blockId: Int) {
+        guard let block = allocatedBlocks[blockId] else { return }
+        block.refCount += 1
+        block.touch()
     }
 
     public func findSharedPrefix(tokenIds: [Int]) -> (blockIds: [Int], remainingTokenCount: Int) {
@@ -235,14 +239,14 @@ public final class PagedBlockPool: @unchecked Sendable {
     public func deleteBlockTable(requestId: String) {
         lock.withLock {
             guard let table = requestTables.removeValue(forKey: requestId) else { return }
-            for blockId in table.blockIds { freeBlock(blockId) }
+            for blockId in table.blockIds { freeBlockUnlocked(blockId) }
         }
     }
 
     public func forkBlockTable(source: BlockTable, newRequestId: String) -> BlockTable? {
         lock.withLock {
             let forked = source.copy(newRequestId: newRequestId)
-            for blockId in forked.blockIds { incrementRef(blockId) }
+            for blockId in forked.blockIds { incrementRefUnlocked(blockId) }
             requestTables[newRequestId] = forked
             return forked
         }

@@ -122,6 +122,11 @@ public struct WorkerMessage: Codable, Sendable {
     public let promptTokens: Int?
     public let completionTokens: Int?
     public let errorMessage: String?
+    public let memoryCurrentBytes: UInt64?
+    public let memorySoftLimitBytes: UInt64?
+    public let memoryHardLimitBytes: UInt64?
+    public let memoryUtilization: Double?
+    public let memoryEvictions: UInt64?
 
     public init(
         type: String,
@@ -135,7 +140,12 @@ public struct WorkerMessage: Codable, Sendable {
         finishReason: FinishReason? = nil,
         promptTokens: Int? = nil,
         completionTokens: Int? = nil,
-        errorMessage: String? = nil
+        errorMessage: String? = nil,
+        memoryCurrentBytes: UInt64? = nil,
+        memorySoftLimitBytes: UInt64? = nil,
+        memoryHardLimitBytes: UInt64? = nil,
+        memoryUtilization: Double? = nil,
+        memoryEvictions: UInt64? = nil
     ) {
         self.type = type
         self.modelId = modelId
@@ -149,6 +159,11 @@ public struct WorkerMessage: Codable, Sendable {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.errorMessage = errorMessage
+        self.memoryCurrentBytes = memoryCurrentBytes
+        self.memorySoftLimitBytes = memorySoftLimitBytes
+        self.memoryHardLimitBytes = memoryHardLimitBytes
+        self.memoryUtilization = memoryUtilization
+        self.memoryEvictions = memoryEvictions
     }
 }
 
@@ -168,4 +183,5 @@ public enum WorkerMessageType {
     public static let abort = "abort"
     public static let ping = "ping"
     public static let pong = "pong"
+    public static let memoryStats = "memoryStats"
 }

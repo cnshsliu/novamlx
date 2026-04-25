@@ -2,6 +2,14 @@ import Foundation
 import NovaMLXCore
 import NovaMLXUtils
 
+public struct WorkerMemoryStats: Sendable {
+    public let currentBytes: UInt64
+    public let softLimitBytes: UInt64
+    public let hardLimitBytes: UInt64
+    public let utilization: Double
+    public let evictions: UInt64
+}
+
 public final class WorkerSupervisor: @unchecked Sendable {
     private var process: Process?
     private var stdinPipe: Pipe?
@@ -17,6 +25,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
     // Stream metadata accumulation
     private var streamFinishReasons: [String: FinishReason] = [:]
     private var streamCompletionTokens: [String: Int] = [:]
+
+    // Latest memory stats from worker
+    public private(set) var latestMemoryStats: WorkerMemoryStats?
 
     private let workerBinaryPath: String
 
@@ -221,6 +232,20 @@ public final class WorkerSupervisor: @unchecked Sendable {
     }
 
     private func handleMessage(_ msg: WorkerMessage) {
+        // Handle memoryStats from worker (no requestId needed)
+        if msg.type == WorkerMessageType.memoryStats {
+            lock.lock()
+            latestMemoryStats = WorkerMemoryStats(
+                currentBytes: msg.memoryCurrentBytes ?? 0,
+                softLimitBytes: msg.memorySoftLimitBytes ?? 0,
+                hardLimitBytes: msg.memoryHardLimitBytes ?? 0,
+                utilization: msg.memoryUtilization ?? 0,
+                evictions: msg.memoryEvictions ?? 0
+            )
+            lock.unlock()
+            return
+        }
+
         guard let requestId = msg.requestId else {
             // No requestId — likely load/unload response
             if msg.type == WorkerMessageType.loaded || msg.type == WorkerMessageType.unloaded {

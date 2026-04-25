@@ -11,6 +11,9 @@ struct NovaMLXWorker {
         let fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         let writer = LineWriter()
 
+        // Start memory enforcer inside worker (1s polling, evicts models under pressure)
+        await engine.startMemoryEnforcer()
+
         NovaMLXLog.info("[Worker] Started, waiting for commands on stdin")
 
         let lines = AsyncStream<String> { continuation in
@@ -23,6 +26,25 @@ struct NovaMLXWorker {
         }
 
         await withTaskGroup(of: Void.self) { group in
+            // Background task: report memory stats to parent every 5s
+            group.addTask {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(5))
+                    guard !Task.isCancelled else { return }
+                    if let enforcer = engine.memoryEnforcer {
+                        let status = await enforcer.status
+                        writer.write(WorkerMessage(
+                            type: WorkerMessageType.memoryStats,
+                            memoryCurrentBytes: status.currentBytes,
+                            memorySoftLimitBytes: status.softLimitBytes,
+                            memoryHardLimitBytes: status.hardLimitBytes,
+                            memoryUtilization: status.utilization,
+                            memoryEvictions: status.totalEvictions
+                        ))
+                    }
+                }
+            }
+
             for await line in lines {
                 guard !line.isEmpty else { continue }
 

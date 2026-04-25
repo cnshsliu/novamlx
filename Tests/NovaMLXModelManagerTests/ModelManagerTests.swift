@@ -182,7 +182,7 @@ struct ModelManagerTests {
 
         try createFakeModelConfig(
             at: tempDir.appendingPathComponent("some-vlm"),
-            modelType: "custom_vlm",
+            modelType: "llava",
             hasVisionConfig: true
         )
 

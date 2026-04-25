@@ -5,6 +5,13 @@ import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
 
+enum MemoryLimitMode: String, CaseIterable {
+    case auto
+    case disabled
+    case percent
+    case fixed
+}
+
 struct SettingsPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let inferenceService: InferenceService
@@ -18,7 +25,7 @@ struct SettingsPageView: View {
     @State private var cliInstallMessage: String? = nil
 
     // Config editor state
-    @State private var showConfigEditor = false
+    @State private var isEditing = false
     @State private var cfgHost = "127.0.0.1"
     @State private var cfgPort = 6590
     @State private var cfgAdminPort = 6591
@@ -27,6 +34,11 @@ struct SettingsPageView: View {
     @State private var cfgTimeout = 300
     @State private var cfgMaxBodyMB = 100.0
     @State private var cfgDefaultModel = ""
+    @State private var cfgMaxProcessMemory = "auto"
+    @State private var memoryLimitMode: MemoryLimitMode = .auto
+    @State private var memoryLimitPercent: Double = 70
+    @State private var memoryLimitValue: Double = 24
+    @State private var memoryLimitUnit = "GB"
     @State private var cfgSaveMessage: String? = nil
     @State private var cfgHasUnsavedChanges = false
 
@@ -48,53 +60,82 @@ struct SettingsPageView: View {
 
     private var serverConfigSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                sectionHeader(l10n.tr("settings.server"), icon: "server.rack")
-                Spacer()
-                Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showConfigEditor.toggle() } }) {
-                    Image(systemName: showConfigEditor ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 10))
-                    Text(l10n.tr("settings.editConfig"))
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
+            sectionHeader(l10n.tr("settings.server"), icon: "server.rack")
 
-            settingsRow(l10n.tr("settings.inferenceApi"), value: "http://127.0.0.1:\(String(appState.serverPort))")
-            settingsRow(l10n.tr("settings.adminApi"), value: "http://127.0.0.1:\(String(appState.adminPort))")
-            settingsRow(l10n.tr("settings.webChat"), value: "http://127.0.0.1:\(String(appState.serverPort))/chat")
-            settingsRow(l10n.tr("settings.adminDashboard"), value: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")
-
-            configPathRow
-
-            if showConfigEditor {
-                Divider().padding(.vertical, 4)
+            if isEditing {
                 configEditorPanel
+            } else {
+                settingsRow(l10n.tr("settings.inferenceApi"), value: "http://127.0.0.1:\(String(appState.serverPort))")
+                settingsRow(l10n.tr("settings.adminApi"), value: "http://127.0.0.1:\(String(appState.adminPort))")
+                settingsRow(l10n.tr("settings.webChat"), value: "http://127.0.0.1:\(String(appState.serverPort))/chat")
+                settingsRow(l10n.tr("settings.adminDashboard"), value: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")
+
+                configPathRow
             }
 
+            // Bottom action bar
             HStack {
-                Button(l10n.tr("settings.openChat")) {
-                    NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.serverPort))/chat")!)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                if isEditing {
+                    if let msg = cfgSaveMessage {
+                        Text(msg)
+                            .font(.system(size: 11))
+                            .foregroundColor(msg.contains("Error") ? .red : NovaTheme.Colors.statusOK)
+                    }
+                    Spacer()
+                    Button(l10n.tr("settings.reset")) {
+                        loadCurrentConfig()
+                        cfgSaveMessage = nil
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
-                Button(l10n.tr("settings.openDashboard")) {
-                    NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")!)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                    Button(l10n.tr("settings.cancel")) {
+                        loadCurrentConfig()
+                        isEditing = false
+                        cfgSaveMessage = nil
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
-                Spacer()
+                    Button(l10n.tr("settings.save")) {
+                        saveConfig()
+                        if cfgSaveMessage == nil || !cfgSaveMessage!.contains("Error") {
+                            isEditing = false
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                } else {
+                    Button(l10n.tr("settings.openChat")) {
+                        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.serverPort))/chat")!)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
-                Button(l10n.tr("settings.openConfig")) {
-                    let path = FileManager.default.homeDirectoryForCurrentUser
-                        .appendingPathComponent(".nova/config.json").path
-                    NSWorkspace.shared.open(URL(string: "file://\(path)")!)
+                    Button(l10n.tr("settings.openDashboard")) {
+                        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")!)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer()
+
+                    Button(l10n.tr("settings.openConfig")) {
+                        let path = FileManager.default.homeDirectoryForCurrentUser
+                            .appendingPathComponent(".nova/config.json").path
+                        NSWorkspace.shared.open(URL(string: "file://\(path)")!)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button(l10n.tr("settings.editConfig")) {
+                        loadCurrentConfig()
+                        cfgSaveMessage = nil
+                        withAnimation(.easeInOut(duration: 0.15)) { isEditing = true }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
         }
         .padding(16)
@@ -147,6 +188,59 @@ struct SettingsPageView: View {
                 configField(l10n.tr("settings.defaultModel"), text: $cfgDefaultModel, width: nil, placeholder: l10n.tr("settings.modelPlaceholder"))
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l10n.tr("settings.memoryLimit")).font(.system(size: 11)).foregroundColor(.secondary)
+                        Picker("", selection: $memoryLimitMode) {
+                            Text(l10n.tr("settings.memoryLimitAuto")).tag(MemoryLimitMode.auto)
+                            Text(l10n.tr("settings.memoryLimitPercent")).tag(MemoryLimitMode.percent)
+                            Text(l10n.tr("settings.memoryLimitFixed")).tag(MemoryLimitMode.fixed)
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 150)
+                    }
+
+                    if memoryLimitMode == .percent {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(l10n.tr("settings.memoryLimitPercentLabel")).font(.system(size: 11)).foregroundColor(.secondary)
+                            HStack(spacing: 4) {
+                                TextField("", value: $memoryLimitPercent, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 12))
+                                    .frame(width: 60)
+                                Text("%").font(.system(size: 12)).foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    if memoryLimitMode == .fixed {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(l10n.tr("settings.memoryLimitValueLabel")).font(.system(size: 11)).foregroundColor(.secondary)
+                            HStack(spacing: 4) {
+                                TextField("", value: $memoryLimitValue, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 12))
+                                    .frame(width: 80)
+                                Picker("", selection: $memoryLimitUnit) {
+                                    Text(l10n.tr("settings.memoryLimitGB")).tag("GB")
+                                    Text(l10n.tr("settings.memoryLimitMB")).tag("MB")
+                                }
+                                .pickerStyle(.menu)
+                                .frame(width: 70)
+                            }
+                        }
+                    }
+                }
+
+                if memoryLimitMode == .auto {
+                    Text(l10n.tr("settings.memoryLimitAutoDesc"))
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(l10n.tr("settings.apiKeys"))
                     .font(.system(size: 11))
@@ -160,24 +254,7 @@ struct SettingsPageView: View {
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.gray.opacity(0.3)))
             }
 
-            HStack {
-                if let msg = cfgSaveMessage {
-                    Text(msg)
-                        .font(.system(size: 11))
-                        .foregroundColor(msg.contains("Error") ? .red : NovaTheme.Colors.statusOK)
-                }
-                Spacer()
-                Button(l10n.tr("settings.resetCurrent")) { loadCurrentConfig() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                Button(l10n.tr("settings.saveToDisk")) { saveConfig() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-            }
         }
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private func configField(_ label: String, text: Binding<String>, width: CGFloat?, placeholder: String) -> some View {
@@ -210,6 +287,40 @@ struct SettingsPageView: View {
         }
     }
 
+    private func buildMemoryLimitString() -> String {
+        switch memoryLimitMode {
+        case .auto: return "auto"
+        case .disabled: return "disabled"
+        case .percent: return "\(Int(memoryLimitPercent))%"
+        case .fixed: return "\(Int(memoryLimitValue))\(memoryLimitUnit)"
+        }
+    }
+
+    private func parseMemoryLimitString(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        switch trimmed {
+        case "auto":
+            memoryLimitMode = .auto
+        case "disabled", "none", "off":
+            memoryLimitMode = .disabled
+        default:
+            if trimmed.hasSuffix("%"), let p = Double(trimmed.dropLast()) {
+                memoryLimitMode = .percent
+                memoryLimitPercent = min(max(p, 10), 90)
+            } else if trimmed.hasSuffix("gb"), let v = Double(trimmed.dropLast(2)) {
+                memoryLimitMode = .fixed
+                memoryLimitValue = v
+                memoryLimitUnit = "GB"
+            } else if trimmed.hasSuffix("mb"), let v = Double(trimmed.dropLast(2)) {
+                memoryLimitMode = .fixed
+                memoryLimitValue = v
+                memoryLimitUnit = "MB"
+            } else {
+                memoryLimitMode = .auto
+            }
+        }
+    }
+
     private func loadCurrentConfig() {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser
         let configPath = homeDir.appendingPathComponent(".nova/config.json")
@@ -224,6 +335,8 @@ struct SettingsPageView: View {
             cfgMaxConcurrent = server["maxConcurrentRequests"] as? Int ?? 16
             cfgTimeout = server["requestTimeout"] as? Int ?? 300
             cfgMaxBodyMB = server["maxRequestSizeMB"] as? Double ?? 100.0
+            cfgMaxProcessMemory = server["maxProcessMemory"] as? String ?? "auto"
+            parseMemoryLimitString(cfgMaxProcessMemory)
             if let keys = server["apiKeys"] as? [String] {
                 cfgApiKeys = keys.joined(separator: "\n")
             }
@@ -266,7 +379,8 @@ struct SettingsPageView: View {
             "adminPort": cfgAdminPort,
             "maxConcurrentRequests": cfgMaxConcurrent,
             "requestTimeout": cfgTimeout,
-            "maxRequestSizeMB": cfgMaxBodyMB
+            "maxRequestSizeMB": cfgMaxBodyMB,
+            "maxProcessMemory": buildMemoryLimitString()
         ]
         if !apiKeysArray.isEmpty {
             serverDict["apiKeys"] = apiKeysArray
@@ -295,7 +409,8 @@ struct SettingsPageView: View {
                     apiKeys: apiKeysArray,
                     maxConcurrentRequests: cfgMaxConcurrent,
                     requestTimeout: TimeInterval(cfgTimeout),
-                    maxRequestSizeMB: cfgMaxBodyMB
+                    maxRequestSizeMB: cfgMaxBodyMB,
+                    maxProcessMemory: buildMemoryLimitString()
                 )
                 await config.setServerConfig(newServerConfig)
                 await config.setDefaultModel(cfgDefaultModel.isEmpty ? nil : cfgDefaultModel)
@@ -418,12 +533,14 @@ struct SettingsPageView: View {
                 Text(l10n.tr("settings.loadModel"))
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ForEach(appState.loadedModels, id: \.self) { modelId in
                     turboQuantRow(modelId: modelId)
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .sectionCard()
         .task(id: appState.loadedModels) {
@@ -452,9 +569,7 @@ struct SettingsPageView: View {
                 tqButton(l10n.tr("settings.bit2"), bits: 2, modelId: modelId, isActive: config?.bits == 2)
             }
         }
-        .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .rowCard()
     }
 
     @ViewBuilder
@@ -527,6 +642,7 @@ struct SettingsPageView: View {
                 Text(l10n.tr("settings.noSessions"))
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 ForEach(sessions) { session in
                     HStack {
@@ -548,12 +664,11 @@ struct SettingsPageView: View {
                         .buttonStyle(.plain)
                         .foregroundColor(.secondary)
                     }
-                    .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .rowCard()
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .sectionCard()
     }
@@ -619,7 +734,7 @@ struct SettingsPageView: View {
             let (data, _) = try await URLSession.shared.data(from: url)
             if let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
                 sessions = json.compactMap { s in
-                    guard let id = s["id"] as? String, let model = s["model"] as? String else { return nil }
+                    guard let id = s["sessionId"] as? String, let model = s["modelId"] as? String else { return nil }
                     return SessionInfo(id: id, model: model)
                 }
             }

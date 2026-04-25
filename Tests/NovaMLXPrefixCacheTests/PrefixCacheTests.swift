@@ -133,7 +133,7 @@ struct PrefixCacheTests {
         #expect(config.maxBlocks == 4096)
         #expect(config.initialBlocks == 256)
         #expect(config.ssdCacheDir == nil)
-        #expect(config.ssdMaxSizeBytes == 100 * 1024 * 1024 * 1024)
+        #expect(config.ssdMaxSizeBytes == 5 * 1024 * 1024 * 1024)
     }
 
     @Test("PrefixCacheStats default init")

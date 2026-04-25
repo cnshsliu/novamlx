@@ -371,7 +371,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let body = try await request.body.collect(upTo: .max)
                 let openAIReq = try JSONDecoder().decode(OpenAIRequest.self, from: body)
 
-                let messages = openAIReq.messages.map { msg in
+                var messages = openAIReq.messages.map { msg in
                     let role: ChatMessage.Role = switch msg.role {
                     case "system": .system
                     case "assistant": .assistant
@@ -382,6 +382,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         if case .imageUrl(let img) = part { return img.url } else { return nil }
                     }
                     return ChatMessage(role: role, content: msg.content?.textValue, images: (imageURLs?.isEmpty ?? true) ? nil : imageURLs)
+                }
+
+                // OCR auto-optimization
+                if OCROptimizer.isOCRModel(openAIReq.model) {
+                    messages = OCROptimizer.applyPrompt(messages: messages, modelName: openAIReq.model)
                 }
 
                 if !inference.isModelLoaded(openAIReq.model) {
@@ -455,6 +460,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     )
                 }
 
+                let ocrSampling = OCROptimizer.samplingOverrides(
+                    modelName: anthropicReq.model,
+                    userTemperature: anthropicReq.temperature,
+                    userMaxTokens: anthropicReq.maxTokens,
+                    userRepetitionPenalty: nil
+                )
+                let ocrStop = OCROptimizer.applyStopSequences(anthropicReq.stopSequences, modelName: anthropicReq.model)
+
                 let request = InferenceRequest(
                     model: anthropicReq.model, messages: messages,
                     tools: anthropicReq.tools?.map { tool in
@@ -468,8 +481,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         ] as [String: Any]
                         return dict
                     },
-                    temperature: anthropicReq.temperature, maxTokens: anthropicReq.maxTokens,
-                    topP: anthropicReq.topP, stream: false, stop: anthropicReq.stopSequences
+                    temperature: ocrSampling.temperature,
+                    maxTokens: ocrSampling.maxTokens,
+                    topP: anthropicReq.topP, stream: false, stop: ocrStop
                 )
 
                 let result = try await inference.generate(request)
@@ -729,6 +743,20 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let sessionMetrics = inference.engine.metrics
                 let persistentMetrics = inference.engine.metricsStore.metrics
                 let batchMetrics = inference.engine.batchScheduler.metrics
+
+                var memoryEnforcerInfo: [String: Any] = ["enabled": false]
+                if let enforcer = inference.engine.memoryEnforcer {
+                    let ms = await enforcer.status
+                    memoryEnforcerInfo = [
+                        "enabled": ms.enabled,
+                        "softLimitBytes": ms.softLimitBytes,
+                        "hardLimitBytes": ms.hardLimitBytes,
+                        "currentBytes": ms.currentBytes,
+                        "utilization": ms.utilization,
+                        "totalEvictions": ms.totalEvictions,
+                    ]
+                }
+
                 let body: [String: Any] = [
                     "session": [
                         "loadedModels": stats.loadedModels,
@@ -771,6 +799,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         "peakBatchWidth": batchMetrics.peakBatchWidth,
                         "totalBatches": batchMetrics.totalBatches,
                     ],
+                    "memoryEnforcer": memoryEnforcerInfo,
                 ]
                 let data = try JSONSerialization.data(withJSONObject: body)
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
@@ -1146,6 +1175,30 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 inference.engine.metricsStore.clearAllTime()
                 return try Self.jsonResponse(["status": "cleared"])
             }
+            Get("/admin/api/memory") { _, _ in
+                guard let enforcer = inference.engine.memoryEnforcer else {
+                    let body: [String: Any] = [
+                        "enabled": false,
+                        "currentBytes": inference.engine.gpuActiveMemory
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: body)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                let status = await enforcer.status
+                var body: [String: Any] = [
+                    "enabled": status.enabled,
+                    "softLimitBytes": status.softLimitBytes,
+                    "hardLimitBytes": status.hardLimitBytes,
+                    "currentBytes": status.currentBytes,
+                    "utilization": status.utilization,
+                    "totalEvictions": status.totalEvictions,
+                    "physicalRAM": status.physicalRAM,
+                ]
+                if let model = status.lastEvictedModel { body["lastEvictedModel"] = model }
+                if let time = status.lastEvictionTime { body["lastEvictionTime"] = time.ISO8601Format() }
+                let data = try JSONSerialization.data(withJSONObject: body)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
             Get("/admin/api/turboquant") { _, _ in
                 let configs = inference.engine.turboQuantService.allConfigs()
                 var result: [[String: Any]] = []
@@ -1511,19 +1564,28 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
         cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
+        let ocrSampling = OCROptimizer.samplingOverrides(
+            modelName: openAIReq.model,
+            userTemperature: openAIReq.temperature,
+            userMaxTokens: openAIReq.maxTokens,
+            userRepetitionPenalty: openAIReq.repetitionPenalty.map { Float($0) }
+        )
+        let ocrStop = OCROptimizer.applyStopSequences(openAIReq.stop, modelName: openAIReq.model)
+
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
             tools: openAIReq.tools?.map { tool in
                 tool.mapValues { unwrapAnyCodable($0) }
             },
-            temperature: openAIReq.temperature, maxTokens: openAIReq.maxTokens,
+            temperature: ocrSampling.temperature,
+            maxTokens: ocrSampling.maxTokens,
             topP: openAIReq.topP, topK: openAIReq.topK,
             minP: openAIReq.minP.map { Float($0) },
             frequencyPenalty: openAIReq.frequencyPenalty.map { Float($0) },
             presencePenalty: openAIReq.presencePenalty.map { Float($0) },
-            repetitionPenalty: openAIReq.repetitionPenalty.map { Float($0) },
+            repetitionPenalty: ocrSampling.repetitionPenalty,
             seed: openAIReq.seed,
-            stream: false, stop: openAIReq.stop,
+            stream: false, stop: ocrStop,
             sessionId: sessionId, responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
@@ -1587,19 +1649,28 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
         cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
+        let ocrSampling = OCROptimizer.samplingOverrides(
+            modelName: openAIReq.model,
+            userTemperature: openAIReq.temperature,
+            userMaxTokens: openAIReq.maxTokens,
+            userRepetitionPenalty: openAIReq.repetitionPenalty.map { Float($0) }
+        )
+        let ocrStop = OCROptimizer.applyStopSequences(openAIReq.stop, modelName: openAIReq.model)
+
         let request = InferenceRequest(
             model: openAIReq.model, messages: messages,
             tools: openAIReq.tools?.map { tool in
                 tool.mapValues { unwrapAnyCodable($0) }
             },
-            temperature: openAIReq.temperature, maxTokens: openAIReq.maxTokens,
+            temperature: ocrSampling.temperature,
+            maxTokens: ocrSampling.maxTokens,
             topP: openAIReq.topP, topK: openAIReq.topK,
             minP: openAIReq.minP.map { Float($0) },
             frequencyPenalty: openAIReq.frequencyPenalty.map { Float($0) },
             presencePenalty: openAIReq.presencePenalty.map { Float($0) },
-            repetitionPenalty: openAIReq.repetitionPenalty.map { Float($0) },
+            repetitionPenalty: ocrSampling.repetitionPenalty,
             seed: openAIReq.seed,
-            stream: true, stop: openAIReq.stop,
+            stream: true, stop: ocrStop,
             sessionId: sessionId, responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
@@ -1726,10 +1797,19 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         anthropicReq: AnthropicRequest, messages: [ChatMessage], inference: InferenceService,
         cfg: ServerConfig, clientType: ClientType
     ) async throws -> Response {
+        let ocrSampling = OCROptimizer.samplingOverrides(
+            modelName: anthropicReq.model,
+            userTemperature: anthropicReq.temperature,
+            userMaxTokens: anthropicReq.maxTokens,
+            userRepetitionPenalty: nil
+        )
+        let ocrStop = OCROptimizer.applyStopSequences(anthropicReq.stopSequences, modelName: anthropicReq.model)
+
         let request = InferenceRequest(
             model: anthropicReq.model, messages: messages,
-            temperature: anthropicReq.temperature, maxTokens: anthropicReq.maxTokens,
-            topP: anthropicReq.topP, stream: true, stop: anthropicReq.stopSequences
+            temperature: ocrSampling.temperature,
+            maxTokens: ocrSampling.maxTokens,
+            topP: anthropicReq.topP, stream: true, stop: ocrStop
         )
 
         let reqTag = request.id.uuidString.prefix(8)
