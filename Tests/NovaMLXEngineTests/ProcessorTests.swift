@@ -17,13 +17,13 @@ struct TurnStopProcessorTests {
         tokens.compactMap { UnicodeScalar($0).map(String.init) }.joined()
     }
 
-    /// Helper: decode that simulates special token strings
+    /// Helper: decode that simulates special token strings interspersed with ASCII
     func specialDecode(_ tokens: [Int]) -> String {
-        // Simulate: single-token decoding to a control string
-        if tokens == [100] { return "<|turn|>" }
-        if tokens == [101] { return "<|im_end|>" }
-        if tokens == [100, 101] { return "<|turn|><|im_end|>" }
-        return asciiDecode(tokens)
+        tokens.map { token in
+            if token == 100 { return "<|turn|>" }
+            if token == 101 { return "<|im_end|>" }
+            return UnicodeScalar(token).map(String.init) ?? ""
+        }.joined()
     }
 
     // MARK: - State transitions

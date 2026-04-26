@@ -8,24 +8,32 @@
 ## Table of Contents
 
 - [Inference Engine](#inference-engine)
+- [Worker Subprocess Isolation](#worker-subprocess-isolation)
 - [Multi-Modal Support](#multi-modal-support)
 - [API Compatibility](#api-compatibility)
 - [Structured Output](#structured-output)
 - [Tool Calling](#tool-calling)
+- [Control Token & Thinking Filtering](#control-token--thinking-filtering)
 - [KV Cache & Prefix Sharing](#kv-cache--prefix-sharing)
 - [TurboQuant KV Compression](#turboquant-kv-compression)
 - [Continuous Batching](#continuous-batching)
+- [Speculative Decoding](#speculative-decoding)
 - [Session Management](#session-management)
 - [Embeddings & Reranking](#embeddings--reranking)
 - [Audio — Speech-to-Text & Text-to-Speech](#audio--speech-to-text--text-to-speech)
 - [MCP — Model Context Protocol](#mcp--model-context-protocol)
+- [Agent Integration](#agent-integration)
 - [Model Management](#model-management)
+- [Memory Management](#memory-management)
 - [Per-Model Settings](#per-model-settings)
 - [HuggingFace Integration](#huggingface-integration)
+- [Cloud Model Proxy](#cloud-model-proxy)
 - [Observability & Benchmarking](#observability--benchmarking)
 - [Web Interfaces](#web-interfaces)
 - [macOS Menu Bar App](#macos-menu-bar-app)
+- [Internationalization](#internationalization)
 - [Security & Middleware](#security--middleware)
+- [Homebrew Distribution](#homebrew-distribution)
 - [Configuration](#configuration)
 
 ---
@@ -42,6 +50,23 @@ NovaMLX runs LLM and VLM inference directly on Apple Silicon GPU via MLX, with z
 | **Sampling** | Temperature, Top-P, Top-K, Min-P, Frequency/Presence/Repetition penalty, Seed |
 | **Streaming** | SSE token-by-token streaming for all generation endpoints |
 | **Max tokens** | Configurable per request or per model |
+| **Fused batch decode** | Concurrent multi-sequence decode on shared KV cache |
+| **Speculative decoding** | N-gram pattern-based and draft-model token prediction for faster generation |
+
+---
+
+## Worker Subprocess Isolation
+
+The inference worker runs as an independent subprocess, communicating with the main API server via JSON messages over stdin/stdout.
+
+| Feature | Details |
+|---------|---------|
+| **Crash isolation** | Worker crash doesn't bring down the API server — auto-restart by supervisor |
+| **Memory isolation** | Worker gets its own process memory budget, independent of main app |
+| **Communication** | Bidirectional JSON message protocol over stdin/stdout |
+| **Health reporting** | Periodic memory stats pushed to parent every 5 seconds |
+| **Code signing** | Ad-hoc signed for macOS process integrity compliance |
+| **Supervisor** | Monitors worker health, restarts on unexpected exit, handles backpressure |
 
 ---
 
@@ -130,6 +155,40 @@ A stream filter suppresses tool markup during streaming so end users see clean c
 
 ---
 
+## Control Token & Thinking Filtering
+
+Real-time control token detection and filtering to keep generation output clean and prevent runaway loops.
+
+### TurnStopProcessor
+
+Detects turn separator patterns in generated text and forces EOS token emission. Critical for models (e.g., Qwen3.6) that use semantic turn markers but rarely emit configured EOS tokens.
+
+| Feature | Details |
+|---------|---------|
+| **Pattern matching** | Configurable stop patterns (e.g., `<|turn|>`, `<|im_end|>`) |
+| **State machine** | Active → StopDetected → Done lifecycle |
+| **EOS forcing** | Masks all non-EOS logits to `-inf` on pattern detection |
+| **Accumulation** | Tracks full decoded sequence, not just individual tokens |
+
+### Thinking Tag Architecture
+
+Semantic thinking tags pass through to end users while protocol-level control tokens are stripped:
+
+| Behavior | Example |
+|----------|---------|
+| **Pass through** | `<think>Reasoning here</think>` — user sees thinking content |
+| **Filtered** | `<|turn|>`, `<|im_end|>` — stripped before streaming output |
+| **Implicit open** | `ThinkingParser` handles responses that close `</think>` without opening tag |
+| **Partial buffering** | Buffers incomplete control tokens in SSE streams to prevent leaked fragments |
+
+### Control Token Filtering Pipeline
+
+- Generic streaming filter scrubs control tokens across all agent output formats
+- Multi-step agent conversation protection — no control token leakage between turns
+- Regex-only token matching option for custom token patterns
+
+---
+
 ## KV Cache & Prefix Sharing
 
 Block-level paged KV cache inspired by vLLM, enabling cross-session prefix reuse.
@@ -176,6 +235,34 @@ Priority-aware request batching for high-throughput concurrent inference.
 | **Preemption** | Lower-priority requests preempted for higher-priority |
 | **Metrics** | Active requests, queue depth, total queued/completed/preempted, peak active, average wait time |
 | **Abortion** | Per-request cancellation support |
+
+---
+
+## Speculative Decoding
+
+Two complementary approaches accelerate generation by predicting and verifying multiple tokens in parallel.
+
+### N-gram Speculative Decoding
+
+Pattern-based draft token generation built into `FusedBatchScheduler`:
+
+| Feature | Details |
+|---------|---------|
+| **Method** | N-gram pattern matching from recent context window |
+| **Draft length** | Configurable number of candidate tokens per step |
+| **Verification** | Target model verifies all draft tokens in parallel |
+| **Overhead** | Zero secondary model — purely algorithmic |
+
+### Draft-Model Speculative Decoding
+
+Dedicated smaller draft model via `SpeculativeTokenIterator`:
+
+| Feature | Details |
+|---------|---------|
+| **Draft model** | Smaller, faster model generates candidate tokens |
+| **Target model** | Full-size model verifies candidates in a single forward pass |
+| **Throughput gain** | Significant speedup for memory-bandwidth-bound generation |
+| **Use case** | Large models where each token generation is memory-limited |
 
 ---
 
@@ -248,6 +335,26 @@ Multi-server MCP client with tool discovery and execution.
 
 ---
 
+## Agent Integration
+
+Built-in support for external AI coding agents via auto-generated configuration. Agents connect through NovaMLX's OpenAI-compatible API as their LLM backend.
+
+| Agent | Description | Config Format |
+|-------|-------------|---------------|
+| **OpenClaw** | Open-source AI agent framework with plugin system and tool use | JSON (`~/.openclaw/openclaw.json`) |
+| **Hermes Agent** | Autonomous AI agent with multi-step reasoning and tool execution | YAML (`~/.hermes/config.yaml`) |
+| **OpenCode** | Terminal-based AI programming assistant with code editing | Environment variable |
+
+| Feature | Details |
+|---------|---------|
+| **Auto-detection** | Scans `$PATH` and common install locations for agent binaries |
+| **Config generation** | One-click config with correct port, API key, and model settings |
+| **Copy to clipboard** | Quick copy for pasting into agent config files |
+| **Install link** | Direct link to each agent's GitHub repository |
+| **GUI** | Dedicated Agents tab in the menu bar app |
+
+---
+
 ## Model Management
 
 ### Admin Endpoints (Port 8081, Bearer auth)
@@ -262,12 +369,45 @@ Multi-server MCP client with tool discovery and execution.
 | `POST` | `/admin/models/discover` | Scan filesystem for new models |
 | `GET` | `/admin/models/{id}/settings` | Get per-model settings |
 | `PUT` | `/admin/models/{id}/settings` | Update per-model settings |
+| `GET` | `/admin/api/memory` | Memory state and pressure monitoring |
 
-### Memory Management
+### Model Eviction
 - **LRU eviction** of unpinned models when memory budget exceeded
 - **TTL-based auto-unload** (configurable per model)
 - **OS memory pressure handler**: Critical → evict all unpinned; Warning → evict to 1 unpinned
 - **Periodic monitoring** (60s): GPU memory >80% triggers eviction
+
+---
+
+## Memory Management
+
+System-level memory pressure monitoring with automatic model eviction via `ProcessMemoryEnforcer`.
+
+### ProcessMemoryEnforcer
+
+Actor-based memory pressure manager with configurable policies:
+
+| Feature | Details |
+|---------|---------|
+| **Polling** | 1-second memory pressure monitoring loop |
+| **Soft limit** | Triggers warning log when exceeded |
+| **Hard limit** | Forces immediate eviction of unpinned models |
+| **Auto mode** | Reserves `max(4GB, min(8GB, physMem/5))` for system, rest available to NovaMLX |
+| **Percent mode** | User-defined percentage of physical RAM (e.g., `80%`) |
+| **Fixed mode** | Absolute byte limit (e.g., `24GB`, `4096MB`) |
+| **OS integration** | Responds to macOS memory pressure notifications |
+| **GUI config** | Mode picker in Settings with conditional inputs for percent/fixed values |
+
+### Memory Budget Tracking
+
+Per-sequence KV cache budget with admission control:
+
+| Feature | Details |
+|---------|---------|
+| **Reservation** | Each sequence reserves KV cache budget before admission |
+| **Release** | Budget freed on sequence completion |
+| **Admission control** | Rejects requests when available budget insufficient |
+| **TurboQuant boost** | KV quantization effectively doubles admission capacity |
 
 ---
 
@@ -304,6 +444,20 @@ Browse, search, and download models directly from HuggingFace.
 | **Downloads** | Async file-by-file with progress tracking and cancellation |
 | **Dashboard UI** | Search box, results table, download progress with cancel buttons |
 | **Auto-register** | Downloaded models automatically discovered and registered |
+
+---
+
+## Cloud Model Proxy
+
+Remote inference proxy that makes cloud-hosted models appear alongside local models.
+
+| Feature | Details |
+|---------|---------|
+| **Protocol** | OpenAI-compatible API passthrough |
+| **Streaming** | Full SSE streaming passthrough with token-by-token relay |
+| **Model discovery** | Cloud models listed in `/v1/models` alongside local models |
+| **Configuration** | Remote endpoint URL and API key per cloud model |
+| **Use case** | Access models too large for local GPU, or add remote fallback capacity |
 
 ---
 
@@ -370,8 +524,35 @@ Native SwiftUI menu bar extra with brain icon.
 |---------|---------|
 | **Status tab** | Running indicator, server address, loaded models, GPU memory, active requests, uptime, tok/s |
 | **Models tab** | Loaded model list with indicators, downloaded count, disk usage |
+| **Agents tab** | External agent detection (OpenClaw, Hermes, OpenCode), config generation, install links |
+| **Settings tab** | View/Edit config toggle, memory limit configuration, model settings, server management |
 | **Polling** | 2-second stats refresh |
 | **Window** | 280×200pt floating panel |
+
+---
+
+## Internationalization
+
+Full i18n system supporting 9 languages across all GUI views and web interfaces.
+
+| Language | Code |
+|----------|------|
+| English | `en` |
+| 简体中文 | `zh-Hans` |
+| 繁體中文 (香港) | `zh-Hant-HK` |
+| 繁體中文 (台灣) | `zh-Hant-TW` |
+| 日本語 | `ja` |
+| 한국어 | `ko` |
+| Français | `fr` |
+| Deutsch | `de` |
+| Русский | `ru` |
+
+| Feature | Details |
+|---------|---------|
+| **Pattern** | `L10n.tr("key.path")` with compile-time key validation |
+| **Coverage** | Settings, Agents, Chat, Menu Bar, Dashboard — all user-facing strings |
+| **Fallback** | English fallback for missing translations |
+| **Web UI** | Chat and Dashboard also fully internationalized |
 
 ---
 
@@ -385,6 +566,25 @@ Native SwiftUI menu bar extra with brain icon.
 | **Request ID** | `x-request-id` header pass-through or auto-generation |
 | **Error handling** | OpenAI-compatible JSON error bodies with proper HTTP status codes |
 | **Admin isolation** | Admin API disabled entirely when no API keys configured |
+| **Worker signing** | Ad-hoc code signing for worker subprocess to satisfy macOS process integrity |
+
+---
+
+## Homebrew Distribution
+
+Install NovaMLX via Homebrew with automatic updates.
+
+```bash
+brew tap cnshsliu/nova
+brew install --cask novamlx
+```
+
+| Feature | Details |
+|---------|---------|
+| **Tap** | `cnshsliu/nova` Homebrew tap |
+| **Cask** | `novamlx` — installs `.app` bundle to `/Applications` |
+| **Updates** | `brew upgrade --cask novamlx` fetches latest GitHub Release |
+| **Version check** | Built-in update checker queries GitHub Releases API |
 
 ---
 
@@ -400,6 +600,8 @@ Native SwiftUI menu bar extra with brain icon.
 | `maxConcurrentRequests` | `16` | Max concurrent requests |
 | `requestTimeout` | `300s` | Request timeout |
 | `contextScalingTarget` | `nil` | Scale reported token counts for billing compatibility |
+| `maxProcessMemory` | `auto` | Process memory limit: `auto`, percent (`80%`), or absolute (`24GB`, `4096MB`) |
+| `maxRequestSizeMB` | `100` | Maximum request body size in megabytes |
 
 ### Engine Configuration
 | Parameter | Default | Description |
@@ -422,33 +624,40 @@ Native SwiftUI menu bar extra with brain icon.
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                    macOS Menu Bar App                     │
+│     Status • Models • Agents • Settings • Dashboard      │
 ├──────────────────────────────────────────────────────────┤
 │                   NovaMLX API Server                      │
 │  ┌─────────────────┐  ┌──────────────────────────────┐  │
 │  │  Inference API   │  │        Admin API              │  │
 │  │  (port 8080)     │  │        (port 8081)            │  │
 │  │  • OpenAI        │  │  • Model Management           │  │
-│  │  • Anthropic     │  │  • Settings                   │  │
+│  │  • Anthropic     │  │  • Per-Model Settings         │  │
 │  │  • Embeddings    │  │  • Benchmarking               │  │
 │  │  • Reranking     │  │  • HuggingFace Browser        │  │
-│  │  • Audio STT/TTS │  │  • TurboQuant                 │  │
-│  │  • MCP Tools     │  │  • Dashboard UI               │  │
+│  │  • Audio STT/TTS │  │  • TurboQuant Config          │  │
+│  │  • MCP Tools     │  │  • Memory Monitoring          │  │
+│  │  • Cloud Proxy   │  │  • Dashboard UI               │  │
 │  └────────┬─────────┘  └──────────────┬───────────────┘  │
 │           └──────────┬────────────────┘                   │
 │                      ▼                                    │
 │  ┌──────────────────────────────────────────────────┐    │
 │  │            Inference Service                      │    │
 │  │  • Continuous Batcher  • Session Manager          │    │
-│  │  • Engine Pool         • Model Settings           │    │
+│  │  • Speculative Decode  • Engine Pool              │    │
+│  │  • Model Settings      • MCP Client Manager       │    │
 │  └────────────────────────┬─────────────────────────┘    │
 │                           ▼                               │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │              MLX Engine                           │    │
-│  │  • LLM/VLM Generation  • Structured Output       │    │
-│  │  • Streaming            • TurboQuant              │    │
-│  │  • Prefix Cache         • Vision Feature Cache    │    │
-│  └────────────────────────┬─────────────────────────┘    │
-│                           ▼                               │
+│  ┌──────────────────────┬──────────────────────────┐     │
+│  │   MLX Engine Process │  Worker Subprocess        │     │
+│  │  • LLM/VLM Generation│  • stdin/stdout JSON IPC  │     │
+│  │  • Structured Output  │  • ProcessMemoryEnforcer  │     │
+│  │  • TurboQuant         │  • WorkerSupervisor       │     │
+│  │  • Prefix/SSD Cache   │  • GPU-Isolated Memory    │     │
+│  │  • Vision Feature     │                           │     │
+│  │  • TurnStopProcessor  │                           │     │
+│  │  • ControlTokenFilter │                           │     │
+│  └────────────────────┬─┴──────────────────────────┘     │
+│                       ▼                                   │
 │  ┌──────────────────────────────────────────────────┐    │
 │  │          MLX / Apple Silicon GPU                  │    │
 │  │  • Lazy Evaluation  • Unified Memory  • Metal    │    │
