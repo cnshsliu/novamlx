@@ -61,6 +61,10 @@ public final class MetricsStore: @unchecked Sendable {
     private let lock = NovaMLXLock()
     private var saveCounter: Int = 0
     private var _recentTps: Double = 0
+    private var _lastTpsUpdate: Date = Date.distantPast
+
+    /// Seconds after which a cached TPS value is considered stale and returned as 0
+    private let tpsStaleThreshold: TimeInterval = 5
 
     public init(baseDirectory: URL) {
         self.metricsFile = baseDirectory.appendingPathComponent("metrics.json")
@@ -74,13 +78,17 @@ public final class MetricsStore: @unchecked Sendable {
     }
 
     public var recentTokensPerSecond: Double {
-        lock.withLock { _recentTps }
+        lock.withLock {
+            if Date().timeIntervalSince(_lastTpsUpdate) > tpsStaleThreshold { return 0 }
+            return _recentTps
+        }
     }
 
     public func recordRequest(model: String, tokens: UInt64, inferenceTime: Double) {
         lock.withLock {
             if inferenceTime > 0 {
                 _recentTps = Double(tokens) / inferenceTime
+                _lastTpsUpdate = Date()
             }
             _metrics.totalRequestsAllTime += 1
             _metrics.totalTokensAllTime += tokens

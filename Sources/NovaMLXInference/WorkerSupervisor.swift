@@ -110,7 +110,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     public func sendUnload(modelId: String) async throws {
         let msg = WorkerMessage(type: WorkerMessageType.unload, modelId: modelId)
-        let response = try await sendAndWait(msg, requestId: "unload-\(modelId)")
+        let response = try await sendAndWait(msg, requestId: modelId)
         guard response.type == WorkerMessageType.unloaded else {
             throw NovaMLXError.inferenceFailed(response.errorMessage ?? "Unload failed")
         }

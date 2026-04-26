@@ -3,6 +3,7 @@ import Foundation
 import HTTPTypes
 import Hummingbird
 import NovaMLXCore
+
 import NovaMLXModelManager
 @testable import NovaMLXAPI
 
@@ -335,5 +336,110 @@ struct APITypesTests {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect(json?["encoding_format"] as? String == "base64")
         #expect(json?["input"] as? [String] == ["hello", "world"])
+    }
+
+    // MARK: - VLM (Vision) Content Decoding
+
+    @Test("OpenAI chat message with image_url content part")
+    func openAIChatMessageWithImageURL() throws {
+        let json = """
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is in this image?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}}
+            ]
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let msg = try JSONDecoder().decode(OpenAIChatMessage.self, from: data)
+        #expect(msg.role == "user")
+
+        guard let content = msg.content else {
+            #expect(Bool(false), "content should not be nil")
+            return
+        }
+
+        // Verify text is extracted
+        #expect(content.textValue == "What is in this image?")
+
+        // Verify image parts
+        let imageParts = content.imageParts
+        #expect(imageParts.count == 1)
+        if case .imageUrl(let img) = imageParts[0] {
+            #expect(img.url.hasPrefix("data:image/png;base64,"))
+        } else {
+            #expect(Bool(false), "First part should be image_url")
+        }
+    }
+
+    @Test("OpenAI chat message with multiple images")
+    func openAIChatMessageWithMultipleImages() throws {
+        let json = """
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/img1.jpg"}},
+                {"type": "text", "text": "Compare these images"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/img2.jpg"}}
+            ]
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let msg = try JSONDecoder().decode(OpenAIChatMessage.self, from: data)
+
+        guard let content = msg.content else {
+            #expect(Bool(false), "content should not be nil")
+            return
+        }
+
+        #expect(content.textValue == "Compare these images")
+        #expect(content.imageParts.count == 2)
+
+        let urls = content.imageParts.compactMap { part -> String? in
+            if case .imageUrl(let img) = part { return img.url } else { return nil }
+        }
+        #expect(urls.count == 2)
+        #expect(urls[0] == "https://example.com/img1.jpg")
+        #expect(urls[1] == "https://example.com/img2.jpg")
+    }
+
+    @Test("VLM ChatMessage maps images from OpenAIChatMessage")
+    func vlmChatMessageImageMapping() throws {
+        let json = """
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,FAKEBASE64=="}}
+            ]
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let msg = try JSONDecoder().decode(OpenAIChatMessage.self, from: data)
+
+        let imageURLs = msg.content?.imageParts.compactMap { part -> String? in
+            if case .imageUrl(let img) = part { return img.url } else { return nil }
+        }
+        let chatMsg = ChatMessage(
+            role: .user,
+            content: msg.content?.textValue,
+            images: (imageURLs?.isEmpty ?? true) ? nil : imageURLs
+        )
+
+        #expect(chatMsg.content == "Describe this")
+        #expect(chatMsg.images?.count == 1)
+        #expect(chatMsg.images?[0] == "data:image/png;base64,FAKEBASE64==")
+    }
+
+    @Test("ImageURL decodes detail field")
+    func imageURLWithDetail() throws {
+        let json = """
+        {"url": "https://example.com/photo.jpg", "detail": "high"}
+        """
+        let data = json.data(using: .utf8)!
+        let img = try JSONDecoder().decode(ImageURL.self, from: data)
+        #expect(img.url == "https://example.com/photo.jpg")
+        #expect(img.detail == "high")
     }
 }

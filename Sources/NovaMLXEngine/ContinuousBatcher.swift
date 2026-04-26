@@ -151,7 +151,7 @@ public final class ContinuousBatcher: @unchecked Sendable {
     private func canAdmitRequest(_ request: InferenceRequest) async -> Bool {
         let modelId = request.model
 
-        // Per-model concurrency check (like OLLAMA_NUM_PARALLEL)
+        // Per-model concurrency check
         let activeForModel = lock.withLock {
             _activeModelCounts[modelId] ?? 0
         }

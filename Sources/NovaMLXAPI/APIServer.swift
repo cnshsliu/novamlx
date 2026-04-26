@@ -260,6 +260,7 @@ extension NovaMLXError {
         case .downloadFailed: .badGateway
         case .unsupportedModel: .badRequest
         case .contextWindowExceeded: .badRequest
+        case .insufficientMemory: .serviceUnavailable
         }
     }
 
@@ -274,6 +275,7 @@ extension NovaMLXError {
         case .downloadFailed: "server_error"
         case .unsupportedModel: "invalid_request_error"
         case .contextWindowExceeded: "invalid_request_error"
+        case .insufficientMemory: "server_error"
         }
     }
 
@@ -288,6 +290,7 @@ extension NovaMLXError {
         case .downloadFailed: "download_failed"
         case .unsupportedModel: "unsupported_model"
         case .contextWindowExceeded: "context_window_exceeded"
+        case .insufficientMemory: "insufficient_memory"
         }
     }
 }
@@ -302,7 +305,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private let perplexityService: PerplexityService
     private let updateChecker: UpdateChecker
     private let hfService: HuggingFaceService
-    private let audioService: AudioService
     private let config: ServerConfig
 
     public init(
@@ -322,7 +324,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         self.perplexityService = PerplexityService(inferenceService: inferenceService)
         self.updateChecker = UpdateChecker()
         self.hfService = HuggingFaceService(modelDirectory: modelManager.modelsDirectory)
-        self.audioService = AudioService()
         self.config = config
         // When HF download completes, re-run discovery so model appears in registry
         self.hfService.onModelDownloaded = { [weak self] repoId in
@@ -342,7 +343,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let updater = self.updateChecker
         let cfg = self.config
         let hf = self.hfService
-        let audio = self.audioService
 
         let rateLimiter = RateLimiter(config: RateLimitConfig())
         let securityHeaders = SecurityHeadersMiddleware()
@@ -633,64 +633,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
                 store.delete(responseId)
                 return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
-            }
-            Post("/v1/audio/transcriptions") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                let data = Data(buffer: body)
-                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                let language = json?["language"] as? String
-                let audioData: Data
-                if let file = json?["file"] as? String, let fileData = Data(base64Encoded: file) {
-                    audioData = fileData
-                } else if let file = json?["audio"] as? String, let fileData = Data(base64Encoded: file) {
-                    audioData = fileData
-                } else {
-                    audioData = data
-                }
-                let result = try await audio.transcribe(audioData: audioData, language: language)
-                return try Self.jsonResponse(result)
-            }
-            Post("/v1/audio/speech") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
-                let text = json["input"] as? String ?? json["text"] as? String ?? ""
-                let voice = json["voice"] as? String
-                let speed = json["speed"] as? Double
-                let language = json["language"] as? String
-                let stream = json["stream"] as? Bool ?? false
-                guard !text.isEmpty else {
-                    return Response(status: .badRequest, body: .init(byteBuffer: ByteBuffer(string: "{\"error\":\"input text required\"}")))
-                }
-                let synthesisRequest = AudioService.SynthesisRequest(text: text, voice: voice, speed: speed, language: language)
-
-                if stream {
-                    let audioStream = audio.synthesizeStream(request: synthesisRequest)
-                    let responseBody: ResponseBody = .init { writer in
-                        do {
-                            for try await chunk in audioStream {
-                                try await writer.write(ByteBuffer(data: chunk.data))
-                            }
-                        } catch {
-                            NovaMLXLog.error("Audio stream error: \(error)")
-                        }
-                    }
-                    var headers = HTTPFields()
-                    headers[.contentType] = "audio/wav"
-                    return Response(status: .ok, headers: headers, body: responseBody)
-                } else {
-                    let wavData = try await audio.synthesize(request: synthesisRequest)
-                    var headers = HTTPFields()
-                    headers[.contentType] = "audio/wav"
-                    return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: wavData)))
-                }
-            }
-            Get("/v1/audio/voices") { _, _ in
-                let voices = AudioService.supportedVoices()
-                return try Self.jsonResponse(["voices": voices])
-            }
-            Get("/v1/audio/languages") { _, _ in
-                let languages = AudioService.supportedLanguages()
-                return try Self.jsonResponse(["languages": languages])
             }
             Get("/health") { _, _ in
                 let stats = inference.stats

@@ -687,4 +687,174 @@ struct E2ETests {
         }
         #expect(await client.isServerAlive(), "Server must survive memory safety test")
     }
+
+    // ─── Suite 6: ContinuousBatcher E2E ───
+
+    @Test("ContinuousBatcher: concurrent requests complete under batcher")
+    func testBatcherConcurrentCompletion() async throws {
+        try await requireServer(client)
+        let models = try await getAllDownloadedModels(client)
+        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
+
+        for model in models {
+            let modelId = model.id
+            print("  [batcher-concurrent] Loading \(modelId)...")
+            let loaded = try await loadModel(client, modelId: modelId)
+            guard loaded else {
+                Issue.record("\(modelId): failed to load")
+                continue
+            }
+
+            // Fire 10 concurrent requests — exceeds maxBatchSize to exercise queuing
+            let requestCount = 10
+            try await withThrowingTaskGroup(of: (Int, Bool).self) { group in
+                for i in 0..<requestCount {
+                    group.addTask {
+                        let body: [String: Any] = [
+                            "model": modelId,
+                            "messages": [["role": "user", "content": "Reply with just the number \(i)."]],
+                            "stream": false, "max_tokens": 10
+                        ]
+                        let data = try JSONSerialization.data(withJSONObject: body)
+                        if let (resp, status) = await safePost(self.client,
+                            url: apiBase.appendingPathComponent("v1/chat/completions"),
+                            body: data, modelId: modelId), status == 200 {
+                            if let json = try? JSONSerialization.jsonObject(with: resp) as? [String: Any],
+                               let choices = json["choices"] as? [[String: Any]],
+                               let text = (choices.first?["message"] as? [String: Any])?["content"] as? String,
+                               !text.isEmpty {
+                                return (i, true)
+                            }
+                        }
+                        return (i, false)
+                    }
+                }
+
+                var successes = 0
+                for try await (_, ok) in group {
+                    if ok { successes += 1 }
+                }
+                #expect(successes == requestCount,
+                    "\(modelId): only \(successes)/\(requestCount) concurrent requests completed under batcher")
+                print("    \(modelId): \(successes)/\(requestCount) concurrent requests OK")
+            }
+
+            try? await unloadModel(client, modelId: modelId)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+            guard await client.isServerAlive() else {
+                Issue.record("Server died after batcher concurrent test with \(modelId)")
+                let recovered = await client.waitForServer(maxWait: 30)
+                if !recovered { return }
+                break
+            }
+        }
+    }
+
+    @Test("ContinuousBatcher: stats endpoint reports batcher metrics")
+    func testBatcherStats() async throws {
+        try await requireServer(client)
+        let models = try await getAllDownloadedModels(client)
+        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
+
+        for model in models {
+            let modelId = model.id
+            print("  [batcher-stats] Loading \(modelId)...")
+            let loaded = try await loadModel(client, modelId: modelId)
+            guard loaded else { continue }
+
+            // Fire a few concurrent requests to exercise the batcher
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<4 {
+                    group.addTask {
+                        let body: [String: Any] = [
+                            "model": modelId,
+                            "messages": [["role": "user", "content": "Say hi."]],
+                            "stream": false, "max_tokens": 10
+                        ]
+                        let data = try JSONSerialization.data(withJSONObject: body)
+                        _ = await safePost(self.client,
+                            url: apiBase.appendingPathComponent("v1/chat/completions"),
+                            body: data, modelId: modelId)
+                    }
+                }
+                for try await _ in group { }
+            }
+
+            // Check stats endpoint
+            let (data, status) = try await client.get(apiBase.appendingPathComponent("v1/stats"))
+            #expect(status == 200, "\(modelId): stats endpoint returned HTTP \(status)")
+            guard status == 200 else {
+                try? await unloadModel(client, modelId: modelId)
+                continue
+            }
+
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let batcher = json["batcher"] as? [String: Any] {
+                let totalCompleted = batcher["totalCompleted"] as? UInt64 ?? 0
+                let totalQueued = batcher["totalQueued"] as? UInt64 ?? 0
+                let maxBatchSize = batcher["maxBatchSize"] as? Int ?? 0
+                #expect(totalCompleted > 0, "\(modelId): batcher should have completed requests, got \(totalCompleted)")
+                #expect(totalQueued > 0, "\(modelId): batcher should have queued requests, got \(totalQueued)")
+                #expect(maxBatchSize > 0, "\(modelId): maxBatchSize should be > 0")
+                print("    \(modelId): batcher stats — completed=\(totalCompleted), queued=\(totalQueued), maxBatch=\(maxBatchSize)")
+            } else {
+                Issue.record("\(modelId): failed to parse batcher stats")
+            }
+
+            try? await unloadModel(client, modelId: modelId)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
+    @Test("ContinuousBatcher: stream requests batched concurrently")
+    func testBatcherStreamConcurrent() async throws {
+        try await requireServer(client)
+        let models = try await getAllDownloadedModels(client)
+        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
+
+        for model in models {
+            let modelId = model.id
+            print("  [batcher-stream] Loading \(modelId)...")
+            let loaded = try await loadModel(client, modelId: modelId)
+            guard loaded else { continue }
+
+            // Fire 6 concurrent stream requests
+            let requestCount = 6
+            try await withThrowingTaskGroup(of: Bool.self) { group in
+                for i in 0..<requestCount {
+                    group.addTask {
+                        let body: [String: Any] = [
+                            "model": modelId,
+                            "messages": [["role": "user", "content": "Count to \(i) in one word."]],
+                            "stream": true, "max_tokens": 10
+                        ]
+                        let data = try JSONSerialization.data(withJSONObject: body)
+                        let result = await safePostStream(self.client,
+                            url: apiBase.appendingPathComponent("v1/chat/completions"),
+                            body: data, modelId: modelId)
+                        return result != nil && !(result ?? "").isEmpty
+                    }
+                }
+
+                var successes = 0
+                for try await ok in group {
+                    if ok { successes += 1 }
+                }
+                #expect(successes >= requestCount / 2,
+                    "\(modelId): only \(successes)/\(requestCount) stream requests completed under batcher")
+                print("    \(modelId): \(successes)/\(requestCount) stream requests OK")
+            }
+
+            try? await unloadModel(client, modelId: modelId)
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+
+            guard await client.isServerAlive() else {
+                Issue.record("Server died after batcher stream test with \(modelId)")
+                let recovered = await client.waitForServer(maxWait: 30)
+                if !recovered { return }
+                break
+            }
+        }
+    }
 }

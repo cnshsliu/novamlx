@@ -9,7 +9,6 @@ struct StatusPageView: View {
     let modelManager: ModelManager
     @EnvironmentObject var l10n: L10n
     @State private var deviceInfo: DeviceInfo?
-    @State private var tqStats: [String: TQStatInfo] = [:]
 
     var body: some View {
         ScrollView {
@@ -18,11 +17,9 @@ struct StatusPageView: View {
                 tpsChart
                 metricsGrid
                 deviceSection
-                loadedModelsSection
             }
             .padding(24)
         }
-        .onAppear { loadTQStats() }
     }
 
     private var serverStatusHero: some View {
@@ -51,10 +48,10 @@ struct StatusPageView: View {
 
             if appState.isServerRunning {
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text(String(format: "%.1f", appState.systemStats.tokensPerSecond))
+                    Text(String(format: "%.1f", appState.peakTokensPerSecond))
                         .font(.title.bold())
                         .foregroundColor(NovaTheme.Colors.accent)
-                    Text(l10n.tr("status.tokensPerSec"))
+                    Text(l10n.tr("status.peakTokensPerSec"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -69,7 +66,7 @@ struct StatusPageView: View {
     private var tpsChart: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(l10n.tr("status.inferenceSpeed"))
+                Text(l10n.tr("status.realtimeInferenceSpeed"))
                     .font(.headline)
                 Spacer()
                 if let last = appState.tpsHistory.last, last > 0 {
@@ -166,57 +163,6 @@ struct StatusPageView: View {
         }
     }
 
-    private var loadedModelsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(l10n.tr("status.activeModels"))
-                .font(.headline)
-
-            if appState.loadedModels.isEmpty {
-                Text(l10n.tr("status.noModelsLoaded"))
-                    .foregroundColor(.secondary)
-                    .font(.subheadline)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(20)
-            } else {
-                ForEach(appState.loadedModels, id: \.self) { modelId in
-                    HStack {
-                        Image(systemName: "circle.fill")
-                            .foregroundColor(NovaTheme.Colors.statusOK)
-                            .font(.caption2)
-                        Text(modelId)
-                            .font(.system(size: 13))
-                            .lineLimit(1)
-                        CopyIDButton(id: modelId)
-                        Spacer()
-                        if modelManager.getRecord(modelId) != nil {
-                            if let tq = tqStats[modelId] {
-                                Text("KV \(tq.bits)-bit (\(String(format: "%.1f", tq.compressionRatio))x)")
-                                    .font(.caption2)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(NovaTheme.Colors.accentDim)
-                                    .foregroundColor(NovaTheme.Colors.accent)
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                            }
-                        }
-                        Text(l10n.tr("status.ready"))
-                            .font(.caption)
-                            .foregroundColor(NovaTheme.Colors.statusOK)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(NovaTheme.Colors.rowBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NovaTheme.Colors.cardBackground)
-        .overlay(RoundedRectangle(cornerRadius: NovaTheme.Radius.lg).stroke(NovaTheme.Colors.cardBorder, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.lg))
-    }
-
     private func formatUptime(_ interval: TimeInterval) -> String {
         let h = Int(interval) / 3600
         let m = Int(interval) % 3600 / 60
@@ -229,34 +175,4 @@ struct StatusPageView: View {
         return "\(n)"
     }
 
-    private func loadTQStats() {
-        let adminPort = appState.adminPort
-        guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/turboquant") else { return }
-        Task {
-            var request = URLRequest(url: url)
-            if let apiKey = appState.apiKey {
-                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            }
-            do {
-                let (data, resp) = try await URLSession.shared.data(for: request)
-                guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return }
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let models = json["models"] as? [[String: Any]] {
-                    var stats: [String: TQStatInfo] = [:]
-                    for m in models {
-                        guard let id = m["modelId"] as? String,
-                              let bits = m["bits"] as? Int else { continue }
-                        let ratio = m["compressionRatio"] as? Double ?? 0
-                        stats[id] = TQStatInfo(bits: bits, compressionRatio: ratio)
-                    }
-                    tqStats = stats
-                }
-            } catch {}
-        }
-    }
-}
-
-private struct TQStatInfo {
-    let bits: Int
-    let compressionRatio: Double
 }

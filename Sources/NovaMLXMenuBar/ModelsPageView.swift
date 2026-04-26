@@ -144,54 +144,49 @@ struct ModelsPageView: View {
             .filter { $0.isActive || $0.status == .failed }
             .sorted { $0.startedAt > $1.startedAt }
 
-        return VStack(spacing: 0) {
-            if !activeOrFailed.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    sectionHeader(
-                        activeOrFailed.allSatisfy(\.isActive) ? l10n.tr("models.downloading") : l10n.tr("models.downloads"),
-                        icon: "arrow.down.circle",
-                        count: activeOrFailed.count
-                    )
-                    ForEach(activeOrFailed, id: \.repoId) { task in
-                        topDownloadRow(task)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                Divider()
-            }
+        let completed = appState.downloadTasks.values
+            .filter { $0.status == .completed }
+            .sorted { $0.startedAt > $1.startedAt }
 
-            searchBar
-            Divider()
-
-            ScrollView {
-                VStack(spacing: 20) {
-                    if !searchResults.isEmpty {
-                        searchResultsSection
-                    }
-                    manualDownloadSection
-
-                    let completed = appState.downloadTasks.values
-                        .filter { $0.status == .completed }
-                        .sorted { $0.startedAt > $1.startedAt }
-
-                    if !completed.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            sectionHeader(l10n.tr("models.completed"), icon: "checkmark.circle", count: completed.count)
-                            ForEach(completed, id: \.repoId) { task in
-                                completedDownloadRow(task)
-                            }
+        return ScrollView {
+            VStack(spacing: 20) {
+                if !activeOrFailed.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionHeader(
+                            activeOrFailed.allSatisfy(\.isActive) ? l10n.tr("models.downloading") : l10n.tr("models.downloads"),
+                            icon: "arrow.down.circle",
+                            count: activeOrFailed.count
+                        )
+                        ForEach(activeOrFailed, id: \.repoId) { task in
+                            topDownloadRow(task)
                         }
-                        .sectionCard()
                     }
-
-                    if searchResults.isEmpty && activeOrFailed.isEmpty && appState.downloadTasks.isEmpty {
-                        emptyState(l10n.tr("models.noDownloads"), subtitle: l10n.tr("models.noDownloadsSub"))
-                            .padding(.top, 60)
-                    }
+                    .sectionCard()
                 }
-                .padding(24)
+
+                searchBar
+
+                if !searchResults.isEmpty {
+                    searchResultsSection
+                }
+                manualDownloadSection
+
+                if !completed.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        sectionHeader(l10n.tr("models.completed"), icon: "checkmark.circle", count: completed.count)
+                        ForEach(completed, id: \.repoId) { task in
+                            completedDownloadRow(task)
+                        }
+                    }
+                    .sectionCard()
+                }
+
+                if searchResults.isEmpty && activeOrFailed.isEmpty && appState.downloadTasks.isEmpty {
+                    emptyState(l10n.tr("models.noDownloads"), subtitle: l10n.tr("models.noDownloadsSub"))
+                        .padding(.top, 60)
+                }
             }
+            .padding(24)
         }
     }
 
@@ -216,7 +211,7 @@ struct ModelsPageView: View {
                         Label(l10n.tr("models.search"), systemImage: "magnifyingglass")
                     }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .disabled(searchText.isEmpty || isSearching)
 
                 Spacer()
@@ -243,7 +238,7 @@ struct ModelsPageView: View {
                 }
             }
         }
-        .padding(16)
+        .sectionCard()
     }
 
     // MARK: - Search Results
@@ -262,10 +257,22 @@ struct ModelsPageView: View {
     private func searchResultRow(_ result: HFSearchResult) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(result.id).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                    .foregroundColor(NovaTheme.Colors.accent)
-                    .help(l10n.tr("models.clickDetails"))
-                    .onTapGesture { fetchModelCard(repoId: result.id) }
+                HStack(spacing: 6) {
+                    Text(result.id).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .help(l10n.tr("models.clickDetails"))
+                        .onTapGesture { fetchModelCard(repoId: result.id) }
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(result.id, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(l10n.tr("agents.copyConfig"))
+                }
                 if !result.tags.isEmpty {
                     HStack(spacing: 4) {
                         ForEach(result.tags.prefix(3), id: \.self) { tag in

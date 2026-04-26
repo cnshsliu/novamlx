@@ -184,7 +184,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine.cleanupOrphanedCacheDirs(downloadedModelIds: downloadedIds)
             Self.cleanupLegacyAppSupportDir()
 
-            // Restore previously loaded models and detect interrupted downloads
             if workerMode {
                 do {
                     try inferenceService.startWorker()
@@ -192,28 +191,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } catch {
                     NovaMLXLog.error("Failed to start worker: \(error)")
                 }
-            }
-            await inferenceService.restoreModels(modelManager: modelManager)
-            appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
-            appState.resumeIncompleteDownloads()
-
-            appState.startStatsMonitoring(inferenceService: inferenceService)
-
-            // Discover cloud models from remote endpoint
-            Task {
-                let _ = await CloudBackend.shared.fetchModels()
-                appState.cloudModels = await inferenceService.listCloudModels()
-                NovaMLXLog.info("Cloud models discovered: \(appState.cloudModels.count)")
-            }
-
-            let memHandler = MemoryPressureHandler(engine: engine, settingsManager: settingsManager)
-            memHandler.start()
-            memoryPressureHandler = memHandler
-
-            // Start ProcessMemoryEnforcer (1s polling, configurable limits)
-            await engine.startMemoryEnforcer()
-            await engine.configureEnforcerSettings { [settingsManager] modelId in
-                settingsManager.getSettings(modelId)
             }
 
             let serverConfig = await config.serverConfig
@@ -234,6 +211,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 serverTask = Task {
                     try? await apiServer.start()
                 }
+            }
+
+            // Restore models in background after API is live
+            Task {
+                await inferenceService.restoreModels(modelManager: modelManager)
+                appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
+                appState.resumeIncompleteDownloads()
+            }
+
+            appState.startStatsMonitoring(inferenceService: inferenceService)
+
+            // Discover cloud models from remote endpoint
+            Task {
+                let _ = await CloudBackend.shared.fetchModels()
+                appState.cloudModels = await inferenceService.listCloudModels()
+                NovaMLXLog.info("Cloud models discovered: \(appState.cloudModels.count)")
+            }
+
+            let memHandler = MemoryPressureHandler(engine: engine, settingsManager: settingsManager)
+            memHandler.start()
+            memoryPressureHandler = memHandler
+
+            // Start ProcessMemoryEnforcer (1s polling, configurable limits)
+            await engine.startMemoryEnforcer()
+            await engine.configureEnforcerSettings { [settingsManager] modelId in
+                settingsManager.getSettings(modelId)
             }
         }
     }

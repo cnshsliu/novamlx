@@ -58,6 +58,22 @@ struct ActiveStreamSequence: @unchecked Sendable {
     var isFinished: Bool
     /// Recent token IDs for N-gram speculation context.
     var recentTokenIds: [Int]
+    /// Frequency penalty value — prevents repetition collapse in small quantized models.
+    /// Applied inline via scatter_add before sampling. 0 = disabled.
+    let frequencyPenalty: Float
+
+    // Accumulated batch decode — avoids per-token decode that breaks SentencePiece spaces
+    var accumulatedTokenIds: [Int] = []
+    var lastDecodedText: String = ""
+
+    mutating func decodeNextToken(_ tokenId: Int, tokenizer: Tokenizer) -> String? {
+        accumulatedTokenIds.append(tokenId)
+        let fullText = tokenizer.decode(accumulatedTokenIds)
+        let deltaLength = fullText.count - lastDecodedText.count
+        lastDecodedText = fullText
+        guard deltaLength > 0 else { return nil }
+        return String(fullText.suffix(deltaLength))
+    }
 }
 
 // MARK: - Queued Stream Request
@@ -491,6 +507,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             minP: request.minP ?? 0.0
         )
 
+        // Frequency penalty to prevent repetition collapse (default 0.5 if user doesn't specify)
+        let freqPenaltyValue = request.frequencyPenalty ?? 0.5
+
         // Run entire prefill + first token sampling inside perform to ensure
         // correct MLX lazy evaluation context.
         let cachesBox = MutableSendableBox<[KVCache]?>(nil)
@@ -541,7 +560,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
         let (firstTokenId, logitStats) = prefillResultBox.value
         let caches = cachesBox.value ?? []
-        let firstTokenText = firstTokenId >= 0 ? (container.tokenizer?.decode([firstTokenId]) ?? "") : "<invalid>"
+        let firstTokenText: String
+        var initialAccumulatedIds: [Int] = []
+        var initialDecodedText: String = ""
+        if firstTokenId >= 0, let tok = container.tokenizer {
+            initialAccumulatedIds = [firstTokenId]
+            firstTokenText = tok.decode(initialAccumulatedIds)
+            initialDecodedText = firstTokenText
+        } else {
+            firstTokenText = "<invalid>"
+        }
         NovaMLXLog.info("[Prefill:\(reqTag)] First token: id=\(firstTokenId), text='\(firstTokenText)', logits=[\(logitStats)]")
 
         guard firstTokenId >= 0 else {
@@ -559,8 +587,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let isEOS = eosId == firstTokenId
 
         // Yield first token to client (unless it's EOS and we finish immediately)
-        if !isEOS && !firstTokenText.isEmpty {
-            continuation.yield(Token(id: 0, text: firstTokenText))
+        let scrubbedFirstToken = MLXEngine.scrubControlTokens(firstTokenText)
+        if !isEOS && !scrubbedFirstToken.isEmpty {
+            continuation.yield(Token(id: 0, text: scrubbedFirstToken))
         }
 
         let completionCount: Int
@@ -591,7 +620,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             startTime: Date(),
             admittedAt: Date(),
             isFinished: isFinished,
-            recentTokenIds: Array(allTokens.suffix(20))
+            recentTokenIds: Array(allTokens.suffix(20)),
+            frequencyPenalty: freqPenaltyValue,
+            accumulatedTokenIds: initialAccumulatedIds,
+            lastDecodedText: initialDecodedText
         )
     }
 
@@ -618,6 +650,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             topK: request.topK ?? 0,
             minP: request.minP ?? 0.0
         )
+        let freqPenaltyValue = request.frequencyPenalty ?? Float(0.5)
         let reqTag = request.id.uuidString.prefix(8)
         let remainingArray = MLXArray(remainingTokenIds.map { Int32($0) })
         let firstTokenIdBox = await mlxContainer.perform(nonSendable: (remainingArray, restoredCaches)) { context, values in
@@ -646,11 +679,21 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             )
         }
 
-        let firstTokenText = container.tokenizer?.decode([firstTokenId]) ?? ""
+        let firstTokenText: String
+        var prefixAccumulatedIds: [Int] = []
+        var prefixDecodedText: String = ""
+        if let tok = container.tokenizer {
+            prefixAccumulatedIds = [firstTokenId]
+            firstTokenText = tok.decode(prefixAccumulatedIds)
+            prefixDecodedText = firstTokenText
+        } else {
+            firstTokenText = ""
+        }
         NovaMLXLog.info("[Prefill:\(reqTag)] First token (remaining): id=\(firstTokenId), text='\(firstTokenText)'")
 
-        if !firstTokenText.isEmpty {
-            continuation.yield(Token(id: 0, text: firstTokenText))
+        let scrubbedPrefixToken = MLXEngine.scrubControlTokens(firstTokenText)
+        if !scrubbedPrefixToken.isEmpty {
+            continuation.yield(Token(id: 0, text: scrubbedPrefixToken))
         }
 
         return ActiveStreamSequence(
@@ -669,7 +712,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             startTime: Date(),
             admittedAt: Date(),
             isFinished: false,
-            recentTokenIds: Array(allTokens.suffix(20))
+            recentTokenIds: Array(allTokens.suffix(20)),
+            frequencyPenalty: freqPenaltyValue,
+            accumulatedTokenIds: prefixAccumulatedIds,
+            lastDecodedText: prefixDecodedText
         )
     }
 
@@ -921,11 +967,24 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let token = MLXArray(Int32(seq.lastTokenId)).reshaped(1, 1)
                     let seqCaches = seq.caches
                     let seqSampler = seq.sampler
+                    let recentIds = seq.recentTokenIds
+                    let freqPen = seq.frequencyPenalty
                     let tidBox = await mlxContainer.perform(nonSendable: (token, seqCaches)) { context, values in
                         let (tokenInput, caches) = values
                         let logits = context.model(tokenInput, cache: caches)
                         eval(logits)
-                        let lastLogits = logits[0..., -1, 0...]
+                        var lastLogits = logits[0..., -1, 0...]
+
+                        // Apply frequency penalty to prevent repetition collapse
+                        if freqPen > 0, !recentIds.isEmpty {
+                            let vocabSize = lastLogits.dim(-1)
+                            let ids = MLXArray(recentIds.map { Int32($0) })
+                            let ones = MLXArray.ones([recentIds.count], type: Float32.self)
+                            let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
+                                .at[ids].add(ones)
+                            lastLogits = lastLogits - (histogram * freqPen).reshaped(1, -1)
+                        }
+
                         let sampled = seqSampler.sample(logits: lastLogits)
                         eval(sampled)
                         return SendableBox(sampled.item(Int.self))
@@ -940,6 +999,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let tokenInput = MLXArray(allTokens.map { Int32($0) }).reshaped(1, allTokens.count)
                     let seqCaches = seq.caches
                     let numDraft = draftTokens.count
+                    let recentIds = seq.recentTokenIds
+                    let freqPen = seq.frequencyPenalty
 
                     let verifyBox = await mlxContainer.perform(nonSendable: (tokenInput, seqCaches, numDraft)) { context, values in
                         let (input, caches, nDraft) = values
@@ -950,7 +1011,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         var accepted = 0
                         var allAccepted: [Int] = []
                         for pos in 0..<(1 + nDraft) {
-                            let posLogits = logits[0..., pos, 0...]
+                            var posLogits = logits[0..., pos, 0...]
+                            // Apply frequency penalty at position 0 (real decode position)
+                            if pos == 0, freqPen > 0, !recentIds.isEmpty {
+                                let vocabSize = posLogits.dim(-1)
+                                let ids = MLXArray(recentIds.map { Int32($0) })
+                                let ones = MLXArray.ones([recentIds.count], type: Float32.self)
+                                let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
+                                    .at[ids].add(ones)
+                                posLogits = posLogits - (histogram * freqPen).reshaped(1, -1)
+                            }
                             let mainToken = argMax(posLogits, axis: -1).item(Int.self)
                             if pos == 0 {
                                 // Position 0: this is the "free" bonus token from the real last token.
@@ -1016,9 +1086,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     // Record into N-gram cache for future speculation.
                     specDecoder.recordToken(tokenId)
 
-                    let decoded = container.tokenizer?.decode([tokenId]) ?? ""
-                    seq.generatedText += decoded
-                    seq.continuation.yield(Token(id: 0, text: decoded))
+                    let decoded: String
+                    if let tok = container.tokenizer, let delta = seq.decodeNextToken(tokenId, tokenizer: tok) {
+                        decoded = MLXEngine.scrubControlTokens(delta)
+                    } else {
+                        decoded = ""
+                    }
+                    seq.generatedText = seq.lastDecodedText
+                    if !decoded.isEmpty {
+                        seq.continuation.yield(Token(id: 0, text: decoded))
+                    }
 
                     lock.withLock { totalTokensViaFused += 1 }
 

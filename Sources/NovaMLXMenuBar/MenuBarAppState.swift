@@ -19,9 +19,13 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var downloadTasks: [String: DownloadTaskInfo] = [:]
     @Published public var requestedPage: AppPage? = nil
     @Published public var tpsHistory: [Double] = []
+    @Published public var peakTokensPerSecond: Double = 0
 
     private var statsTimer: Timer?
     private let maxTpsHistory = 90
+
+    /// Cap for realistic token generation speed on Apple Silicon (any value above is a measurement bug)
+    private let maxRealisticTps: Double = 500
 
     public init() {}
 
@@ -39,9 +43,14 @@ public final class MenuBarAppState: ObservableObject {
                 self.loadedModels = inferenceService.listLoadedModels()
                 self.cloudModels = await inferenceService.listCloudModels()
                 self.uptime = SystemMonitor.shared.uptime
-                self.tpsHistory.append(currentStats.recentTokensPerSecond)
+                let tps = currentStats.recentTokensPerSecond
+                self.tpsHistory.append(tps)
                 if self.tpsHistory.count > self.maxTpsHistory {
                     self.tpsHistory.removeFirst(self.tpsHistory.count - self.maxTpsHistory)
+                }
+                // Track peak, capping at realistic maximum to filter measurement bugs
+                if tps > self.peakTokensPerSecond && tps <= self.maxRealisticTps {
+                    self.peakTokensPerSecond = tps
                 }
                 await self.pollDownloadStatus()
             }

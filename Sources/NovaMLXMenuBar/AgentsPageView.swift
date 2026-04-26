@@ -44,7 +44,7 @@ struct AgentsPageView: View {
     @EnvironmentObject var l10n: L10n
 
     @State private var agents: [AgentInfo] = AgentInfo.builtIn
-    @State private var isRefreshing = false
+    @State private var rotationAngle: Double = 0
 
     var body: some View {
         ScrollView {
@@ -97,8 +97,7 @@ struct AgentsPageView: View {
             Button(action: { checkInstalledAgents() }) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11))
-                    .rotationEffect(.degrees(isRefreshing ? 360 : 0))
-                    .animation(isRefreshing ? .linear(duration: 0.6).repeatForever(autoreverses: false) : nil, value: isRefreshing)
+                    .rotationEffect(.degrees(rotationAngle))
                     .frame(width: 16, height: 16)
             }
             .buttonStyle(.bordered)
@@ -266,14 +265,18 @@ struct AgentsPageView: View {
     }
 
     private func checkInstalledAgents() {
-        isRefreshing = true
+        withAnimation(.linear(duration: 0.6).repeatForever(autoreverses: false)) {
+            rotationAngle = 360
+        }
         for i in agents.indices {
             let path = findBinary(named: agents[i].binaryNames.first ?? agents[i].id)
             agents[i].isInstalled = path != nil
             agents[i].resolvedPath = path
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            self.isRefreshing = false
+            withAnimation(.easeOut(duration: 0.15)) {
+                self.rotationAngle = 0
+            }
         }
     }
 

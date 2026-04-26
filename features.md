@@ -20,7 +20,7 @@
 - [Speculative Decoding](#speculative-decoding)
 - [Session Management](#session-management)
 - [Embeddings & Reranking](#embeddings--reranking)
-- [Audio — Speech-to-Text & Text-to-Speech](#audio--speech-to-text--text-to-speech)
+
 - [MCP — Model Context Protocol](#mcp--model-context-protocol)
 - [Agent Integration](#agent-integration)
 - [Model Management](#model-management)
@@ -81,6 +81,43 @@ Full vision-language model (VLM) pipeline for image understanding.
 | **Vision feature cache** | In-memory LRU (20 entries) + optional SSD persistence, SHA-256 hashing, per-model isolation |
 | **API** | Standard OpenAI `image_url` content parts in chat messages |
 
+### Vision Usage Example
+
+```bash
+# Describe an image via base64 data URI
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What do you see in this image?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAA...=="}}
+      ]
+    }],
+    "max_tokens": 100
+  }'
+
+# Describe an image via HTTP URL
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/gemma-4-e4b-it-4bit",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}}
+      ]
+    }]
+  }'
+```
+
+> The model names used above are examples. Browse and download more models through the app's HuggingFace browser or the admin API at `/admin/models/download`.
+
 ---
 
 ## API Compatibility
@@ -97,10 +134,6 @@ Full vision-language model (VLM) pipeline for image understanding.
 | `POST` | `/v1/responses` | OpenAI Responses API |
 | `GET` | `/v1/responses/{id}` | Retrieve stored response |
 | `DELETE` | `/v1/responses/{id}` | Delete stored response |
-| `POST` | `/v1/audio/transcriptions` | Speech-to-text |
-| `POST` | `/v1/audio/speech` | Text-to-speech |
-| `GET` | `/v1/audio/voices` | List TTS voices |
-| `GET` | `/v1/audio/languages` | List supported languages |
 
 ### Anthropic-Compatible Endpoints
 
@@ -293,30 +326,6 @@ Persistent conversational sessions with KV cache reuse across turns.
 - **Normalization**: Min-max score normalization across documents
 - **Top-N filtering**: Return only top N results
 - **Endpoint**: `POST /v1/rerank` (Cohere/Jina-compatible)
-
----
-
-## Audio — Speech-to-Text & Text-to-Speech
-
-On-device audio processing using Apple's native Speech and AVFoundation frameworks.
-
-### Speech-to-Text
-- **Engine**: Apple `SFSpeechRecognizer` (on-device)
-- **Input**: Base64-encoded audio data
-- **Language**: Auto-detect or specify (`en-US`, `zh-CN`, etc.)
-- **Output**: Transcribed text, language, duration, timestamped segments
-- **Endpoint**: `POST /v1/audio/transcriptions`
-
-### Text-to-Speech
-- **Engine**: Apple `AVSpeechSynthesizer`
-- **Voices**: System voices (default, enhanced, premium quality tiers)
-- **Parameters**: Voice selection, speed control, language
-- **Output**: 16-bit PCM WAV audio
-- **Endpoint**: `POST /v1/audio/speech`
-
-### Discovery
-- `GET /v1/audio/voices` — list all available TTS voices with identifiers and quality
-- `GET /v1/audio/languages` — list supported language codes
 
 ---
 
@@ -634,7 +643,6 @@ brew install --cask novamlx
 │  │  • Anthropic     │  │  • Per-Model Settings         │  │
 │  │  • Embeddings    │  │  • Benchmarking               │  │
 │  │  • Reranking     │  │  • HuggingFace Browser        │  │
-│  │  • Audio STT/TTS │  │  • TurboQuant Config          │  │
 │  │  • MCP Tools     │  │  • Memory Monitoring          │  │
 │  │  • Cloud Proxy   │  │  • Dashboard UI               │  │
 │  └────────┬─────────┘  └──────────────┬───────────────┘  │

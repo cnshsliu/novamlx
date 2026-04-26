@@ -309,6 +309,35 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Check tokenizer_config.json, chat_template.jinja, chat_template.json in order.
         Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family)
 
+        // --- Pre-load memory gate ---
+        // Check ProcessMemoryEnforcer soft limit BEFORE loading weights.
+        // If we can't fit the new model under the soft limit, evict LRU unpinned
+        // models to make room. If that's not enough, fail fast with a clear error
+        // instead of loading weights and immediately triggering enforcer eviction.
+        if let enforcer = memoryEnforcer {
+            let enforcerStatus = await enforcer.status
+            if enforcerStatus.enabled && enforcerStatus.softLimitBytes > 0 {
+                if let estimatedBytes = Self.estimateModelWeightSize(at: url) {
+                    let safetyMargin = UInt64(Double(estimatedBytes) * 0.2)  // 20% buffer
+                    let neededBytes = estimatedBytes + safetyMargin
+                    let currentBytes = UInt64(MLX.Memory.activeMemory)
+                    if currentBytes + neededBytes > enforcerStatus.softLimitBytes {
+                        NovaMLXLog.info("[MemoryGate] Need \(neededBytes / 1_048_576)MB, have \(currentBytes / 1_048_576)MB free of \(enforcerStatus.softLimitBytes / 1_048_576)MB limit — attempting LRU eviction")
+                        let ok = await ensureMemoryHeadroom(neededBytes: neededBytes, softLimitBytes: enforcerStatus.softLimitBytes)
+                        if !ok {
+                            let afterCurrent = UInt64(MLX.Memory.activeMemory)
+                            let availableMB = enforcerStatus.softLimitBytes > afterCurrent ? (enforcerStatus.softLimitBytes - afterCurrent) / 1_048_576 : 0
+                            let neededMB = neededBytes / 1_048_576
+                            NovaMLXLog.error("[MemoryGate] Insufficient memory for \(config.identifier.displayName): need \(neededMB)MB, available \(availableMB)MB")
+                            throw NovaMLXError.insufficientMemory(neededMB: neededMB, availableMB: availableMB, modelId: config.identifier.displayName)
+                        }
+                        NovaMLXLog.info("[MemoryGate] Headroom secured after LRU eviction")
+                    }
+                }
+            }
+        }
+        // --- End pre-load memory gate ---
+
         // VLM models must be loaded via VLMModelFactory — they need vision tower
         // and VLM-specific prepare()/callAsFunction implementations
         let isVLM = config.modelType == .vlm
@@ -396,9 +425,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let weightsBytes = MLX.Memory.activeMemory
         if weightsBytes > 0 {
             let reservationTicket = wiredPolicy.ticket(size: Int(weightsBytes), kind: MLX.WiredMemoryTicketKind.reservation)
-            _ = await reservationTicket.start()
-            container.setWiredReservation(reservationTicket)
-            NovaMLXLog.info("Wired memory reservation: \(weightsBytes / 1024 / 1024)MB for \(config.identifier.displayName)")
+            let availableMem = Self.getAvailablePhysicalMemory()
+            let neededMB = UInt64(weightsBytes) / 1_048_576
+            // Only wire if there's enough free physical memory. Wired reservation
+            // pins pages in RAM and will block indefinitely when free RAM is exhausted.
+            // We also keep a 1GB headroom so the OS has breathing room.
+            let headroom = UInt64(1024 * 1024 * 1024)
+            if availableMem > UInt64(weightsBytes) + headroom {
+                _ = await reservationTicket.start()
+                container.setWiredReservation(reservationTicket)
+                NovaMLXLog.info("Wired memory reservation: \(neededMB)MB for \(config.identifier.displayName)")
+            } else {
+                NovaMLXLog.warning("Skipping wired reservation for \(config.identifier.displayName): only \(availableMem / 1_048_576)MB free, need \(neededMB)MB + 1GB headroom. Model runs without wired memory guarantee.")
+            }
         }
 
         pool.add(container)
@@ -552,6 +591,54 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return wiredPolicy.ticket(size: estimatedBytes, kind: MLX.WiredMemoryTicketKind.active)
     }
 
+    /// Returns the approximate free physical memory (free + inactive + purgeable) in bytes.
+    private static func getAvailablePhysicalMemory() -> UInt64 {
+        let hostPort = mach_host_self()
+        var pageSize: vm_size_t = 0
+        host_page_size(hostPort, &pageSize)
+
+        var hostInfo = vm_statistics64()
+        var infoCount = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &hostInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(infoCount)) {
+                host_statistics64(hostPort, HOST_VM_INFO64, $0, &infoCount)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return UInt64(hostInfo.free_count + hostInfo.inactive_count + hostInfo.purgeable_count) * UInt64(pageSize)
+    }
+
+    /// Estimate model weight size from config.json params or directory size.
+    /// Used by the pre-load memory gate to decide whether we need LRU eviction.
+    static func estimateModelWeightSize(at url: URL) -> UInt64? {
+        let configFile = url.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configFile),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let numParams = json["num_params"] as? UInt64 {
+            let dtype = json["torch_dtype"] as? String ?? "float16"
+            let bytesPerParam: UInt64 = (dtype.contains("int8") || dtype.contains("q8")) ? 1 : 2
+            return numParams * bytesPerParam
+        }
+        // Fallback: directory size (safetensors dominate)
+        return FileManager.default.directorySize(at: url)
+    }
+
+    /// Evict LRU unpinned models until estimated new model fits under softLimitBytes.
+    /// Returns true if enough headroom was freed, false otherwise.
+    private func ensureMemoryHeadroom(neededBytes: UInt64, softLimitBytes: UInt64) async -> Bool {
+        let maxIterations = 10
+        for _ in 0..<maxIterations {
+            let current = UInt64(MLX.Memory.activeMemory)
+            if current + neededBytes <= softLimitBytes { return true }
+            let freed = pool.evictLRU()
+            if freed == nil { break }
+            try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms settle for Metal
+        }
+        return UInt64(MLX.Memory.activeMemory) + neededBytes <= softLimitBytes
+    }
+
     public func preflightCheck(modelId: String, promptTokens: Int, maxTokens: Int) async throws {
         guard let maxGPU = GPU.maxRecommendedWorkingSetBytes(), maxGPU > 0 else { return }
 
@@ -621,7 +708,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         var params = GenerateParameters(
             maxTokens: maxTokens,
-            temperature: temperature > 0 ? temperature : 0.6,
+            temperature: temperature,
             topP: topP,
             topK: topK,
             minP: minP
@@ -633,7 +720,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             params.repetitionContextSize = config.repeatLastN
         }
 
-        if let freq = request.frequencyPenalty, freq != 0 {
+        let freq = request.frequencyPenalty ?? 0.5
+        if freq != 0 {
             params.frequencyPenalty = freq
         }
 

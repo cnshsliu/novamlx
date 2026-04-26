@@ -353,8 +353,9 @@ public final class InferenceService: @unchecked Sendable {
         } else {
             gpuMem = engine.gpuActiveMemory
         }
+        let modelCount = workerMode ? workerLoadedModels.count : engine.loadedModelCount
         return InferenceStats(
-            loadedModels: engine.loadedModelCount,
+            loadedModels: modelCount,
             activeRequests: batcher.activeRequests + fusedScheduler.activeRequestCount,
             gpuMemoryUsed: gpuMem,
             recentTokensPerSecond: engine.metricsStore.recentTokensPerSecond

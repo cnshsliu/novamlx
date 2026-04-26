@@ -92,32 +92,10 @@ public final class EnginePool: @unchecked Sendable {
         }
     }
 
-    public func evictIfNeeded(forNewModelSizeMB sizeMB: UInt64) {
-        guard maxMemoryMB > 0 else { return }
-        let currentMB = totalMemoryMB()
-        let neededMB = currentMB + sizeMB
-        if neededMB <= maxMemoryMB { return }
-
-        NovaMLXLog.info("EnginePool: memory pressure \(currentMB)/\(maxMemoryMB)MB, need \(sizeMB)MB more")
-
-        var freed = UInt64(0)
-        let target = neededMB - maxMemoryMB
-        while freed < target {
-            guard let freedMB = evictLRU() else { break }
-            freed += freedMB
-        }
-
-        if freed < target {
-            NovaMLXLog.warning("EnginePool: could only free \(freed)MB of \(target)MB needed")
-        }
-    }
-
-    // Sum of actual model weight sizes in pool, not MLX.Memory.activeMemory
-    public func totalMemoryMB() -> UInt64 {
-        lock.withLock {
-            pool.values.reduce(0) { $0 + $1.estimatedSizeMB }
-        }
-    }
+    // Removed evictIfNeeded(forNewModelSizeMB:) and totalMemoryMB().
+    // Both used estimatedSizeMB (cumulative activeMemory at load time — double-counts shared
+    // weights) and had zero callers. Replaced by MLXEngine.ensureMemoryHeadroom() which uses
+    // ProcessMemoryEnforcer soft limit and real-time MLX.Memory.activeMemory.
 
     public var loadedModelIds: [String] {
         lock.withLock { Array(pool.keys) }

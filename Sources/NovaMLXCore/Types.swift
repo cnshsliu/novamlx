@@ -25,6 +25,7 @@ public enum NovaMLXError: Error, LocalizedError {
     case downloadFailed(String, underlying: Error)
     case unsupportedModel(String)
     case contextWindowExceeded(promptTokens: Int, maxTokens: Int, contextLength: Int)
+    case insufficientMemory(neededMB: UInt64, availableMB: UInt64, modelId: String)
 
     public var errorDescription: String? {
         switch self {
@@ -38,6 +39,8 @@ public enum NovaMLXError: Error, LocalizedError {
         case .unsupportedModel(let name): "Unsupported model: \(name)"
         case .contextWindowExceeded(let promptTokens, let maxTokens, let contextLength):
             "Context window exceeded: prompt has \(promptTokens) tokens + max_tokens \(maxTokens) = \(promptTokens + maxTokens), but model context length is \(contextLength). Reduce your prompt or max_tokens."
+        case .insufficientMemory(let neededMB, let availableMB, let modelId):
+            "Insufficient memory to load '\(modelId)': need \(neededMB)MB but only \(availableMB)MB available under the current memory limit. Unload unused models, pin important ones, or increase maxProcessMemory."
         }
     }
 }
@@ -100,7 +103,7 @@ public struct ModelConfig: Codable, Sendable {
         modelType: ModelType = .llm,
         hasLinearAttention: Bool = false,
         contextLength: Int = 4096,
-        maxTokens: Int = 4096,
+        maxTokens: Int = 2048,
         temperature: Double = 0.7,
         topP: Double = 0.9,
         repeatPenalty: Float = 1.0,

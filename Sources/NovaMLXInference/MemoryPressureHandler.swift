@@ -71,7 +71,8 @@ public final class MemoryPressureHandler: @unchecked Sendable {
     private func periodicCheck() {
         checkTTLExpirations()
 
-        let activeMB = engine.pool.totalMemoryMB()
+        let activeBytes = UInt64(MLX.Memory.activeMemory)
+        let activeMB = activeBytes / 1_048_576
         let totalRAM = UInt64(ProcessInfo.processInfo.physicalMemory / 1_048_576)
         let usagePercent = totalRAM > 0 ? Double(activeMB) / Double(totalRAM) * 100 : 0
 

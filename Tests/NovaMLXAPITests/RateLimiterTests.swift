@@ -1,10 +1,10 @@
-import AVFoundation
+
 import Foundation
 import Testing
 import NovaMLXCore
 import NovaMLXUtils
 @testable import NovaMLXAPI
-@testable import NovaMLXEngine
+
 
 @Suite("E2E Rate Limiter Tests")
 struct E2ERateLimiterTests {
@@ -252,91 +252,5 @@ struct E2EAPISerializationTests {
         #expect(decoded.messages.count == 3)
         #expect(decoded.system == .text("You are a math tutor."))
         #expect(decoded.stopSequences?.count == 1)
-    }
-}
-
-@Suite("E2E Audio Service Tests")
-struct E2EAudioTests {
-    @Test("Supported voices structure")
-    func supportedVoicesStructure() {
-        let voices = AudioService.supportedVoices()
-        #expect(!voices.isEmpty)
-        let first = voices.first!
-        #expect(first["identifier"] != nil)
-        #expect(first["name"] != nil)
-        #expect(first["language"] != nil)
-        #expect(first["quality"] != nil)
-    }
-
-    @Test("Supported languages contains major languages")
-    func supportedLanguagesMajor() {
-        let langs = AudioService.supportedLanguages()
-        #expect(!langs.isEmpty)
-        #expect(langs.contains("en-US"))
-        #expect(langs.contains(where: { $0.hasPrefix("zh") }))
-        #expect(langs.contains(where: { $0.hasPrefix("es") }))
-        #expect(langs.contains(where: { $0.hasPrefix("ja") }))
-    }
-
-    @Test("SynthesisRequest coding round-trip")
-    func synthesisRequestCoding() throws {
-        let req = AudioService.SynthesisRequest(
-            text: "Hello world",
-            voice: "com.apple.voice.compact.en-US.Samantha",
-            speed: 0.8,
-            language: "en-US"
-        )
-        let data = try JSONEncoder().encode(req)
-        let decoded = try JSONDecoder().decode(AudioService.SynthesisRequest.self, from: data)
-        #expect(decoded.text == "Hello world")
-        #expect(decoded.voice == "com.apple.voice.compact.en-US.Samantha")
-        #expect(decoded.speed == 0.8)
-        #expect(decoded.language == "en-US")
-    }
-
-    @Test("TranscriptionResult coding round-trip with segments")
-    func transcriptionResultCoding() throws {
-        let result = AudioService.TranscriptionResult(
-            text: "Hello world",
-            language: "en",
-            duration: 2.5,
-            segments: [
-                AudioService.TranscriptionResult.Segment(text: "Hello", start: 0.0, end: 0.5),
-                AudioService.TranscriptionResult.Segment(text: " world", start: 0.5, end: 1.0),
-            ]
-        )
-        let data = try JSONEncoder().encode(result)
-        let decoded = try JSONDecoder().decode(AudioService.TranscriptionResult.self, from: data)
-        #expect(decoded.text == "Hello world")
-        #expect(decoded.language == "en")
-        #expect(decoded.duration == 2.5)
-        #expect(decoded.segments?.count == 2)
-        #expect(decoded.segments?.first?.text == "Hello")
-    }
-
-    @Test("TranscriptionResult without segments")
-    func transcriptionResultNoSegments() throws {
-        let result = AudioService.TranscriptionResult(
-            text: "Hello",
-            language: "en",
-            duration: nil,
-            segments: nil
-        )
-        let data = try JSONEncoder().encode(result)
-        let decoded = try JSONDecoder().decode(AudioService.TranscriptionResult.self, from: data)
-        #expect(decoded.text == "Hello")
-        #expect(decoded.duration == nil)
-        #expect(decoded.segments == nil)
-    }
-
-    @Test("AudioChunk creation and properties")
-    func audioChunkProperties() {
-        let chunk = AudioService.AudioChunk(data: Data([0x01, 0x02, 0x03]), isFinal: false)
-        #expect(chunk.data.count == 3)
-        #expect(!chunk.isFinal)
-
-        let finalChunk = AudioService.AudioChunk(data: Data(), isFinal: true)
-        #expect(finalChunk.data.isEmpty)
-        #expect(finalChunk.isFinal)
     }
 }
