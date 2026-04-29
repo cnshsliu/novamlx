@@ -4,7 +4,7 @@
 
 <h1 align="center">NovaMLX</h1>
 
-<p align="center"><strong>The fastest pure-Swift LLM/VLM server for Apple Silicon.<br>No Python. No cloud. No limits.</strong></p>
+<p align="center"><strong>The blazing fast pure-Swift LLM/VLM server for Apple Silicon.<br>No Python. No cloud. No limits.</strong></p>
 
 <p align="center">
 Run 50+ model families — Llama, Qwen, Gemma, DeepSeek, Mistral — natively on your Mac.<br>
