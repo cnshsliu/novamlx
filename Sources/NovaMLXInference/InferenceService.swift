@@ -269,7 +269,10 @@ public final class InferenceService: @unchecked Sendable {
     public func isModelLoaded(_ modelId: String) -> Bool {
         let resolvedId = settingsManager.resolveModelId(modelId)
         // Cloud models are always "loaded" (available remotely)
-        if CloudBackend.isCloudModel(resolvedId) { return true }
+        // Check both with and without :cloud suffix (Anthropic clients may omit it)
+        if CloudBackend.isCloudModel(resolvedId) || CloudBackend.isCloudModel(resolvedId + ":cloud") {
+            return true
+        }
         if workerMode {
             return workerLoadedModels.contains(resolvedId)
         }
@@ -354,11 +357,17 @@ public final class InferenceService: @unchecked Sendable {
             gpuMem = engine.gpuActiveMemory
         }
         let modelCount = workerMode ? workerLoadedModels.count : engine.loadedModelCount
+        let activeReqs = workerMode
+            ? (worker?.activeRequestCount ?? 0)
+            : (batcher.activeRequests + fusedScheduler.activeRequestCount)
+        let workerCpu = workerMode ? (worker?.latestMemoryStats?.cpuUsage ?? 0) : 0
         return InferenceStats(
             loadedModels: modelCount,
-            activeRequests: batcher.activeRequests + fusedScheduler.activeRequestCount,
+            activeRequests: activeReqs,
             gpuMemoryUsed: gpuMem,
-            recentTokensPerSecond: engine.metricsStore.recentTokensPerSecond
+            recentTokensPerSecond: engine.metricsStore.recentTokensPerSecond,
+            totalTokensGenerated: engine.metricsStore.metrics.totalTokensAllTime,
+            workerCpuUsage: workerCpu
         )
     }
 
@@ -404,13 +413,25 @@ private final class StreamTracker: @unchecked Sendable {
     let metricsStore: MetricsStore
     let startTime = Date()
     var tokenCount = 0
+    private var lastLiveUpdate: Date = Date()
 
     init(model: String, metricsStore: MetricsStore) {
         self.model = model
         self.metricsStore = metricsStore
     }
 
-    func increment() { tokenCount += 1 }
+    func increment() {
+        tokenCount += 1
+        let now = Date()
+        // Update live TPS every second during streaming to keep the status chart fresh
+        if now.timeIntervalSince(lastLiveUpdate) >= 1.0 {
+            let elapsed = now.timeIntervalSince(startTime)
+            if elapsed > 0.01 {
+                metricsStore.updateLiveTps(Double(tokenCount) / elapsed)
+            }
+            lastLiveUpdate = now
+        }
+    }
 
     func finish() {
         let elapsed = Date().timeIntervalSince(startTime)
@@ -425,10 +446,14 @@ public struct InferenceStats: Sendable {
     public let activeRequests: Int
     public let gpuMemoryUsed: UInt64
     public let recentTokensPerSecond: Double
-    public init(loadedModels: Int = 0, activeRequests: Int = 0, gpuMemoryUsed: UInt64 = 0, recentTokensPerSecond: Double = 0) {
+    public let totalTokensGenerated: UInt64
+    public let workerCpuUsage: Double
+    public init(loadedModels: Int = 0, activeRequests: Int = 0, gpuMemoryUsed: UInt64 = 0, recentTokensPerSecond: Double = 0, totalTokensGenerated: UInt64 = 0, workerCpuUsage: Double = 0) {
         self.loadedModels = loadedModels
         self.activeRequests = activeRequests
         self.gpuMemoryUsed = gpuMemoryUsed
         self.recentTokensPerSecond = recentTokensPerSecond
+        self.totalTokensGenerated = totalTokensGenerated
+        self.workerCpuUsage = workerCpuUsage
     }
 }

@@ -14,6 +14,10 @@ public enum NovaMLXPaths {
     public static var prefixCacheBaseDir: URL { baseDir.appendingPathComponent("prefix_cache") }
     public static var chatHistoryDir: URL { baseDir.appendingPathComponent("chat_history") }
 
+    // Auth & subscription
+    public static var sessionFile: URL { baseDir.appendingPathComponent("session") }
+    public static var authCacheFile: URL { baseDir.appendingPathComponent("auth_cache.json") }
+
     public static func prefixCacheDir(for modelId: String) -> URL {
         prefixCacheBaseDir.appendingPathComponent(
             modelId.replacingOccurrences(of: "/", with: "_"), isDirectory: true)

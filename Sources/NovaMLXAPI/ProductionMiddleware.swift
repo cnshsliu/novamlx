@@ -261,7 +261,7 @@ struct SecurityHeadersMiddleware: RouterMiddleware {
         var response = try await next(request, context)
         response.headers[.xContentTypeOptions] = "nosniff"
         response.headers[.strictTransportSecurity] = "max-age=31536000; includeSubDomains"
-        response.headers[Self.xFrameOptions] = "DENY"
+        response.headers[Self.xFrameOptions] = "SAMEORIGIN"
         response.headers[Self.referrerPolicy] = "strict-origin-when-cross-origin"
         return response
     }

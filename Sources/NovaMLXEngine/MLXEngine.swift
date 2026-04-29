@@ -20,6 +20,8 @@ public final class ModelContainer: @unchecked Sendable {
     public var kvMemoryOverride: Int?
     /// Control tokens extracted from tokenizer.json + chat_template (e.g. "<|turn>", "<|im_end|>")
     public private(set) var controlTokens: [String] = []
+    /// Whether this model uses thinking/reasoning tags (detected from chat_template)
+    public private(set) var isThinkingModel: Bool = false
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -32,6 +34,7 @@ public final class ModelContainer: @unchecked Sendable {
         self.tokenizer = tokenizer
         self.isLoaded = true
         self.controlTokens = Self.extractControlTokens(for: identifier.id)
+        self.isThinkingModel = Self.detectThinkingModel(for: identifier.id)
         if !controlTokens.isEmpty {
             NovaMLXLog.info("[ControlTokens] \(identifier.displayName): \(controlTokens)")
         }
@@ -104,6 +107,14 @@ public final class ModelContainer: @unchecked Sendable {
         ])
 
         return tokens.sorted()
+    }
+
+    /// Detect if model uses thinking/reasoning tags by checking chat_template
+    public static func detectThinkingModel(for modelId: String) -> Bool {
+        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let template = loadChatTemplate(modelDir: modelDir) ?? ""
+        return template.contains("<think") || template.contains("</think")
+            || template.contains("<thinking") || template.contains("</thinking")
     }
 
     private static func loadChatTemplate(modelDir: URL) -> String? {
@@ -413,6 +424,40 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
         }
 
+        // Read generation_config.json — model author's recommended sampling params.
+        // Priority: generation_config.json > per-family defaults > global ModelConfig defaults.
+        var genConfig: GenerationConfig?
+        let genConfigFile = url.appendingPathComponent("generation_config.json")
+        if let data = try? Data(contentsOf: genConfigFile),
+           let gen = try? JSONDecoder().decode(GenerationConfig.self, from: data) {
+            genConfig = gen
+            if let t = gen.temperature { container.config.temperature = t }
+            if let p = gen.topP { container.config.topP = p }
+            if let k = gen.topK { container.config.topK = k }
+            if let r = gen.repetitionPenalty { container.config.repeatPenalty = r }
+            if let f = gen.frequencyPenalty { container.config.frequencyPenalty = f }
+            if let p = gen.presencePenalty { container.config.presencePenalty = p }
+            if let m = gen.maxNewTokens { container.config.maxTokens = min(m, container.config.maxTokens) }
+            NovaMLXLog.info("generation_config.json: temp=\(gen.temperature?.description ?? "-"), topP=\(gen.topP?.description ?? "-"), topK=\(gen.topK?.description ?? "-")")
+        }
+
+        // Apply per-family sampling defaults for fields NOT set by generation_config.
+        // frequencyPenalty/repetitionPenalty always come from family defaults since
+        // generation_config.json rarely includes them.
+        let familyOpt = ModelFamilyRegistry.shared.optimization(for: config.identifier.id, family: config.identifier.family)
+        if let fs = familyOpt.samplingDefaults {
+            if genConfig?.temperature == nil, let t = fs.temperature { container.config.temperature = t }
+            if genConfig?.topP == nil, let p = fs.topP { container.config.topP = p }
+            if genConfig?.topK == nil, let k = fs.topK { container.config.topK = k }
+            if let m = fs.minP { container.config.minP = m }
+            if genConfig?.frequencyPenalty == nil, let f = fs.frequencyPenalty { container.config.frequencyPenalty = f }
+            if genConfig?.repetitionPenalty == nil, let r = fs.repetitionPenalty { container.config.repeatPenalty = r }
+            if let m = fs.maxTokens { container.config.maxTokens = min(m, container.config.maxTokens) }
+            if fs.frequencyPenalty != nil || fs.topK != nil {
+                NovaMLXLog.info("Family sampling defaults applied for \(config.identifier.family.rawValue): freqPenalty=\(fs.frequencyPenalty?.description ?? "-"), topK=\(fs.topK?.description ?? "-")")
+            }
+        }
+
         if let kvProvider = model.value as? KVCacheDimensionProvider, container.config.kvMemoryBytesPerToken == nil {
             let numLayers = kvProvider.kvHeads.count
             let kvHeadsSum = kvProvider.kvHeads.reduce(0, +)
@@ -703,8 +748,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let temperature = Float(request.temperature ?? config.temperature)
         let maxTokens = request.maxTokens ?? config.maxTokens
         let topP = Float(request.topP ?? config.topP)
-        let topK = request.topK ?? 0
-        let minP = request.minP ?? 0.0
+        let topK = request.topK ?? config.topK
+        let minP = request.minP ?? config.minP
 
         var params = GenerateParameters(
             maxTokens: maxTokens,
@@ -720,7 +765,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             params.repetitionContextSize = config.repeatLastN
         }
 
-        let freq = request.frequencyPenalty ?? 0.5
+        let freq = request.frequencyPenalty ?? config.frequencyPenalty
         if freq != 0 {
             params.frequencyPenalty = freq
         }

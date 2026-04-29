@@ -8,6 +8,7 @@ public struct WorkerMemoryStats: Sendable {
     public let hardLimitBytes: UInt64
     public let utilization: Double
     public let evictions: UInt64
+    public let cpuUsage: Double
 }
 
 public final class WorkerSupervisor: @unchecked Sendable {
@@ -34,6 +35,13 @@ public final class WorkerSupervisor: @unchecked Sendable {
     public private(set) var isRunning = false
 
     public var onCrash: (() -> Void)?
+
+    /// Number of requests currently being processed by the worker
+    public var activeRequestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingRequests.count + streamContinuations.count
+    }
 
     public init(workerBinaryPath: String) {
         self.workerBinaryPath = workerBinaryPath
@@ -240,7 +248,8 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 softLimitBytes: msg.memorySoftLimitBytes ?? 0,
                 hardLimitBytes: msg.memoryHardLimitBytes ?? 0,
                 utilization: msg.memoryUtilization ?? 0,
-                evictions: msg.memoryEvictions ?? 0
+                evictions: msg.memoryEvictions ?? 0,
+                cpuUsage: msg.cpuUsage ?? 0
             )
             lock.unlock()
             return
@@ -253,6 +262,16 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 lock.lock()
                 if let cont = pendingRequests.removeValue(forKey: key) {
                     cont.resume(returning: msg)
+                }
+                lock.unlock()
+            } else if msg.type == WorkerMessageType.error {
+                // Worker rejected load/unload — resume the waiting continuation
+                let key = msg.modelId ?? ""
+                lock.lock()
+                if let cont = pendingRequests.removeValue(forKey: key) {
+                    cont.resume(returning: msg)
+                } else {
+                    NovaMLXLog.warning("[WorkerSupervisor] Unhandled worker error (no pending request for '\(key)'): \(msg.errorMessage ?? "unknown")")
                 }
                 lock.unlock()
             }

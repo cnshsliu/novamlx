@@ -88,10 +88,26 @@ enum ChatHTML {
         .thinking-content.open{display:block}
         .thinking-toggle .arrow{transition:transform .2s;font-size:10px}
         .thinking-toggle.open .arrow{transform:rotate(90deg)}
-        .thought-summary{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:12px;font-size:12px;color:var(--text3);cursor:pointer;margin-bottom:8px;transition:all .15s}
+        .thought-summary{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:14px;font-size:12px;color:var(--text3);cursor:pointer;margin-bottom:8px;transition:all .15s}
         .thought-summary:hover{background:var(--bg4);color:var(--text);border-color:var(--accent)}
-        .thought-summary .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:pulse 2s infinite}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+        .thought-summary .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0}
+        .neural-pulse{margin-bottom:10px;cursor:pointer;border-radius:10px;overflow:hidden;border:1px solid var(--border);background:var(--bg2);transition:border-color .3s}
+        .neural-pulse:hover{border-color:var(--accent)}
+        .neural-pulse-bar{height:2px;background:linear-gradient(90deg,transparent,var(--accent),#c084fc,var(--accent),transparent);background-size:200% 100%;animation:np-slide 1.8s ease-in-out infinite}
+        @keyframes np-slide{0%{background-position:-200% 0}100%{background-position:200% 0}}
+        .neural-pulse-body{display:flex;align-items:center;gap:10px;padding:10px 14px}
+        .neural-pulse-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:np-glow 1.4s ease-in-out infinite;flex-shrink:0;box-shadow:0 0 8px var(--accent)}
+        @keyframes np-glow{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.75)}}
+        .neural-pulse-metrics{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
+        .neural-pulse-label{font-size:12px;font-weight:600;color:var(--text2)}
+        .neural-pulse-stats{font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums}
+        .neural-pulse-ghost{font-size:11px;color:var(--text3);opacity:.35;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:180px;letter-spacing:.02em;font-style:italic;flex-shrink:0}
+        .sync-indicator{margin-bottom:10px;border-radius:10px;overflow:hidden;border:1px solid var(--border);background:var(--bg2)}
+        .sync-bar{height:2px;background:linear-gradient(90deg,transparent,var(--accent),#c084fc,var(--accent),transparent);background-size:200% 100%;animation:np-slide 1.8s ease-in-out infinite}
+        .sync-body{display:flex;align-items:center;gap:10px;padding:10px 14px}
+        .sync-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:np-glow 1.4s ease-in-out infinite;flex-shrink:0;box-shadow:0 0 8px var(--accent)}
+        .sync-text{font-size:12px;color:var(--text2);font-weight:500}
+        .sync-timer{font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums}
         .typing-cursor{display:inline-block;width:2px;height:1em;background:var(--accent);margin-left:2px;vertical-align:text-bottom;animation:blink-cursor .8s step-end infinite}
         @keyframes blink-cursor{0%,100%{opacity:1}50%{opacity:0}}
         .thinking-panel{position:fixed;top:0;right:-420px;width:400px;height:100vh;background:var(--bg2);border-left:1px solid var(--border);z-index:500;transition:right .3s ease;display:flex;flex-direction:column}
@@ -407,7 +423,8 @@ enum ChatHTML {
             const roleClass=m.role==='user'?'user':m.role==='assistant'?'assistant':'system';
             let bodyHtml='';
             if(m.thinking){
-                bodyHtml+=`<div class="thought-summary" onclick="openThinkingPanel(${idx})"><span class="dot"></span> Thought for ${m.thinkingTime||'?'}s</div>`;
+                const tkCount=m.thinking.split(/\\s+/).filter(Boolean).length;
+                bodyHtml+=`<div class="thought-summary" onclick="openThinkingPanel(${idx})"><span class="dot"></span> Thought for ${m.thinkingTime||'?'}s &middot; ~${tkCount} words &middot; click to view</div>`;
             }
             if(m.error){
                 bodyHtml+=`<div class="error-msg">${escHtml(m.content||'Unknown error')}</div>`;
@@ -564,6 +581,19 @@ enum ChatHTML {
             renderMessages();
             const startTime=Date.now();
 
+            // Show sync indicator immediately
+            let syncTimerId=setInterval(()=>{
+                const el=document.getElementById('msg-'+assistantIdx);
+                if(!el)return;
+                const bodyEl=el.querySelector('.msg-body');
+                if(!bodyEl)return;
+                const sec=((Date.now()-startTime)/1000).toFixed(0);
+                bodyEl.innerHTML=`<div class="sync-indicator"><div class="sync-bar"></div><div class="sync-body"><div class="sync-dot"></div><div><div class="sync-text">Syncing with model...</div><div class="sync-timer">${sec}s elapsed</div></div></div></div>`;
+                scrollToBottom();
+            },250);
+            // Fire first sync render immediately
+            {const el=document.getElementById('msg-'+assistantIdx);if(el){const bodyEl=el.querySelector('.msg-body');if(bodyEl){bodyEl.innerHTML='<div class="sync-indicator"><div class="sync-bar"></div><div class="sync-body"><div class="sync-dot"></div><div><div class="sync-text">Syncing with model...</div><div class="sync-timer">0s elapsed</div></div></div></div>';}}}
+
             const apiMessages=buildApiMessages();
             const body={model,model:document.getElementById('modelSelect').value,messages:apiMessages,stream:true,stream_options:{include_usage:true},temperature:state.settings.temperature,max_tokens:state.settings.max_tokens,top_p:state.settings.top_p};
             if(state.settings.top_k>0)body.top_k=state.settings.top_k;
@@ -584,31 +614,41 @@ enum ChatHTML {
                 }
                 const reader=resp.body.getReader();const decoder=new TextDecoder();
                 let buffer='',thinkingStartTime=null,fullContent='',thinkingDone=false;
-                let renderTimer=null;
+                let renderTimer=null,thinkingTokens=0,thinkingRefreshId=null;
+                let firstDataReceived=false;
+
+                function doRender(){
+                    const el=document.getElementById('msg-'+assistantIdx);
+                    if(!el)return;
+                    let html='';
+                    if(state.thinkingContent&&!thinkingDone){
+                        const elapsed=((Date.now()-(thinkingStartTime||Date.now()))/1000).toFixed(1);
+                        const speed=thinkingTokens>0?(thinkingTokens/parseFloat(elapsed)).toFixed(1):'--';
+                        const ghost=escHtml(state.thinkingContent.slice(-80));
+                        html+=`<div class="neural-pulse" onclick="openThinkingPanel(${assistantIdx})">
+                            <div class="neural-pulse-bar"></div>
+                            <div class="neural-pulse-body">
+                                <div class="neural-pulse-dot"></div>
+                                <div class="neural-pulse-metrics">
+                                    <div class="neural-pulse-label">Thinking...</div>
+                                    <div class="neural-pulse-stats">${elapsed}s &middot; ${thinkingTokens} tokens &middot; ${speed} tok/s</div>
+                                </div>
+                                <div class="neural-pulse-ghost">${ghost}</div>
+                            </div>
+                        </div>`;
+                    }
+                    html+=renderMd(fullContent);
+                    const bodyEl=el.querySelector('.msg-body');
+                    if(bodyEl){bodyEl.innerHTML=html;scrollToBottom();}
+                }
 
                 function scheduleRender(){
                     if(renderTimer)return;
-                    renderTimer=setTimeout(()=>{
-                        renderTimer=null;
-                        const el=document.getElementById('msg-'+assistantIdx);
-                        if(!el)return;
-                        let html='';
-                        if(state.thinkingContent&&!thinkingDone){
-                            html+=`<div class="thinking-bubble"><div class="thinking-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
-                                <span class="arrow" style="transform:rotate(90deg)">&#9654;</span> Thinking...
-                            </div><div class="thinking-content open">${renderMd(state.thinkingContent)}</div></div>`;
-                        }
-                        html+=renderMd(fullContent);
-                        const bodyEl=el.querySelector('.msg-body');
-                        if(bodyEl){bodyEl.innerHTML=html;scrollToBottom();}
-                    },30);
+                    renderTimer=setTimeout(()=>{renderTimer=null;doRender()},50);
                 }
 
-                while(true){
-                    const {done,value}=await reader.read();
-                    if(done)break;
-                    buffer+=decoder.decode(value,{stream:true});
-                    const lines=buffer.split('\\n');buffer=lines.pop()||'';
+                function processBuffer(buf){
+                    const lines=buf.split('\\n');
                     for(const line of lines){
                         if(line.startsWith(': '))continue;
                         if(!line.startsWith('data: '))continue;
@@ -618,16 +658,32 @@ enum ChatHTML {
                             const chunk=JSON.parse(data);
                             const delta=chunk.choices?.[0]?.delta;
                             if(delta){
+                                if(!firstDataReceived&&(delta.reasoning_content||delta.content)){
+                                    firstDataReceived=true;
+                                    if(syncTimerId){clearInterval(syncTimerId);syncTimerId=null;}
+                                }
                                 if(delta.reasoning_content){
-                                    if(!thinkingStartTime)thinkingStartTime=Date.now();
+                                    const wasFirst=!thinkingStartTime;
+                                    if(wasFirst)thinkingStartTime=Date.now();
                                     state.thinkingContent+=delta.reasoning_content;
+                                    thinkingTokens++;
+                                    if(wasFirst){
+                                        doRender();
+                                        thinkingRefreshId=setInterval(doRender,200);
+                                    } else {
+                                        scheduleRender();
+                                    }
                                 }
                                 if(delta.content){
                                     if(!state.streamStartTime)state.streamStartTime=Date.now();
-                                    if(!thinkingDone&&state.thinkingContent)thinkingDone=true;
+                                    if(!thinkingDone&&state.thinkingContent){thinkingDone=true;if(thinkingRefreshId){clearInterval(thinkingRefreshId);thinkingRefreshId=null;}}
                                     fullContent+=delta.content;
                                     state.streamTokens++;
                                     scheduleRender();
+                                }
+                                // Diagnostic: detect if thinking leaks into content
+                                if(delta.content && thinkingDone===false && !delta.reasoning_content && !state.thinkingContent){
+                                    // Content arrived before any thinking — OK for non-thinking models
                                 }
                             }
                             if(chunk.usage){
@@ -636,11 +692,63 @@ enum ChatHTML {
                                 const tps=u.completion_tokens>0?(u.completion_tokens/parseFloat(elapsed)).toFixed(1):'--';
                                 state.messages[assistantIdx].perf=`Prompt: ${u.prompt_tokens} | Completion: ${u.completion_tokens} | ${tps} tokens/s | ${elapsed}s`;
                             }
-                        }catch(e){}
+                        }catch(e){console.warn('SSE parse error:',e)}
                     }
                 }
+                while(true){
+                    const {done,value}=await reader.read();
+                    if(done)break;
+                    buffer+=decoder.decode(value,{stream:true});
+                    const lines=buffer.split('\\n');buffer=lines.pop()||'';
+                    processBuffer(lines.join('\\n'));
+                }
+                // Flush remaining buffer after stream ends
+                if(buffer.trim())processBuffer(buffer);buffer='';
 
                 if(renderTimer)clearTimeout(renderTimer);
+                if(thinkingRefreshId){clearInterval(thinkingRefreshId);thinkingRefreshId=null;}
+                if(syncTimerId){clearInterval(syncTimerId);syncTimerId=null;}
+
+                // Diagnostic analysis
+                (function(){
+                    const tLen=state.thinkingContent.length;
+                    const cLen=fullContent.length;
+                    const thinkPreview=state.thinkingContent.substring(0,200);
+                    const contentPreview=fullContent.substring(0,200);
+
+                    console.group('[NovaMLX SSE Diagnostic]');
+                    console.log('thinkingContent: '+tLen+' chars');
+                    console.log('fullContent: '+cLen+' chars');
+                    console.log('thinkingDone: '+thinkingDone);
+
+                    // Detect: thinking content looks like actual answer
+                    const thinkingHasSteps=/Step \\d/i.test(state.thinkingContent);
+                    const thinkingHasAnswer=/^.*\\d+\\s*\\+\\s*\\d+\\s*=\\s*\\d+.*$/m.test(state.thinkingContent);
+                    const contentHasStepByStep=/Step \\d|step-by-step/i.test(fullContent);
+                    const contentLooksLikeThinking=/Analyze|Identify|Consider|Formulate|Draft/i.test(fullContent) && cLen>500;
+
+                    if(thinkingHasSteps&&cLen<50){
+                        console.warn('BUG DETECTED: thinking contains step-by-step answer but content is empty/short. Thinking is leaking.');
+                        console.log('thinking (first 300):',thinkPreview);
+                        console.log('content (first 300):',contentPreview);
+                    }else if(contentLooksLikeThinking&&tLen>0){
+                        console.warn('BUG DETECTED: content looks like thinking process (meta-reasoning). Content may contain thinking tokens.');
+                        console.log('content (first 300):',contentPreview);
+                        console.log('thinking (first 300):',thinkPreview);
+                    }else if(tLen===0&&cLen===0){
+                        console.error('BUG DETECTED: both thinking and content are empty!');
+                    }else if(tLen>0&&cLen===0){
+                        console.warn('BUG DETECTED: thinking exists but content is empty. All output went to thinking.');
+                    }else{
+                        console.log('OK: thinking and content appear correctly separated');
+                    }
+
+                    // Log raw SSE field names received
+                    console.log('thinking preview: '+thinkPreview.substring(0,150));
+                    console.log('content preview: '+contentPreview.substring(0,150));
+                    console.groupEnd();
+                })();
+
                 state.messages[assistantIdx].content=fullContent;
                 if(state.thinkingContent){
                     state.messages[assistantIdx].thinking=state.thinkingContent;
@@ -690,9 +798,10 @@ enum ChatHTML {
 
         function openThinkingPanel(idx){
             const m=state.messages[idx];
-            if(!m||!m.thinking)return;
+            const thinking=m?.thinking||state.thinkingContent;
+            if(!thinking)return;
             const body=document.getElementById('thinkingPanelBody');
-            body.innerHTML=renderMd(m.thinking);
+            body.innerHTML=renderMd(thinking);
             document.getElementById('thinkingPanel').classList.add('open');
             document.getElementById('thinkingOverlay').classList.add('open');
         }

@@ -42,10 +42,21 @@ struct SettingsPageView: View {
     @State private var cfgSaveMessage: String? = nil
     @State private var cfgHasUnsavedChanges = false
 
+    // Cloud auth state
+    @State private var cloudEmail = ""
+    @State private var cloudPassword = ""
+    @State private var cloudLoggedIn = false
+    @State private var cloudUserInfo: String = ""
+    @State private var cloudPlan: String = ""
+    @State private var cloudExpires: String = ""
+    @State private var cloudAuthMessage: String? = nil
+    @State private var cloudLoggingIn = false
+
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
                 serverConfigSection
+                cloudAccountSection
                 cliSection
                 languageSection
                 turboQuantSection
@@ -418,6 +429,220 @@ struct SettingsPageView: View {
         } catch {
             cfgSaveMessage = "Error: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Cloud Account
+
+    private var cloudAccountSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("Cloud TokenHub Account", icon: "cloud")
+
+            if cloudLoggedIn {
+                cloudLoggedInView
+            } else {
+                cloudLoginForm
+            }
+
+            if let msg = cloudAuthMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundColor(msg.contains("Error") || msg.contains("Failed") || msg.contains("Invalid") ? NovaTheme.Colors.statusError : NovaTheme.Colors.statusOK)
+            }
+        }
+        .padding(16)
+        .sectionCard()
+        .task { checkCloudLoginStatus() }
+    }
+
+    private var cloudLoggedInView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "person.crop.circle.badge.checkmark")
+                    .foregroundColor(NovaTheme.Colors.statusOK)
+                    .font(.system(size: 16))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(cloudUserInfo)
+                        .font(.system(size: 13, weight: .medium))
+                    HStack(spacing: 8) {
+                        StatusBadge(text: cloudPlan.uppercased(), color: NovaTheme.Colors.accent)
+                        if !cloudExpires.isEmpty {
+                            Text("Expires: \(cloudExpires)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                Spacer()
+                Button("Manage Subscription") {
+                    if let url = URL(string: "\(AuthClient.defaultBaseURL)/cloud") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("Logout") {
+                    cloudLogout()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var cloudLoginForm: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Sign in to use cloud models for remote inference.")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Email").font(.system(size: 11)).foregroundColor(.secondary)
+                    TextField("email@example.com", text: $cloudEmail)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Password").font(.system(size: 11)).foregroundColor(.secondary)
+                    SecureField("Password", text: $cloudPassword)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                }
+            }
+
+            HStack {
+                if cloudLoggingIn {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Signing in...")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                } else {
+                    Button("Sign In") {
+                        cloudLogin()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(cloudEmail.isEmpty || cloudPassword.isEmpty)
+
+                    if let url = URL(string: "\(AuthClient.defaultBaseURL)/cloud") {
+                        Button("Subscribe") {
+                            NSWorkspace.shared.open(url)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+            }
+        }
+    }
+
+    private func checkCloudLoginStatus() {
+        if let session = AuthCache.loadSession(), !session.isEmpty {
+            cloudLoggedIn = true
+            // Try to load cached info
+            if let cache = AuthCache.load() {
+                cloudUserInfo = cache.userEmail
+                cloudPlan = cache.plan
+                if let expires = cache.expiresAt {
+                    cloudExpires = String(expires.prefix(10))
+                }
+            } else {
+                cloudUserInfo = "Signed in"
+                cloudPlan = "Checking..."
+            }
+            // Refresh status in background
+            Task { await refreshCloudStatus() }
+        }
+    }
+
+    private func refreshCloudStatus() async {
+        guard let _ = AuthCache.loadSession() else { return }
+        let client = AuthClient()
+        do {
+            let response = try await client.checkSession(AuthCache.loadSession()!)
+            let cache = AuthCache(
+                valid: response.valid,
+                plan: response.plan ?? "free",
+                status: response.status ?? "unknown",
+                cancelAtPeriodEnd: response.cancelAtPeriodEnd ?? false,
+                expiresAt: response.expiresAt,
+                cachedAt: Date().timeIntervalSince1970,
+                userEmail: response.user?.email ?? ""
+            )
+            try cache.save()
+            await MainActor.run {
+                cloudLoggedIn = response.valid
+                cloudUserInfo = response.user?.email ?? ""
+                cloudPlan = response.plan ?? "free"
+                cloudExpires = response.expiresAt.map { String($0.prefix(10)) } ?? ""
+                cloudAuthMessage = nil
+            }
+        } catch {
+            await MainActor.run {
+                if case AuthError.sessionExpired = error {
+                    cloudLoggedIn = false
+                    cloudUserInfo = ""
+                    cloudAuthMessage = "Session expired. Please sign in again."
+                }
+            }
+        }
+    }
+
+    private func cloudLogin() {
+        cloudLoggingIn = true
+        cloudAuthMessage = nil
+        Task {
+            let client = AuthClient()
+            do {
+                let response = try await client.login(email: cloudEmail, password: cloudPassword)
+                try AuthCache.saveSession(response.session)
+
+                // Check subscription
+                let check = try await client.checkSession(response.session)
+                let cache = AuthCache(
+                    valid: check.valid,
+                    plan: check.plan ?? "free",
+                    status: check.status ?? "none",
+                    cancelAtPeriodEnd: check.cancelAtPeriodEnd ?? false,
+                    expiresAt: check.expiresAt,
+                    cachedAt: Date().timeIntervalSince1970,
+                    userEmail: response.user.email
+                )
+                try cache.save()
+
+                await MainActor.run {
+                    cloudLoggedIn = check.valid
+                    cloudUserInfo = response.user.email
+                    cloudPlan = check.plan ?? "free"
+                    cloudExpires = check.expiresAt.map { String($0.prefix(10)) } ?? ""
+                    cloudPassword = ""
+                    cloudLoggingIn = false
+                    if check.valid {
+                        cloudAuthMessage = "Signed in successfully!"
+                    } else {
+                        cloudAuthMessage = "Signed in, but no active subscription."
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    cloudLoggingIn = false
+                    cloudAuthMessage = "Login failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func cloudLogout() {
+        AuthCache.clearAll()
+        cloudLoggedIn = false
+        cloudUserInfo = ""
+        cloudPlan = ""
+        cloudExpires = ""
+        cloudEmail = ""
+        cloudPassword = ""
+        cloudAuthMessage = "Logged out."
     }
 
     // MARK: - Language

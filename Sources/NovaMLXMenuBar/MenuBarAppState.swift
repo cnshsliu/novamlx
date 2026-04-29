@@ -35,16 +35,41 @@ public final class MenuBarAppState: ObservableObject {
         statsTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
             Task { @MainActor in
                 let currentStats = inferenceService.stats
-                self.systemStats = SystemMonitor.shared.currentStats(
+                let tps = currentStats.recentTokensPerSecond
+                var systemStats = SystemMonitor.shared.currentStats(
                     activeRequests: currentStats.activeRequests,
-                    tokensPerSecond: currentStats.recentTokensPerSecond
+                    tokensPerSecond: tps
                 )
-                self.inferenceStats = inferenceService.stats
+                // In worker mode, override CPU with worker-reported value
+                // (SystemMonitor only measures the lightweight main process)
+                if currentStats.workerCpuUsage > 0 {
+                    systemStats = SystemStats(
+                        cpuUsage: currentStats.workerCpuUsage,
+                        memoryUsed: systemStats.memoryUsed,
+                        memoryTotal: systemStats.memoryTotal,
+                        gpuMemoryUsed: systemStats.gpuMemoryUsed,
+                        activeRequests: systemStats.activeRequests,
+                        tokensPerSecond: systemStats.tokensPerSecond,
+                        uptime: systemStats.uptime
+                    )
+                }
+                self.systemStats = systemStats
+                self.inferenceStats = currentStats
                 self.loadedModels = inferenceService.listLoadedModels()
                 self.cloudModels = await inferenceService.listCloudModels()
                 self.uptime = SystemMonitor.shared.uptime
-                let tps = currentStats.recentTokensPerSecond
-                self.tpsHistory.append(tps)
+                self.totalTokensGenerated = currentStats.totalTokensGenerated
+                // Trim consecutive zeros: allow at most 1 zero data point (~2s) between
+                // inference bursts. Long idle stretches produce a flat line that wastes
+                // chart space — only keep the interesting TPS up/down curve.
+                if tps > 0 {
+                    self.tpsHistory.append(tps)
+                } else {
+                    let trailingZeros = self.tpsHistory.reversed().prefix(while: { $0 == 0 }).count
+                    if trailingZeros < 1 {
+                        self.tpsHistory.append(tps)
+                    }
+                }
                 if self.tpsHistory.count > self.maxTpsHistory {
                     self.tpsHistory.removeFirst(self.tpsHistory.count - self.maxTpsHistory)
                 }

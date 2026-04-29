@@ -127,6 +127,7 @@ public struct WorkerMessage: Codable, Sendable {
     public let memoryHardLimitBytes: UInt64?
     public let memoryUtilization: Double?
     public let memoryEvictions: UInt64?
+    public let cpuUsage: Double?
 
     public init(
         type: String,
@@ -145,7 +146,8 @@ public struct WorkerMessage: Codable, Sendable {
         memorySoftLimitBytes: UInt64? = nil,
         memoryHardLimitBytes: UInt64? = nil,
         memoryUtilization: Double? = nil,
-        memoryEvictions: UInt64? = nil
+        memoryEvictions: UInt64? = nil,
+        cpuUsage: Double? = nil
     ) {
         self.type = type
         self.modelId = modelId
@@ -164,6 +166,7 @@ public struct WorkerMessage: Codable, Sendable {
         self.memoryHardLimitBytes = memoryHardLimitBytes
         self.memoryUtilization = memoryUtilization
         self.memoryEvictions = memoryEvictions
+        self.cpuUsage = cpuUsage
     }
 }
 

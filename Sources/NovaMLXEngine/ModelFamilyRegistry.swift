@@ -2,6 +2,30 @@ import Foundation
 import NovaMLXCore
 import NovaMLXUtils
 
+public struct FamilySamplingDefaults: Sendable {
+    public let temperature: Double?
+    public let topP: Double?
+    public let topK: Int?
+    public let minP: Float?
+    public let frequencyPenalty: Float?
+    public var repetitionPenalty: Float?
+    public let maxTokens: Int?
+
+    public init(
+        temperature: Double? = nil, topP: Double? = nil, topK: Int? = nil,
+        minP: Float? = nil, frequencyPenalty: Float? = nil,
+        repetitionPenalty: Float? = nil, maxTokens: Int? = nil
+    ) {
+        self.temperature = temperature
+        self.topP = topP
+        self.topK = topK
+        self.minP = minP
+        self.frequencyPenalty = frequencyPenalty
+        self.repetitionPenalty = repetitionPenalty
+        self.maxTokens = maxTokens
+    }
+}
+
 public struct ModelFamilyOptimization: Sendable {
     public let defaultKVBits: Int?
     public let defaultKVGroupSize: Int
@@ -9,6 +33,7 @@ public struct ModelFamilyOptimization: Sendable {
     public let recommendedContextLength: Int
     public let repeatLastN: Int
     public let headDim: Int
+    public let samplingDefaults: FamilySamplingDefaults?
 
     public init(
         defaultKVBits: Int? = nil,
@@ -16,7 +41,8 @@ public struct ModelFamilyOptimization: Sendable {
         prefillStepSize: Int = 512,
         recommendedContextLength: Int = 4096,
         repeatLastN: Int = 64,
-        headDim: Int = 128
+        headDim: Int = 128,
+        samplingDefaults: FamilySamplingDefaults? = nil
     ) {
         self.defaultKVBits = defaultKVBits
         self.defaultKVGroupSize = defaultKVGroupSize
@@ -24,6 +50,7 @@ public struct ModelFamilyOptimization: Sendable {
         self.recommendedContextLength = recommendedContextLength
         self.repeatLastN = repeatLastN
         self.headDim = headDim
+        self.samplingDefaults = samplingDefaults
     }
 
     public func safeGroupSize(requestedGroupSize: Int? = nil) -> Int {
@@ -49,13 +76,15 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
             defaultKVBits: 4,
             prefillStepSize: 512,
             recommendedContextLength: 8192,
-            repeatLastN: 64
+            repeatLastN: 64,
+            samplingDefaults: FamilySamplingDefaults(temperature: 0.7, topP: 0.9)
         ),
         .mistral: ModelFamilyOptimization(
             defaultKVBits: 4,
             prefillStepSize: 512,
             recommendedContextLength: 8192,
-            repeatLastN: 64
+            repeatLastN: 64,
+            samplingDefaults: FamilySamplingDefaults(temperature: 0.7, topP: 0.9)
         ),
         .phi: ModelFamilyOptimization(
             defaultKVBits: nil,
@@ -63,13 +92,20 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
             prefillStepSize: 256,
             recommendedContextLength: 4096,
             repeatLastN: 32,
-            headDim: 96
+            headDim: 96,
+            samplingDefaults: FamilySamplingDefaults(
+                temperature: 0.7,
+                topP: 0.9,
+                frequencyPenalty: 1.0,
+                repetitionPenalty: 1.1
+            )
         ),
         .qwen: ModelFamilyOptimization(
             defaultKVBits: 4,
             prefillStepSize: 512,
             recommendedContextLength: 8192,
-            repeatLastN: 64
+            repeatLastN: 64,
+            samplingDefaults: FamilySamplingDefaults(temperature: 1.0, topP: 0.95, topK: 20)
         ),
         .gemma: ModelFamilyOptimization(
             defaultKVBits: nil,
@@ -77,7 +113,8 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
             prefillStepSize: 256,
             recommendedContextLength: 8192,
             repeatLastN: 32,
-            headDim: 256
+            headDim: 256,
+            samplingDefaults: FamilySamplingDefaults(temperature: 1.0, topP: 0.95, topK: 64)
         ),
         .starcoder: ModelFamilyOptimization(
             defaultKVBits: 4,

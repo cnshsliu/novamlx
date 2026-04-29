@@ -162,8 +162,8 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
 
     let validKeys: [String]
 
-    private static let publicPaths: Set<String> = ["/chat", "/health", "/v1/models"]
-    private static let publicPrefixes: Set<String> = ["/v1/chat/history"]
+    private static let publicPaths: Set<String> = ["/", "/chat", "/health", "/v1/models", "/v1/stats", "/favicon.ico"]
+    private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
     func handle(
         _ request: Request,
@@ -306,6 +306,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private let updateChecker: UpdateChecker
     private let hfService: HuggingFaceService
     private let config: ServerConfig
+    private let startTime = Date()
 
     public init(
         inferenceService: InferenceService,
@@ -436,7 +437,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             }
             Post("/v1/messages") { request, context in
                 let body = try await request.body.collect(upTo: .max)
-                let anthropicReq = try JSONDecoder().decode(AnthropicRequest.self, from: body)
+                var anthropicReq = try JSONDecoder().decode(AnthropicRequest.self, from: body)
+
+                // Anthropic clients send cloud model names without :cloud suffix — fix it
+                let cloudModels = await inference.listCloudModels()
+                if !cloudModels.contains(anthropicReq.model),
+                   cloudModels.contains(anthropicReq.model + ":cloud") {
+                    anthropicReq.model += ":cloud"
+                }
 
                 NovaMLXLog.info("[API] POST /v1/messages — model=\(anthropicReq.model), stream=\(anthropicReq.stream ?? false), maxTokens=\(anthropicReq.maxTokens), msgs=\(anthropicReq.messages.count)")
 
@@ -496,8 +504,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     : result.completionTokens
 
                 var content: [AnthropicContentBlock] = []
-                if !result.text.isEmpty {
-                    content.append(AnthropicContentBlock(text: result.text))
+                // Parse thinking tags from raw output
+                let thinkingParser = ThinkingParser()
+                _ = thinkingParser.feed(result.text)
+                let finalResult = thinkingParser.finalize()
+                if !finalResult.thinking.isEmpty {
+                    content.append(AnthropicContentBlock(type: "thinking", thinking: finalResult.thinking))
+                }
+                if !finalResult.response.isEmpty {
+                    content.append(AnthropicContentBlock(text: finalResult.response))
                 }
                 if let toolCalls = result.toolCalls {
                     for tc in toolCalls {
@@ -637,10 +652,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             Get("/health") { _, _ in
                 let stats = inference.stats
                 let mcpStatuses = mcp.getServerStatuses()
+                let uptime = Date().timeIntervalSince(self.startTime)
+                let diskFree = (try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())[.systemFreeSize] as? Int64) ?? 0
+                let diskTotal = (try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())[.systemSize] as? Int64) ?? 0
                 let body: [String: Any] = [
                     "status": "ok",
                     "loadedModels": stats.loadedModels,
                     "gpuMemoryUsed": stats.gpuMemoryUsed,
+                    "uptime": Int(uptime),
+                    "diskUsage": diskTotal - diskFree,
                     "mcp": [
                         "connectedServers": mcp.connectedServerCount,
                         "totalServers": mcp.totalServerCount,
@@ -699,6 +719,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     ]
                 }
 
+                let sysStats = SystemMonitor.shared.currentStats(
+                    activeRequests: stats.activeRequests,
+                    tokensPerSecond: sessionMetrics.averageTokensPerSecond,
+                    gpuMemoryUsed: stats.gpuMemoryUsed
+                )
                 let body: [String: Any] = [
                     "session": [
                         "loadedModels": stats.loadedModels,
@@ -707,6 +732,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         "totalRequests": sessionMetrics.totalRequests,
                         "totalTokens": sessionMetrics.totalTokensGenerated,
                         "averageTokensPerSecond": sessionMetrics.averageTokensPerSecond,
+                        "recentTokensPerSecond": inference.engine.metricsStore.recentTokensPerSecond,
+                        "cpuUsage": sysStats.cpuUsage,
+                        "memoryUsed": sysStats.memoryUsed,
+                        "memoryTotal": sysStats.memoryTotal,
                     ],
                     "allTime": [
                         "totalRequests": persistentMetrics.totalRequestsAllTime,
@@ -746,6 +775,50 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let data = try JSONSerialization.data(withJSONObject: body)
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
+            // SPA root — serves the full web UI
+            Get("/") { _, _ in
+                let html = WebUIBuilder.render()
+                return Response(
+                    status: .ok,
+                    headers: [.contentType: "text/html"],
+                    body: .init(byteBuffer: ByteBuffer(string: html))
+                )
+            }
+
+            Get("/favicon.ico") { _, _ in
+                let svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%238b5cf6'/><text x='16' y='23' text-anchor='middle' font-size='20' fill='white' font-family='sans-serif' font-weight='bold'>N</text></svg>"
+                return Response(
+                    status: .ok,
+                    headers: [.contentType: "image/svg+xml"],
+                    body: .init(byteBuffer: ByteBuffer(string: svg))
+                )
+            }
+
+            // Admin API proxy — forwards /admin/* to the admin server on localhost:{adminPort}
+            // This lets the web UI (on port 6590) reach admin endpoints without CORS issues
+            Get("/admin/**") { request, context in
+                let path = "/admin/" + context.parameters.getCatchAll().joined(separator: "/")
+                let query = request.uri.query ?? ""
+                let fullPath = query.isEmpty ? path : path + "?" + query
+                return try await Self.proxyAdminRequest(path: fullPath, method: "GET", body: nil, cfg: cfg)
+            }
+            Post("/admin/**") { request, context in
+                let path = "/admin/" + context.parameters.getCatchAll().joined(separator: "/")
+                let body = try await request.body.collect(upTo: .max)
+                return try await Self.proxyAdminRequest(path: path, method: "POST", body: body, cfg: cfg)
+            }
+            Put("/admin/**") { request, context in
+                let path = "/admin/" + context.parameters.getCatchAll().joined(separator: "/")
+                let body = try await request.body.collect(upTo: .max)
+                return try await Self.proxyAdminRequest(path: path, method: "PUT", body: body, cfg: cfg)
+            }
+            Delete("/admin/**") { request, context in
+                let path = "/admin/" + context.parameters.getCatchAll().joined(separator: "/")
+                let query = request.uri.query ?? ""
+                let fullPath = query.isEmpty ? path : path + "?" + query
+                return try await Self.proxyAdminRequest(path: fullPath, method: "DELETE", body: nil, cfg: cfg)
+            }
+
             RouteGroup("v1") {
                 Post("/rerank") { request, context in
                     let body = try await request.body.collect(upTo: .max)
@@ -1451,6 +1524,77 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     body: .init(byteBuffer: ByteBuffer(data: data))
                 )
             }
+            // Agent binary detection
+            Get("/admin/api/agents/check") { _, _ in
+                let agentsToCheck = [
+                    ("openclaw", "OpenClaw", "https://github.com/openclaw/openclaw"),
+                    ("hermes", "Hermes Agent", "https://github.com/hermes-agent/hermes"),
+                    ("opencode", "OpenCode", "https://github.com/opencode-ai/opencode"),
+                ]
+                let searchPaths = ["/usr/local/bin", "/opt/homebrew/bin", NSString(string: "~/").expandingTildeInPath + "/.local/bin"]
+                var results: [[String: Any]] = []
+                for (binary, name, installUrl) in agentsToCheck {
+                    var found = false
+                    var foundPath: String? = nil
+                    // Try which
+                    let task = Process()
+                    task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+                    task.arguments = [binary]
+                    let pipe = Pipe()
+                    task.standardOutput = pipe
+                    task.standardError = FileHandle.nullDevice
+                    try? task.run()
+                    task.waitUntilExit()
+                    if task.terminationStatus == 0 {
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+                            found = true
+                            foundPath = path
+                        }
+                    }
+                    if !found {
+                        for dir in searchPaths {
+                            let p = dir + "/" + binary
+                            if FileManager.default.isExecutableFile(atPath: p) {
+                                found = true
+                                foundPath = p
+                                break
+                            }
+                        }
+                    }
+                    results.append([
+                        "id": binary,
+                        "name": name,
+                        "installed": found,
+                        "path": foundPath as Any,
+                        "installUrl": installUrl,
+                    ])
+                }
+                let data = try JSONSerialization.data(withJSONObject: results)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+
+            // Config file read/write
+            Get("/admin/api/config") { _, _ in
+                let configURL = await NovaMLXConfiguration.shared.configFileURL
+                guard let data = try? Data(contentsOf: configURL),
+                      let json = try? JSONSerialization.jsonObject(with: data) else {
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(string: "{}")))
+                }
+                let responseData = try JSONSerialization.data(withJSONObject: json)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: responseData)))
+            }
+            Put("/admin/api/config") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                guard let json = try? JSONSerialization.jsonObject(with: body) else {
+                    throw NovaMLXError.apiError("Invalid JSON")
+                }
+                let configURL = await NovaMLXConfiguration.shared.configFileURL
+                let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: configURL, options: .atomic)
+                return try Self.jsonResponse(["status": "ok", "message": "Config saved. Restart required."])
+            }
+
             Get("/admin/dashboard") { _, _ in
                 let html = Self.dashboardHTML()
                 return Response(
@@ -1538,31 +1682,44 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let finishReason: String
         let message: OpenAIChatMessage
 
+        // Parse thinking tags from raw output
+        let thinkingParser = ThinkingParser()
+        _ = thinkingParser.feed(result.text)
+        let finalResult = thinkingParser.finalize()
+        let thinkingText = finalResult.thinking.isEmpty ? nil : finalResult.thinking
+        let responseText = finalResult.response
+
         // Engine-produced tool calls take priority
         if let engineToolCalls = result.toolCalls, !engineToolCalls.isEmpty {
             finishReason = "tool_calls"
             message = OpenAIChatMessage(
                 role: "assistant",
-                content: result.text.isEmpty ? nil : result.text,
+                content: responseText.isEmpty ? nil : responseText,
+                reasoningContent: thinkingText,
                 toolCalls: engineToolCalls.map { tc in
                     OpenAIToolCall(id: tc.id, function: OpenAIFunctionCall(name: tc.functionName, arguments: tc.arguments))
                 }
             )
         } else {
             // Fallback: post-hoc text parsing
-            let parsed = ToolCallParser.parse(result.text)
-            if let toolCalls = parsed.toolCalls {
+            let toolParsed = ToolCallParser.parse(responseText)
+            if let toolCalls = toolParsed.toolCalls {
                 finishReason = "tool_calls"
                 message = OpenAIChatMessage(
                     role: "assistant",
-                    content: parsed.content.isEmpty ? nil : parsed.content,
+                    content: toolParsed.content.isEmpty ? nil : toolParsed.content,
+                    reasoningContent: thinkingText,
                     toolCalls: toolCalls.map { tc in
                         OpenAIToolCall(id: tc.id, function: OpenAIFunctionCall(name: tc.function.name, arguments: tc.function.arguments))
                     }
                 )
             } else {
                 finishReason = result.finishReason.rawValue
-                message = OpenAIChatMessage(role: "assistant", content: result.text)
+                message = OpenAIChatMessage(
+                    role: "assistant",
+                    content: responseText.isEmpty ? nil : responseText,
+                    reasoningContent: thinkingText
+                )
             }
         }
         let response = OpenAIResponse(
@@ -1637,7 +1794,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try await writer.write(ByteBuffer(string: "data: \(String(data: roleData, encoding: .utf8) ?? "")\n\n"))
 
                 var completionTokenCount = 0
-                let thinkingParser = ThinkingParser()
+                let modelId = openAIReq.model.lowercased()
+                let isThinkingModel = ModelContainer.detectThinkingModel(for: openAIReq.model)
+                let thinkingParser = ThinkingParser(expectImplicitThinking: isThinkingModel)
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
@@ -1771,17 +1930,44 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let startData = try JSONEncoder().encode(startEvent)
                 try await writer.write(ByteBuffer(string: "event: message_start\ndata: \(String(data: startData, encoding: .utf8) ?? "{}")\n\n"))
 
-                let blockStart = AnthropicStreamEvent.contentBlockStart(index: 0)
-                let blockStartData = try JSONEncoder().encode(blockStart)
-                try await writer.write(ByteBuffer(string: "event: content_block_start\ndata: \(String(data: blockStartData, encoding: .utf8) ?? "{}")\n\n"))
-
                 NovaMLXLog.info("[SSE:\(reqTag)] Waiting for first token from inference stream...")
+
+                let anthropicModelId = (anthropicReq.model).lowercased()
+                let isAnthropicThinkingModel = ModelContainer.detectThinkingModel(for: anthropicReq.model)
+                let thinkingParser = ThinkingParser(expectImplicitThinking: isAnthropicThinkingModel)
+                var currentBlockIndex = 0
+                var isInThinkingBlock = false
+                var hasStartedTextBlock = false
+
+                func startThinkingBlock() async throws {
+                    let evt = AnthropicStreamEvent.contentBlockStart(index: currentBlockIndex, blockType: "thinking")
+                    let data = try JSONEncoder().encode(evt)
+                    try await writer.write(ByteBuffer(string: "event: content_block_start\ndata: \(String(data: data, encoding: .utf8) ?? "{}")\n\n"))
+                    isInThinkingBlock = true
+                }
+
+                func endCurrentBlock() async throws {
+                    try await writer.write(ByteBuffer(string: "event: content_block_stop\ndata: {}\n\n"))
+                    currentBlockIndex += 1
+                    isInThinkingBlock = false
+                }
+
+                func startTextBlock() async throws {
+                    let evt = AnthropicStreamEvent.contentBlockStart(index: currentBlockIndex, blockType: "text")
+                    let data = try JSONEncoder().encode(evt)
+                    try await writer.write(ByteBuffer(string: "event: content_block_start\ndata: \(String(data: data, encoding: .utf8) ?? "{}")\n\n"))
+                    isInThinkingBlock = false
+                    hasStartedTextBlock = true
+                }
 
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
                         if token.finishReason != nil {
-                            try await writer.write(ByteBuffer(string: "event: content_block_stop\ndata: {}\n\n"))
+                            // Close current block if open
+                            if isInThinkingBlock || hasStartedTextBlock {
+                                try await writer.write(ByteBuffer(string: "event: content_block_stop\ndata: {}\n\n"))
+                            }
                             let ctxWin = inference.getContextWindow(for: anthropicReq.model) ?? 0
                             let promptCount = inference.countTokens(model: anthropicReq.model, messages: messages) ?? 0
                             let scaledIn = clientType.shouldScaleContext ? cfg.scaleTokenCount(promptCount, modelContextWindow: ctxWin) : promptCount
@@ -1799,9 +1985,31 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 NovaMLXLog.info("[SSE:\(reqTag)] First token received (TTFT=\(String(format: "%.1f", ttft))s)")
                             }
                             tokenCount += 1
-                            let deltaEvent = AnthropicStreamEvent.textDelta(token.text)
-                            let deltaData = try JSONEncoder().encode(deltaEvent)
-                            try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+
+                            let parsed = thinkingParser.feed(token.text)
+                            if parsed.text.isEmpty { continue }
+
+                            if parsed.type == .thinking {
+                                if !isInThinkingBlock {
+                                    if hasStartedTextBlock {
+                                        try await endCurrentBlock()
+                                    }
+                                    try await startThinkingBlock()
+                                }
+                                let deltaEvent = AnthropicStreamEvent.thinkingDelta(parsed.text)
+                                let deltaData = try JSONEncoder().encode(deltaEvent)
+                                try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+                            } else {
+                                if isInThinkingBlock {
+                                    try await endCurrentBlock()
+                                }
+                                if !hasStartedTextBlock {
+                                    try await startTextBlock()
+                                }
+                                let deltaEvent = AnthropicStreamEvent.textDelta(parsed.text)
+                                let deltaData = try JSONEncoder().encode(deltaEvent)
+                                try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+                            }
                         }
                     case .keepAlive:
                         let elapsed = Date().timeIntervalSince(streamStart)
@@ -2089,6 +2297,34 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             return header
         }
         return body
+    }
+
+    // MARK: - Admin API Proxy
+
+    private static func proxyAdminRequest(path: String, method: String, body: ByteBuffer?, cfg: ServerConfig) async throws -> Response {
+        let targetURL = "http://127.0.0.1:\(cfg.adminPort)\(path)"
+        guard let url = URL(string: targetURL) else {
+            throw NovaMLXError.apiError("Invalid proxy target: \(targetURL)")
+        }
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = method
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey = cfg.apiKeys.first {
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if let body {
+            urlRequest.httpBody = Data(buffer: body)
+        }
+        let (data, resp) = try await URLSession.shared.data(for: urlRequest)
+        guard let httpResp = resp as? HTTPURLResponse else {
+            throw NovaMLXError.apiError("Invalid response from admin server")
+        }
+        let status = HTTPResponse.Status(code: httpResp.statusCode)
+        var headers: HTTPFields = [.contentType: httpResp.value(forHTTPHeaderField: "Content-Type") ?? "application/json"]
+        if let cacheControl = httpResp.value(forHTTPHeaderField: "Cache-Control") {
+            headers[.cacheControl] = cacheControl
+        }
+        return Response(status: status, headers: headers, body: .init(byteBuffer: ByteBuffer(data: data)))
     }
 
     private static func jsonResponse<T: Encodable>(_ value: T) throws -> Response {

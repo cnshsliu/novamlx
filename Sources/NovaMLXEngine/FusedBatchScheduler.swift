@@ -123,6 +123,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     private var totalTokensViaFused: UInt64 = 0
     private var peakBatchWidth: Int = 0
     private var totalPreemptions: UInt64 = 0
+    private var lastDecodeStepTime: Date = Date()
+    private var lastDecodeStepTokens: UInt64 = 0
 
     // MARK: - Init
 
@@ -503,12 +505,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let sampler = CompiledSampler(
             temperature: Float(request.temperature ?? container.config.temperature),
             topP: Float(request.topP ?? container.config.topP),
-            topK: request.topK ?? 0,
-            minP: request.minP ?? 0.0
+            topK: request.topK ?? container.config.topK,
+            minP: request.minP ?? container.config.minP
         )
 
-        // Frequency penalty to prevent repetition collapse (default 0.5 if user doesn't specify)
-        let freqPenaltyValue = request.frequencyPenalty ?? 0.5
+        // Frequency penalty — per-model default from generation_config.json + family defaults
+        let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
 
         // Run entire prefill + first token sampling inside perform to ensure
         // correct MLX lazy evaluation context.
@@ -647,10 +649,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let sampler = CompiledSampler(
             temperature: Float(request.temperature ?? container.config.temperature),
             topP: Float(request.topP ?? container.config.topP),
-            topK: request.topK ?? 0,
-            minP: request.minP ?? 0.0
+            topK: request.topK ?? container.config.topK,
+            minP: request.minP ?? container.config.minP
         )
-        let freqPenaltyValue = request.frequencyPenalty ?? Float(0.5)
+        let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
         let reqTag = request.id.uuidString.prefix(8)
         let remainingArray = MLXArray(remainingTokenIds.map { Int32($0) })
         let firstTokenIdBox = await mlxContainer.perform(nonSendable: (remainingArray, restoredCaches)) { context, values in
@@ -1079,8 +1081,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                     // Update N-gram context buffer.
                     seq.recentTokenIds.append(tokenId)
-                    if seq.recentTokenIds.count > 30 {
-                        seq.recentTokenIds = Array(seq.recentTokenIds.suffix(20))
+                    if seq.recentTokenIds.count > 128 {
+                        seq.recentTokenIds = Array(seq.recentTokenIds.suffix(64))
                     }
 
                     // Record into N-gram cache for future speculation.
@@ -1185,6 +1187,17 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 }
             }
         }
+
+        // Report live TPS to MetricsStore so the status chart updates during generation
+        let tokensNow = lock.withLock { totalTokensViaFused }
+        let tokensThisStep = tokensNow - lastDecodeStepTokens
+        let now = Date()
+        let stepElapsed = now.timeIntervalSince(lastDecodeStepTime)
+        if tokensThisStep > 0 && stepElapsed > 0.01 {
+            engine.metricsStore.updateLiveTps(Double(tokensThisStep) / stepElapsed)
+        }
+        lastDecodeStepTime = now
+        lastDecodeStepTokens = tokensNow
 
         return anyActive
     }

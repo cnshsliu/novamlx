@@ -26,20 +26,22 @@ struct NovaMLXWorker {
         }
 
         await withTaskGroup(of: Void.self) { group in
-            // Background task: report memory stats to parent every 5s
+            // Background task: report memory + CPU stats to parent every 5s
             group.addTask {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(5))
                     guard !Task.isCancelled else { return }
                     if let enforcer = engine.memoryEnforcer {
                         let status = await enforcer.status
+                        let cpu = SystemMonitor.shared.currentStats()
                         writer.write(WorkerMessage(
                             type: WorkerMessageType.memoryStats,
                             memoryCurrentBytes: status.currentBytes,
                             memorySoftLimitBytes: status.softLimitBytes,
                             memoryHardLimitBytes: status.hardLimitBytes,
                             memoryUtilization: status.utilization,
-                            memoryEvictions: status.totalEvictions
+                            memoryEvictions: status.totalEvictions,
+                            cpuUsage: cpu.cpuUsage
                         ))
                     }
                 }

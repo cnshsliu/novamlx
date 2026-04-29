@@ -41,6 +41,7 @@ public final class ThinkingParser: @unchecked Sendable {
     private var preCloseContent: String
     private var implicitCloseTag: Bool
     private var closeWasSeen: Bool
+    private var expectImplicitThinking: Bool
 
     private enum State: Sendable {
         case normal
@@ -54,7 +55,7 @@ public final class ThinkingParser: @unchecked Sendable {
     private static let bufferRetention = max(thinkOpen.count, thinkClose.count)
     private static let flushThreshold = 500
 
-    public init() {
+    public init(expectImplicitThinking: Bool = false) {
         self.buffer = ""
         self.state = .normal
         self.thinkingContent = ""
@@ -62,6 +63,7 @@ public final class ThinkingParser: @unchecked Sendable {
         self.preCloseContent = ""
         self.implicitCloseTag = false
         self.closeWasSeen = false
+        self.expectImplicitThinking = expectImplicitThinking
     }
 
     public func reset() {
@@ -72,6 +74,7 @@ public final class ThinkingParser: @unchecked Sendable {
         preCloseContent = ""
         implicitCloseTag = false
         closeWasSeen = false
+        // expectImplicitThinking is preserved across resets
     }
 
     /// Feed a streaming token into the parser.
@@ -141,15 +144,26 @@ public final class ThinkingParser: @unchecked Sendable {
                 } else {
                     let safeEnd = max(0, buffer.count - Self.bufferRetention)
                     if safeEnd > 0 {
-                        let safe = String(buffer.prefix(safeEnd))
-                        preCloseContent += safe
-                        buffer = String(buffer.suffix(Self.bufferRetention))
-                        // Flush if over threshold (non-thinking model or very long thinking)
-                        if preCloseContent.count >= Self.flushThreshold {
-                            responseContent += preCloseContent
-                            resultText += preCloseContent
-                            resultType = .content
-                            preCloseContent = ""
+                        if expectImplicitThinking && !closeWasSeen {
+                            // Implicit thinking model: stream tokens as thinking immediately
+                            // rather than buffering — enables real-time thinking visualization
+                            let safe = String(buffer.prefix(safeEnd))
+                            thinkingContent += safe
+                            resultText += safe
+                            resultType = .thinking
+                            buffer = String(buffer.suffix(Self.bufferRetention))
+                        } else {
+                            let safe = String(buffer.prefix(safeEnd))
+                            preCloseContent += safe
+                            buffer = String(buffer.suffix(Self.bufferRetention))
+                            // Flush if over threshold — but NOT for implicit thinking models
+                            // where content before </think...> must be treated as thinking
+                            if preCloseContent.count >= Self.flushThreshold && !expectImplicitThinking {
+                                responseContent += preCloseContent
+                                resultText += preCloseContent
+                                resultType = .content
+                                preCloseContent = ""
+                            }
                         }
                     }
                     break loop

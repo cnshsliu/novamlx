@@ -88,15 +88,19 @@ public struct ModelConfig: Codable, Sendable {
     public let modelType: ModelType
     public var hasLinearAttention: Bool
     public var contextLength: Int
-    public let maxTokens: Int
-    public let temperature: Double
-    public let topP: Double
-    public let repeatPenalty: Float
+    public var maxTokens: Int
+    public var temperature: Double
+    public var topP: Double
+    public var repeatPenalty: Float
     public let repeatLastN: Int
     public let seed: UInt64?
     public let kvBits: Int?
     public let kvGroupSize: Int
     public var kvMemoryBytesPerToken: Int?
+    public var topK: Int
+    public var minP: Float
+    public var frequencyPenalty: Float
+    public var presencePenalty: Float
 
     public init(
         identifier: ModelIdentifier,
@@ -111,7 +115,11 @@ public struct ModelConfig: Codable, Sendable {
         seed: UInt64? = nil,
         kvBits: Int? = nil,
         kvGroupSize: Int = 64,
-        kvMemoryBytesPerToken: Int? = nil
+        kvMemoryBytesPerToken: Int? = nil,
+        topK: Int = 0,
+        minP: Float = 0.0,
+        frequencyPenalty: Float = 0,
+        presencePenalty: Float = 0
     ) {
         self.identifier = identifier
         self.modelType = modelType
@@ -126,6 +134,32 @@ public struct ModelConfig: Codable, Sendable {
         self.kvBits = kvBits
         self.kvGroupSize = kvGroupSize
         self.kvMemoryBytesPerToken = kvMemoryBytesPerToken
+        self.topK = topK
+        self.minP = minP
+        self.frequencyPenalty = frequencyPenalty
+        self.presencePenalty = presencePenalty
+    }
+}
+
+/// Parameters parsed from HuggingFace generation_config.json.
+/// All fields optional — only values present in the file are populated.
+public struct GenerationConfig: Codable, Sendable {
+    public let temperature: Double?
+    public let topP: Double?
+    public let topK: Int?
+    public let repetitionPenalty: Float?
+    public let frequencyPenalty: Float?
+    public let presencePenalty: Float?
+    public let maxNewTokens: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case temperature
+        case topP = "top_p"
+        case topK = "top_k"
+        case repetitionPenalty = "repetition_penalty"
+        case frequencyPenalty = "frequency_penalty"
+        case presencePenalty = "presence_penalty"
+        case maxNewTokens = "max_new_tokens"
     }
 }
 

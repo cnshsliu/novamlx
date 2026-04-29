@@ -9,6 +9,8 @@ struct StatusPageView: View {
     let modelManager: ModelManager
     @EnvironmentObject var l10n: L10n
     @State private var deviceInfo: DeviceInfo?
+    @State private var hoveredTPS: Double?
+    @State private var hoveredIndex: Int = 0
 
     var body: some View {
         ScrollView {
@@ -84,8 +86,9 @@ struct StatusPageView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 24)
             } else {
+                let history = appState.tpsHistory
                 Chart {
-                    ForEach(Array(appState.tpsHistory.enumerated()), id: \.offset) { index, tps in
+                    ForEach(Array(history.enumerated()), id: \.offset) { index, tps in
                         LineMark(
                             x: .value("Time", index),
                             y: .value("tok/s", tps)
@@ -106,12 +109,66 @@ struct StatusPageView: View {
                         )
                         .interpolationMethod(.catmullRom)
                     }
+
+                    if let tps = hoveredTPS {
+                        RuleMark(y: .value("tok/s", tps))
+                            .foregroundStyle(NovaTheme.Colors.accent.opacity(0.5))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+
+                        PointMark(
+                            x: .value("Time", hoveredIndex),
+                            y: .value("tok/s", tps)
+                        )
+                        .foregroundStyle(NovaTheme.Colors.accent)
+                        .symbolSize(50)
+                    }
                 }
                 .chartXAxis(.hidden)
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
                         AxisValueLabel()
                             .font(.caption2)
+                    }
+                }
+                .chartOverlay { proxy in
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .fill(.clear)
+                            .contentShape(Rectangle())
+                            .onContinuousHover { phase in
+                                switch phase {
+                                case .active(let location):
+                                    guard let plotAnchor = proxy.plotFrame else {
+                                        hoveredTPS = nil
+                                        return
+                                    }
+                                    let plotFrame = geometry[plotAnchor]
+                                    let relX = location.x - plotFrame.origin.x
+                                    let xRatio = max(0, min(1, relX / plotFrame.width))
+                                    let idx = Int(round(xRatio * Double(history.count - 1)))
+                                    let clamped = max(0, min(idx, history.count - 1))
+                                    hoveredTPS = history[clamped]
+                                    hoveredIndex = clamped
+                                case .ended:
+                                    hoveredTPS = nil
+                                    hoveredIndex = 0
+                                }
+                            }
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if let tps = hoveredTPS {
+                        Text(String(format: "%.1f tok/s", tps))
+                            .font(.caption.bold())
+                            .foregroundColor(NovaTheme.Colors.accent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(NovaTheme.Colors.cardBackground)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(NovaTheme.Colors.accent.opacity(0.4), lineWidth: 1))
+                            )
+                            .padding(4)
                     }
                 }
                 .frame(height: 120)
@@ -174,5 +231,4 @@ struct StatusPageView: View {
         if n >= 1_000 { return String(format: "%.1fK", Double(n) / 1_000) }
         return "\(n)"
     }
-
 }

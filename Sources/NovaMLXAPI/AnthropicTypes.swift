@@ -20,7 +20,7 @@ public struct AnthropicTool: Codable, Sendable {
 }
 
 public struct AnthropicRequest: Codable, Sendable {
-    public let model: String
+    public var model: String
     public let messages: [AnthropicMessage]
     public let maxTokens: Int
     public let system: AnthropicContent?
@@ -158,6 +158,7 @@ public enum AnthropicContent: Codable, Sendable, Equatable {
 public struct AnthropicContentBlock: Codable, Sendable {
     public let type: String
     public let text: String?
+    public let thinking: String?
     public let id: String?
     public let name: String?
     public let input: AnyCodable?
@@ -165,17 +166,18 @@ public struct AnthropicContentBlock: Codable, Sendable {
     public let source: AnyCodable?
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, id, name, input, source
+        case type, text, thinking, id, name, input, source
         case toolUseId = "tool_use_id"
     }
 
     public init(
-        type: String, text: String? = nil, id: String? = nil,
-        name: String? = nil, input: AnyCodable? = nil,
+        type: String, text: String? = nil, thinking: String? = nil,
+        id: String? = nil, name: String? = nil, input: AnyCodable? = nil,
         toolUseId: String? = nil, source: AnyCodable? = nil
     ) {
         self.type = type
         self.text = text
+        self.thinking = thinking
         self.id = id
         self.name = name
         self.input = input
@@ -187,6 +189,7 @@ public struct AnthropicContentBlock: Codable, Sendable {
     public init(text: String) {
         self.type = "text"
         self.text = text
+        self.thinking = nil
         self.id = nil
         self.name = nil
         self.input = nil
@@ -309,6 +312,25 @@ public struct AnthropicStreamEvent: Codable, Sendable {
         )
     }
 
+    public static func contentBlockStart(index: Int, blockType: String) -> AnthropicStreamEvent {
+        AnthropicStreamEvent(
+            type: "content_block_start",
+            message: nil,
+            contentBlock: AnthropicContentBlockStart(type: blockType, index: index),
+            delta: nil, usage: nil
+        )
+    }
+
+    public static func thinkingDelta(_ thinking: String) -> AnthropicStreamEvent {
+        AnthropicStreamEvent(
+            type: "content_block_delta",
+            message: nil,
+            contentBlock: nil,
+            delta: AnthropicDelta(type: "thinking_delta", thinking: thinking),
+            usage: nil
+        )
+    }
+
     public static func textDelta(_ text: String) -> AnthropicStreamEvent {
         AnthropicStreamEvent(
             type: "content_block_delta",
@@ -351,17 +373,18 @@ public struct AnthropicContentBlockStart: Codable, Sendable {
 public struct AnthropicDelta: Codable, Sendable {
     public let type: String
     public let text: String?
+    public let thinking: String?
     public let stopReason: String?
 
     private enum CodingKeys: String, CodingKey {
-        case type
-        case text
+        case type, text, thinking
         case stopReason = "stop_reason"
     }
 
-    public init(type: String, text: String? = nil, stopReason: String? = nil) {
+    public init(type: String, text: String? = nil, thinking: String? = nil, stopReason: String? = nil) {
         self.type = type
         self.text = text
+        self.thinking = thinking
         self.stopReason = stopReason
     }
 }

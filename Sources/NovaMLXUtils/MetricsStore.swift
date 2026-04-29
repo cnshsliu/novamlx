@@ -79,7 +79,8 @@ public final class MetricsStore: @unchecked Sendable {
 
     public var recentTokensPerSecond: Double {
         lock.withLock {
-            if Date().timeIntervalSince(_lastTpsUpdate) > tpsStaleThreshold { return 0 }
+            let stale = Date().timeIntervalSince(_lastTpsUpdate) > tpsStaleThreshold
+            if stale { return 0 }
             return _recentTps
         }
     }
@@ -98,6 +99,15 @@ public final class MetricsStore: @unchecked Sendable {
             _metrics.lastUpdated = Date()
         }
         maybeSave()
+    }
+
+    /// Update live TPS without affecting cumulative counters — called during active generation
+    /// to keep the TPS value fresh for the status chart.
+    public func updateLiveTps(_ tps: Double) {
+        lock.withLock {
+            _recentTps = tps
+            _lastTpsUpdate = Date()
+        }
     }
 
     public func recordCacheHit() {

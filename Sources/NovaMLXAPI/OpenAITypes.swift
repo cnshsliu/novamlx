@@ -327,27 +327,31 @@ public struct ImageURL: Codable, Sendable {
 public struct OpenAIChatMessage: Codable, Sendable {
     public let role: String
     public let content: MessageContent?
+    public let reasoningContent: String?
     public let toolCalls: [OpenAIToolCall]?
     public let toolCallId: String?
     public let name: String?
 
     private enum CodingKeys: String, CodingKey {
         case role, content, name
+        case reasoningContent = "reasoning_content"
         case toolCalls = "tool_calls"
         case toolCallId = "tool_call_id"
     }
 
-    public init(role: String, content: String? = nil, toolCalls: [OpenAIToolCall]? = nil, toolCallId: String? = nil, name: String? = nil) {
+    public init(role: String, content: String? = nil, reasoningContent: String? = nil, toolCalls: [OpenAIToolCall]? = nil, toolCallId: String? = nil, name: String? = nil) {
         self.role = role
         self.content = content.map { .text($0) }
+        self.reasoningContent = reasoningContent
         self.toolCalls = toolCalls
         self.toolCallId = toolCallId
         self.name = name
     }
 
-    public init(role: String, content: MessageContent?, toolCalls: [OpenAIToolCall]? = nil, toolCallId: String? = nil, name: String? = nil) {
+    public init(role: String, content: MessageContent?, reasoningContent: String? = nil, toolCalls: [OpenAIToolCall]? = nil, toolCallId: String? = nil, name: String? = nil) {
         self.role = role
         self.content = content
+        self.reasoningContent = reasoningContent
         self.toolCalls = toolCalls
         self.toolCallId = toolCallId
         self.name = name

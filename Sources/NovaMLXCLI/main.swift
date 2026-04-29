@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXCore
 
 struct NovaMLXCLI {
     static func run() async {
@@ -42,6 +43,12 @@ struct NovaMLXCLI {
                 try await handleBench(subArgs)
             case "launch":
                 try await LaunchCommand.handleLaunch(subArgs)
+            case "login":
+                try await handleLogin()
+            case "logout":
+                handleLogout()
+            case "account":
+                try await handleAccount()
             case "--help", "-h":
                 printUsage()
             case "--version", "-v":
@@ -52,7 +59,9 @@ struct NovaMLXCLI {
             }
         } catch {
             print("Error: \(error.localizedDescription)")
-            print("Is NovaMLX server running? Start it first with: NovaMLX")
+            if !(error is AuthError) {
+                print("Is NovaMLX server running? Start it first with: NovaMLX")
+            }
         }
     }
 
@@ -102,6 +111,11 @@ struct NovaMLXCLI {
           nova launch openclaw            Launch OpenClaw with NovaMLX backend
           nova launch hermes              Launch Hermes Agent with NovaMLX backend
           nova launch opencode            Launch OpenCode with NovaMLX backend
+
+        CLOUD AUTH
+          nova login                      Login to NovaMLX Cloud
+          nova logout                     Logout from NovaMLX Cloud
+          nova account                    Show account & subscription status
 
         OPTIONS
           --help, -h     Show this help
@@ -370,6 +384,129 @@ struct NovaMLXCLI {
             print(resp.statusCode == 200 ? "Benchmark cancelled." : "Failed: \(resp.statusCode)")
         default:
             print("Unknown subcommand: \(sub)")
+        }
+    }
+
+    // MARK: - Cloud Auth
+
+    static func handleLogin() async throws {
+        // If already logged in, show current status
+        if let session = AuthCache.loadSession(), !session.isEmpty {
+            print("Already logged in. Checking subscription...")
+            do {
+                let client = AuthClient()
+                let response = try await client.checkSession(session)
+                if response.valid {
+                    print("Logged in as: \(response.user?.email ?? "unknown")")
+                    print("Plan: \(response.plan?.uppercased() ?? "FREE")")
+                    if let expires = response.expiresAt {
+                        print("Expires: \(expires.prefix(10))")
+                    }
+                    print("\nAlready logged in. Use 'nova logout' first to switch accounts.")
+                    return
+                }
+            } catch AuthError.sessionExpired {
+                print("Previous session expired. Please login again.\n")
+                AuthCache.clearAll()
+            } catch {
+                // Fall through to login prompt
+            }
+        }
+
+        print("NovaMLX Cloud Login")
+        print("Email: ", terminator: "")
+        guard let email = readLine(), !email.isEmpty else {
+            print("Email is required.")
+            return
+        }
+        print("Password: ", terminator: "")
+        guard let password = readLine(), !password.isEmpty else {
+            print("Password is required.")
+            return
+        }
+
+        let client = AuthClient()
+        let response = try await client.login(email: email, password: password)
+
+        // Save session
+        try AuthCache.saveSession(response.session)
+
+        // Check subscription
+        let check = try await client.checkSession(response.session)
+        let cache = AuthCache(
+            valid: check.valid,
+            plan: check.plan ?? "free",
+            status: check.status ?? "none",
+            cancelAtPeriodEnd: check.cancelAtPeriodEnd ?? false,
+            expiresAt: check.expiresAt,
+            cachedAt: Date().timeIntervalSince1970,
+            userEmail: response.user.email
+        )
+        try cache.save()
+
+        print("")
+        if check.valid {
+            print("Login successful! Plan: \(check.plan?.uppercased() ?? "FREE")", terminator: "")
+            if let expires = check.expiresAt {
+                print(" (expires \(expires.prefix(10)))")
+            } else {
+                print("")
+            }
+        } else {
+            print("Login successful, but no active subscription.")
+            print("Visit https://novamlx.com/cloud to subscribe.")
+        }
+    }
+
+    static func handleLogout() {
+        if AuthCache.loadSession() == nil {
+            print("Not logged in.")
+            return
+        }
+        AuthCache.clearAll()
+        print("Logged out.")
+    }
+
+    static func handleAccount() async throws {
+        guard let session = AuthCache.loadSession() else {
+            print("Not logged in. Use 'nova login' first.")
+            return
+        }
+
+        print("Checking subscription status...\n")
+        let client = AuthClient()
+        let response = try await client.checkSession(session)
+
+        // Update cache
+        let cache = AuthCache(
+            valid: response.valid,
+            plan: response.plan ?? "free",
+            status: response.status ?? "none",
+            cancelAtPeriodEnd: response.cancelAtPeriodEnd ?? false,
+            expiresAt: response.expiresAt,
+            cachedAt: Date().timeIntervalSince1970,
+            userEmail: response.user?.email ?? ""
+        )
+        try cache.save()
+
+        if response.valid {
+            print("User: \(response.user?.email ?? "unknown")")
+            if let name = response.user?.name { print("Name: \(name)") }
+            print("Plan: \(response.plan?.uppercased() ?? "FREE")")
+            print("Status: \(response.status ?? "unknown")")
+            if let expires = response.expiresAt {
+                print("Expires: \(expires.prefix(10))")
+            }
+            if response.cancelAtPeriodEnd == true {
+                print("\nWarning: Subscription cancelled. Will expire at end of billing period.")
+            }
+            print("\nCloud inference: Available")
+        } else {
+            print("User: \(response.user?.email ?? "unknown")")
+            print("Plan: \(response.plan?.uppercased() ?? "FREE")")
+            print("Status: \(response.status ?? "none")")
+            print("\nCloud inference: Not available")
+            print("Subscribe at: https://novamlx.com/cloud")
         }
     }
 }

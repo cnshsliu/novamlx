@@ -397,10 +397,14 @@ struct ChatPageView: View {
                 for try await token in tokenStream {
                     let parsed = thinkingParser.feed(token.text)
                     if !parsed.text.isEmpty {
-                        messages[assistantIdx].content += parsed.text
+                        if parsed.type == .thinking {
+                            messages[assistantIdx].thinkingContent += parsed.text
+                        } else {
+                            messages[assistantIdx].content += parsed.text
+                        }
                     }
                 }
-                // Separate thinking from response after stream completes
+                // Finalize handles edge cases (implicit open tag cleanup)
                 let finalized = thinkingParser.finalize()
                 if !finalized.thinking.isEmpty {
                     messages[assistantIdx].thinkingContent = finalized.thinking

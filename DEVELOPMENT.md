@@ -229,6 +229,22 @@ Block-level (64 tokens/block) KV cache with:
 - Copy-on-write session forking
 - SSD persistence (SafeTensors format, 16-bucket sharding)
 
+### Thinking Model Detection & Streaming
+
+NovaMLX automatically detects thinking/reasoning models at load time by inspecting the model's `chat_template` (from `tokenizer_config.json` or `chat_template.jinja`). If the template contains any of `<think`, `</think`, `<thinking`, `</thinking`, the model is flagged as a thinking model — no manual configuration or model name matching needed. New thinking models are supported automatically as long as their chat template includes these tags.
+
+**How it works:**
+- `ModelContainer.detectThinkingModel(for:)` in `MLXEngine.swift` reads the chat template and checks for thinking tags
+- `ThinkingParser` in `ThinkingParser.swift` receives `expectImplicitThinking=true` for detected thinking models, which causes it to stream thinking tokens immediately (rather than buffering until `</think` is found)
+- The API layer (`APIServer.swift`) calls `detectThinkingModel` to initialize the correct `ThinkingParser` for each request
+- Both OpenAI and Anthropic streaming endpoints send `reasoning_content` / `thinking_delta` events in real-time as thinking tokens are generated
+
+**Two thinking modes:**
+- **Implicit** (Qwen3, DeepSeek-R1): chat template injects `<think...>` into the prompt, model only generates `</think...>`. The parser treats all content before the first close tag as thinking.
+- **Explicit**: model generates both `<think...>` and `</think...>` tags. Standard parsing applies.
+
+**Web UI:** The built-in chat page shows a Neural Pulse animation during thinking (real-time token count, speed, ghost preview of latest tokens), collapsing to a "Thought for Xs · N words" badge after completion.
+
 ### Security
 
 - API key authentication (Bearer token) on both ports

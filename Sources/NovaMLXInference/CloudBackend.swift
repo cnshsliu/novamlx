@@ -72,9 +72,21 @@ public actor CloudBackend {
         cachedModels.map(\.localName)
     }
 
+    // MARK: - Subscription Validation
+
+    private func validateAccess() async throws {
+        do {
+            _ = try await CloudAuth.validate()
+        } catch {
+            NovaMLXLog.error("[Cloud] Auth failed: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
     // MARK: - OpenAI Proxy (Non-streaming)
 
     public func proxy(_ request: InferenceRequest) async throws -> InferenceResult {
+        try await validateAccess()
         let remoteModel = Self.stripCloudSuffix(request.model)
         let startTime = Date()
 
@@ -106,6 +118,9 @@ public actor CloudBackend {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
+                    // Validate auth before streaming
+                    _ = try await CloudAuth.validate()
+
                     var urlRequest = URLRequest(url: Self.cloudBaseURL.appendingPathComponent("chat/completions"))
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -143,6 +158,7 @@ public actor CloudBackend {
     // MARK: - Anthropic Proxy (Non-streaming)
 
     public func proxyAnthropic(_ request: InferenceRequest) async throws -> InferenceResult {
+        try await validateAccess()
         let remoteModel = Self.stripCloudSuffix(request.model)
         let startTime = Date()
 
@@ -173,6 +189,9 @@ public actor CloudBackend {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
+                    // Validate auth before streaming
+                    _ = try await CloudAuth.validate()
+
                     var urlRequest = URLRequest(url: Self.cloudBaseURL.appendingPathComponent("messages"))
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -230,6 +249,9 @@ public actor CloudBackend {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
+                    // Validate auth before streaming
+                    _ = try await CloudAuth.validate()
+
                     var urlRequest = URLRequest(url: cloudBaseURL.appendingPathComponent("chat/completions"))
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
