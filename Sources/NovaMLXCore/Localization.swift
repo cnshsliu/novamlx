@@ -85,8 +85,7 @@ public final class L10n: ObservableObject {
     // MARK: - Persistence
 
     private func persistLanguage() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configURL = home.appendingPathComponent(".nova/config.json")
+        let configURL = NovaMLXPaths.configFile
 
         guard var config = Self.readJSON(at: configURL) else { return }
         config["language"] = currentLanguage.rawValue
@@ -97,8 +96,7 @@ public final class L10n: ObservableObject {
     }
 
     private static func loadSavedLanguage() -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configURL = home.appendingPathComponent(".nova/config.json")
+        let configURL = NovaMLXPaths.configFile
         guard let config = readJSON(at: configURL) else { return nil }
         return config["language"] as? String
     }

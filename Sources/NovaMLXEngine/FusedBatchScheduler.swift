@@ -66,6 +66,12 @@ struct ActiveStreamSequence: @unchecked Sendable {
     var accumulatedTokenIds: [Int] = []
     var lastDecodedText: String = ""
 
+    /// Harmony channel state: tracks whether the previous token was a scrubbed control token.
+    /// When the model outputs <|channel|>final<|message|>, these arrive as 3 separate tokens.
+    /// <|channel|> is scrubbed to "", "final" passes through, <|message|> is scrubbed to "".
+    /// This flag lets us suppress "final"/"analysis" when they follow a control token.
+    var previousTokenWasControl: Bool = false
+
     mutating func decodeNextToken(_ tokenId: Int, tokenizer: Tokenizer) -> String? {
         accumulatedTokenIds.append(tokenId)
         let fullText = tokenizer.decode(accumulatedTokenIds)
@@ -239,6 +245,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         for try await token in stream {
             if let fr = token.finishReason { finishReason = fr }
             if !token.text.isEmpty { text += token.text; completionTokens += 1 }
+        }
+
+        // Scrub any leaked control tokens from the final text
+        let controlPatterns = MLXEngine.controlTokensForModel(modelId: modelId)
+        if !controlPatterns.isEmpty {
+            text = MLXEngine.scrubControlTokens(
+                MLXEngine.trimControlTokens(text, patterns: controlPatterns)
+            )
         }
 
         let elapsed = Date().timeIntervalSince(startTime)
@@ -420,6 +434,18 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let input = try await mlxContainer.prepare(input: userInput)
         let promptTokenCount = input.text.tokens.size
         let maxTokens = request.maxTokens ?? container.config.maxTokens
+
+        // Context window check with accurate token count (includes chat template)
+        let settings = engine.settingsProvider?(request.model)
+        let contextLength = settings?.maxContextWindow
+            ?? container.config.contextLength
+        if Int(promptTokenCount) + maxTokens > contextLength {
+            let reqTag = request.id.uuidString.prefix(8)
+            NovaMLXLog.warning("[ContextWindow:\(reqTag)] Prompt (\(promptTokenCount) tokens) + maxTokens (\(maxTokens)) exceeds context length (\(contextLength))")
+            throw NovaMLXError.contextWindowExceeded(
+                promptTokens: Int(promptTokenCount), maxTokens: maxTokens, contextLength: contextLength
+            )
+        }
 
         try await engine.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
@@ -625,7 +651,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             recentTokenIds: Array(allTokens.suffix(20)),
             frequencyPenalty: freqPenaltyValue,
             accumulatedTokenIds: initialAccumulatedIds,
-            lastDecodedText: initialDecodedText
+            lastDecodedText: initialDecodedText,
+            previousTokenWasControl: scrubbedFirstToken.isEmpty && !firstTokenText.isEmpty
         )
     }
 
@@ -953,7 +980,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             // Decode step: run forward pass + sample inside mlxContainer.perform.
             // model() must be called inside perform to ensure correct MLX lazy
             // evaluation context — calling outside causes NaN/Inf logits.
+
+            // EOS token ID from tokenizer (primary stop condition)
             let eosId = container.tokenizer?.eosTokenId
+
+            // Get control token patterns for turn-stop detection (cached on container)
+            let controlPatterns = container.controlTokens
 
             // Run decode step per-sequence inside perform.
             // N-gram speculation: propose draft tokens, verify in one forward pass.
@@ -1090,9 +1122,31 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                     let decoded: String
                     if let tok = container.tokenizer, let delta = seq.decodeNextToken(tokenId, tokenizer: tok) {
-                        decoded = MLXEngine.scrubControlTokens(delta)
+                        let scrubbed = MLXEngine.scrubControlTokens(delta)
+
+                        // Harmony format: suppress residue words (analysis, final, user, etc.)
+                        // that appear as standalone tokens between scrubbed control tokens.
+                        // Pattern: <|channel|> → scrubbed to "" → "final" → passes through → <|message|> → scrubbed to ""
+                        // The "final" token would be the output, but it's a channel type, not content.
+                        if scrubbed.isEmpty && !delta.isEmpty {
+                            // Previous token was a control token that got scrubbed
+                            seq.previousTokenWasControl = true
+                            decoded = ""
+                        } else if seq.previousTokenWasControl && !scrubbed.isEmpty {
+                            seq.previousTokenWasControl = false
+                            // Check if this is a known residue word between control tokens
+                            if MLXEngine.harmonyResidueWords.contains(scrubbed.trimmingCharacters(in: .whitespaces)) {
+                                decoded = ""
+                            } else {
+                                decoded = scrubbed
+                            }
+                        } else {
+                            seq.previousTokenWasControl = false
+                            decoded = scrubbed
+                        }
                     } else {
                         decoded = ""
+                        seq.previousTokenWasControl = false
                     }
                     seq.generatedText = seq.lastDecodedText
                     if !decoded.isEmpty {
@@ -1115,7 +1169,30 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         }
                     }
 
-                    if isEOS || atMax || hitStop {
+                    // Check control token patterns (e.g. <|turn>user) — prevents infinite
+                    // hallucination loops when models generate past turn boundaries
+                    var hitControlToken = false
+                    if !controlPatterns.isEmpty && !hitStop && !isEOS {
+                        for pattern in controlPatterns {
+                            if seq.generatedText.contains(pattern) {
+                                hitControlToken = true
+                                break
+                            }
+                        }
+                    }
+
+                    // Check bare multi-turn hallucination patterns — models sometimes
+                    // generate `user\n...\nassistant\n` without any control tokens.
+                    // Patterns come from the chat template processor (family-specific).
+                    if !hitControlToken && !hitStop && !isEOS {
+                        if container.chatTemplateProcessor?.shouldStopForHallucination(
+                            generatedText: seq.generatedText, completionTokenCount: seq.completionTokens
+                        ) == true {
+                            hitControlToken = true
+                        }
+                    }
+
+                    if isEOS || atMax || hitStop || hitControlToken {
                         let finishReason: FinishReason = atMax ? .length : .stop
                         seq.continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
                         seq.continuation.finish()

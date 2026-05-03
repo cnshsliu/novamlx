@@ -22,6 +22,8 @@ public final class ModelContainer: @unchecked Sendable {
     public private(set) var controlTokens: [String] = []
     /// Whether this model uses thinking/reasoning tags (detected from chat_template)
     public private(set) var isThinkingModel: Bool = false
+    /// Per-model-family chat template processor for control token handling
+    public private(set) var chatTemplateProcessor: ChatTemplateProcessor?
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -33,8 +35,23 @@ public final class ModelContainer: @unchecked Sendable {
         self.mlxContainer = mlxContainer
         self.tokenizer = tokenizer
         self.isLoaded = true
-        self.controlTokens = Self.extractControlTokens(for: identifier.id)
-        self.isThinkingModel = Self.detectThinkingModel(for: identifier.id)
+
+        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(identifier.id)
+        let chatTemplate = Self.loadChatTemplate(modelDir: modelDir)
+        let addedTokens = Self.loadAddedTokens(modelDir: modelDir)
+
+        // Select processor based on family + detected template format
+        let processor = ChatTemplateProcessorRegistry.processor(
+            family: identifier.family, chatTemplate: chatTemplate
+        )
+        self.chatTemplateProcessor = processor
+
+        // Extract and refine control tokens via processor
+        self.controlTokens = Self.extractControlTokensWithProcessor(
+            processor: processor, chatTemplate: chatTemplate, addedTokens: addedTokens
+        )
+        self.isThinkingModel = processor.isThinkingModel(chatTemplate: chatTemplate, addedTokens: addedTokens)
+
         if !controlTokens.isEmpty {
             NovaMLXLog.info("[ControlTokens] \(identifier.displayName): \(controlTokens)")
         }
@@ -73,13 +90,22 @@ public final class ModelContainer: @unchecked Sendable {
                     tokens.insert(content)
                 }
             }
+            // Also pick up <|xxx|> pattern tokens marked non-special (e.g. Qwen3.6 tool_call)
+            // These are protocol-level tokens the model shouldn't emit outside tool-use mode
+            for entry in added {
+                if entry["special"] as? Bool == false,
+                   let content = entry["content"] as? String,
+                   content.hasPrefix("<|") && (content.hasSuffix("|>") || content.hasSuffix(">")) {
+                    tokens.insert(content)
+                }
+            }
         }
 
         // 2. From chat_template: extract all <|xxx> and <|xxx|> patterns
         let template = loadChatTemplate(modelDir: modelDir)
         if let template {
-            // Match <|xxx> and <|xxx|> patterns
-            if let regex = try? NSRegularExpression(pattern: "<\\|[a-zA-Z_][a-zA-Z0-9_]*\\|?>") {
+            // Match <|xxx>, <|xxx|>, and <|/xxx> patterns
+            if let regex = try? NSRegularExpression(pattern: "<\\|[a-zA-Z_/][a-zA-Z0-9_/]*\\|?>") {
                 let nsRange = NSRange(template.startIndex..., in: template)
                 for match in regex.matches(in: template, range: nsRange) {
                     if let range = Range(match.range, in: template) {
@@ -89,8 +115,49 @@ public final class ModelContainer: @unchecked Sendable {
             }
         }
 
+        // Generate close-tag variants: <|turn|> → <|/turn|>, <|/turn>
+        // Models like Qwen3.6 output <|/turn> as close tags for <|turn|> open tags
+        var closeVariants = Set<String>()
+        for token in tokens {
+            guard token.hasPrefix("<|") && !token.contains("/") else { continue }
+            let inner: String
+            if token.hasSuffix("|>") {
+                inner = String(token.dropFirst(2).dropLast(2))
+            } else if token.hasSuffix(">") {
+                inner = String(token.dropFirst(2).dropLast(1))
+            } else { continue }
+            closeVariants.insert("<|/\(inner)|>")
+            closeVariants.insert("<|/\(inner)>")
+        }
+        tokens.formUnion(closeVariants)
+
+        // Refine turn markers: if template uses <|turn>role format (Qwen3.6 style),
+        // bare <|turn> / <|turn|> are role prefixes, NOT end-of-turn signals.
+        // Replace them with <|turn>user to only stop at the start of a new user turn,
+        // allowing the model to generate <|turn>model (response turn) freely.
+        if let template, template.contains("<|turn>") {
+            let turnPrefixes: Set<String> = ["<|turn>", "<|turn|>"]
+            if tokens.intersection(turnPrefixes).isEmpty == false {
+                tokens.subtract(turnPrefixes)
+                tokens.subtract(["<|/turn>", "<|/turn|>"])
+                tokens.insert("<|turn>user")
+            }
+        }
+
         // Remove EOS/BOS/PAD/UNK — those are structural, not output separators
         tokens.remove("")
+
+        // Harmony format (GPT-OSS): structural tokens are part of output format.
+        // Only <|return|> should be a stop signal. <|channel|>, <|message|>, <|end|>, etc.
+        // are generated by the model as part of its multi-channel output format.
+        if let template, template.contains("<|channel|>") {
+            tokens.subtract([
+                "<|end|>", "<|channel|>", "<|message|>",
+                "<|call|>", "<|constrain|>",
+                "<|/end|>", "<|/channel|>", "<|/message|>",
+                "<|/call|>", "<|/constrain|>",
+            ])
+        }
 
         // Exclude semantic content tags — parsed by ThinkingParser, not stream delimiters.
         // These mark thinking/response boundaries and carry meaning for the application
@@ -104,17 +171,95 @@ public final class ModelContainer: @unchecked Sendable {
         tokens.subtract([
             "<think", "</think",             // DeepSeek-R1, Qwen-thinking
             "<thinking", "</thinking",       // alternative format (Claude, some OS models)
+            "<|begin_of_thought|>", "<|end_of_thought|>",   // Qwen3.6+
+            "<|begin_of_think|>", "<|end_of_think|>",       // variant
         ])
 
         return tokens.sorted()
     }
 
+    /// Extract control tokens using the per-family processor for refinement.
+    private static func extractControlTokensWithProcessor(
+        processor: ChatTemplateProcessor,
+        chatTemplate: String?,
+        addedTokens: [[String: Any]]
+    ) -> [String] {
+        var rawTokens = Set<String>()
+        var templateTokens = Set<String>()
+
+        // From tokenizer.json added_tokens
+        for entry in addedTokens {
+            if entry["special"] as? Bool == true,
+               let content = entry["content"] as? String,
+               content.hasPrefix("<") {
+                rawTokens.insert(content)
+            }
+            if entry["special"] as? Bool == false,
+               let content = entry["content"] as? String,
+               content.hasPrefix("<|") && (content.hasSuffix("|>") || content.hasSuffix(">")) {
+                rawTokens.insert(content)
+            }
+        }
+
+        // From chat_template
+        if let template = chatTemplate {
+            templateTokens = SharedControlTokenLogic.extractTemplateTokens(from: template)
+        }
+
+        return processor.refineControlTokens(
+            rawTokens: rawTokens,
+            templateTokens: templateTokens,
+            chatTemplate: chatTemplate,
+            addedTokens: addedTokens
+        )
+    }
+
+    /// Load added_tokens from tokenizer.json.
+    private static func loadAddedTokens(modelDir: URL) -> [[String: Any]] {
+        let tokenizerPath = modelDir.appendingPathComponent("tokenizer.json")
+        guard let data = try? Data(contentsOf: tokenizerPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let added = json["added_tokens"] as? [[String: Any]] else {
+            return []
+        }
+        return added
+    }
+
     /// Detect if model uses thinking/reasoning tags by checking chat_template
+    /// and tokenizer added_tokens (some models like Qwen3.6 use <|begin_of_thought|>
+    /// in the tokenizer but not in the chat template).
     public static func detectThinkingModel(for modelId: String) -> Bool {
         let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
         let template = loadChatTemplate(modelDir: modelDir) ?? ""
-        return template.contains("<think") || template.contains("</think")
-            || template.contains("<thinking") || template.contains("</thinking")
+        if template.contains("<think") || template.contains("</think")
+            || template.contains("<thinking") || template.contains("</thinking") {
+            return true
+        }
+        // Fallback: check tokenizer added_tokens for thinking markers
+        // (Qwen3.6 uses <|begin_of_thought|> which is not in the chat template)
+        let tokenizerPath = modelDir.appendingPathComponent("tokenizer.json")
+        if let data = try? Data(contentsOf: tokenizerPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let added = json["added_tokens"] as? [[String: Any]] {
+            for entry in added {
+                if let content = entry["content"] as? String {
+                    if content.contains("begin_of_thought") || content.contains("end_of_thought")
+                        || content.contains("begin_of_think") || content.contains("end_of_think") {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /// Returns true ONLY when the chat template injects <think or <thinking tags,
+    /// meaning the model expects implicit open-tag handling (DeepSeek-R1 style).
+    /// Qwen3.6 outputs <|begin_of_thought|> explicitly — NOT implicit — so returns false.
+    public static func isImplicitThinkingModel(for modelId: String) -> Bool {
+        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let template = loadChatTemplate(modelDir: modelDir) ?? ""
+        return template.contains("<think") || template.contains("<thinking")
     }
 
     private static func loadChatTemplate(modelDir: URL) -> String? {
@@ -221,18 +366,44 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// for known model families (gemma, qwen, phi, llama).
     private static func ensureChatTemplate(modelDir: URL, modelId: String, family: ModelFamily) {
         let fm = FileManager.default
-
-        // Check if chat template already exists in tokenizer_config.json
         let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
-        if let data = try? Data(contentsOf: tcPath),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           json["chat_template"] != nil {
-            return // Already has a chat template
-        }
-
-        // Check standalone template files
         let jinjaPath = modelDir.appendingPathComponent("chat_template.jinja")
         let jsonPath = modelDir.appendingPathComponent("chat_template.json")
+
+        // Check if tokenizer_config.json has a non-empty chat_template
+        var hasValidTemplate = false
+        if let data = try? Data(contentsOf: tcPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let template = json["chat_template"] {
+                if let str = template as? String, !str.isEmpty {
+                    hasValidTemplate = true
+                } else if let arr = template as? [[String: Any]], !arr.isEmpty {
+                    hasValidTemplate = true
+                }
+            }
+
+            // If tokenizer_config.json has empty chat_template but a .jinja file exists,
+            // inject the jinja content into tokenizer_config.json so the tokenizer picks it up
+            if !hasValidTemplate && fm.fileExists(atPath: jinjaPath.path) {
+                if let jinjaContent = try? String(contentsOf: jinjaPath, encoding: .utf8), !jinjaContent.isEmpty {
+                    var mutableJson = json
+                    mutableJson["chat_template"] = jinjaContent
+                    if let newData = try? JSONSerialization.data(withJSONObject: mutableJson, options: [.prettyPrinted, .sortedKeys]) {
+                        do {
+                            try newData.write(to: tcPath, options: .atomic)
+                            NovaMLXLog.info("[loadModel] \(modelId): injected chat_template from .jinja into tokenizer_config.json")
+                            return
+                        } catch {
+                            NovaMLXLog.warning("[loadModel] \(modelId): failed to write tokenizer_config.json: \(error)")
+                        }
+                    }
+                }
+            }
+        }
+
+        if hasValidTemplate { return }
+
+        // Check standalone template files
         if fm.fileExists(atPath: jinjaPath.path) || fm.fileExists(atPath: jsonPath.path) {
             return
         }
@@ -313,6 +484,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     public func loadModel(from url: URL, config: ModelConfig) async throws -> ModelContainer {
+        await CustomModelRegistration.ensureRegistered()
         let container = ModelContainer(identifier: config.identifier, config: config)
         NovaMLXLog.info("Loading model from: \(url.path)")
 
@@ -414,13 +586,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 NovaMLXLog.info("Auto-detected context length: \(maxPos) tokens for \(config.identifier.displayName)")
             }
 
-            // Detect hybrid linear attention models (e.g. Qwen3.5).
-            // These use MambaCache for linear_attention layers + KVCacheSimple for full_attention layers.
+            // Detect hybrid linear attention models (e.g. Qwen3.5, bailing_hybrid).
+            // These use MambaCache/ArraysCache for linear_attention layers + KVCacheSimple for full_attention layers.
             // FusedBatchScheduler only supports KVCacheSimple, so these must use ContinuousBatcher.
             if let layerTypes = tc["layer_types"] as? [String],
                layerTypes.contains("linear_attention") {
                 container.config.hasLinearAttention = true
                 NovaMLXLog.info("Detected hybrid linear attention model (\(layerTypes.filter { $0 == "linear_attention" }.count)/\(layerTypes.count) linear layers) — will use ContinuousBatcher")
+            } else if let mt = tc["model_type"] as? String, mt == "bailing_hybrid" {
+                container.config.hasLinearAttention = true
+                NovaMLXLog.info("Detected bailing_hybrid model (MLA+GLA) — will use ContinuousBatcher")
             }
         }
 
@@ -829,6 +1004,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
     private func buildTurnStopProcessor(
         modelId: String,
+        container: ModelContainer?,
         tokenizer: Tokenizer,
         modelConfig: ModelConfiguration
     ) -> TurnStopProcessor? {
@@ -839,9 +1015,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         if let eosId = tokenizer.eosTokenId { eosIds.insert(eosId) }
         eosIds = eosIds.union(modelConfig.eosTokenIds)
 
+        let hallucinationPatterns = container?.chatTemplateProcessor?.hallucinationPatterns() ?? []
+
         return TurnStopProcessor(
             stopPatterns: patterns,
             eosTokenIds: eosIds,
+            hallucinationPatterns: hallucinationPatterns,
             decode: tokenizer.decode
         )
     }
@@ -850,11 +1029,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     private func composeWithTurnStop(
         baseProcessor: (any LogitProcessor)?,
         modelId: String,
+        container: ModelContainer?,
         tokenizer: Tokenizer,
         modelConfig: ModelConfiguration
     ) -> (any LogitProcessor)? {
         guard let tsp = buildTurnStopProcessor(
             modelId: modelId,
+            container: container,
             tokenizer: tokenizer,
             modelConfig: modelConfig
         ) else { return baseProcessor }
@@ -880,23 +1061,87 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return result
     }
 
-    /// Regex-based scrub: strip any <|xxx|> or <|xxx> patterns from output.
-    /// Catches multi-token control sequences (mask_start, tool_call, etc.)
+    /// Regex-based scrub: strip any <|xxx|>, <|xxx>, or <|xxx\n patterns from output.
+    /// Catches multi-token control sequences (mask_start, tool_call, tool_code, etc.)
     /// that aren't registered as special tokens in the tokenizer.
+    /// The loose pattern catches partial tokens that span decode boundaries.
+    /// Excludes thinking markers (<|begin_of_thought|>, <|end_of_thought|>) which
+    /// ThinkingParser needs to see for correct thinking/content partitioning.
+    private static let thinkingMarkerWords: Set<String> = [
+        "begin_of_thought", "end_of_thought",
+        "begin_of_think", "end_of_think",
+        "think", "/think",
+        "thinking", "/thinking",
+    ]
+
     static let controlTokenRegex: NSRegularExpression = {
-        try! NSRegularExpression(pattern: "<\\|[a-zA-Z_][a-zA-Z0-9_]*\\|?>")
+        try! NSRegularExpression(pattern: "(?:<\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>|\\n|\\s))|(?:<[a-zA-Z_/][a-zA-Z0-9_/]*\\|>)")
     }()
 
+    /// Regex: matches <|channel|>word<|message|> — Harmony channel+type+message structure
+    private static let channelMessageRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "<\\|channel\\|>\\w+<\\|message\\|>")
+    }()
+
+    /// Regex: matches <|start|>word<|message|> — Harmony start+role+message structure
+    private static let startMessageRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "<\\|start\\|>\\w+<\\|message\\|>")
+    }()
+
+    /// Known Harmony-format channel type words and role names that can be left behind
+    /// when streaming scrubs <|channel|> and <|message|> individually.
+    public static let harmonyResidueWords: Set<String> = [
+        "analysis", "final", "commentary",     // channel types
+        "user", "assistant", "system", "developer",  // roles
+    ]
+
     static func scrubControlTokens(_ text: String) -> String {
-        let nsRange = NSRange(text.startIndex..., in: text)
-        let matches = controlTokenRegex.matches(in: text, range: nsRange)
-        guard !matches.isEmpty else { return text }
+        // First pass: remove multi-token structures (e.g. <|channel|>analysis<|message|>)
+        // These leave behind role/type words if only individual tokens are removed.
         var result = text
-        for match in matches.reversed() {
-            if let range = Range(match.range, in: result) {
-                result.removeSubrange(range)
+        for regex in [channelMessageRegex, startMessageRegex] {
+            let nsRange = NSRange(result.startIndex..., in: result)
+            let matches = regex.matches(in: result, range: nsRange)
+            for match in matches.reversed() {
+                if let range = Range(match.range, in: result) {
+                    result.replaceSubrange(range, with: "")
+                }
             }
         }
+
+        // Second pass: standard control token scrubbing
+        let nsRange2 = NSRange(result.startIndex..., in: result)
+        let matches = controlTokenRegex.matches(in: result, range: nsRange2)
+        for match in matches.reversed() {
+            if let range = Range(match.range, in: result) {
+                let matched = String(result[range])
+                let isThinkingMarker = thinkingMarkerWords.contains { matched.contains($0) }
+                if !isThinkingMarker {
+                    result.removeSubrange(range)
+                }
+            }
+        }
+
+        // Third pass: remove Harmony residue words that survive per-token streaming scrub.
+        // In streaming, <|channel|> and <|message|> are scrubbed individually, leaving
+        // channel type words ("analysis", "final") and role names ("user", "assistant")
+        // as standalone text. Check if the result is EXACTLY a residue word or starts
+        // with one followed by content.
+        let trimmed = result.trimmingCharacters(in: .whitespaces)
+        if harmonyResidueWords.contains(trimmed) {
+            return ""
+        }
+        // Check if starts with a residue word (e.g. "finalYour name is Bob.")
+        for word in harmonyResidueWords {
+            if trimmed.hasPrefix(word) {
+                let afterWord = trimmed.dropFirst(word.count)
+                // Only strip if followed by uppercase (sentence start) or end of string
+                if afterWord.isEmpty || afterWord.first?.isUppercase == true || afterWord.first == "\n" {
+                    result = String(afterWord)
+                }
+            }
+        }
+
         return result
     }
 
@@ -1007,6 +1252,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Starting generation for \(request.model)")
 
         let maxTokens = request.maxTokens ?? container.config.maxTokens
+
+        // Context window check with accurate token count (after chat template)
+        let genSettings = settingsProvider?(request.model)
+        let genContextLength = genSettings?.maxContextWindow ?? container.config.contextLength
+        if Int(promptTokenCount) + maxTokens > genContextLength {
+            throw NovaMLXError.contextWindowExceeded(
+                promptTokens: Int(promptTokenCount), maxTokens: maxTokens, contextLength: genContextLength
+            )
+        }
+
         try await preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
@@ -1034,6 +1289,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let processor = composeWithTurnStop(
             baseProcessor: baseProcessor,
             modelId: request.model,
+            container: container,
             tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil),
             modelConfig: modelConfig
         )
@@ -1155,23 +1411,124 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
             }
         } else {
-            do {
-                iterator = try TokenIterator(
-                    input: effectiveInput, model: model.value,
-                    cache: kvCache,
-                    processor: processor, sampler: sampler,
-                    maxTokens: maxTokens
+            // CRITICAL: TokenIterator.init runs model.prepare (full prefill + first token
+            // sampling). For VLM models and any model using compiled MLX functions, this
+            // MUST happen inside mlxContainer.perform to ensure correct lazy evaluation.
+            // Running outside perform produces NaN/Inf logits (see FusedBatchScheduler
+            // prefillSequence for the same pattern).
+            let isVLM = container.config.modelType == .vlm
+            if isVLM {
+                // VLM models require ALL model forward passes inside mlxContainer.perform.
+                // Run the entire generation loop (prefill + decode) inside perform,
+                // collect all token IDs, then build the response outside.
+                let tokenIds = effectiveInput.text.tokens.asArray(Int32.self)
+                let reqTag = request.id.uuidString.prefix(8)
+
+                // Build EOS token set
+                let stopTokenIds: Set<Int> = {
+                    var ids = modelConfig.eosTokenIds
+                    if let eosId = container.tokenizer?.eosTokenId { ids.insert(eosId) }
+                    return ids
+                }()
+                let stopIdsBox = SetBox(stopTokenIds)
+                let unknownTokenId = mlxTokenizer.unknownTokenId
+
+                // Wrap non-Sendable values for capture in @Sendable closure
+                let cacheBox = MutableSendableBox<[KVCache]?>(kvCache)
+                let samplerBox = SamplerBox(sampler)
+
+                let genResult = await mlxContainer.perform { context in
+                    let modelObj = context.model
+                    let caches = cacheBox.value!
+
+                    // Prefill
+                    let inputTokens = MLXArray(tokenIds.map { Int32($0) }).reshaped(1, tokenIds.count)
+                    let logits = modelObj(inputTokens, cache: caches)
+                    eval(logits)
+                    eval(caches)
+
+                    // Sample first token
+                    let logitsToSample = logits[0..., -1, 0...]
+                    let maxLogit = logitsToSample.asType(.float32).max().item(Float.self)
+                    let stats = "max=\(String(format: "%.2f", maxLogit))"
+                    var currentToken = samplerBox.value.sample(logits: logitsToSample)
+                    eval(currentToken)
+
+                    var generatedIds: [Int] = []
+                    let tid = currentToken.item(Int.self)
+                    if tid == unknownTokenId || stopIdsBox.value.contains(tid) {
+                        return SendableBox(([Int](), stats, caches as [KVCache]))
+                    }
+                    generatedIds.append(tid)
+
+                    // Decode loop — reshape token to (1,1) like TokenIterator.next() does
+                    var count = 1
+                    while count < maxTokens {
+                        let stepInput = currentToken.reshaped(1, 1)
+                        let stepLogits = modelObj(stepInput, cache: caches)
+                        eval(stepLogits)
+                        let processedLogits = stepLogits[0..., -1, 0...]
+                        let sampled = samplerBox.value.sample(logits: processedLogits)
+                        eval(sampled)
+                        let tokenId = sampled.item(Int.self)
+                        if tokenId == unknownTokenId || stopIdsBox.value.contains(tokenId) {
+                            break
+                        }
+                        generatedIds.append(tokenId)
+                        currentToken = sampled
+                        count += 1
+                    }
+
+                    return SendableBox((generatedIds, stats, caches as [KVCache]))
+                }
+
+                let (generatedIds, logitStats, finalCaches) = genResult.value
+                kvCacheBox.value = finalCaches
+                NovaMLXLog.info("[Prefill:\(reqTag)] VLM — \(tokenIds.count) prompt, \(generatedIds.count) generated, logits=[\(logitStats)]")
+
+                // Decode generated tokens to text
+                let decodedText = mlxTokenizer.decode(tokenIds: generatedIds)
+                let cleanText = Self.scrubControlTokens(decodedText)
+
+                let elapsed = Date().timeIntervalSince(startTime)
+                let tps = generatedIds.count > 0 ? Double(generatedIds.count) / elapsed : 0
+
+                lock.withLock {
+                    totalRequests += 1
+                    totalTokensGenerated += UInt64(generatedIds.count)
+                    totalInferenceTime += elapsed
+                }
+
+                deferredClearCache()
+
+                return InferenceResult(
+                    id: request.id,
+                    model: request.model,
+                    text: cleanText,
+                    tokensPerSecond: tps,
+                    promptTokens: Int(promptTokenCount),
+                    completionTokens: generatedIds.count,
+                    finishReason: generatedIds.count >= maxTokens ? .length : .stop
                 )
-            } catch {
-                NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
-                let freshCache = model.value.newCache(parameters: parameters)
-                kvCacheBox.value = freshCache
-                iterator = try TokenIterator(
-                    input: input, model: model.value,
-                    cache: freshCache,
-                    processor: processor, sampler: sampler,
-                    maxTokens: maxTokens
-                )
+            } else {
+                do {
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                } catch {
+                    NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                    let freshCache = model.value.newCache(parameters: parameters)
+                    kvCacheBox.value = freshCache
+                    iterator = try TokenIterator(
+                        input: input, model: model.value,
+                        cache: freshCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
             }
         }
 
@@ -1283,6 +1640,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let parameters = self.buildGenerateParameters(request: request, config: container.config, settings: self.settingsProvider?(request.model))
                     let promptTokenCount = input.text.tokens.size
                     let maxTokens = request.maxTokens ?? container.config.maxTokens
+
+                    // Context window check with accurate token count (after chat template)
+                    let streamSettings = self.settingsProvider?(request.model)
+                    let streamContextLength = streamSettings?.maxContextWindow ?? container.config.contextLength
+                    if Int(promptTokenCount) + maxTokens > streamContextLength {
+                        throw NovaMLXError.contextWindowExceeded(
+                            promptTokens: Int(promptTokenCount), maxTokens: maxTokens, contextLength: streamContextLength
+                        )
+                    }
+
                     try await self.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
                     // Capture prompt tokens for prefix cache storage + loading
@@ -1306,11 +1673,115 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let processor = self.composeWithTurnStop(
                         baseProcessor: baseProcessor,
                         modelId: request.model,
+                        container: container,
                         tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil),
                         modelConfig: modelConfig
                     )
 
                     let sampler = parameters.sampler()
+                    let isVLM = container.config.modelType == .vlm
+
+                    // VLM streaming: run entire generation inside perform.
+                    // TokenIterator runs model forward passes outside perform, producing
+                    // bad logits for VLM models (NaN/Inf or premature EOS). The non-streaming
+                    // VLM path already runs inside perform — replicate that for streaming.
+                    if isVLM {
+                        let tokenIds = input.text.tokens.asArray(Int32.self).map { Int($0) }
+                        let reqTag = request.id.uuidString.prefix(8).description
+
+                        let stopTokenIds: Set<Int> = {
+                            var ids = modelConfig.eosTokenIds
+                            if let eosId = container.tokenizer?.eosTokenId { ids.insert(eosId) }
+                            return ids
+                        }()
+
+                        let startTime = Date()
+                        let kvCache = model.value.newCache(parameters: parameters)
+                        let cacheBox = MutableSendableBox<[KVCache]?>(kvCache)
+                        let samplerBox = SamplerBox(sampler)
+                        let unknownTokenId = mlxTokenizer.unknownTokenId
+
+                        // Yield role chunk immediately
+                        continuation.yield(Token(id: 0, text: ""))
+
+                        var completionTokens = 0
+                        var finishReason: FinishReason = .stop
+
+                        let genResult = await mlxContainer.perform { context in
+                            let modelObj = context.model
+                            let caches = cacheBox.value!
+
+                            // Prefill
+                            let inputTokens = MLXArray(tokenIds.map { Int32($0) }).reshaped(1, tokenIds.count)
+                            let logits = modelObj(inputTokens, cache: caches)
+                            eval(logits)
+                            eval(caches)
+
+                            // Sample first token
+                            let logitsToSample = logits[0..., -1, 0...]
+                            var currentToken = samplerBox.value.sample(logits: logitsToSample)
+                            eval(currentToken)
+
+                            var generatedIds: [Int] = []
+                            let tid = currentToken.item(Int.self)
+                            if tid == unknownTokenId || stopTokenIds.contains(tid) {
+                                return SendableBox((generatedIds, caches as [KVCache]))
+                            }
+                            generatedIds.append(tid)
+
+                            // Decode loop
+                            var count = 1
+                            while count < maxTokens {
+                                if Task.isCancelled { break }
+                                let stepInput = currentToken.reshaped(1, 1)
+                                let stepLogits = modelObj(stepInput, cache: caches)
+                                eval(stepLogits)
+                                let processedLogits = stepLogits[0..., -1, 0...]
+                                let sampled = samplerBox.value.sample(logits: processedLogits)
+                                eval(sampled)
+                                let tokenId = sampled.item(Int.self)
+                                if tokenId == unknownTokenId || stopTokenIds.contains(tokenId) {
+                                    break
+                                }
+                                generatedIds.append(tokenId)
+                                currentToken = sampled
+                                count += 1
+                            }
+
+                            return SendableBox((generatedIds, caches as [KVCache]))
+                        }
+
+                        let (generatedIds, finalCaches) = genResult.value
+                        cacheBox.value = finalCaches
+                        completionTokens = generatedIds.count
+
+                        // Stream generated tokens as text chunks
+                        let fullText = mlxTokenizer.decode(tokenIds: generatedIds)
+                        let cleanText = Self.scrubControlTokens(fullText)
+                        if !cleanText.isEmpty {
+                            continuation.yield(Token(id: 0, text: cleanText))
+                        }
+
+                        if completionTokens >= maxTokens { finishReason = .length }
+
+                        let elapsed = Date().timeIntervalSince(startTime)
+                        let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
+
+                        NovaMLXLog.info("[STREAM:\(reqTag)] VLM: tokens=\(completionTokens), stopReason=\(finishReason), tps=\(String(format: "%.1f", tps))")
+
+                        self.lock.withLock {
+                            self.totalRequests += 1
+                            self.totalTokensGenerated += UInt64(completionTokens)
+                            self.totalInferenceTime += elapsed
+                        }
+                        self.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
+
+                        continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
+                        continuation.finish()
+                        self.lock.withLock { self.activeCount -= 1 }
+                        self.deferredClearCache()
+                        return
+                    }
 
                     // Build effective input and cache — use prefix cache hit if valid
                     var effectiveInput = input
@@ -1776,6 +2247,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let turnStopProc = buildTurnStopProcessor(
             modelId: request.model,
+            container: container,
             tokenizer: tokenizer,
             modelConfig: modelConfig
         )
@@ -1912,6 +2384,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let turnStopProc = engine.buildTurnStopProcessor(
                         modelId: request.model,
+                        container: container,
                         tokenizer: tokenizer,
                         modelConfig: modelConfig
                     )
@@ -2035,4 +2508,24 @@ public struct EngineMetrics: Sendable {
         self.averageTokensPerSecond = averageTokensPerSecond
         self.activeRequests = activeRequests
     }
+}
+
+// MARK: - VLM Token Iterators
+
+/// Wrapper to capture non-Sendable LogitSampler in @Sendable closures
+private final class SamplerBox: @unchecked Sendable {
+    let value: any LogitSampler
+    init(_ value: any LogitSampler) { self.value = value }
+}
+
+/// Wrapper to capture non-Sendable LogitProcessor in @Sendable closures
+private final class ProcessorBox: @unchecked Sendable {
+    var value: (any LogitProcessor)?
+    init(_ value: (any LogitProcessor)?) { self.value = value }
+}
+
+/// Wrapper for Set<Int> capture in @Sendable closures
+private final class SetBox: @unchecked Sendable {
+    let value: Set<Int>
+    init(_ value: Set<Int>) { self.value = value }
 }

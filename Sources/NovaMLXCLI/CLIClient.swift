@@ -1,13 +1,12 @@
 import Foundation
+import NovaMLXCore
 
 enum CLIClient {
     private static let baseURL = "http://127.0.0.1:8080"
     private static let adminURL = "http://127.0.0.1:8081"
 
-    // Read server config from ~/.nova/config.json (same file the server uses)
     static func configFromFile() -> [String: Any]? {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let configURL = homeDir.appendingPathComponent(".nova/config.json")
+        let configURL = NovaMLXPaths.configFile
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }

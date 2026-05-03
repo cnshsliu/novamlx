@@ -20,7 +20,8 @@ enum LocalizationStrings {
         // App / Navigation
         "app.status": "Status",
         "app.models": "Models",
-        "app.chat": "Chat",
+        "app.downloads": "Downloads",
+        "app.chat": "Playground",
         "app.agents": "Agents",
         "app.settings": "Settings",
         "app.running": "Running",
@@ -272,7 +273,7 @@ enum LocalizationStrings {
     private static let zhHans: [String: String] = [
         "app.status": "状态",
         "app.models": "模型",
-        "app.chat": "聊天",
+        "app.chat": "Playground",
         "app.agents": "智能体",
         "app.settings": "设置",
         "app.running": "运行中",
@@ -516,7 +517,7 @@ enum LocalizationStrings {
     private static let zhHantHK: [String: String] = [
         "app.status": "狀態",
         "app.models": "模型",
-        "app.chat": "聊天",
+        "app.chat": "Playground",
         "app.agents": "智能體",
         "app.settings": "設定",
         "app.running": "運行中",
@@ -760,7 +761,7 @@ enum LocalizationStrings {
     private static let zhHantTW: [String: String] = [
         "app.status": "狀態",
         "app.models": "模型",
-        "app.chat": "聊天",
+        "app.chat": "Playground",
         "app.agents": "智慧代理",
         "app.settings": "設定",
         "app.running": "執行中",
@@ -1004,7 +1005,7 @@ enum LocalizationStrings {
     private static let ja: [String: String] = [
         "app.status": "ステータス",
         "app.models": "モデル",
-        "app.chat": "チャット",
+        "app.chat": "Playground",
         "app.agents": "エージェント",
         "app.settings": "設定",
         "app.running": "実行中",
@@ -1248,7 +1249,7 @@ enum LocalizationStrings {
     private static let ko: [String: String] = [
         "app.status": "상태",
         "app.models": "모델",
-        "app.chat": "채팅",
+        "app.chat": "Playground",
         "app.agents": "에이전트",
         "app.settings": "설정",
         "app.running": "실행 중",
@@ -1492,7 +1493,7 @@ enum LocalizationStrings {
     private static let fr: [String: String] = [
         "app.status": "Statut",
         "app.models": "Modèles",
-        "app.chat": "Chat",
+        "app.chat": "Playground",
         "app.agents": "Agents",
         "app.settings": "Paramètres",
         "app.running": "En cours",
@@ -1736,7 +1737,7 @@ enum LocalizationStrings {
     private static let de: [String: String] = [
         "app.status": "Status",
         "app.models": "Modelle",
-        "app.chat": "Chat",
+        "app.chat": "Playground",
         "app.agents": "Agenten",
         "app.settings": "Einstellungen",
         "app.running": "Aktiv",
@@ -1980,7 +1981,7 @@ enum LocalizationStrings {
     private static let ru: [String: String] = [
         "app.status": "Статус",
         "app.models": "Модели",
-        "app.chat": "Чат",
+        "app.chat": "Playground",
         "app.agents": "Агенты",
         "app.settings": "Настройки",
         "app.running": "Работает",

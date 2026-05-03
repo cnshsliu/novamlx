@@ -17,6 +17,7 @@ public final class InferenceService: @unchecked Sendable {
     public let workerMode: Bool
     private var worker: WorkerSupervisor?
     private var workerLoadedModels: Set<String> = []
+    private var workerModelTypes: [String: ModelType] = [:]
 
     public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil) {
         self.engine = engine
@@ -43,6 +44,7 @@ public final class InferenceService: @unchecked Sendable {
             guard let self = self else { return }
             NovaMLXLog.warning("[InferenceService] Worker crashed — clearing loaded models state")
             self.workerLoadedModels.removeAll()
+            self.workerModelTypes.removeAll()
             self.saveLoadedModelsList()
         }
         try worker.start()
@@ -94,25 +96,14 @@ public final class InferenceService: @unchecked Sendable {
 
         let reqTag = finalRequest.id.uuidString.prefix(8)
 
-        // Context window check — fail fast if prompt exceeds model's context length.
-        // This gives the client an immediate error instead of hanging through prefill.
+        // Context window check moved to engine/scheduler layer after tokenization,
+        // where we have accurate token counts (includes chat template tokens).
         let container = engine.getContainer(for: resolvedId)
-        if let tokenizer = container?.tokenizer {
-            let promptTokens = engine.tokenizeMessages(finalRequest.messages, tokenizer: tokenizer)
-            let contextLength = settings.maxContextWindow ?? container?.config.contextLength ?? 4096
-            let maxTokens = finalRequest.maxTokens ?? container?.config.maxTokens ?? 4096
-            if promptTokens.count + maxTokens > contextLength {
-                NovaMLXLog.warning("[ContextWindow:\(reqTag)] Prompt (\(promptTokens.count) tokens) + maxTokens (\(maxTokens)) exceeds context length (\(contextLength))")
-                throw NovaMLXError.contextWindowExceeded(
-                    promptTokens: promptTokens.count, maxTokens: maxTokens, contextLength: contextLength
-                )
-            }
-        }
 
         // VLM models use ContinuousBatcher — they have complex internal position state
         // (3D mRoPE, precomputedPositionIds, ropeDeltas) that our fused decode step
         // can't replicate with a simple model(token, cache:) call.
-        let isVLM = container?.config.modelType == .vlm
+        let isVLM = container?.config.modelType == .vlm || workerModelTypes[resolvedId] == .vlm
 
         // Hybrid linear attention models (e.g. Qwen3.5) mix MambaCache + KVCacheSimple layers.
         // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
@@ -187,26 +178,14 @@ public final class InferenceService: @unchecked Sendable {
 
         let reqTag = finalRequest.id.uuidString.prefix(8)
 
-        // Context window check — fail fast with an error stream instead of hanging.
+        // Context window check moved to engine/scheduler layer after tokenization,
+        // where we have accurate token counts (includes chat template tokens).
         let container = engine.getContainer(for: resolvedId)
-        if let tokenizer = container?.tokenizer {
-            let promptTokens = engine.tokenizeMessages(finalRequest.messages, tokenizer: tokenizer)
-            let contextLength = settings.maxContextWindow ?? container?.config.contextLength ?? 4096
-            let maxTokens = finalRequest.maxTokens ?? container?.config.maxTokens ?? 4096
-            if promptTokens.count + maxTokens > contextLength {
-                NovaMLXLog.warning("[ContextWindow:\(reqTag)] Prompt (\(promptTokens.count) tokens) + maxTokens (\(maxTokens)) exceeds context length (\(contextLength))")
-                return AsyncThrowingStream {
-                    $0.finish(throwing: NovaMLXError.contextWindowExceeded(
-                        promptTokens: promptTokens.count, maxTokens: maxTokens, contextLength: contextLength
-                    ))
-                }
-            }
-        }
 
         // VLM models use ContinuousBatcher — they have complex internal position state
         // (3D mRoPE, precomputedPositionIds, ropeDeltas) that our fused decode step
         // can't replicate with a simple model(token, cache:) call.
-        let isVLM = container?.config.modelType == .vlm
+        let isVLM = container?.config.modelType == .vlm || workerModelTypes[resolvedId] == .vlm
 
         // Hybrid linear attention models (e.g. Qwen3.5) mix MambaCache + KVCacheSimple layers.
         // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
@@ -246,6 +225,7 @@ public final class InferenceService: @unchecked Sendable {
         if workerMode, let worker = worker {
             try await worker.sendLoad(modelId: modelId, path: url.path, config: config)
             workerLoadedModels.insert(modelId)
+            workerModelTypes[modelId] = config.modelType
         } else {
             _ = try await engine.loadModel(from: url, config: config)
             let settings = settingsManager.getSettings(modelId)
@@ -260,6 +240,7 @@ public final class InferenceService: @unchecked Sendable {
         if workerMode, let worker = worker {
             try? await worker.sendUnload(modelId: identifier.id)
             workerLoadedModels.remove(identifier.id)
+            workerModelTypes.removeValue(forKey: identifier.id)
         } else {
             engine.unloadModel(identifier)
         }
@@ -268,9 +249,7 @@ public final class InferenceService: @unchecked Sendable {
 
     public func isModelLoaded(_ modelId: String) -> Bool {
         let resolvedId = settingsManager.resolveModelId(modelId)
-        // Cloud models are always "loaded" (available remotely)
-        // Check both with and without :cloud suffix (Anthropic clients may omit it)
-        if CloudBackend.isCloudModel(resolvedId) || CloudBackend.isCloudModel(resolvedId + ":cloud") {
+        if CloudBackend.isCloudModel(resolvedId) {
             return true
         }
         if workerMode {

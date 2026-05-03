@@ -132,9 +132,7 @@ struct SettingsPageView: View {
                     Spacer()
 
                     Button(l10n.tr("settings.openConfig")) {
-                        let path = FileManager.default.homeDirectoryForCurrentUser
-                            .appendingPathComponent(".nova/config.json").path
-                        NSWorkspace.shared.open(URL(string: "file://\(path)")!)
+                        NSWorkspace.shared.open(NovaMLXPaths.configFile)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -155,8 +153,7 @@ struct SettingsPageView: View {
     }
 
     private var configPathRow: some View {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let configPath = homeDir.appendingPathComponent(".nova/config.json").path
+        let configPath = NovaMLXPaths.configFile.path
 
         return HStack {
             Text(l10n.tr("settings.configFile")).font(.system(size: 13)).foregroundColor(.secondary)
@@ -333,8 +330,7 @@ struct SettingsPageView: View {
     }
 
     private func loadCurrentConfig() {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let configPath = homeDir.appendingPathComponent(".nova/config.json")
+        let configPath = NovaMLXPaths.configFile
 
         guard let data = try? Data(contentsOf: configPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
@@ -402,8 +398,7 @@ struct SettingsPageView: View {
             configDict["defaultModel"] = cfgDefaultModel
         }
 
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let configPath = homeDir.appendingPathComponent(".nova/config.json")
+        let configPath = NovaMLXPaths.configFile
 
         do {
             let data = try JSONSerialization.data(withJSONObject: configDict, options: [.prettyPrinted, .sortedKeys])
@@ -548,6 +543,9 @@ struct SettingsPageView: View {
                 if let expires = cache.expiresAt {
                     cloudExpires = String(expires.prefix(10))
                 }
+                appState.cloudLoggedIn = true
+                appState.cloudEmail = cache.userEmail
+                appState.cloudPlan = cache.plan
             } else {
                 cloudUserInfo = "Signed in"
                 cloudPlan = "Checking..."
@@ -578,6 +576,9 @@ struct SettingsPageView: View {
                 cloudPlan = response.plan ?? "free"
                 cloudExpires = response.expiresAt.map { String($0.prefix(10)) } ?? ""
                 cloudAuthMessage = nil
+                appState.cloudLoggedIn = response.valid
+                appState.cloudEmail = response.user?.email ?? ""
+                appState.cloudPlan = response.plan ?? "free"
             }
         } catch {
             await MainActor.run {
@@ -585,6 +586,9 @@ struct SettingsPageView: View {
                     cloudLoggedIn = false
                     cloudUserInfo = ""
                     cloudAuthMessage = "Session expired. Please sign in again."
+                    appState.cloudLoggedIn = false
+                    appState.cloudEmail = ""
+                    appState.cloudPlan = ""
                 }
             }
         }
@@ -624,6 +628,9 @@ struct SettingsPageView: View {
                     } else {
                         cloudAuthMessage = "Signed in, but no active subscription."
                     }
+                    appState.cloudLoggedIn = check.valid
+                    appState.cloudEmail = response.user.email
+                    appState.cloudPlan = check.plan ?? "free"
                 }
             } catch {
                 await MainActor.run {
@@ -643,6 +650,9 @@ struct SettingsPageView: View {
         cloudEmail = ""
         cloudPassword = ""
         cloudAuthMessage = "Logged out."
+        appState.cloudLoggedIn = false
+        appState.cloudEmail = ""
+        appState.cloudPlan = ""
     }
 
     // MARK: - Language

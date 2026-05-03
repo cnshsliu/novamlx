@@ -114,7 +114,11 @@ enum OCROptimizer {
     ) -> SamplingOverrides {
         guard let ocrType = ocrType(for: modelName),
               let defaults = samplingDefaults[ocrType] else {
-            return SamplingOverrides()
+            return SamplingOverrides(
+                temperature: userTemperature,
+                maxTokens: userMaxTokens,
+                repetitionPenalty: userRepetitionPenalty
+            )
         }
         return SamplingOverrides(
             temperature: userTemperature ?? defaults.temperature,

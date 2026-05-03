@@ -36,7 +36,7 @@ struct CoreTypesTests {
         let id = ModelIdentifier(id: "test", family: .phi)
         let config = ModelConfig(identifier: id)
         #expect(config.contextLength == 4096)
-        #expect(config.maxTokens == 4096)
+        #expect(config.maxTokens == 2048)
         #expect(config.temperature == 0.7)
         #expect(config.topP == 0.9)
         #expect(config.modelType == .llm)

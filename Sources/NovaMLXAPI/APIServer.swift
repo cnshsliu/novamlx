@@ -504,8 +504,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     : result.completionTokens
 
                 var content: [AnthropicContentBlock] = []
-                // Parse thinking tags from raw output
-                let thinkingParser = ThinkingParser()
+                // Parse thinking tags from raw output — match streaming's model-aware detection
+                let isAnthropicImplicit = ModelContainer.isImplicitThinkingModel(for: anthropicReq.model)
+                let thinkingParser = ThinkingParser(expectImplicitThinking: isAnthropicImplicit)
                 _ = thinkingParser.feed(result.text)
                 let finalResult = thinkingParser.finalize()
                 if !finalResult.thinking.isEmpty {
@@ -1682,8 +1683,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let finishReason: String
         let message: OpenAIChatMessage
 
-        // Parse thinking tags from raw output
-        let thinkingParser = ThinkingParser()
+        // Parse thinking tags from raw output — match streaming's model-aware detection
+        let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
+        let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
         _ = thinkingParser.feed(result.text)
         let finalResult = thinkingParser.finalize()
         let thinkingText = finalResult.thinking.isEmpty ? nil : finalResult.thinking
@@ -1794,9 +1796,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try await writer.write(ByteBuffer(string: "data: \(String(data: roleData, encoding: .utf8) ?? "")\n\n"))
 
                 var completionTokenCount = 0
-                let modelId = openAIReq.model.lowercased()
-                let isThinkingModel = ModelContainer.detectThinkingModel(for: openAIReq.model)
-                let thinkingParser = ThinkingParser(expectImplicitThinking: isThinkingModel)
+                let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
+                let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
@@ -1816,6 +1817,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let data = try JSONEncoder().encode(chunk)
                             try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                         } else if let finish = token.finishReason {
+                            // Flush ThinkingParser before emitting stop chunk
+                            let finalParsed = thinkingParser.finalize()
+                            if !finalParsed.response.isEmpty {
+                                completionTokenCount += 1
+                                let respDelta = OpenAIDelta(content: finalParsed.response)
+                                let respChunk = OpenAIStreamChunk(id: chunkId, model: openAIReq.model, choices: [OpenAIStreamChoice(index: 0, delta: respDelta)])
+                                let respData = try JSONEncoder().encode(respChunk)
+                                try await writer.write(ByteBuffer(string: "data: \(String(data: respData, encoding: .utf8) ?? "")\n\n"))
+                            }
                             let finalChunk = OpenAIStreamChunk(
                                 id: chunkId,
                                 model: openAIReq.model,
@@ -1932,9 +1942,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 NovaMLXLog.info("[SSE:\(reqTag)] Waiting for first token from inference stream...")
 
-                let anthropicModelId = (anthropicReq.model).lowercased()
-                let isAnthropicThinkingModel = ModelContainer.detectThinkingModel(for: anthropicReq.model)
-                let thinkingParser = ThinkingParser(expectImplicitThinking: isAnthropicThinkingModel)
+                let isAnthropicImplicitModel = ModelContainer.isImplicitThinkingModel(for: anthropicReq.model)
+                let thinkingParser = ThinkingParser(expectImplicitThinking: isAnthropicImplicitModel)
                 var currentBlockIndex = 0
                 var isInThinkingBlock = false
                 var hasStartedTextBlock = false
@@ -1964,6 +1973,20 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     switch event {
                     case .token(let token):
                         if token.finishReason != nil {
+                            // Flush ThinkingParser before closing blocks
+                            let finalParsed = thinkingParser.finalize()
+                            if !finalParsed.response.isEmpty {
+                                if isInThinkingBlock {
+                                    try await endCurrentBlock()
+                                }
+                                if !hasStartedTextBlock {
+                                    try await startTextBlock()
+                                }
+                                tokenCount += 1
+                                let deltaEvent = AnthropicStreamEvent.textDelta(finalParsed.response)
+                                let deltaData = try JSONEncoder().encode(deltaEvent)
+                                try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+                            }
                             // Close current block if open
                             if isInThinkingBlock || hasStartedTextBlock {
                                 try await writer.write(ByteBuffer(string: "event: content_block_stop\ndata: {}\n\n"))

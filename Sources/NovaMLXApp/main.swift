@@ -63,10 +63,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let config = NovaMLXConfiguration.shared
     var mainWindow: NSWindow?
 
+    /// Path errors captured in init() BEFORE ModelManager creates any directories
+    private let pathValidationErrors: [String]
+
     override init() {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        let baseDir = homeDir.appendingPathComponent(".nova", isDirectory: true)
-        let modelsDir = baseDir.appendingPathComponent("models", isDirectory: true)
+        // Validate BEFORE creating ModelManager (which auto-creates dirs)
+        let errors = NovaMLXPaths.validateConfiguredPaths()
+        self.pathValidationErrors = errors
+
+        let baseDir = NovaMLXPaths.baseDir
+        let modelsDir = NovaMLXPaths.modelsDir
 
         // Auto-migrate from old Application Support path if needed
         Self.migrateFromApplicationSupport(to: baseDir)
@@ -111,9 +117,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
 
-        guard let encoded = oldPrefix.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return }
-        _ = "file://" + encoded
         var changed = false
+        let newModelsPrefix = "file://" + NovaMLXPaths.modelsDir.path
 
         for (key, value) in json {
             guard var record = value as? [String: Any],
@@ -122,12 +127,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { continue }
             record["localURL"] = localURL.replacingOccurrences(
                 of: "file:///Users/lucas/Library/Application%20Support/NovaMLX/models/",
-                with: "file:///Users/lucas/.nova/models/"
+                with: newModelsPrefix
             )
-            // Also handle non-percent-encoded variant
             record["localURL"] = (record["localURL"] as? String ?? localURL).replacingOccurrences(
                 of: "file:///Users/lucas/Library/Application Support/NovaMLX/models/",
-                with: "file:///Users/lucas/.nova/models/"
+                with: newModelsPrefix
             )
             json[key] = record
             changed = true
@@ -136,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if changed {
             let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
             try? newData?.write(to: registryPath, options: .atomic)
-            NovaMLXLog.info("Fixed registry paths to point to ~/.nova")
+            NovaMLXLog.info("Fixed registry paths to point to \(NovaMLXPaths.modelsDir.path)")
         }
     }
 
@@ -157,14 +161,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        // Validate configured paths — fatal if configured but inaccessible
+        if !pathValidationErrors.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "NovaMLX: Configuration Error"
+            alert.informativeText = pathValidationErrors.joined(separator: "\n\n")
+            alert.alertStyle = .critical
+            alert.addButton(withTitle: "Quit")
+            NSApp.activate(ignoringOtherApps: true)
+            _ = alert.runModal()
+            NSApp.terminate(nil)
+            return
+        }
+
         Task {
             NovaMLXLog.rotateLogFile()
 
             try? await config.initializeDirectories()
 
-            let configFile = await config.modelsDirectory
-                .deletingLastPathComponent()
-                .appendingPathComponent("config.json")
+            let configFile = NovaMLXPaths.configFile
             if FileManager.default.fileExists(atPath: configFile.path) {
                 do {
                     try await config.loadFromFile(configFile)

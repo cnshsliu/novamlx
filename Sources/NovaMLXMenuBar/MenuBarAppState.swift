@@ -21,6 +21,11 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var tpsHistory: [Double] = []
     @Published public var peakTokensPerSecond: Double = 0
 
+    // Cloud auth state — shared across all pages
+    @Published public var cloudLoggedIn: Bool = false
+    @Published public var cloudEmail: String = ""
+    @Published public var cloudPlan: String = ""
+
     private var statsTimer: Timer?
     private let maxTpsHistory = 90
 
@@ -74,10 +79,12 @@ public final class MenuBarAppState: ObservableObject {
                     self.tpsHistory.removeFirst(self.tpsHistory.count - self.maxTpsHistory)
                 }
                 // Track peak, capping at realistic maximum to filter measurement bugs
-                if tps > self.peakTokensPerSecond && tps <= self.maxRealisticTps {
-                    self.peakTokensPerSecond = tps
+                let displayTps = tps > 0 ? tps : 0
+                if displayTps > self.peakTokensPerSecond && displayTps <= self.maxRealisticTps {
+                    self.peakTokensPerSecond = displayTps
                 }
                 await self.pollDownloadStatus()
+                self.refreshCloudAuthState()
             }
         }
     }
@@ -85,6 +92,21 @@ public final class MenuBarAppState: ObservableObject {
     public func stopStatsMonitoring() {
         statsTimer?.invalidate()
         statsTimer = nil
+    }
+
+    // MARK: - Cloud Auth
+
+    public func refreshCloudAuthState() {
+        if let cache = AuthCache.load(), !cache.isExpired, cache.valid {
+            cloudLoggedIn = true
+            cloudEmail = cache.userEmail
+            cloudPlan = cache.plan
+        } else {
+            // No valid cache — show logged-out state
+            cloudLoggedIn = false
+            cloudEmail = ""
+            cloudPlan = ""
+        }
     }
 
     // MARK: - Download Management

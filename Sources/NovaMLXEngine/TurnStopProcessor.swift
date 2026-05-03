@@ -9,6 +9,9 @@ import NovaMLXCore
 /// Qwen3.6 uses `<|turn>user` / `<|turn>model` as turn separators but rarely emits
 /// its configured EOS tokens (`<|im_end|>`), causing infinite generation loops.
 /// This processor detects the separator string in decoded output and forces an EOS token.
+///
+/// Also detects bare multi-turn hallucination patterns (e.g. `user\n...\nassistant\n`)
+/// when models generate conversation turns without emitting control tokens.
 public final class TurnStopProcessor: LogitProcessor, @unchecked Sendable {
 
     private enum State {
@@ -20,6 +23,8 @@ public final class TurnStopProcessor: LogitProcessor, @unchecked Sendable {
     private let stopPatterns: [String]
     private let eosTokenIds: Set<Int>
     private let decode: ([Int]) -> String
+    private let hallucinationPatterns: [String]
+    private let hallucinationThreshold: Int
 
     private var state: State = .active
     private var tokenBuffer: [Int] = []
@@ -29,10 +34,14 @@ public final class TurnStopProcessor: LogitProcessor, @unchecked Sendable {
     public init(
         stopPatterns: [String],
         eosTokenIds: Set<Int>,
+        hallucinationPatterns: [String] = [],
+        hallucinationThreshold: Int = 20,
         decode: @escaping @Sendable ([Int]) -> String
     ) {
         self.stopPatterns = stopPatterns
         self.eosTokenIds = eosTokenIds
+        self.hallucinationPatterns = hallucinationPatterns
+        self.hallucinationThreshold = hallucinationThreshold
         self.decode = decode
     }
 
@@ -70,10 +79,22 @@ public final class TurnStopProcessor: LogitProcessor, @unchecked Sendable {
             decodedText = newDecoded
             decodedLength = newDecoded.count
 
+            // Check control token patterns
             for pattern in stopPatterns {
                 if decodedText.contains(pattern) {
                     state = .stopDetected
                     return
+                }
+            }
+
+            // Check bare multi-turn hallucination patterns (after enough tokens
+            // to avoid false positives on short outputs)
+            if tokenBuffer.count > hallucinationThreshold && !hallucinationPatterns.isEmpty {
+                for pattern in hallucinationPatterns {
+                    if decodedText.contains(pattern) {
+                        state = .stopDetected
+                        return
+                    }
                 }
             }
         }

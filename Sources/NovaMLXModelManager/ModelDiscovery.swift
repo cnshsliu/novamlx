@@ -88,6 +88,9 @@ public final class ModelDiscovery: Sendable {
         "qwen2": .qwen, "qwen2_vl": .qwen, "qwen2_5_vl": .qwen, "qwen3": .qwen, "qwen3_vl": .qwen,
         "gemma": .gemma, "gemma2": .gemma, "gemma3": .gemma, "gemma4": .gemma, "gemma3_text": .gemma, "gemma3n": .gemma, "gemma4_text": .gemma,
         "starcoder2": .starcoder,
+        "bailing_moe": .bailing, "bailing_hybrid": .bailing,
+        "deepseek_v3": .qwen, "deepseek_v4": .qwen,
+        "gpt_oss": .gptOss,
     ]
 
     private static let familyByArchitecture: [String: ModelFamily] = [
@@ -102,6 +105,8 @@ public final class ModelDiscovery: Sendable {
         "Gemma2ForCausalLM": .gemma,
         "Gemma3ForConditionalGeneration": .gemma,
         "Gemma4ForConditionalGeneration": .gemma,
+        "GptOssForCausalLM": .gptOss,
+        "DeepseekV4ForCausalLM": .qwen,
     ]
 
     public init() {}

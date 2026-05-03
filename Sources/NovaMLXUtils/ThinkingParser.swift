@@ -85,6 +85,11 @@ public final class ThinkingParser: @unchecked Sendable {
     public func feed(_ token: String) -> ParsedToken {
         buffer += token
 
+        // Normalize alternative thinking markers (Qwen3.6+)
+        buffer = buffer
+            .replacingOccurrences(of: "<|begin_of_thought|>", with: "<think/>")
+            .replacingOccurrences(of: "<|end_of_thought|>", with: "</think/>")
+
         var resultText = ""
         var resultType: ParsedTokenType = .content
 
@@ -153,12 +158,15 @@ public final class ThinkingParser: @unchecked Sendable {
                             resultType = .thinking
                             buffer = String(buffer.suffix(Self.bufferRetention))
                         } else {
-                            let safe = String(buffer.prefix(safeEnd))
-                            preCloseContent += safe
+                            // Buffer into preCloseContent — if </think arrives later,
+                            // this content is reclassified as thinking. Only flush as
+                            // response when exceeding threshold (safe to commit).
+                            preCloseContent += String(buffer.prefix(safeEnd))
                             buffer = String(buffer.suffix(Self.bufferRetention))
-                            // Flush if over threshold — but NOT for implicit thinking models
-                            // where content before </think...> must be treated as thinking
-                            if preCloseContent.count >= Self.flushThreshold && !expectImplicitThinking {
+
+                            // Flush preCloseContent as response when it exceeds threshold
+                            // and no close tag has appeared — content is confirmed response
+                            if preCloseContent.count > Self.flushThreshold {
                                 responseContent += preCloseContent
                                 resultText += preCloseContent
                                 resultType = .content
@@ -257,6 +265,18 @@ public final class ThinkingParser: @unchecked Sendable {
         state = .normal
         implicitCloseTag = false
         closeWasSeen = false
+
+        // Fallback: if model opened thinking but never closed it and produced
+        // no response content, the answer is embedded in thinking. Move it to
+        // response so the user gets it in `content` instead of `reasoning_content`.
+        // Only applies for explicit-thinking models (not implicit like DeepSeek-R1).
+        if !expectImplicitThinking
+            && responseContent.isEmpty
+            && !thinkingContent.isEmpty {
+            responseContent = thinkingContent
+            thinkingContent = ""
+        }
+
         return ThinkingContent(thinking: thinkingContent, response: responseContent)
     }
 

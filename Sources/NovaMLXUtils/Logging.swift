@@ -5,10 +5,7 @@ import NovaMLXCore
 public enum NovaMLXLog {
     public static let logger = Logger(label: "com.novamlx")
 
-    private static let logFileURL: URL = {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".nova/novamlx.log")
-    }()
+    private static let logFileURL: URL = NovaMLXPaths.logFile
 
     private static let logQueue = DispatchQueue(label: "com.novamlx.logfile")
     private static nonisolated(unsafe) var fileHandle: FileHandle?

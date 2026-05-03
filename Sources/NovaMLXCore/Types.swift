@@ -69,6 +69,8 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case gemma
     case starcoder
     case claude
+    case bailing
+    case gptOss
     case other
 
     public init(from decoder: Decoder) throws {

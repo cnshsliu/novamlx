@@ -19,7 +19,8 @@ public struct AuthClient: Sendable {
         self.baseURL = baseURL
     }
 
-    public static var defaultBaseURL: String {
+    /// Cached auth URL — computed once, logs once.
+    public static let defaultBaseURL: String = {
         // 1. Environment variable (CLI or dev override)
         if let env = ProcessInfo.processInfo.environment["NOVA_AUTH_URL"], !env.isEmpty {
             authLog("Auth URL from env: \(env)")
@@ -27,22 +28,17 @@ public struct AuthClient: Sendable {
         }
         // 2. Config file (~/.nova/config.json → auth.authURL)
         if let configData = FileManager.default.contents(atPath: NovaMLXPaths.configFile.path) {
-            authLog("Config file size: \(configData.count) bytes")
             if let json = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
                let auth = json["auth"] as? [String: Any],
                let url = auth["authURL"] as? String, !url.isEmpty {
                 authLog("Auth URL from config: \(url)")
                 return url
-            } else {
-                authLog("Config parsed but no auth.authURL found")
             }
-        } else {
-            authLog("Config file not found at \(NovaMLXPaths.configFile.path)")
         }
         // 3. Production default
         authLog("Using production default: https://novamlx.ai")
         return "https://novamlx.ai"
-    }
+    }()
 
     public func login(email: String, password: String) async throws -> LoginResponse {
         var request = URLRequest(url: URL(string: "\(baseURL)/api/v1/auth/login")!)

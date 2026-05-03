@@ -15,10 +15,14 @@ import NovaMLXCore
 
 /// Simulated streaming token accumulator for agent scenarios
 struct AgentStreamAccumulator {
-    var parser = ThinkingParser()
+    var parser: ThinkingParser
     var thinkingText = ""
     var responseText = ""
     var toolCalls: [ParsedToolCall] = []
+
+    init(expectImplicitThinking: Bool = false) {
+        self.parser = ThinkingParser(expectImplicitThinking: expectImplicitThinking)
+    }
 
     mutating func feed(_ token: String) {
         let parsed = parser.feed(token)
@@ -30,8 +34,13 @@ struct AgentStreamAccumulator {
 
     mutating func finalize() {
         let result = parser.finalize()
-        if !result.thinking.isEmpty && thinkingText.isEmpty { thinkingText = result.thinking }
-        if !result.response.isEmpty && responseText.isEmpty { responseText = result.response }
+        // finalize() returns ALL accumulated content (thinkingContent/responseContent),
+        // not just the buffer tail. We only need the delta — content that wasn't yet
+        // yielded by feed(). Calculate by subtracting what we already captured.
+        let thinkingDelta = String(result.thinking.dropFirst(thinkingText.count))
+        let responseDelta = String(result.response.dropFirst(responseText.count))
+        if !thinkingDelta.isEmpty { thinkingText += thinkingDelta }
+        if !responseDelta.isEmpty { responseText += responseDelta }
         // Parse tool calls from response
         let tr = ToolCallParser.parse(responseText)
         if let tcs = tr.toolCalls {
@@ -138,7 +147,8 @@ struct ClaudeCodeAgentTests {
 
     @Test("Claude Code thinking+response streaming simulation")
     func thinkingResponseStreaming() {
-        var acc = AgentStreamAccumulator()
+        // Implicit open tag: chat template injects 💭, model only outputs </think/>
+        var acc = AgentStreamAccumulator(expectImplicitThinking: true)
 
         // Simulate reasoning model with implicit open tag
         // (<think> injected by chat template, only </think> in output)
@@ -181,7 +191,8 @@ struct ClaudeCodeAgentTests {
 
     @Test("Claude Code long context: thinking + tool use + response")
     func longContextThinkingToolResponse() {
-        var acc = AgentStreamAccumulator()
+        // Implicit thinking: only </think/> in output, no explicit open tag
+        var acc = AgentStreamAccumulator(expectImplicitThinking: true)
 
         // Models like Qwen3.6 (thinking) used as Claude Code agent
         let streamSequence = [
@@ -280,7 +291,8 @@ struct OpenCodeAgentTests {
 
     @Test("Open Code streaming with thinking model")
     func openCodeThinkingStreaming() {
-        var acc = AgentStreamAccumulator()
+        // Implicit thinking: only </think/> in output, no explicit open tag
+        var acc = AgentStreamAccumulator(expectImplicitThinking: true)
 
         // Simulate Qwen model with thinking, used as Open Code agent
         let tokens = [

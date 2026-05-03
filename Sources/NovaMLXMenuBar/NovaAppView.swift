@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 import NovaMLXCore
 import NovaMLXInference
 import NovaMLXModelManager
@@ -7,7 +8,8 @@ import NovaMLXUtils
 public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
     case models = "Models"
-    case chat = "Chat"
+    case downloads = "Downloads"
+    case chat = "Playground"
     case agents = "Agents"
     case settings = "Settings"
 
@@ -17,7 +19,8 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
         case .models: return "cube.box"
-        case .chat: return "bubble.left.and.bubble.right"
+        case .downloads: return "arrow.down.circle"
+        case .chat: return "cpu"
         case .agents: return "app.badge.checkmark"
         case .settings: return "gearshape"
         }
@@ -96,7 +99,7 @@ public struct NovaAppView: View {
 
                 Spacer()
 
-                if page == .models && appState.activeDownloadCount > 0 {
+                if page == .downloads && appState.activeDownloadCount > 0 {
                     Text("\(appState.activeDownloadCount)")
                         .font(.caption2)
                         .foregroundColor(.white)
@@ -151,7 +154,8 @@ public struct NovaAppView: View {
     }
 
     private var sidebarFooter: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            miniTpsChart
             if !appState.loadedModels.isEmpty {
                 Text(l10n.tr("app.modelsLoaded", appState.loadedModels.count))
                     .font(.caption2)
@@ -165,6 +169,67 @@ public struct NovaAppView: View {
         }
     }
 
+    private var miniTpsChart: some View {
+        let history = appState.tpsHistory
+        let hasData = !history.allSatisfy({ $0 == 0 })
+        let currentTps = history.last ?? 0
+
+        return Group {
+            if hasData {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(String(format: "%.0f tok/s", currentTps))
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundColor(currentTps > 0 ? NovaTheme.Colors.accent : .secondary)
+                        Spacer()
+                        if appState.peakTokensPerSecond > 0 {
+                            Text(String(format: "peak %.0f", appState.peakTokensPerSecond))
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    Chart {
+                        ForEach(Array(history.enumerated()), id: \.offset) { index, tps in
+                            LineMark(
+                                x: .value("T", index),
+                                y: .value("tps", tps)
+                            )
+                            .foregroundStyle(NovaTheme.Colors.accent)
+                            .interpolationMethod(.catmullRom)
+                            .lineStyle(StrokeStyle(lineWidth: 1.2))
+
+                            AreaMark(
+                                x: .value("T", index),
+                                y: .value("tps", tps)
+                            )
+                            .foregroundStyle(
+                                .linearGradient(
+                                    colors: [NovaTheme.Colors.accent.opacity(0.25), NovaTheme.Colors.accent.opacity(0.02)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .interpolationMethod(.catmullRom)
+                        }
+                    }
+                    .chartXAxis(.hidden)
+                    .chartYAxis(.hidden)
+                    .frame(height: 32)
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(NovaTheme.Colors.cardBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
+                )
+            }
+        }
+    }
+
     private var detailView: some View {
         ZStack {
             StatusPageView(appState: appState, modelManager: modelManager)
@@ -173,6 +238,9 @@ public struct NovaAppView: View {
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .models ? 1 : 0)
+            DownloadsPageView(appState: appState, modelManager: modelManager)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .downloads ? 1 : 0)
             ChatPageView(appState: appState, inferenceService: inferenceService)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
@@ -189,6 +257,7 @@ public struct NovaAppView: View {
         switch page {
         case .status: return l10n.tr("app.status")
         case .models: return l10n.tr("app.models")
+        case .downloads: return l10n.tr("app.downloads")
         case .chat: return l10n.tr("app.chat")
         case .agents: return l10n.tr("app.agents")
         case .settings: return l10n.tr("app.settings")

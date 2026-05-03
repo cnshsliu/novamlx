@@ -4,22 +4,16 @@ public actor NovaMLXConfiguration {
     public static let shared = NovaMLXConfiguration()
 
     private var _modelsDirectory: URL
-    private var _cacheDirectory: URL
     private var _serverConfig: ServerConfig
     private var _defaultModel: String?
 
     private init() {
         _modelsDirectory = NovaMLXPaths.modelsDir
-        _cacheDirectory = NovaMLXPaths.cacheDir
         _serverConfig = ServerConfig()
     }
 
     public var modelsDirectory: URL {
         get async { _modelsDirectory }
-    }
-
-    public var cacheDirectory: URL {
-        get async { _cacheDirectory }
     }
 
     public var serverConfig: ServerConfig {
@@ -34,10 +28,6 @@ public actor NovaMLXConfiguration {
         _modelsDirectory = url
     }
 
-    public func setCacheDirectory(_ url: URL) {
-        _cacheDirectory = url
-    }
-
     public func setServerConfig(_ config: ServerConfig) {
         _serverConfig = config
     }
@@ -49,7 +39,6 @@ public actor NovaMLXConfiguration {
     public func initializeDirectories() throws {
         let fm = FileManager.default
         try fm.createDirectory(at: _modelsDirectory, withIntermediateDirectories: true)
-        try fm.createDirectory(at: _cacheDirectory, withIntermediateDirectories: true)
     }
 
     public func loadFromFile(_ url: URL) throws {
@@ -73,7 +62,6 @@ public actor NovaMLXConfiguration {
         try data.write(to: url, options: .atomic)
     }
 
-    /// Update apiKeys in the server config and persist to file
     public func updateApiKeys(_ keys: [String], file url: URL) throws {
         _serverConfig = ServerConfig(
             host: _serverConfig.host,
@@ -92,9 +80,8 @@ public actor NovaMLXConfiguration {
         try saveToFile(url)
     }
 
-    /// Convenience: get the config file URL (sibling of models directory)
     public var configFileURL: URL {
-        _modelsDirectory.deletingLastPathComponent().appendingPathComponent("config.json")
+        NovaMLXPaths.configFile
     }
 }
 
