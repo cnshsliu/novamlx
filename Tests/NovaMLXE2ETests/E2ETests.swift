@@ -315,6 +315,17 @@ func buildClaudeCodeConversation(turns: Int) -> [[String: Any]] {
 struct E2ETests {
     let client = HTTPClient()
 
+    /// Heuristic: skip VLMs in text-only test suites.
+    /// Brittle but appropriate — avoids expanding admin API surface for a test concern.
+    /// Update if new VLM families appear (see ModelDiscovery.vlmModelTypes).
+    private func isLikelyVLM(_ modelId: String) -> Bool {
+        let id = modelId.lowercased()
+        return id.contains("-vl") || id.contains("_vl") || id.contains("vision") ||
+               id.contains("llava") || id.contains("pixtral") || id.contains("internvl") ||
+               id.contains("minicpmv") || id.contains("paligemma") || id.contains("idefics") ||
+               id.contains("mllama") || id.contains("florence2") || id.contains("molmo")
+    }
+
     /// Load each model once, run ALL test closures against it, then unload.
     /// This gives us ~6 cycles instead of ~96.
     func forEachModelSuite(_ label: String, tests: (String) async throws -> Void) async throws {
@@ -324,6 +335,13 @@ struct E2ETests {
 
         for model in models {
             let modelId = model.id
+
+            // VLMs need image input — skip for text-only test suites
+            if isLikelyVLM(modelId) {
+                print("  [\(label)] SKIP \(modelId): VLM (needs image input)")
+                continue
+            }
+
             print("  [\(label)] Loading \(modelId)...")
             let loaded = try await loadModel(client, modelId: modelId)
             guard loaded else {
@@ -360,10 +378,13 @@ struct E2ETests {
         try await forEachModelSuite("core-api") { modelId in
             // --- OpenAI non-stream ---
             do {
+                // max_tokens=150: Harmony (gpt-oss) needs budget to finish its
+                // reasoning channel before producing final content. If it still
+                // returns empty content at 150, that's a real bug worth catching.
                 let body: [String: Any] = [
                     "model": modelId,
                     "messages": [["role": "user", "content": "Say hello in one word."]],
-                    "stream": false, "max_tokens": 50
+                    "stream": false, "max_tokens": 150
                 ]
                 let data = try JSONSerialization.data(withJSONObject: body)
                 guard let (resp, status) = await safePost(client,
@@ -377,12 +398,23 @@ struct E2ETests {
                     guard status == 200 else { return }
                     let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
                     let choices = json?["choices"] as? [[String: Any]]
-                    let text = (choices?.first?["message"] as? [String: Any])?["content"] as? String ?? ""
-                    #expect(!text.isEmpty, "\(modelId): empty OpenAI response")
+                    let msg = choices?.first?["message"] as? [String: Any]
+                    let text = msg?["content"] as? String ?? ""
+                    let reasoning = msg?["reasoning_content"] as? String
+                    // Accept either content or reasoning_content as non-empty output.
+                    // If content is empty but reasoning exists, model spent all budget
+                    // in reasoning — acceptable for smoke test, but log a warning.
+                    if !text.isEmpty {
+                        print("    \(modelId): OpenAI non-stream OK")
+                    } else if let rc = reasoning, !rc.isEmpty {
+                        Issue.record("\(modelId): OpenAI non-stream had empty content but \(rc.count) chars reasoning — model may need more tokens")
+                        print("    \(modelId): OpenAI non-stream OK (reasoning only, \(rc.count) chars)")
+                    } else {
+                        Issue.record("\(modelId): empty OpenAI response (no content, no reasoning)")
+                    }
                     let finishReason = choices?.first?["finish_reason"] as? String ?? ""
                     #expect(finishReason == "stop" || finishReason == "length",
                         "\(modelId): unexpected finish_reason '\(finishReason)'")
-                    print("    \(modelId): OpenAI non-stream OK")
                 }
             }
 
@@ -391,7 +423,7 @@ struct E2ETests {
                 let body: [String: Any] = [
                     "model": modelId,
                     "messages": [["role": "user", "content": "Say hello in one word."]],
-                    "stream": true, "max_tokens": 50
+                    "stream": true, "max_tokens": 150
                 ]
                 let data = try JSONSerialization.data(withJSONObject: body)
                 let result = await safePostStream(client,
@@ -409,7 +441,7 @@ struct E2ETests {
                 let body: [String: Any] = [
                     "model": modelId,
                     "messages": [["role": "user", "content": "Say hello in one word."]],
-                    "max_tokens": 50, "stream": false
+                    "max_tokens": 150, "stream": false
                 ]
                 let data = try JSONSerialization.data(withJSONObject: body)
                 let url = apiBase.appendingPathComponent("v1/messages")
@@ -430,11 +462,19 @@ struct E2ETests {
                     let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
                     let content = json?["content"] as? [[String: Any]]
                     let text = content?.compactMap { $0["text"] as? String }.joined() ?? ""
-                    #expect(!text.isEmpty, "\(modelId): empty Anthropic response")
+                    let thinking = content?.compactMap { $0["thinking"] as? String }.joined() ?? ""
+                    // Accept either text or thinking as non-empty output
+                    if !text.isEmpty {
+                        print("    \(modelId): Anthropic non-stream OK")
+                    } else if !thinking.isEmpty {
+                        Issue.record("\(modelId): Anthropic non-stream had empty text but \(thinking.count) chars thinking — model may need more tokens")
+                        print("    \(modelId): Anthropic non-stream OK (thinking only, \(thinking.count) chars)")
+                    } else {
+                        Issue.record("\(modelId): empty Anthropic response (no text, no thinking)")
+                    }
                     let stopReason = json?["stop_reason"] as? String ?? ""
                     #expect(stopReason == "stop" || stopReason == "end_turn",
                         "\(modelId): unexpected stop_reason '\(stopReason)'")
-                    print("    \(modelId): Anthropic non-stream OK")
                 }
             }
 
@@ -443,7 +483,7 @@ struct E2ETests {
                 let body: [String: Any] = [
                     "model": modelId,
                     "messages": [["role": "user", "content": "Say hello in one word."]],
-                    "max_tokens": 50, "stream": true
+                    "max_tokens": 150, "stream": true
                 ]
                 let data = try JSONSerialization.data(withJSONObject: body)
                 let result = await safePostStream(client,
