@@ -409,6 +409,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public lazy var batchScheduler = BatchScheduler(engine: self)
     public var settingsProvider: (@Sendable (String) -> ModelSettings?)?
     private var prefixCacheManagers: [String: PrefixCacheManager]
+    /// Operational kill switch mirrored from `ServerConfig.prefixCacheEnabled`.
+    /// Read inside `lock.withLock` from `getOrCreatePrefixCacheManager`. Default
+    /// `true` matches the historical behavior; engine sync from configuration
+    /// happens via `setPrefixCacheEnabled(_:)`.
+    private var prefixCacheEnabled: Bool = true
     /// Per-model cache of `TokenMaskBuilder` instances. Built on first
     /// structured-output request; invalidated on model unload. Avoids the
     /// per-request cost of decoding every token in the vocabulary (250k+
@@ -1045,6 +1050,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
     func getOrCreatePrefixCacheManager(modelId: String) -> PrefixCacheManager? {
         lock.withLock {
+            // Operational kill switch (ServerConfig.prefixCacheEnabled). When
+            // disabled, never instantiate or return a manager — callers should
+            // treat `nil` as "no prefix cache for this request".
+            guard prefixCacheEnabled else { return nil }
             if let existing = prefixCacheManagers[modelId] {
                 return existing
             }
@@ -1060,6 +1069,27 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             prefixCacheManagers[modelId] = manager
             return manager
         }
+    }
+
+    /// Toggle the prefix cache subsystem at runtime. When disabled, all
+    /// existing managers are cleared and removed; subsequent requests will
+    /// not load or store anything via the prefix cache. Mirrors
+    /// `ServerConfig.prefixCacheEnabled`.
+    public func setPrefixCacheEnabled(_ enabled: Bool) {
+        lock.withLock {
+            prefixCacheEnabled = enabled
+            if !enabled {
+                for (_, mgr) in prefixCacheManagers {
+                    mgr.clear()
+                }
+                prefixCacheManagers.removeAll()
+            }
+        }
+        NovaMLXLog.info("Prefix cache subsystem \(enabled ? "enabled" : "disabled")")
+    }
+
+    public var isPrefixCacheEnabled: Bool {
+        lock.withLock { prefixCacheEnabled }
     }
 
     public func cleanupOrphanedCacheDirs(downloadedModelIds: Set<String>) {
@@ -1879,17 +1909,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
 
         // Capture prompt tokens for prefix cache storage + loading
+        // VLM streaming builds a fresh cache inside perform — skip fetch/store.
+        let isVLM = container.config.modelType == .vlm
         let allPromptTokens: [Int]?
-        if let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
+        let prefixResult: PrefixCacheManager.PrefixResult?
+        if !isVLM,
+           let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
             let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
             allPromptTokens = tokens
+            prefixResult = getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
         } else {
             allPromptTokens = nil
-        }
-
-        // Try prefix cache load
-        let prefixResult = allPromptTokens.flatMap { tokens in
-            getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
+            prefixResult = nil
         }
 
         // Build processor (repetition penalty only)
@@ -2030,7 +2061,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             // MUST happen inside mlxContainer.perform to ensure correct lazy evaluation.
             // Running outside perform produces NaN/Inf logits (see FusedBatchScheduler
             // prefillSequence for the same pattern).
-            let isVLM = container.config.modelType == .vlm
             if isVLM {
                 // VLM models require ALL model forward passes inside mlxContainer.perform.
                 // Run the entire generation loop (prefill + decode) inside perform,
@@ -2282,16 +2312,21 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     try await self.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
-                    // Capture prompt tokens for prefix cache storage + loading
-                    let allPromptTokens: [Int]? = if let _ = self.getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
-                        input.text.tokens.asArray(Int32.self).map { Int($0) }
-                    } else {
-                        nil
-                    }
+                    let isVLM = container.config.modelType == .vlm
 
-                    // Try prefix cache load
-                    let prefixResult = allPromptTokens.flatMap { tokens in
-                        self.getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
+                    // Capture prompt tokens for prefix cache storage + loading
+                    // VLM streaming builds a fresh cache inside perform — skip fetch/store.
+                    let allPromptTokens: [Int]?
+                    let prefixResult: PrefixCacheManager.PrefixResult?
+                    if !isVLM,
+                       let _ = self.getOrCreatePrefixCacheManager(modelId: request.model),
+                       promptTokenCount > 0 {
+                        let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
+                        allPromptTokens = tokens
+                        prefixResult = self.getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
+                    } else {
+                        allPromptTokens = nil
+                        prefixResult = nil
                     }
 
                     // Build processor (repetition penalty only)
@@ -2311,7 +2346,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     )
 
                     let sampler = parameters.sampler()
-                    let isVLM = container.config.modelType == .vlm
 
                     // VLM streaming: run entire generation inside perform.
                     // TokenIterator runs model forward passes outside perform, producing
