@@ -1908,12 +1908,24 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
 
-        // Capture prompt tokens for prefix cache storage + loading
-        // VLM streaming builds a fresh cache inside perform — skip fetch/store.
+        // Fetch model early so we can probe cache type for RotatingKVCache.
+        // Build processor (repetition penalty only)
+        let baseProcessor = parameters.processor()
+        let model = await mlxContainer.perform { context in SendableBox(context.model) }
+        let mlxTokenizer = await mlxContainer.tokenizer
+        let modelConfig = await mlxContainer.configuration
+
+        // Probe model cache type. If any layer is RotatingKVCache (sliding window),
+        // prefix cache is incompatible — skip fetch to avoid wasted SSD I/O.
         let isVLM = container.config.modelType == .vlm
+        let probeCache = model.value.newCache(parameters: parameters)
+        let modelUsesRotating = probeCache.contains { $0 is RotatingKVCache }
+
+        // Capture prompt tokens for prefix cache storage + loading.
+        // Skip for VLM (builds fresh cache in perform) and RotatingKVCache (incompatible).
         let allPromptTokens: [Int]?
         let prefixResult: PrefixCacheManager.PrefixResult?
-        if !isVLM,
+        if !isVLM, !modelUsesRotating,
            let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
             let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
             allPromptTokens = tokens
@@ -1922,12 +1934,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             allPromptTokens = nil
             prefixResult = nil
         }
-
-        // Build processor (repetition penalty only)
-        let baseProcessor = parameters.processor()
-        let model = await mlxContainer.perform { context in SendableBox(context.model) }
-        let mlxTokenizer = await mlxContainer.tokenizer
-        let modelConfig = await mlxContainer.configuration
 
         let processor = composeWithTurnStop(
             baseProcessor: baseProcessor,
@@ -2312,13 +2318,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     try await self.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
-                    let isVLM = container.config.modelType == .vlm
+                    // Fetch model early so we can probe cache type for RotatingKVCache.
+                    let baseProcessor = parameters.processor()
+                    let model = await mlxContainer.perform { context in SendableBox(context.model) }
+                    let mlxTokenizer = await mlxContainer.tokenizer
+                    let modelConfig = await mlxContainer.configuration
 
-                    // Capture prompt tokens for prefix cache storage + loading
-                    // VLM streaming builds a fresh cache inside perform — skip fetch/store.
+                    // Probe model cache type. If any layer is RotatingKVCache (sliding window),
+                    // prefix cache is incompatible — skip fetch to avoid wasted SSD I/O.
+                    let isVLM = container.config.modelType == .vlm
+                    let probeCache = model.value.newCache(parameters: parameters)
+                    let modelUsesRotating = probeCache.contains { $0 is RotatingKVCache }
+
+                    // Capture prompt tokens for prefix cache storage + loading.
+                    // Skip for VLM (builds fresh cache in perform) and RotatingKVCache (incompatible).
                     let allPromptTokens: [Int]?
                     let prefixResult: PrefixCacheManager.PrefixResult?
-                    if !isVLM,
+                    if !isVLM, !modelUsesRotating,
                        let _ = self.getOrCreatePrefixCacheManager(modelId: request.model),
                        promptTokenCount > 0 {
                         let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
@@ -2328,12 +2344,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         allPromptTokens = nil
                         prefixResult = nil
                     }
-
-                    // Build processor (repetition penalty only)
-                    let baseProcessor = parameters.processor()
-                    let model = await mlxContainer.perform { context in SendableBox(context.model) }
-                    let mlxTokenizer = await mlxContainer.tokenizer
-                    let modelConfig = await mlxContainer.configuration
 
                     let processor = self.composeWithTurnStop(
                         baseProcessor: baseProcessor,
