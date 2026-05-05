@@ -372,18 +372,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let body = try await request.body.collect(upTo: .max)
                 let openAIReq = try JSONDecoder().decode(OpenAIRequest.self, from: body)
 
-                var messages = openAIReq.messages.map { msg in
-                    let role: ChatMessage.Role = switch msg.role {
-                    case "system": .system
-                    case "assistant": .assistant
-                    case "tool": .tool
-                    default: .user
-                    }
-                    let imageURLs = msg.content?.imageParts.compactMap { part -> String? in
-                        if case .imageUrl(let img) = part { return img.url } else { return nil }
-                    }
-                    return ChatMessage(role: role, content: msg.content?.textValue, images: (imageURLs?.isEmpty ?? true) ? nil : imageURLs)
-                }
+                var messages = mapOpenAIMessages(openAIReq.messages)
 
                 // OCR auto-optimization
                 if OCROptimizer.isOCRModel(openAIReq.model) {
