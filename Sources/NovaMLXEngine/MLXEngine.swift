@@ -253,41 +253,114 @@ public final class ModelContainer: @unchecked Sendable {
         return false
     }
 
-    /// Returns true ONLY when the chat template injects <think or <thinking tags
-    /// AND the model does NOT have explicit thinking tokens (e.g. <|begin_of_thought|>).
-    /// DeepSeek-R1: template injects <think, no explicit tokens → true (implicit).
-    /// Qwen3.6: template has <think BUT also has <|begin_of_thought|> tokens → false (explicit).
+    /// Returns true when the chat template injects an opening thinking tag
+    /// (`<think>\n` or similar) into the assistant generation prompt — meaning
+    /// the model only generates the CLOSE tag (`</think>`).
+    ///
+    /// **Implicit (returns true)** — chat template literally contains
+    /// `<think>\n` (or the `<thinking>` variant) inside the
+    /// `add_generation_prompt` block. Model output stream looks like:
+    /// `…thinking content…</think>…response…`. No opening tag in the model's
+    /// output. Examples: real `mlx-community/Qwen3.6-*-4bit` quants (template
+    /// emits `<think>\n` after `<|im_start|>assistant\n`); DeepSeek-R1.
+    ///
+    /// **Explicit (returns false)** — chat template injects no opening tag,
+    /// OR the model's tokenizer carries the `<|begin_of_thought|>` /
+    /// `<|end_of_thought|>` family-specific markers (in which case the model
+    /// is expected to emit BOTH `<|begin_of_thought|>` and `<|end_of_thought|>`
+    /// in its output stream — Qwen3.6 explicit-marker variants).
+    ///
+    /// **Why we don't classify by added_tokens shape alone:** `<think>` /
+    /// `</think>` are routinely registered as added_tokens (so they decode
+    /// atomically) on IMPLICIT models too — the chat template still injects
+    /// the open tag as a prompt prefix. The presence of `<think>` as a token
+    /// is a NECESSARY but NOT SUFFICIENT condition for explicit mode. The
+    /// authoritative signal is the chat template, not the tokenizer.
+    ///
+    /// Pre-2026-05-05 implementation incorrectly treated `<think>` in
+    /// `added_tokens` as proof of explicit mode, mis-classifying real-world
+    /// `mlx-community/Qwen3.6-*-4bit` quants and routing all pre-close output
+    /// to `responseContent` rather than `reasoning_content`.
     public static func isImplicitThinkingModel(for modelId: String) -> Bool {
         let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
         let template = loadChatTemplate(modelDir: modelDir) ?? ""
-        let hasTemplateThinkTags = template.contains("<think") || template.contains("<thinking")
-        guard hasTemplateThinkTags else { return false }
 
-        // If the model also has explicit thinking tokens, it's NOT implicit.
+        // Step 1: explicit-marker family-specific tokens override everything.
+        // If the tokenizer registers `<|begin_of_thought|>` / `<|end_of_thought|>`
+        // (Qwen3.6 explicit variant), the model emits both markers. NOT implicit.
         let tokenizerPath = modelDir.appendingPathComponent("tokenizer.json")
         if let data = try? Data(contentsOf: tokenizerPath),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let added = json["added_tokens"] as? [[String: Any]] {
-            NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): checking \(added.count) added_tokens")
             for entry in added {
-                if let content = entry["content"] as? String {
-                    if content.contains("begin_of_thought") || content.contains("end_of_thought")
-                        || content.contains("begin_of_think") || content.contains("end_of_think") {
-                        NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): explicit token found (begin_of_thought): \(content.prefix(30))")
-                        return false
-                    }
-                    // Check for <think...> and </think...> style tokens (Qwen3.6 uses <thinkgt and </thinkgt)
-                    if (content.hasPrefix("<think") || content.hasPrefix("</think")) && content.hasSuffix(">") {
-                        NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): explicit token found (tag style): \(content.prefix(30))")
-                        return false
-                    }
+                guard let content = entry["content"] as? String else { continue }
+                if content.contains("begin_of_thought") || content.contains("end_of_thought")
+                    || content.contains("begin_of_think") || content.contains("end_of_think") {
+                    NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): explicit family marker token \(content.prefix(40)) → false")
+                    return false
                 }
             }
         } else {
             NovaMLXLog.warning("[isImplicitThinkingModel] \(modelId): failed to load tokenizer.json from \(tokenizerPath.path)")
         }
-        NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): returning true (implicit)")
-        return true
+
+        // Step 2: chat-template-driven detection. The template MUST contain
+        // an opening `<think` / `<thinking` tag literal AND that literal must
+        // be inside the `add_generation_prompt` block (i.e. emitted as part
+        // of the prompt prefix, not part of message rendering).
+        //
+        // **Two byte-shapes to handle:**
+        //  1. Real-world `tokenizer_config.json.chat_template` Jinja source —
+        //     the `\n` after `<think>` is a Jinja literal escape sequence
+        //     (preserved as 2 bytes: `\\` + `n`) until rendering time. So the
+        //     template string contains the 11-byte sequence `'<think>\n'`
+        //     where `\n` is BACKSLASH-N. Match: `"'<think>\\n'"`.
+        //  2. Pre-rendered / fixture templates — `\n` is already a literal
+        //     newline (1 byte `0x0A`). Match: `"'<think>"` followed by `'\n'`.
+        //
+        // Also accept double-quoted Jinja literals and the `<thinking>` family.
+        // If `<think>` (with closing `>`) appears as a quoted Jinja literal in
+        // the template AND no later `</think` close in the same string mode,
+        // it's almost certainly an injection. We accept the simpler "quoted
+        // open tag" check below as a sufficient proxy.
+        let injectionLiterals: [String] = [
+            "'<think>\\n'",     // Qwen3 / Qwen3.5 / Qwen3.6 mlx-community
+            "\"<think>\\n\"",
+            "'<thinking>\\n'",
+            "\"<thinking>\\n\"",
+            "'<think>'",        // some templates omit trailing \n
+            "\"<think>\"",
+            "'<thinking>'",
+            "\"<thinking>\"",
+        ]
+        var hasInjectedOpen = injectionLiterals.contains(where: { template.contains($0) })
+        // Fixture / pre-rendered shape: actual newline after `<think>`.
+        if !hasInjectedOpen {
+            // Check for `<think>` followed by an actual newline byte. Use
+            // String.range(of:) for clarity over manual byte-walking. This
+            // handles the test-fixture style (Swift triple-quoted literal
+            // where `\n` is interpreted at parse time).
+            if template.contains("<think>\n") || template.contains("<thinking>\n") {
+                hasInjectedOpen = true
+            }
+        }
+
+        if hasInjectedOpen {
+            NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): template injects opening think tag → true (implicit)")
+            return true
+        }
+
+        // Step 3: fallback — template references thinking tags but doesn't
+        // appear to inject. Treat as explicit.
+        let templateMentionsThink = template.contains("<think") || template.contains("<thinking")
+        if templateMentionsThink {
+            NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): template mentions think tag but no injection literal → false (explicit)")
+            return false
+        }
+
+        // Step 4: no thinking format detected — not a thinking model.
+        NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): no thinking markers found → false")
+        return false
     }
 
     private static func loadChatTemplate(modelDir: URL) -> String? {
@@ -1397,29 +1470,122 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         )
     }
 
-    /// Compose a base processor (repetition penalty) with optional turn stop processor.
+    /// Compose a base processor (repetition penalty), optional turn stop processor,
+    /// and optional thinking-budget processor into a single LogitProcessor chain.
+    ///
+    /// `request` and `parameters` may be omitted to skip thinking-budget construction
+    /// (used by call sites that don't have request context, such as warmup paths).
+    /// All non-budget call sites historically passed only base + turnStop; the budget
+    /// slot is opt-in via the request-aware overload below.
     private func composeWithTurnStop(
         baseProcessor: (any LogitProcessor)?,
         modelId: String,
         container: ModelContainer?,
         tokenizer: Tokenizer,
-        modelConfig: ModelConfiguration
+        modelConfig: ModelConfiguration,
+        request: InferenceRequest? = nil,
+        parameters: GenerateParameters? = nil
     ) -> (any LogitProcessor)? {
-        guard let tsp = buildTurnStopProcessor(
+        let tsp = buildTurnStopProcessor(
             modelId: modelId,
             container: container,
             tokenizer: tokenizer,
             modelConfig: modelConfig
-        ) else { return baseProcessor }
+        )
+        let budget: ThinkingBudgetProcessor?
+        if let request = request, let parameters = parameters {
+            budget = buildThinkingBudgetProcessor(
+                request: request,
+                container: container,
+                tokenizer: tokenizer,
+                parameters: parameters
+            )
+        } else {
+            budget = nil
+        }
 
-        if let base = baseProcessor {
-            return ComposedLogitProcessor(
-                grammarProcessor: base,
-                penaltyProcessor: nil,
-                turnStopProcessor: tsp
+        return ComposedLogitProcessor.compose(
+            grammar: baseProcessor,
+            turnStop: tsp,
+            thinkingBudget: budget
+        )
+    }
+
+    /// Build a `ThinkingBudgetProcessor` if the request + model state warrant it.
+    ///
+    /// **Activation rules:**
+    ///  1. Opt-out: returns nil if `request.enableThinking == false` or
+    ///     `request.thinkingBudget == 0` (explicit disable).
+    ///  2. Explicit budget: returns processor with `request.thinkingBudget`
+    ///     when > 0, regardless of temperature.
+    ///  3. Smart default: when temperature == 0 AND the model is a thinking
+    ///     model AND user did not specify a budget, applies an automatic
+    ///     budget of `min(1024, max(256, maxTokens / 2))`. Greedy decoding on
+    ///     reasoning models can lock the model in chain-of-thought on complex
+    ///     prompts (Qwen team explicitly recommends `temperature ≥ 0.6` for
+    ///     thinking mode). Verified reproducible against Python `mlx_lm` 0.31.3
+    ///     on `mlx-community/Qwen3.6-27B-4bit` (T7 prompt: 2000 tokens, no
+    ///     `</think>` emitted, all chain-of-thought).
+    ///  4. Returns nil if no close-marker token can be resolved from the
+    ///     tokenizer (model has no recognizable thinking format, or close
+    ///     markers are multi-token like Harmony's `<|channel|>final<|message|>`
+    ///     which require state-machine tracking — out of scope for the
+    ///     single-token-mask processor).
+    private func buildThinkingBudgetProcessor(
+        request: InferenceRequest,
+        container: ModelContainer?,
+        tokenizer: Tokenizer,
+        parameters: GenerateParameters
+    ) -> ThinkingBudgetProcessor? {
+        // Explicit opt-outs
+        if request.enableThinking == false { return nil }
+        if let b = request.thinkingBudget, b == 0 { return nil }
+
+        let modelId = container?.identifier.id ?? request.model
+        let temperature = parameters.temperature
+        let maxTokens = parameters.maxTokens ?? container?.config.maxTokens ?? 4096
+
+        // Determine effective budget
+        let effective: Int? = {
+            if let b = request.thinkingBudget, b > 0 { return b }
+            // Smart default: temp == 0 + thinking model only.
+            guard temperature == 0 else { return nil }
+            guard ModelContainer.detectThinkingModel(for: modelId) else { return nil }
+            return min(1024, max(256, maxTokens / 2))
+        }()
+
+        guard let budget = effective, budget > 0 else { return nil }
+
+        let closeIds = ThinkingCloseMarkerResolver.resolveCloseTokenIds(
+            for: tokenizer, modelId: modelId
+        )
+        if closeIds.isEmpty {
+            // No single-token close marker — log once at info level so the
+            // explicit-budget user knows the request silently degraded to
+            // unbounded thinking.
+            if request.thinkingBudget != nil {
+                NovaMLXLog.info(
+                    "[ThinkingBudget] \(modelId): explicit thinkingBudget=\(budget) requested but no single-token close marker resolvable from tokenizer (Harmony / multi-token formats not yet supported). Budget will not be enforced."
+                )
+            }
+            return nil
+        }
+
+        if request.thinkingBudget == nil {
+            // Smart-default applied — log so users on temp=0 + thinking can
+            // see this in `~/.nova/novamlx.log` and understand what happened.
+            // Logged at info level (one line per request) — avoids surprise
+            // without spamming.
+            NovaMLXLog.info(
+                "[ThinkingBudget] \(modelId): temp=0 + thinking model detected — applying smart-default budget=\(budget) (closeIds=\(closeIds.sorted())). Set thinking_budget=0 to disable, or set thinking_budget=N for a custom budget."
             )
         }
-        return tsp
+
+        return ThinkingBudgetProcessor(
+            budget: budget,
+            closeTokenIds: closeIds,
+            modelId: modelId
+        )
     }
 
     static func trimControlTokens(_ text: String, patterns: [String]) -> String {
@@ -1737,7 +1903,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             modelId: request.model,
             container: container,
             tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil),
-            modelConfig: modelConfig
+            modelConfig: modelConfig,
+            request: request,
+            parameters: parameters
         )
 
         let sampler = parameters.sampler()
@@ -2137,7 +2305,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         modelId: request.model,
                         container: container,
                         tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil),
-                        modelConfig: modelConfig
+                        modelConfig: modelConfig,
+                        request: request,
+                        parameters: parameters
                     )
 
                     let sampler = parameters.sampler()

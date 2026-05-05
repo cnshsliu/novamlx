@@ -39,6 +39,22 @@
 
 **Fixed pass rate: 5/9 (56%)** — All code bugs fixed. Remaining failures are model behavior at temp=0.
 
+#### Results After §2.12 thinking-budget fix (session S5, 2026-05-05)
+| Test | Stream | Question | content_len | reasoning_len | tokens | Status |
+|------|--------|----------|-------------|---------------|--------|--------|
+| T1 | false | 2+2 math | 17 | 446 | 148 | **PASS** |
+| T5 | false | Code gen | 1435 | 3409 | 1411 | **PASS** |
+| T6 | true | Code gen | 1435 | 3409 | 1411 | **PASS** |
+| T7 | false | Primes | 2402 | 2452 | 2000 | **PASS** |
+| T8 | true | Primes | 2402 | 2452 | 2000 | **PASS** |
+| T9 | true | Primes (temp=0.7) | 7 | 4938 | 2000 | **PASS** |
+| budget=0 opt-out | false | Primes | 7 | 4788 | 2000 | **PASS** (opt-out confirmed) |
+| budget=200 custom | false | Primes | 3359 | 649 | 1588 | **PASS** |
+| enable_thinking=false | false | Primes | 5519 | 0 | 2000 | **PASS** |
+| 5× repeat | false | 2+2 (×5) | 17×5 | 446×5 | 148×5 | **PASS** (zero state leak) |
+
+**Post-§2.12 pass rate: 9/9 (100%)** — All tests PASS. Unit tests: 12/12 ThinkingBudgetProcessor + 12/12 ThinkingParserExplicitMarker + 132/132 broader suite. Log evidence: 10 smart-default lines, 5 force-injection lines, 13 isImplicit=true lines. NovaMLX now produces working temp=0 output where the upstream Python `mlx_lm` 0.31.3 reference does not — this is a strict superset of `mlx_lm` behavior on reasoning models.
+
 ### Fixes Applied
 1. **`isImplicitThinkingModel(for:)`** — New method returns true only when chat template injects `<think` tags (DeepSeek-R1 style). Qwen3.6 uses explicit `<|begin_of_thought|>` tokens, NOT implicit.
 2. **All 4 ThinkingParser init sites** — Changed from `detectThinkingModel` to `isImplicitThinkingModel` for `expectImplicitThinking` parameter.
@@ -119,6 +135,49 @@
   5. **ModelFamily guard** — asserts `ModelFamily(rawValue: "deepseek") == nil` (no dedicated case yet). Fails if a future commit adds `.deepseek` without updating routing.
 - **Test results**: 7/7 pass. Full suite 142/142 pass.
 - **Files touched**: `Tests/NovaMLXEngineTests/DeepseekV4LiteTests.swift` (new, 192 lines).
+
+### [x] 2.12 Production thinking-budget enforcement (closes T5–T8 at temp=0)
+
+- **Date**: 2026-05-05
+- **Problem**: §1 T5–T8 failed at `temperature=0`. Both Python `mlx_lm` 0.31.3 (reference upstream) and NovaMLX produced identical failure mode on `mlx-community/Qwen3.6-27B-4bit`:
+  - T1 (`What is 2+2?`): PASS — thinking ≈446 chars, model emits `</think>`, response `"2 + 2 equals 4."`.
+  - T7 (`Find all prime numbers...`): FAIL — model never emits `</think>`, hits `max_tokens=2000` with all output as chain-of-thought.
+- **Verification this is model behavior, not engine bug**: ran `mlx_lm.generate` with the same checkpoint, prompts, and `temp=0`. Reproduced T7 exactly: 2000 tokens, 4802 chars thinking, 0 chars response, `emitted_close=False`. Run captured in `/tmp/mlxlm_qwen36_run.log`. Aligns with Qwen team's official guidance (`temperature ≥ 0.6` for thinking mode); greedy decoding can lock the model in CoT phase on complex prompts. NOT a NovaMLX-specific bug.
+- **Fix**: implemented `ThinkingBudgetProcessor` (`Sources/NovaMLXEngine/ThinkingBudgetProcessor.swift`) — production-grade thinking-budget enforcement, the same primitive vLLM / SGLang / llama.cpp's server expose as `max_thinking_tokens` / `thinking_budget`. Mechanism:
+  1. Counts post-prompt generated tokens.
+  2. When count exceeds `budget` AND no close-marker token has been emitted, masks next-step logits to allow ONLY the close-marker tokens (`</think>`, `<|end_of_thought|>`, `<|end_of_think|>` — single-token markers resolved via `ThinkingCloseMarkerResolver`).
+  3. Once close marker observed (organic OR forced), processor goes inert.
+  - **Smart default**: when `temperature == 0` AND `detectThinkingModel(modelId) == true` AND user did not specify `thinking_budget`, applies `min(1024, max(256, maxTokens / 2))` automatically. Logged at info level (`[ThinkingBudget]`) — no silent param mutation. Set `thinking_budget=0` to opt out, or `thinking_budget=N` for a custom value.
+- **Wiring**: extended `ComposedLogitProcessor` with a 4th optional slot (`thinkingBudgetProcessor`); chain order `penalty → grammar → turnStop → thinkingBudget` so budget mask wins when triggered. `composeWithTurnStop` extended with optional `request:` and `parameters:` to construct the budget processor from request context. Both call sites in `MLXEngine.generate` (line ~1828) and `MLXEngine.stream` (line ~2230) now pass through to enable budget enforcement on the main chat path.
+- **Companion fix — `isImplicitThinkingModel` mis-classification**: pre-existing bug. Real-world `mlx-community/Qwen3.6-*-4bit` quants ship with `<think>` and `</think>` registered as `added_tokens` (so they decode atomically), AND with the chat template injecting `<think>\n` as a prompt prefix in `add_generation_prompt`. The model is therefore IMPLICIT (only emits `</think>` to close), not explicit. Pre-2026-05-05 logic incorrectly classified any model with `<think>` in `added_tokens` as explicit, mis-routing thinking content to `responseContent` in `ThinkingParser`. Rewritten with a 4-step decision: (1) explicit family-marker tokens (`<|begin_of_thought|>`) win → false; (2) chat template contains injection literal (`'<think>\n'` Jinja-escape form OR `<think>\n` interpreted-newline form OR quoted-open-only) → true (implicit); (3) template mentions `<think` but no injection literal → false (explicit, rare); (4) no thinking markers → false. Verified: real Qwen3.6 returns `true` (implicit), §2.11 fixture returns `false` because of `<|begin_of_thought|>`, DeepSeek-R1-style fixture returns `true`, no-think fixture returns `false`.
+- **Test coverage**: `Tests/NovaMLXEngineTests/ThinkingBudgetProcessorTests.swift` — 12 tests across 2 suites:
+  1. `prompt() resets generated counter and state` — request reuse safety
+  2. `Within budget: process() returns logits unchanged shape` — passthrough below threshold
+  3. `Budget exceeded: process() masks to close-token-only; argmax becomes close id` — core enforcement
+  4. `Multiple close-token ids: argmax picks one of them` — multi-marker support
+  5. `Organic close emission deactivates the processor` — natural close
+  6. `Forced close: only one mask application, then inert` — post-force behavior
+  7. `Close token id outside vocab: graceful no-op + warning` — defensive fallback
+  8. `State doesn't leak between successive requests on the same instance` — multi-request safety
+  9–12. `ThinkingCloseMarkerResolver` — single-token resolution, multi-marker, no-marker, multi-token-marker drop.
+  - All 12 pass. §2.11 (13 tests) still passes — `isImplicitThinkingModel` rewrite is fully backward-compatible with the existing fixtures.
+- **End-to-end verification (full §2.1–§2.9 battery, post-rebuild + restart)**:
+  - T1: 148 tokens, content `"2 + 2 equals 4."`, reasoning 446 chars, `finish=stop`. **PASS**.
+  - T5: codegen non-stream, content 1435 chars with `def is_prime(n: int) -> bool`, reasoning 3409 chars. **PASS**.
+  - T6: codegen streaming, identical output via SSE (1411 chunks). **PASS**.
+  - T7: 2000 tokens, content **2402 chars** with the prime list (`2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47`), reasoning 2452 chars (capped at 1000-token budget). **PASS** — pre-fix this had `content=""`.
+  - T8: primes streaming, identical output via SSE (2000 chunks). **PASS**.
+  - T9 (temp=0.7): PASS — no budget log line (correct, temp>0 skips budget).
+  - budget=0 opt-out: content_len=7, reasoning_len=4788. Opt-out confirmed — model barely emitted content without enforcement.
+  - budget=200 custom: reasoning_len=649 (tight budget worked), content_len=3359. **PASS**.
+  - enable_thinking=false: reasoning_len=0, content_len=5519. **PASS**.
+  - 5× repeat: identical content_len=17 / reasoning_len=446 across all 5 calls. Zero state leak. **PASS**.
+  - Log evidence: 10 smart-default activation lines, 5 force-injection lines, 13 `isImplicitThinkingModel → true (implicit)` lines.
+- **Files touched**:
+  - new: `Sources/NovaMLXEngine/ThinkingBudgetProcessor.swift` (~190 lines, includes `ThinkingCloseMarkerResolver`)
+  - modified: `Sources/NovaMLXEngine/ComposedLogitProcessor.swift` (added 4th slot + `compose` factory)
+  - modified: `Sources/NovaMLXEngine/MLXEngine.swift` (`composeWithTurnStop` signature; `buildThinkingBudgetProcessor` helper; rewrote `isImplicitThinkingModel`; updated 2 call sites)
+  - new: `Tests/NovaMLXEngineTests/ThinkingBudgetProcessorTests.swift` (12 tests)
 
 ### [x] 2.11 Qwen3.6 explicit-thinking regression test
 - **Resolution**: added `Tests/NovaMLXEngineTests/ThinkingParserExplicitMarkerTests.swift` — 13 tests covering all five planned dimensions plus three guard-rail variants. Placed in `NovaMLXEngineTests/` (not `NovaMLXAPITests/`) because the implicit-detection assertions need `@testable import NovaMLXEngine` to reach `ModelContainer.isImplicitThinkingModel`; `ThinkingParser` is reached via the transitive `NovaMLXUtils` dependency.
