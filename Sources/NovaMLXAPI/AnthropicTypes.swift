@@ -208,16 +208,19 @@ public struct AnthropicContentBlock: Codable, Sendable {
     public let input: AnyCodable?
     public let toolUseId: String?
     public let source: AnyCodable?
+    /// tool_result content: Anthropic spec allows string or [{type:"text",...}] or [{type:"image",...}]
+    public let content: AnyCodable?
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, thinking, id, name, input, source
+        case type, text, thinking, id, name, input, source, content
         case toolUseId = "tool_use_id"
     }
 
     public init(
         type: String, text: String? = nil, thinking: String? = nil,
         id: String? = nil, name: String? = nil, input: AnyCodable? = nil,
-        toolUseId: String? = nil, source: AnyCodable? = nil
+        toolUseId: String? = nil, source: AnyCodable? = nil,
+        content: AnyCodable? = nil
     ) {
         self.type = type
         self.text = text
@@ -227,6 +230,7 @@ public struct AnthropicContentBlock: Codable, Sendable {
         self.input = input
         self.toolUseId = toolUseId
         self.source = source
+        self.content = content
     }
 
     /// Convenience for simple text blocks
@@ -239,6 +243,7 @@ public struct AnthropicContentBlock: Codable, Sendable {
         self.input = nil
         self.toolUseId = nil
         self.source = nil
+        self.content = nil
     }
 }
 

@@ -448,12 +448,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 NovaMLXLog.info("[API] POST /v1/messages — model=\(anthropicReq.model), stream=\(anthropicReq.stream ?? false), maxTokens=\(anthropicReq.maxTokens), msgs=\(anthropicReq.messages.count)")
 
-                var messages = anthropicReq.messages.map { msg in
-                    let role: ChatMessage.Role = msg.role == "assistant" ? .assistant : .user
-                    return ChatMessage(role: role, content: msg.textContent)
-                }
-                if let system = anthropicReq.system {
-                    messages.insert(ChatMessage(role: .system, content: system.textContent), at: 0)
+                var messages: [ChatMessage]
+                do {
+                    messages = try mapAnthropicMessages(anthropicReq.messages, system: anthropicReq.system)
+                } catch let err as AnthropicMappingError {
+                    throw NovaMLXError.apiError(String(describing: err))
                 }
 
                 if !inference.isModelLoaded(anthropicReq.model) {
@@ -588,12 +587,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.modelNotFound(req.model)
                 }
 
-                var messages = req.messages.map { msg in
-                    let role: ChatMessage.Role = msg.role == "assistant" ? .assistant : .user
-                    return ChatMessage(role: role, content: msg.textContent)
-                }
-                if let system = req.system {
-                    messages.insert(ChatMessage(role: .system, content: system.textContent), at: 0)
+                let messages: [ChatMessage]
+                do {
+                    messages = try mapAnthropicMessages(req.messages, system: req.system)
+                } catch let err as AnthropicMappingError {
+                    throw NovaMLXError.apiError(String(describing: err))
                 }
 
                 guard let tokenCount = inference.countTokens(model: req.model, messages: messages) else {
