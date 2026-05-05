@@ -251,9 +251,6 @@ public final class SSDCacheStore: @unchecked Sendable {
         index.add(entry)
 
         let evicted = index.evictLRU()
-        for e in evicted {
-            try? FileManager.default.removeItem(at: e.filePath)
-        }
 
         let pending = PendingWrite(
             blockHash: hash,
@@ -263,7 +260,10 @@ public final class SSDCacheStore: @unchecked Sendable {
             metadata: meta,
             filePath: path
         )
-        writeQueue.sync { [weak self] in
+        writeQueue.async { [weak self] in
+            for e in evicted {
+                try? FileManager.default.removeItem(at: e.filePath)
+            }
             self?.writePending(pending)
         }
     }
@@ -317,8 +317,10 @@ public final class SSDCacheStore: @unchecked Sendable {
             _ = index.remove(entry.blockHash)
         }
         index.clear()
-        for entry in allEntries {
-            try? FileManager.default.removeItem(at: entry.filePath)
+        writeQueue.async {
+            for entry in allEntries {
+                try? FileManager.default.removeItem(at: entry.filePath)
+            }
         }
         NovaMLXLog.info("SSD cache cleared")
     }
