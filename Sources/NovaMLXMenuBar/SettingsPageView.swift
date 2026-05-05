@@ -154,23 +154,41 @@ struct SettingsPageView: View {
 
     private var configPathRow: some View {
         let configPath = NovaMLXPaths.configFile.path
+        let modelsPath = NovaMLXPaths.modelsDir.path
 
-        return HStack {
-            Text(l10n.tr("settings.configFile")).font(.system(size: 13)).foregroundColor(.secondary)
-            Spacer()
-            Text(configPath)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundColor(NovaTheme.Colors.accent)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(l10n.tr("settings.clickCopy"))
-                .onTapGesture {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(configPath, forType: .string)
-                }
+        return VStack(spacing: 0) {
+            HStack {
+                Text(l10n.tr("settings.configFile")).font(.system(size: 13)).foregroundColor(.secondary)
+                Spacer()
+                Text(configPath)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.accent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .onTapGesture {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: NovaMLXPaths.configFile.deletingLastPathComponent().path)
+                    }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            Divider().padding(.horizontal, 12)
+
+            HStack {
+                Text(l10n.tr("settings.modelsPath")).font(.system(size: 13)).foregroundColor(.secondary)
+                Spacer()
+                Text(modelsPath)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.accent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .onTapGesture {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: modelsPath)
+                    }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
     }
 
     private var configEditorPanel: some View {

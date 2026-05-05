@@ -209,6 +209,84 @@ struct JSONLogitProcessorTests {
         #expect(mask?[5] == false, "'x' invalid — not the terminating letter of 'true'")
     }
 
+    // MARK: - Control char rejection inside strings (RFC 8259 §7)
+
+    @Test("Literal newline inside .inString rejected by FSM step()")
+    func literalNewlineInStringRejected() {
+        // RFC 8259 §7: control chars (U+0000..U+001F) MUST be escaped inside
+        // JSON strings. Raw `\n` (0x0A), `\r` (0x0D), `\t` (0x09) tokens that
+        // would land inside a string value must be rejected at the mask level
+        // — otherwise the model produces output like `{"text":"line1
+        // line2"}` which fails JSON.parse.
+        for c: Character in ["\n", "\r", "\t"] {
+            let result = JSONLogitProcessor.stepForTesting(
+                state: .inString, depthStack: [true], escapeNext: false, stringIsKey: false,
+                char: c
+            )
+            #expect(result == nil,
+                   "FSM must reject raw control char \(String(c.unicodeScalars.first!.value, radix: 16)) inside .inString")
+        }
+        // Other control chars (e.g. NUL, BEL, FF) also rejected.
+        for ascii: UInt8 in [0x00, 0x07, 0x0B, 0x0C, 0x1F] {
+            let c = Character(UnicodeScalar(ascii))
+            let result = JSONLogitProcessor.stepForTesting(
+                state: .inString, depthStack: [true], escapeNext: false, stringIsKey: false,
+                char: c
+            )
+            #expect(result == nil, "Control char 0x\(String(ascii, radix: 16)) must be rejected inside .inString")
+        }
+    }
+
+    @Test("Escaped newline (\\\\n two-char sequence) accepted inside .inString")
+    func escapedNewlineInStringAllowed() {
+        // The two-char sequence `\` then `n` must be admitted: `\` puts the
+        // FSM in escapeNext, then `n` is consumed as the escape's payload.
+        var ctx = JSONLogitProcessor.stepForTesting(
+            state: .inString, depthStack: [true], escapeNext: false, stringIsKey: false,
+            char: "\\"
+        )
+        #expect(ctx != nil, "Backslash must be admitted (starts escape sequence)")
+        #expect(ctx?.escapeNext == true)
+
+        // Now feed the 'n' — this is the *letter* n, not a literal newline.
+        let next = JSONLogitProcessor.stepForTesting(
+            state: ctx!.state, depthStack: ctx!.depthStack,
+            escapeNext: ctx!.escapeNext, stringIsKey: ctx!.stringIsKey,
+            char: "n"
+        )
+        #expect(next != nil, "'n' as escape payload must be admitted")
+        #expect(next?.escapeNext == false, "escapeNext must be cleared after payload")
+        #expect(next?.state == .inString, "still inside string after \\n")
+    }
+
+    @Test("Tokens containing literal newlines are masked out for string-context states")
+    func tokensWithLiteralNewlineMaskedOut() {
+        // End-to-end mask-level check: a token whose decoded text contains a
+        // raw `\n` must NOT be admitted from any string-context (state, parent)
+        // mask. A token with the same content but escaped (`\\n`) is fine —
+        // but our synthetic vocab can't encode escape sequences cleanly, so we
+        // stick to the rejection assertion.
+        let vocab = [
+            "abc",        // 0: plain string content — should be allowed
+            "ab\nc",      // 1: literal newline embedded — must be rejected
+            "x\ty",       // 2: literal tab embedded — must be rejected
+            "p\rq",       // 3: literal CR embedded — must be rejected
+            "ok\\nstr",   // 4: backslash-n (escaped) — allowed
+            "\""          // 5: closing quote — allowed (terminates string)
+        ]
+        let proc = makeProcessor(vocab: vocab, eosId: 100)
+
+        for parent: JSONLogitProcessor.ParentFrame in [.topLevel, .object, .array] {
+            let mask = proc.testMaskBoolValues(state: .inString, parent: parent) ?? []
+            #expect(mask[0] == true,  "plain 'abc' admitted in .inString (parent=\(parent))")
+            #expect(mask[1] == false, "token with literal \\n must be rejected (parent=\(parent))")
+            #expect(mask[2] == false, "token with literal \\t must be rejected (parent=\(parent))")
+            #expect(mask[3] == false, "token with literal \\r must be rejected (parent=\(parent))")
+            #expect(mask[4] == true,  "escaped 'ok\\\\nstr' admitted (parent=\(parent))")
+            #expect(mask[5] == true,  "closing quote admitted (parent=\(parent))")
+        }
+    }
+
     // MARK: - EOS gating
 
     @Test("EOS only admitted at .done with topLevel parent")

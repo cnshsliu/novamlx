@@ -44,6 +44,17 @@ struct StatusPageView: View {
                     + Text("  admin:\(String(appState.serverPort == 8080 ? 8081 : 8081))")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
+                if let model = appState.currentInferenceModel {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(NovaTheme.Colors.accent)
+                            .frame(width: 6, height: 6)
+                        Text(model)
+                            .font(.caption)
+                            .foregroundColor(NovaTheme.Colors.accent)
+                            .lineLimit(1)
+                    }
+                }
             }
 
             Spacer()

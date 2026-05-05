@@ -1294,6 +1294,81 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return tokens
     }
 
+    // MARK: - Defensive EOS injection (todo.markdown §2.9)
+    //
+    // If a model's `config.json` ships with a malformed or missing
+    // `eos_token_id`, generation never halts and silently consumes the entire
+    // `maxTokens` budget. The original Gemma-4 VLM `<turn|>` bug (todo.markdown
+    // §5 row 1) was masked by `eos_token_id: [1, 106]` being correct in the
+    // canonical config; a future quant author shipping `eos_token_id: []` (or
+    // omitting 106) would re-open it.
+    //
+    // This helper unions the upstream-derived EOS set with hardcoded
+    // family-specific canonical stop tokens. It logs a warning the first time
+    // injection actually adds something for a given modelId, so we can detect
+    // malformed quants in the wild via `~/.nova/novamlx.log`.
+    //
+    // Currently only Gemma is hardcoded — extend the switch as new families
+    // surface canonical stop tokens that warrant defense.
+    static let defensiveEosWarningLock = NSLock()
+    nonisolated(unsafe) static var defensiveEosWarnedModels: Set<String> = []
+
+    /// Returns `modelConfig.eosTokenIds` unioned with family-specific canonical
+    /// stop tokens. Logs once-per-modelId when injection was needed.
+    static func defensiveEosTokenIds(
+        for modelConfig: ModelConfiguration,
+        container: ModelContainer
+    ) -> Set<Int> {
+        var ids = modelConfig.eosTokenIds
+
+        switch container.identifier.family {
+        case .gemma:
+            // Gemma 2/3/4 canonical: <bos>=1, <end_of_turn>=106. Both ship in
+            // the official `eos_token_id: [1, 106]`. Empty / missing → silent
+            // runaway VLM generation (token 106 never triggers stop).
+            let canonical: Set<Int> = [1, 106]
+            let missing = canonical.subtracting(ids)
+            if !missing.isEmpty {
+                warnDefensiveEosInjection(
+                    modelId: container.identifier.id,
+                    family: "gemma",
+                    missing: missing
+                )
+                ids.formUnion(canonical)
+            }
+        default:
+            // Other families: no defensive defaults today. Add cases here if a
+            // family surfaces canonical stop tokens that aren't reliably
+            // present in upstream `config.json`.
+            break
+        }
+
+        return ids
+    }
+
+    private static func warnDefensiveEosInjection(
+        modelId: String,
+        family: String,
+        missing: Set<Int>
+    ) {
+        defensiveEosWarningLock.lock()
+        defer { defensiveEosWarningLock.unlock() }
+        guard !defensiveEosWarnedModels.contains(modelId) else { return }
+        defensiveEosWarnedModels.insert(modelId)
+        let sorted = missing.sorted()
+        NovaMLXLog.warning(
+            "[DefensiveEOS] \(modelId): config.json eos_token_id missing canonical \(family) stop token(s) \(sorted) — auto-injecting. The model's config.json may be malformed; consider re-quantizing or reporting to the model author."
+        )
+    }
+
+    /// Test-only hook: clear the once-per-model warning cache so tests can
+    /// re-trigger the warning path on the same modelId.
+    static func _resetDefensiveEosWarningCache() {
+        defensiveEosWarningLock.lock()
+        defer { defensiveEosWarningLock.unlock() }
+        defensiveEosWarnedModels.removeAll()
+    }
+
     private func buildTurnStopProcessor(
         modelId: String,
         container: ModelContainer?,
@@ -1305,7 +1380,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         var eosIds = Set<Int>()
         if let eosId = tokenizer.eosTokenId { eosIds.insert(eosId) }
-        eosIds = eosIds.union(modelConfig.eosTokenIds)
+        // §2.9: defensive injection of family-canonical stop tokens.
+        if let container = container {
+            eosIds.formUnion(Self.defensiveEosTokenIds(for: modelConfig, container: container))
+        } else {
+            eosIds.formUnion(modelConfig.eosTokenIds)
+        }
 
         let hallucinationPatterns = container?.chatTemplateProcessor?.hallucinationPatterns() ?? []
 
@@ -1790,9 +1870,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 let tokenIds = effectiveInput.text.tokens.asArray(Int32.self)
                 let reqTag = request.id.uuidString.prefix(8)
 
-                // Build EOS token set
+                // Build EOS token set — §2.9: defensive family-canonical injection.
                 let stopTokenIds: Set<Int> = {
-                    var ids = modelConfig.eosTokenIds
+                    var ids = Self.defensiveEosTokenIds(for: modelConfig, container: container)
                     if let eosId = container.tokenizer?.eosTokenId { ids.insert(eosId) }
                     return ids
                 }()
@@ -1802,6 +1882,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 // Wrap non-Sendable values for capture in @Sendable closure
                 let cacheBox = MutableSendableBox<[KVCache]?>(kvCache)
                 let samplerBox = SamplerBox(sampler)
+                // VLM path runs entirely inside `mlxContainer.perform`, so we must
+                // thread the LogitProcessor chain (penalty + TurnStopProcessor +
+                // hallucination patterns) through manually — TokenIterator is not
+                // used here. Without this, multi-token hallucination patterns
+                // (e.g. "\nuser\n" turn-impersonation) and repetition penalty are
+                // silently bypassed for VLM models. See VLM streaming path for the
+                // mirror fix.
+                let processorBox = ProcessorBox(processor)
 
                 let genResult = await mlxContainer.perform { context in
                     let modelObj = context.model
@@ -1813,12 +1901,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     eval(logits)
                     eval(caches)
 
-                    // Sample first token
-                    let logitsToSample = logits[0..., -1, 0...]
+                    // Initialize processor with the prompt — needed for
+                    // repetition-penalty token history and TurnStopProcessor state.
+                    processorBox.value?.prompt(inputTokens)
+
+                    // Sample first token (after running through processor chain)
+                    let rawFirst = logits[0..., -1, 0...]
+                    let logitsToSample = processorBox.value?.process(logits: rawFirst) ?? rawFirst
                     let maxLogit = logitsToSample.asType(.float32).max().item(Float.self)
                     let stats = "max=\(String(format: "%.2f", maxLogit))"
                     var currentToken = samplerBox.value.sample(logits: logitsToSample)
                     eval(currentToken)
+                    processorBox.value?.didSample(token: currentToken)
 
                     var generatedIds: [Int] = []
                     let tid = currentToken.item(Int.self)
@@ -1833,9 +1927,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let stepInput = currentToken.reshaped(1, 1)
                         let stepLogits = modelObj(stepInput, cache: caches)
                         eval(stepLogits)
-                        let processedLogits = stepLogits[0..., -1, 0...]
+                        let rawStep = stepLogits[0..., -1, 0...]
+                        let processedLogits = processorBox.value?.process(logits: rawStep) ?? rawStep
                         let sampled = samplerBox.value.sample(logits: processedLogits)
                         eval(sampled)
+                        processorBox.value?.didSample(token: sampled)
                         let tokenId = sampled.item(Int.self)
                         if tokenId == unknownTokenId || stopIdsBox.value.contains(tokenId) {
                             break
@@ -2056,7 +2152,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let reqTag = request.id.uuidString.prefix(8).description
 
                         let stopTokenIds: Set<Int> = {
-                            var ids = modelConfig.eosTokenIds
+                            // §2.9: defensive family-canonical injection (mirror of non-stream VLM path).
+                            var ids = MLXEngine.defensiveEosTokenIds(for: modelConfig, container: container)
                             if let eosId = container.tokenizer?.eosTokenId { ids.insert(eosId) }
                             return ids
                         }()
@@ -2066,6 +2163,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let cacheBox = MutableSendableBox<[KVCache]?>(kvCache)
                         let samplerBox = SamplerBox(sampler)
                         let unknownTokenId = mlxTokenizer.unknownTokenId
+                        // VLM streaming runs the entire generation inside
+                        // `mlxContainer.perform`, so we manually thread the
+                        // LogitProcessor chain (repetition penalty +
+                        // TurnStopProcessor multi-token hallucination detection).
+                        // Without this, the chain built above by
+                        // `engine.composeWithTurnStop` is silently dropped on
+                        // VLM requests. Mirrors the non-stream VLM fix.
+                        let processorBox = ProcessorBox(processor)
 
                         // Yield role chunk immediately
                         continuation.yield(Token(id: 0, text: ""))
@@ -2083,10 +2188,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             eval(logits)
                             eval(caches)
 
+                            processorBox.value?.prompt(inputTokens)
+
                             // Sample first token
-                            let logitsToSample = logits[0..., -1, 0...]
+                            let rawFirst = logits[0..., -1, 0...]
+                            let logitsToSample = processorBox.value?.process(logits: rawFirst) ?? rawFirst
                             var currentToken = samplerBox.value.sample(logits: logitsToSample)
                             eval(currentToken)
+                            processorBox.value?.didSample(token: currentToken)
 
                             var generatedIds: [Int] = []
                             let tid = currentToken.item(Int.self)
@@ -2102,9 +2211,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 let stepInput = currentToken.reshaped(1, 1)
                                 let stepLogits = modelObj(stepInput, cache: caches)
                                 eval(stepLogits)
-                                let processedLogits = stepLogits[0..., -1, 0...]
+                                let rawStep = stepLogits[0..., -1, 0...]
+                                let processedLogits = processorBox.value?.process(logits: rawStep) ?? rawStep
                                 let sampled = samplerBox.value.sample(logits: processedLogits)
                                 eval(sampled)
+                                processorBox.value?.didSample(token: sampled)
                                 let tokenId = sampled.item(Int.self)
                                 if tokenId == unknownTokenId || stopTokenIds.contains(tokenId) {
                                     break
@@ -2603,9 +2714,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         )
         let modelConfig = await mlxContainer.configuration
         // Build full EOS set: tokenizer primary + model config extras (e.g. Qwen3.6 has [248046, 248044])
+        // §2.9: defensive family-canonical injection on top of the upstream set.
         var allEosIds = Set<Int>()
         if let eosId = tokenizer.eosTokenId { allEosIds.insert(eosId) }
-        allEosIds = allEosIds.union(modelConfig.eosTokenIds)
+        allEosIds = allEosIds.union(Self.defensiveEosTokenIds(for: modelConfig, container: container))
 
         let grammarProcessor: any LogitProcessor
         if let schema = request.jsonSchemaDef {
@@ -2785,10 +2897,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         for: request.model, tokenizer: tokenizer
                     )
                     let modelConfig = await mlxContainer.configuration
-                    // Build full EOS set (see generateWithProcessor for rationale)
+                    // Build full EOS set (see generateWithProcessor for rationale).
+                    // §2.9: defensive family-canonical injection on top of the upstream set.
                     var allEosIds = Set<Int>()
                     if let eosId = tokenizer.eosTokenId { allEosIds.insert(eosId) }
-                    allEosIds = allEosIds.union(modelConfig.eosTokenIds)
+                    allEosIds = allEosIds.union(MLXEngine.defensiveEosTokenIds(for: modelConfig, container: container))
 
                     let grammarProcessor: any LogitProcessor
                     if let schema = request.jsonSchemaDef {

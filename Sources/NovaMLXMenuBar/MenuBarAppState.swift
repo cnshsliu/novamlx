@@ -20,6 +20,7 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var requestedPage: AppPage? = nil
     @Published public var tpsHistory: [Double] = []
     @Published public var peakTokensPerSecond: Double = 0
+    @Published public var currentInferenceModel: String? = nil
 
     // Cloud auth state — shared across all pages
     @Published public var cloudLoggedIn: Bool = false
@@ -60,6 +61,7 @@ public final class MenuBarAppState: ObservableObject {
                 }
                 self.systemStats = systemStats
                 self.inferenceStats = currentStats
+                self.currentInferenceModel = CurrentInferenceModel.shared.modelID
                 self.loadedModels = inferenceService.listLoadedModels()
                 self.cloudModels = await inferenceService.listCloudModels()
                 self.uptime = SystemMonitor.shared.uptime

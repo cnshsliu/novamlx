@@ -498,6 +498,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     preserveThinking: anthropicReq.resolvedPreserveThinking
                 )
 
+                CurrentInferenceModel.shared.modelID = request.model
+                defer { CurrentInferenceModel.shared.modelID = nil }
                 let result = try await inference.generate(request)
                 let ctxWin = inference.getContextWindow(for: anthropicReq.model) ?? 0
                 let scaledInput = anthropicClientType.shouldScaleContext
@@ -1730,6 +1732,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             preserveThinking: openAIReq.resolvedPreserveThinking
         )
 
+        CurrentInferenceModel.shared.modelID = request.model
+        defer { CurrentInferenceModel.shared.modelID = nil }
         let result = try await inference.generate(request)
         let finishReason: String
         let message: OpenAIChatMessage
@@ -1871,6 +1875,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let toolCallCounter = LockedCounter()
 
         let body: ResponseBody = .init { writer in
+            CurrentInferenceModel.shared.modelID = openAIReq.model
+            defer { CurrentInferenceModel.shared.modelID = nil }
             do {
                 let roleChunk = OpenAIStreamChunk(
                     id: chunkId,
@@ -2086,6 +2092,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let msgId = "msg_\(request.id.uuidString.prefix(24))"
 
         let body: ResponseBody = .init { writer in
+            CurrentInferenceModel.shared.modelID = anthropicReq.model
+            defer { CurrentInferenceModel.shared.modelID = nil }
             var tokenCount = 0
             let streamStart = Date()
             do {
@@ -2288,6 +2296,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             stream: false, stop: compReq.stop
         )
 
+        CurrentInferenceModel.shared.modelID = request.model
+        defer { CurrentInferenceModel.shared.modelID = nil }
         let result = try await inference.generate(request)
         let ctxWin = inference.getContextWindow(for: compReq.model) ?? 0
         let scaledP = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
@@ -2328,6 +2338,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let chunkId = "cmpl-\(request.id.uuidString.prefix(8))"
 
         let body: ResponseBody = .init { writer in
+            CurrentInferenceModel.shared.modelID = compReq.model
+            defer { CurrentInferenceModel.shared.modelID = nil }
             var completionTokenCount = 0
             do {
                 for try await event in keepAliveStream {
@@ -2425,6 +2437,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             topP: req.topP, stream: false
         )
 
+        CurrentInferenceModel.shared.modelID = request.model
+        defer { CurrentInferenceModel.shared.modelID = nil }
         let result = try await inference.generate(request)
         let responseId = "resp_\(result.id.uuidString.prefix(24))"
         let outputItemId = "msg_\(result.id.uuidString.prefix(24))"
