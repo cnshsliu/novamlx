@@ -142,8 +142,8 @@ public final class SSDCacheStore: @unchecked Sendable {
             // Skip partial/temp writes
             guard fileURL.pathExtension == "safetensors" && !fileURL.lastPathComponent.contains(".tmp.") else { continue }
             do {
-                let (_, metadata) = try loadArraysAndMetadata(url: fileURL, stream: .cpu)
-                guard let hashHex = metadata["block_hash"] else { continue }
+                let metadata = try readSafetensorsMetadata(url: fileURL)
+                guard !metadata.isEmpty, let hashHex = metadata["block_hash"] else { continue }
 
                 // TTL check — prune expired entries
                 if let createdAtStr = metadata["created_at"],
