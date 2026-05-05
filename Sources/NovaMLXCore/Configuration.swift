@@ -75,7 +75,8 @@ public actor NovaMLXConfiguration {
             tlsKeyPath: _serverConfig.tlsKeyPath,
             tlsKeyPassword: _serverConfig.tlsKeyPassword,
             maxRequestSizeMB: _serverConfig.maxRequestSizeMB,
-            maxProcessMemory: _serverConfig.maxProcessMemory
+            maxProcessMemory: _serverConfig.maxProcessMemory,
+            prefixCacheEnabled: _serverConfig.prefixCacheEnabled
         )
         try saveToFile(url)
     }

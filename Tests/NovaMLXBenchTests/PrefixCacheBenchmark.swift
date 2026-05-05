@@ -1,156 +1,169 @@
 import Foundation
-import MLX
-import NovaMLXCore
-import NovaMLXEngine
-import NovaMLXInference
-import NovaMLXModelManager
 import Testing
 
+/// Prefix cache TTFT benchmark. Hits the running NovaMLX server via HTTP
+/// with a repeated-prefix workload. Uses whatever model is currently loaded.
+///
+/// Gate: NOVAMLX_BENCH=1
+/// Usage: NOVAMLX_BENCH=1 swift test --filter PrefixCacheBenchmark
 @Suite("Prefix Cache Benchmark", .serialized, .enabled(if: ProcessInfo.processInfo.environment["NOVAMLX_BENCH"] == "1"))
-@MainActor
 struct PrefixCacheBenchmark {
 
-    private func makeHarness() -> BenchmarkHarness {
-        BenchmarkHarness()
+    private static let modelId = ProcessInfo.processInfo.environment["NOVA_MODEL"] ?? "mlx-community/Qwen3.6-27B-4bit"
+    private static let baseURL = ProcessInfo.processInfo.environment["NOVA_API_URL"] ?? "http://127.0.0.1:6590"
+
+    private static var apiKey: String {
+        let configPath = NSHomeDirectory() + "/.nova/config.json"
+        let data = try! Data(contentsOf: URL(fileURLWithPath: configPath))
+        let json = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let server = json["server"] as! [String: Any]
+        let keys = server["apiKeys"] as! [String]
+        return keys[0]
     }
+
+    private static let adminURL = ProcessInfo.processInfo.environment["NOVA_ADMIN_URL"] ?? "http://127.0.0.1:6591"
 
     /// Build a synthetic prompt of ~512 tokens by repeating a fixed sentence.
     private func buildLongPrompt() -> String {
         let sentence = "The quick brown fox jumps over the lazy dog near the riverbank on a sunny afternoon. "
-        // ~15 tokens per sentence, repeat to get ~512 tokens
         return String(repeating: sentence, count: 35)
     }
 
-    @Test("Prefix cache on/off/cold/warm TTFT benchmark")
-    func prefixCacheBenchmark() async throws {
-        let harness = makeHarness()
-        guard let config = BenchModelRegistry.shared.model(for: .llama) else {
-            Issue.record("No LLaMA model configured — skipping benchmark")
-            return
+    /// Send a streaming chat completion, return TTFT in ms.
+    private func streamingRequest(model: String, prompt: String, maxTokens: Int) async throws -> Double? {
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [["role": "user", "content": prompt]],
+            "temperature": 0.0,
+            "max_tokens": maxTokens,
+            "stream": true,
+        ]
+        var request = URLRequest(url: URL(string: "\(Self.baseURL)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(Self.apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 300
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            return nil
         }
+
+        let requestStart = ContinuousClock.now
+        var firstTokenTime: ContinuousClock.Instant? = nil
+
+        for try await line in bytes.lines {
+            if firstTokenTime == nil, line.hasPrefix("data: "), line != "data: [DONE]" {
+                let payload = String(line.dropFirst(6))
+                if let data = payload.data(using: .utf8),
+                   let chunk = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let choices = chunk["choices"] as? [[String: Any]],
+                   let delta = choices.first?["delta"] as? [String: Any] {
+                    let content = delta["content"] as? String
+                    let reasoning = delta["reasoning_content"] as? String
+                    if content != nil || reasoning != nil {
+                        firstTokenTime = .now
+                    }
+                }
+            }
+        }
+
+        guard let ft = firstTokenTime else { return nil }
+        return Double(requestStart.duration(to: ft).components.attoseconds) / 1e18 * 1000
+    }
+
+    /// Set prefix cache enabled/disabled via admin endpoint.
+    private func setCacheEnabled(_ enabled: Bool) async throws {
+        // Use the config file directly since there's no admin toggle endpoint.
+        // Instead, just read the cache stats to verify state.
+        _ = enabled // no-op; cache is always enabled unless config says otherwise
+    }
+
+    /// Clear prefix cache for model via admin endpoint.
+    private func clearCache(model: String) async throws {
+        guard let url = URL(string: "\(Self.adminURL)/admin/prefix-cache/\(model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? model)/clear") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(Self.apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+        _ = try await URLSession.shared.data(for: request)
+    }
+
+    /// Get prefix cache stats.
+    private func getCacheStats(model: String) async throws -> [String: Any]? {
+        guard let url = URL(string: "\(Self.adminURL)/admin/prefix-cache/\(model.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? model)/stats") else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(Self.apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    @Test("Prefix cache on/cold/warm TTFT benchmark via HTTP")
+    func prefixCacheBenchmark() async throws {
+        let model = Self.modelId
+        let longPrompt = buildLongPrompt()
+        let shortPrompt = "What is 2+2? "
+        let prompt = longPrompt + shortPrompt
+        let maxTokens = 32
 
         print("\nPrefixCacheBenchmark")
         print("====================")
+        print("  Model: \(model)")
 
-        // Load model
-        let loadTime = try await harness.loadModel(config)
-        print("  Model loaded: \(config.hubId)")
-        print("  Load: \(String(format: "%.0f", loadTime.loadTimeMs))ms, Weights: \(String(format: "%.2f", loadTime.weightsMemoryGB))GB")
+        // Clear cache to start fresh
+        try await clearCache(model: model)
 
-        let modelId = config.hubId
-        let longPrompt = buildLongPrompt()
-        let shortPrompt = "What is 2+2? "
-        let maxTokens = 32
-
-        // --- Mode A: prefix cache OFF ---
-        harness.engine.setPrefixCacheEnabled(false)
-        // Warmup
-        for _ in 0..<2 {
-            let req = InferenceRequest(
-                model: modelId,
-                messages: [ChatMessage(role: .user, content: longPrompt + shortPrompt)],
-                temperature: 0.0,
-                maxTokens: maxTokens,
-                stream: true
-            )
-            let stream = harness.inferenceService.stream(req)
-            for try await _ in stream {}
-        }
-        // Measured runs
+        // --- Mode A: prefix cache OFF (disable via config, then re-enable) ---
+        // Since we can't toggle at runtime via admin, use the fact that a cold
+        // cache = no hits = equivalent to "off". Run once to get baseline TTFT.
+        // Mode A: run with freshly cleared cache each time (no hits possible).
+        print("  Running Mode A (no cache hits — clearing before each request)...")
         var modeATTFTs: [Double] = []
         let modeAStart = Date()
-        for _ in 0..<30 {
-            let req = InferenceRequest(
-                model: modelId,
-                messages: [ChatMessage(role: .user, content: longPrompt + shortPrompt)],
-                temperature: 0.0,
-                maxTokens: maxTokens,
-                stream: true
-            )
-            let requestStart = ContinuousClock.now
-            var firstToken = true
-            var ttftMs: Double = 0
-            let stream = harness.inferenceService.stream(req)
-            for try await token in stream {
-                if firstToken {
-                    ttftMs = Double(requestStart.duration(to: .now).components.attoseconds) / 1e18 * 1000
-                    firstToken = false
-                }
+        for i in 0..<30 {
+            try await clearCache(model: model)
+            if let ttft = try await streamingRequest(model: model, prompt: prompt, maxTokens: maxTokens) {
+                modeATTFTs.append(ttft)
             }
-            if !firstToken { modeATTFTs.append(ttftMs) }
+            if i == 0 { print("    request 0 done") }
         }
         let modeAWall = Date().timeIntervalSince(modeAStart)
 
-        // --- Mode B: prefix cache ON, cold cache ---
-        harness.engine.setPrefixCacheEnabled(true)
-        harness.engine.clearPrefixCache(for: modelId)
-        // Warmup (populates cache)
+        // --- Mode B: prefix cache ON, cold start then warm up ---
+        print("  Running Mode B (cold → populating cache)...")
+        try await clearCache(model: model)
+        // Warmup to populate cache
         for _ in 0..<10 {
-            let req = InferenceRequest(
-                model: modelId,
-                messages: [ChatMessage(role: .user, content: longPrompt + shortPrompt)],
-                temperature: 0.0,
-                maxTokens: maxTokens,
-                stream: true
-            )
-            let stream = harness.inferenceService.stream(req)
-            for try await _ in stream {}
+            _ = try await streamingRequest(model: model, prompt: prompt, maxTokens: maxTokens)
         }
-        // Measured runs (cold — each run adds to cache)
-        harness.engine.clearPrefixCache(for: modelId)
         var modeBTTFTs: [Double] = []
         let modeBStart = Date()
-        for _ in 0..<30 {
-            let req = InferenceRequest(
-                model: modelId,
-                messages: [ChatMessage(role: .user, content: longPrompt + shortPrompt)],
-                temperature: 0.0,
-                maxTokens: maxTokens,
-                stream: true
-            )
-            let requestStart = ContinuousClock.now
-            var firstToken = true
-            var ttftMs: Double = 0
-            let stream = harness.inferenceService.stream(req)
-            for try await token in stream {
-                if firstToken {
-                    ttftMs = Double(requestStart.duration(to: .now).components.attoseconds) / 1e18 * 1000
-                    firstToken = false
-                }
+        for i in 0..<30 {
+            if let ttft = try await streamingRequest(model: model, prompt: prompt, maxTokens: maxTokens) {
+                modeBTTFTs.append(ttft)
             }
-            if !firstToken { modeBTTFTs.append(ttftMs) }
+            if i == 0 { print("    request 0 done") }
         }
         let modeBWall = Date().timeIntervalSince(modeBStart)
 
-        // --- Mode C: prefix cache ON, warm cache (reuse from Mode B) ---
+        // --- Mode C: warm cache (reuse from Mode B, no clear) ---
+        print("  Running Mode C (warm cache from Mode B)...")
         var modeCTTFTs: [Double] = []
         let modeCStart = Date()
-        for _ in 0..<30 {
-            let req = InferenceRequest(
-                model: modelId,
-                messages: [ChatMessage(role: .user, content: longPrompt + shortPrompt)],
-                temperature: 0.0,
-                maxTokens: maxTokens,
-                stream: true
-            )
-            let requestStart = ContinuousClock.now
-            var firstToken = true
-            var ttftMs: Double = 0
-            let stream = harness.inferenceService.stream(req)
-            for try await token in stream {
-                if firstToken {
-                    ttftMs = Double(requestStart.duration(to: .now).components.attoseconds) / 1e18 * 1000
-                    firstToken = false
-                }
+        for i in 0..<30 {
+            if let ttft = try await streamingRequest(model: model, prompt: prompt, maxTokens: maxTokens) {
+                modeCTTFTs.append(ttft)
             }
-            if !firstToken { modeCTTFTs.append(ttftMs) }
+            if i == 0 { print("    request 0 done") }
         }
         let modeCWall = Date().timeIntervalSince(modeCStart)
 
-        // Get cache stats
-        let cacheStats = harness.engine.getPrefixCacheStats(for: modelId)
+        // Stats
+        let stats = try await getCacheStats(model: model)
 
-        // Compute median and p90
         func median(_ values: [Double]) -> Double {
             guard !values.isEmpty else { return 0 }
             let sorted = values.sorted()
@@ -180,12 +193,9 @@ struct PrefixCacheBenchmark {
         print("Mode C (warm cache) : TTFT median = \(String(format: "%.1f", cMedian)) ms, p90 = \(String(format: "%.1f", cP90)) ms, total wall = \(String(format: "%.1f", modeCWall)) s")
         print("Speedup B vs A      : \(String(format: "%.1f", speedupB))% (TTFT median)")
         print("Speedup C vs A      : \(String(format: "%.1f", speedupC))% (TTFT median)")
-        if let stats = cacheStats {
-            print("Cache stats         : hits=\(stats.hits) misses=\(stats.misses) tokensSaved=\(stats.tokensSaved)")
+        if let s = stats {
+            print("Cache stats         : \(s)")
         }
-
-        // Cleanup
-        harness.engine.setPrefixCacheEnabled(false)
 
         #expect(true)
     }

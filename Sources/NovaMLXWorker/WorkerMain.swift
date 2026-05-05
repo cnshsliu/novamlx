@@ -12,6 +12,22 @@ struct NovaMLXWorker {
         let fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         let writer = LineWriter()
 
+        // Apply ServerConfig.prefixCacheEnabled to the worker's engine. The
+        // host process owns the on-disk config; the worker just reads it once
+        // at startup so the kill switch in ~/.nova/config.json takes effect
+        // without requiring an IPC plumbing change.
+        let configFile = NovaMLXPaths.configFile
+        if FileManager.default.fileExists(atPath: configFile.path) {
+            do {
+                try await NovaMLXConfiguration.shared.loadFromFile(configFile)
+                let cfg = await NovaMLXConfiguration.shared.serverConfig
+                engine.setPrefixCacheEnabled(cfg.prefixCacheEnabled)
+                NovaMLXLog.info("[Worker] prefixCacheEnabled=\(cfg.prefixCacheEnabled)")
+            } catch {
+                NovaMLXLog.warning("[Worker] failed to load config (\(error)) — prefix cache stays at default")
+            }
+        }
+
         // Start memory enforcer inside worker (1s polling, evicts models under pressure)
         await engine.startMemoryEnforcer()
 

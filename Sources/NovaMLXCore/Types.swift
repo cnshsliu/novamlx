@@ -466,12 +466,18 @@ public struct ServerConfig: Codable, Sendable {
     public let tlsKeyPassword: String?
     public let maxRequestSizeMB: Double
     public let maxProcessMemory: String
+    /// Operational kill switch for the prefix cache subsystem.
+    /// When `false`, no SSD cache directories are created, no `fetchPrefix`
+    /// or `storeCache` calls are issued, and `getOrCreatePrefixCacheManager`
+    /// returns `nil` for every model.
+    public let prefixCacheEnabled: Bool
 
     private enum CodingKeys: String, CodingKey {
         case host, port, adminPort, apiKeys, maxConcurrentRequests
         case requestTimeout, contextScalingTarget
         case tlsCertPath, tlsKeyPath, tlsKeyPassword, maxRequestSizeMB
         case maxProcessMemory
+        case prefixCacheEnabled
     }
 
     public init(
@@ -486,7 +492,8 @@ public struct ServerConfig: Codable, Sendable {
         tlsKeyPath: String? = nil,
         tlsKeyPassword: String? = nil,
         maxRequestSizeMB: Double = 100,
-        maxProcessMemory: String = "auto"
+        maxProcessMemory: String = "auto",
+        prefixCacheEnabled: Bool = true
     ) {
         self.host = host
         self.port = port
@@ -500,6 +507,7 @@ public struct ServerConfig: Codable, Sendable {
         self.tlsKeyPassword = tlsKeyPassword
         self.maxRequestSizeMB = maxRequestSizeMB
         self.maxProcessMemory = maxProcessMemory
+        self.prefixCacheEnabled = prefixCacheEnabled
     }
 
     public var isTLSEnabled: Bool { tlsCertPath != nil }
@@ -518,6 +526,7 @@ public struct ServerConfig: Codable, Sendable {
         tlsKeyPassword = try container.decodeIfPresent(String.self, forKey: .tlsKeyPassword)
         maxRequestSizeMB = try container.decodeIfPresent(Double.self, forKey: .maxRequestSizeMB) ?? 100
         maxProcessMemory = try container.decodeIfPresent(String.self, forKey: .maxProcessMemory) ?? "auto"
+        prefixCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .prefixCacheEnabled) ?? true
     }
 
     public func scaleTokenCount(_ count: Int, modelContextWindow: Int) -> Int {
