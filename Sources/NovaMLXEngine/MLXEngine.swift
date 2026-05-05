@@ -253,13 +253,41 @@ public final class ModelContainer: @unchecked Sendable {
         return false
     }
 
-    /// Returns true ONLY when the chat template injects <think or <thinking tags,
-    /// meaning the model expects implicit open-tag handling (DeepSeek-R1 style).
-    /// Qwen3.6 outputs <|begin_of_thought|> explicitly — NOT implicit — so returns false.
+    /// Returns true ONLY when the chat template injects <think or <thinking tags
+    /// AND the model does NOT have explicit thinking tokens (e.g. <|begin_of_thought|>).
+    /// DeepSeek-R1: template injects <think, no explicit tokens → true (implicit).
+    /// Qwen3.6: template has <think BUT also has <|begin_of_thought|> tokens → false (explicit).
     public static func isImplicitThinkingModel(for modelId: String) -> Bool {
         let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
         let template = loadChatTemplate(modelDir: modelDir) ?? ""
-        return template.contains("<think") || template.contains("<thinking")
+        let hasTemplateThinkTags = template.contains("<think") || template.contains("<thinking")
+        guard hasTemplateThinkTags else { return false }
+
+        // If the model also has explicit thinking tokens, it's NOT implicit.
+        let tokenizerPath = modelDir.appendingPathComponent("tokenizer.json")
+        if let data = try? Data(contentsOf: tokenizerPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let added = json["added_tokens"] as? [[String: Any]] {
+            NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): checking \(added.count) added_tokens")
+            for entry in added {
+                if let content = entry["content"] as? String {
+                    if content.contains("begin_of_thought") || content.contains("end_of_thought")
+                        || content.contains("begin_of_think") || content.contains("end_of_think") {
+                        NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): explicit token found (begin_of_thought): \(content.prefix(30))")
+                        return false
+                    }
+                    // Check for <think...> and </think...> style tokens (Qwen3.6 uses <thinkgt and </thinkgt)
+                    if (content.hasPrefix("<think") || content.hasPrefix("</think")) && content.hasSuffix(">") {
+                        NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): explicit token found (tag style): \(content.prefix(30))")
+                        return false
+                    }
+                }
+            }
+        } else {
+            NovaMLXLog.warning("[isImplicitThinkingModel] \(modelId): failed to load tokenizer.json from \(tokenizerPath.path)")
+        }
+        NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): returning true (implicit)")
+        return true
     }
 
     private static func loadChatTemplate(modelDir: URL) -> String? {
@@ -308,6 +336,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public lazy var batchScheduler = BatchScheduler(engine: self)
     public var settingsProvider: (@Sendable (String) -> ModelSettings?)?
     private var prefixCacheManagers: [String: PrefixCacheManager]
+    /// Per-model cache of `TokenMaskBuilder` instances. Built on first
+    /// structured-output request; invalidated on model unload. Avoids the
+    /// per-request cost of decoding every token in the vocabulary (250k+
+    /// tokens for Qwen3.6 / Gemma-4).
+    public let tokenMaskBuilderCache = TokenMaskBuilderCache()
     private var activeCount: Int
     private var activeTasks: [UUID: Task<Void, Never>]
     private let lock = NovaMLXLock()
@@ -361,125 +394,182 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
     static let tokenizerLoader = LocalTokenizerLoader()
 
-    /// Ensure the model directory has a chat template. If missing, try to copy
-    /// from another downloaded model in the same family, or inject a default template
-    /// for known model families (gemma, qwen, phi, llama).
-    private static func ensureChatTemplate(modelDir: URL, modelId: String, family: ModelFamily) {
+    /// Ensure the model directory has a usable chat template, and that
+    /// `tokenizer_config.json.chat_template` (canonical per HuggingFace) and any
+    /// standalone `chat_template.jinja` are consistent.
+    ///
+    /// Background — swift-transformers (Hub.swift) prefers `chat_template.jinja`
+    /// over `tokenizer_config.json.chat_template` when both exist; the .jinja
+    /// content silently overwrites the config field. If the .jinja is stale or
+    /// from a different family, the model is prompted in the wrong format and
+    /// emits tokens that look like control-token leakage and turn-impersonation
+    /// hallucination but are actually faithful continuation of the wrong format.
+    ///
+    /// Behavior here:
+    ///   • If `ChatTemplateLibrary` has a maintained template for this model,
+    ///     write it into `tokenizer_config.json.chat_template` AND remove any
+    ///     stale `chat_template.jinja` so swift-transformers doesn't override it.
+    ///   • If both `tokenizer_config.json.chat_template` and `chat_template.jinja`
+    ///     exist but disagree, log a WARN and quarantine the .jinja file
+    ///     (renamed `.jinja.disagreed-with-tokenizer_config`) — the canonical
+    ///     `tokenizer_config.json` value wins.
+    ///   • If neither source has a usable template, log a clear error. We
+    ///     intentionally do NOT inject a generic fallback — guessing a chat
+    ///     format for an arbitrary model corrupts inference more often than not.
+    private static func ensureChatTemplate(modelDir: URL, modelId: String, family: ModelFamily, architecture: String? = nil) {
         let fm = FileManager.default
         let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
         let jinjaPath = modelDir.appendingPathComponent("chat_template.jinja")
         let jsonPath = modelDir.appendingPathComponent("chat_template.json")
+        let backupPath = modelDir.appendingPathComponent("chat_template.jinja.disabled-by-novamlx")
 
-        // Check if tokenizer_config.json has a non-empty chat_template
-        var hasValidTemplate = false
-        if let data = try? Data(contentsOf: tcPath),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let template = json["chat_template"] {
-                if let str = template as? String, !str.isEmpty {
-                    hasValidTemplate = true
-                } else if let arr = template as? [[String: Any]], !arr.isEmpty {
-                    hasValidTemplate = true
-                }
-            }
-
-            // If tokenizer_config.json has empty chat_template but a .jinja file exists,
-            // inject the jinja content into tokenizer_config.json so the tokenizer picks it up
-            if !hasValidTemplate && fm.fileExists(atPath: jinjaPath.path) {
-                if let jinjaContent = try? String(contentsOf: jinjaPath, encoding: .utf8), !jinjaContent.isEmpty {
-                    var mutableJson = json
-                    mutableJson["chat_template"] = jinjaContent
-                    if let newData = try? JSONSerialization.data(withJSONObject: mutableJson, options: [.prettyPrinted, .sortedKeys]) {
-                        do {
-                            try newData.write(to: tcPath, options: .atomic)
-                            NovaMLXLog.info("[loadModel] \(modelId): injected chat_template from .jinja into tokenizer_config.json")
-                            return
-                        } catch {
-                            NovaMLXLog.warning("[loadModel] \(modelId): failed to write tokenizer_config.json: \(error)")
-                        }
-                    }
-                }
+        // One-shot cleanup notice — if we have a pre-existing quarantine backup
+        // and the current config is healthy (tokenizer_config.json has a
+        // non-empty template, no live .jinja conflict), log a single info line
+        // suggesting the user can delete the backup. We don't auto-delete:
+        // the backup may be the user's only record of what the corrupt
+        // template looked like.
+        if fm.fileExists(atPath: backupPath.path) && !fm.fileExists(atPath: jinjaPath.path) {
+            if let data = try? Data(contentsOf: tcPath),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let t = json["chat_template"] as? String, !t.isEmpty {
+                NovaMLXLog.info("[ChatTemplate] \(modelId): pre-existing quarantine backup at \(backupPath.lastPathComponent); current tokenizer_config.json template (\(t.count) chars) is being used. The backup can be safely deleted if you no longer need it for inspection.")
             }
         }
 
-        if hasValidTemplate { return }
+        // 1. Read whatever templates currently exist on disk.
+        let configTemplate = readConfigChatTemplate(at: tcPath)
+        let jinjaTemplate: String? = fm.fileExists(atPath: jinjaPath.path)
+            ? (try? String(contentsOf: jinjaPath, encoding: .utf8)).flatMap { $0.isEmpty ? nil : $0 }
+            : nil
 
-        // Check standalone template files
-        if fm.fileExists(atPath: jinjaPath.path) || fm.fileExists(atPath: jsonPath.path) {
+        // 2. Apply NovaMLX-maintained override if ChatTemplateLibrary has one.
+        //    The override is the source of truth: write it to tokenizer_config and
+        //    remove any .jinja file (which swift-transformers would otherwise prefer).
+        let baselineForResolve = configTemplate ?? jinjaTemplate
+        if let resolved = ChatTemplateLibrary.resolve(
+            modelId: modelId,
+            family: family,
+            architecture: architecture,
+            downloadedTemplate: baselineForResolve
+        ) {
+            if resolved != configTemplate {
+                injectTemplate(resolved, into: modelDir, modelId: modelId)
+            }
+            quarantineJinjaIfPresent(jinjaPath: jinjaPath, reason: "NovaMLX override applied", modelId: modelId)
             return
         }
 
-        NovaMLXLog.warning("[loadModel] \(modelId): no chat template found — attempting to inject one")
+        // 3. No NovaMLX override — reconcile what's already on disk.
+        switch (configTemplate, jinjaTemplate) {
+        case let (.some(cfg), .some(jinja)) where cfg != jinja:
+            // Disagreement. tokenizer_config.json is canonical per HF spec.
+            // Quarantine the .jinja so swift-transformers stops overriding.
+            NovaMLXLog.warning("[ChatTemplate] \(modelId): tokenizer_config.json.chat_template (\(cfg.count) chars) and chat_template.jinja (\(jinja.count) chars) DISAGREE — keeping config, quarantining .jinja (swift-transformers would otherwise prefer the .jinja file)")
+            quarantineJinjaIfPresent(jinjaPath: jinjaPath, reason: "disagreed-with-tokenizer_config", modelId: modelId)
 
-        // Try to copy from a sibling model of the same family
-        let modelsDir = modelDir.deletingLastPathComponent()
-        if let siblingTemplate = findChatTemplateInSiblings(modelsDir: modelsDir, currentModel: modelDir) {
-            do {
-                try fm.copyItem(at: siblingTemplate, to: jinjaPath)
-                NovaMLXLog.info("[loadModel] \(modelId): copied chat template from sibling model")
+        case (.none, .some(let jinja)):
+            // Promote .jinja content into tokenizer_config.json so it's the canonical source,
+            // then remove the .jinja file so future updates don't drift.
+            promoteJinjaToConfig(jinjaContent: jinja, tcPath: tcPath, modelId: modelId)
+            quarantineJinjaIfPresent(jinjaPath: jinjaPath, reason: "promoted-to-tokenizer_config", modelId: modelId)
+
+        case (.some, _):
+            // tokenizer_config has a valid template; ensure no stale .jinja overrides it.
+            if let jinja = jinjaTemplate, jinja == configTemplate {
+                // Identical content — fine, no action.
+                _ = jinja
+            }
+
+        case (.none, .none):
+            // Last resort: chat_template.json (rare).
+            if fm.fileExists(atPath: jsonPath.path) {
+                NovaMLXLog.info("[ChatTemplate] \(modelId): using chat_template.json (no tokenizer_config.json template)")
                 return
-            } catch {
-                NovaMLXLog.warning("[loadModel] \(modelId): failed to copy sibling template: \(error)")
             }
-        }
-
-        // Inject a default template for known families
-        if let defaultTemplate = defaultChatTemplate(for: family) {
-            do {
-                try defaultTemplate.write(to: jinjaPath, atomically: true, encoding: String.Encoding.utf8)
-                NovaMLXLog.info("[loadModel] \(modelId): injected default \(family) chat template")
-            } catch {
-                NovaMLXLog.warning("[loadModel] \(modelId): failed to write default template: \(error)")
-            }
-        } else {
-            NovaMLXLog.warning("[loadModel] \(modelId): no chat template available — inference will fail for chat requests")
+            // No usable template anywhere. Do NOT inject a guessed fallback.
+            NovaMLXLog.error("[ChatTemplate] \(modelId): no chat template found in tokenizer_config.json, chat_template.jinja, or chat_template.json — chat requests will fail. Re-download the model or supply a maintained template via ChatTemplateLibrary.")
         }
     }
 
-    private static func findChatTemplateInSiblings(modelsDir: URL, currentModel: URL) -> URL? {
-        let fm = FileManager.default
-        guard let contents = try? fm.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: nil) else { return nil }
-
-        for sibling in contents {
-            guard sibling != currentModel else { continue }
-            let jinja = sibling.appendingPathComponent("chat_template.jinja")
-            if fm.fileExists(atPath: jinja.path) { return jinja }
+    /// Read `chat_template` from `tokenizer_config.json` if present and non-empty.
+    private static func readConfigChatTemplate(at tcPath: URL) -> String? {
+        guard let data = try? Data(contentsOf: tcPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let str = json["chat_template"] as? String, !str.isEmpty { return str }
+        // Some configs use an array form: [{"name": "default", "template": "..."}]
+        if let arr = json["chat_template"] as? [[String: Any]] {
+            for entry in arr {
+                if entry["name"] as? String == "default", let t = entry["template"] as? String, !t.isEmpty {
+                    return t
+                }
+            }
         }
         return nil
     }
 
-    private static func defaultChatTemplate(for family: ModelFamily) -> String? {
-        switch family {
-        case .gemma:
-            return """
-            {%- set ns = namespace(prev_message_type=None) -%}
-            {%- set loop_messages = messages -%}
-            {{ bos_token }}
-            {%- if messages[0]['role'] in ['system', 'developer'] -%}
-            {{- '<|turn>system\\n' -}}
-            {{- messages[0]['content'] | trim -}}
-            {{- '\\n' -}}
-            {%- set loop_messages = messages[1:] -%}
-            {%- endif -%}
-            {%- for message in loop_messages -%}
-            {%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}
-            {{- '<|turn>' + role + '\\n' -}}
-            {%- if message['content'] is string -%}
-            {{- message['content'] | trim -}}
-            {%- elif message['content'] is sequence -%}
-            {%- for item in message['content'] -%}
-            {%- if item['type'] == 'text' -%}
-            {{- item['text'] | trim -}}
-            {%- endif -%}
-            {%- endfor -%}
-            {%- endif -%}
-            {{- '\\n' -}}
-            {%- endfor -%}
-            {%- if add_generation_prompt -%}
-            {{- '<|turn>model\\n' -}}
-            {%- endif -%}
-            """
-        default:
-            return nil
+    /// Inject a resolved template into tokenizer_config.json so the tokenizer picks it up.
+    private static func injectTemplate(_ template: String, into modelDir: URL, modelId: String) {
+        let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
+        guard let data = try? Data(contentsOf: tcPath),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            NovaMLXLog.warning("[ChatTemplate] \(modelId): no tokenizer_config.json to inject into")
+            return
+        }
+        json["chat_template"] = template
+        guard let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) else { return }
+        do {
+            try newData.write(to: tcPath, options: .atomic)
+            NovaMLXLog.info("[ChatTemplate] \(modelId): wrote maintained template to tokenizer_config.json (\(template.count) chars)")
+        } catch {
+            NovaMLXLog.warning("[ChatTemplate] \(modelId): failed to write tokenizer_config.json: \(error)")
+        }
+    }
+
+    /// Move a chat_template.jinja file out of the way so swift-transformers
+    /// stops loading it. The file is renamed (not deleted) so the user can
+    /// inspect or restore it manually if needed.
+    private static func quarantineJinjaIfPresent(jinjaPath: URL, reason: String, modelId: String) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: jinjaPath.path) else { return }
+        let backup = jinjaPath.appendingPathExtension("disabled-by-novamlx")
+        // If a previous quarantine file exists, leave it alone — never overwrite.
+        guard !fm.fileExists(atPath: backup.path) else {
+            // Quietly remove the live .jinja since we already have a backup; future
+            // model updates would otherwise re-trigger the same cycle.
+            try? fm.removeItem(at: jinjaPath)
+            NovaMLXLog.info("[ChatTemplate] \(modelId): removed chat_template.jinja (existing backup at \(backup.lastPathComponent), reason=\(reason))")
+            return
+        }
+        do {
+            try fm.moveItem(at: jinjaPath, to: backup)
+            NovaMLXLog.info("[ChatTemplate] \(modelId): quarantined chat_template.jinja → \(backup.lastPathComponent) (reason=\(reason))")
+        } catch {
+            NovaMLXLog.warning("[ChatTemplate] \(modelId): failed to quarantine chat_template.jinja: \(error)")
+        }
+    }
+
+    /// Copy chat_template.jinja content into tokenizer_config.json's
+    /// `chat_template` field so it becomes the canonical (HF-compliant) source.
+    private static func promoteJinjaToConfig(jinjaContent: String, tcPath: URL, modelId: String) {
+        guard let data = try? Data(contentsOf: tcPath),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // No tokenizer_config.json — create one carrying just the template.
+            let minimal: [String: Any] = ["chat_template": jinjaContent]
+            if let newData = try? JSONSerialization.data(withJSONObject: minimal, options: [.prettyPrinted, .sortedKeys]) {
+                try? newData.write(to: tcPath, options: .atomic)
+                NovaMLXLog.info("[ChatTemplate] \(modelId): created tokenizer_config.json with template promoted from .jinja (\(jinjaContent.count) chars)")
+            }
+            return
+        }
+        json["chat_template"] = jinjaContent
+        if let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+            do {
+                try newData.write(to: tcPath, options: .atomic)
+                NovaMLXLog.info("[ChatTemplate] \(modelId): promoted chat_template.jinja into tokenizer_config.json (\(jinjaContent.count) chars)")
+            } catch {
+                NovaMLXLog.warning("[ChatTemplate] \(modelId): failed to promote .jinja into tokenizer_config.json: \(error)")
+            }
         }
     }
 
@@ -490,7 +580,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         // Ensure chat template exists — models without it will crash on inference.
         // Check tokenizer_config.json, chat_template.jinja, chat_template.json in order.
-        Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family)
+        let configJson = (try? Data(contentsOf: url.appendingPathComponent("config.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let arch = (configJson?["architectures"] as? [String])?.first
+        Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family, architecture: arch)
 
         // --- Pre-load memory gate ---
         // Check ProcessMemoryEnforcer soft limit BEFORE loading weights.
@@ -501,8 +594,30 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             let enforcerStatus = await enforcer.status
             if enforcerStatus.enabled && enforcerStatus.softLimitBytes > 0 {
                 if let estimatedBytes = Self.estimateModelWeightSize(at: url) {
-                    let safetyMargin = UInt64(Double(estimatedBytes) * 0.2)  // 20% buffer
+                    // Peak memory during eval(): model weights + Metal buffer materialization.
+                    // Staged eval (for models >30GB) keeps peak to ~model_size + one batch.
+                    // Without staged eval, peak can reach ~1.3x.
+                    let safetyMargin: UInt64
+                    if estimatedBytes > 30 * 1_073_741_824 {
+                        // Staged eval: peak ≈ weight_size + 5GB batch overhead
+                        safetyMargin = 5 * 1_073_741_824
+                    } else if estimatedBytes > 20 * 1_073_741_824 {
+                        safetyMargin = UInt64(Double(estimatedBytes) * 0.3)  // 30% for medium models
+                    } else {
+                        safetyMargin = UInt64(Double(estimatedBytes) * 0.2)  // 20% for small models
+                    }
                     let neededBytes = estimatedBytes + safetyMargin
+
+                    // Also check against Metal's recommended working set size.
+                    // If peak would exceed it, fail fast with a clear message.
+                    if let maxGPU = MLX.GPU.maxRecommendedWorkingSetBytes(), maxGPU > 0,
+                       neededBytes > UInt64(maxGPU) {
+                        let neededMB = neededBytes / 1_048_576
+                        let maxMB = UInt64(maxGPU) / 1_048_576
+                        NovaMLXLog.error("[MemoryGate] Model peak (\(neededMB)MB) exceeds Metal working set (\(maxMB)MB) for \(config.identifier.displayName)")
+                        throw NovaMLXError.insufficientMemory(neededMB: neededMB, availableMB: maxMB, modelId: config.identifier.displayName)
+                    }
+
                     let currentBytes = UInt64(MLX.Memory.activeMemory)
                     if currentBytes + neededBytes > enforcerStatus.softLimitBytes {
                         NovaMLXLog.info("[MemoryGate] Need \(neededBytes / 1_048_576)MB, have \(currentBytes / 1_048_576)MB free of \(enforcerStatus.softLimitBytes / 1_048_576)MB limit — attempting LRU eviction")
@@ -660,9 +775,165 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
         }
 
+        // Chat-template sanity check — verify the rendering pipeline is healthy
+        // before the model becomes serviceable. Failures here mean every chat
+        // request will produce garbled output. We log warnings (not errors)
+        // because some non-chat models (embeddings, base models) legitimately
+        // have no chat template; the API layer will reject chat requests for
+        // those models with a clear error message.
+        await Self.runChatTemplateSanityCheck(
+            mlxContainer: mlxContainer,
+            modelId: config.identifier.id,
+            modelType: config.modelType
+        )
+
+        // Optional upstream-fingerprint check (off by default; enable with
+        // NOVAMLX_TEMPLATE_UPSTREAM_CHECK=1 env var). Compares the local
+        // template (the one swift-transformers will actually render) against
+        // the HuggingFace upstream copy. Result is cached for 24h.
+        if config.modelType != .embedding {
+            let templateForCheck: String = {
+                let tcPath = url.appendingPathComponent("tokenizer_config.json")
+                if let data = try? Data(contentsOf: tcPath),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let t = json["chat_template"] as? String, !t.isEmpty {
+                    return t
+                }
+                let jinjaPath = url.appendingPathComponent("chat_template.jinja")
+                return (try? String(contentsOf: jinjaPath, encoding: .utf8)) ?? ""
+            }()
+            if !templateForCheck.isEmpty {
+                Task {
+                    await ChatTemplateUpstreamCheck.shared.check(
+                        modelId: config.identifier.id,
+                        localTemplate: templateForCheck
+                    )
+                }
+            }
+        }
+
+        // Auto-draft a test profile for this model if neither the bundled
+        // registry nor the user has one. Writes to ~/.nova/profiles/_drafts/
+        // for operator review. Skipped silently for embeddings (no chat).
+        if config.modelType != .embedding {
+            let registryHasOverride = ChatTemplateRegistry.shared.templateOverride(
+                modelId: config.identifier.id,
+                family: config.identifier.family,
+                architecture: nil
+            ) != nil
+            ChatTemplateProfileDrafter.draftIfNeeded(
+                modelId: config.identifier.id,
+                modelDir: url,
+                family: config.identifier.family,
+                registryHasOverride: registryHasOverride
+            )
+        }
+
         pool.add(container)
         metricsStore.recordModelLoad()
         return container
+    }
+
+    /// Render a canonical test prompt through the loaded tokenizer and check the
+    /// result for known failure modes:
+    ///  • throws (no chat template, syntax error in Jinja)
+    ///  • zero-length output (template silently produces empty string)
+    ///  • unrendered Jinja (`{{`, `{%-` literals — template wasn't compiled)
+    ///  • missing user content (the literal "ping_test_42" we injected isn't
+    ///    represented in the rendered output → template loses user data)
+    ///  • unbalanced common control tokens (`<|im_start|>` count != `<|im_end|>`,
+    ///    `<start_of_turn>` != `<end_of_turn>`, etc.) — indicates a broken
+    ///    template that opens turns it never closes.
+    ///
+    /// Each finding is logged with a stable `[ChatTemplateHealth]` prefix so
+    /// operators can grep for it. This runs once per `loadModel`; the cost is
+    /// negligible compared to weight loading.
+    private static func runChatTemplateSanityCheck(
+        mlxContainer: MLXLMCommon.ModelContainer,
+        modelId: String,
+        modelType: ModelType
+    ) async {
+        // Embedding-only models legitimately have no chat template. Skip.
+        guard modelType != .embedding else { return }
+
+        let tokenizer = await mlxContainer.tokenizer
+
+        // Probe message designed to surface common bugs:
+        // • Two roles to exercise turn separators.
+        // • A unique sentinel string ("ping_test_42") that, after decode,
+        //   should appear somewhere in the rendered output. If it doesn't,
+        //   the template is dropping user content.
+        let messages: [[String: any Sendable]] = [
+            ["role": "user", "content": "ping_test_42"]
+        ]
+
+        let renderedTokens: [Int]
+        do {
+            renderedTokens = try tokenizer.applyChatTemplate(
+                messages: messages,
+                tools: nil,
+                additionalContext: nil
+            )
+        } catch {
+            NovaMLXLog.warning("[ChatTemplateHealth] \(modelId): apply_chat_template threw — chat requests will fail (\(error.localizedDescription))")
+            return
+        }
+
+        guard !renderedTokens.isEmpty else {
+            NovaMLXLog.warning("[ChatTemplateHealth] \(modelId): chat template rendered to ZERO tokens — template is empty or filters out all input")
+            return
+        }
+
+        let rendered = tokenizer.decode(tokenIds: renderedTokens, skipSpecialTokens: false)
+
+        var issues: [String] = []
+
+        // Unrendered Jinja → template body leaked into output (compile/runtime failure)
+        for marker in ["{{", "}}", "{%-", "%}", "{#", "#}"] {
+            if rendered.contains(marker) {
+                issues.append("contains unrendered Jinja `\(marker)`")
+                break
+            }
+        }
+
+        // Sentinel preservation — without this, the model never sees user input
+        if !rendered.contains("ping_test_42") {
+            issues.append("user content sentinel missing from rendered output (template drops user.content)")
+        }
+
+        // Unbalanced common control-token pairs — heuristic, only flag if both >0 and counts differ
+        let pairs: [(String, String)] = [
+            ("<|im_start|>", "<|im_end|>"),
+            ("<start_of_turn>", "<end_of_turn>"),
+            ("<|start|>", "<|end|>"),
+        ]
+        for (open, close) in pairs {
+            let openCount = rendered.components(separatedBy: open).count - 1
+            let closeCount = rendered.components(separatedBy: close).count - 1
+            // For some templates the assistant turn may legitimately leave the
+            // last `<|im_start|>` open (waiting for completion), so we tolerate
+            // openCount = closeCount + 1.
+            if openCount > 0 || closeCount > 0 {
+                if openCount > closeCount + 1 || closeCount > openCount {
+                    issues.append("unbalanced \(open)/\(close): \(openCount) vs \(closeCount)")
+                }
+            }
+        }
+
+        // Cross-format leak: detect markers from a DIFFERENT family than the
+        // primary one. E.g. a Qwen ChatML template that ALSO contains <|turn>
+        // or <start_of_turn> is almost certainly corrupted.
+        let detected = ChatTemplateFormat.detectAll(from: rendered)
+        if detected.count > 1 {
+            let formats = detected.map { "\($0.format) (\($0.confidence))" }.joined(separator: ", ")
+            issues.append("multi-format markers in rendered output: \(formats) — likely template corruption (one family format expected)")
+        }
+
+        if issues.isEmpty {
+            NovaMLXLog.info("[ChatTemplateHealth] \(modelId): rendering pipeline OK (\(renderedTokens.count) tokens, format=\(detected.first?.format.label ?? "unknown"))")
+        } else {
+            NovaMLXLog.warning("[ChatTemplateHealth] \(modelId): \(issues.count) issue(s) detected — \(issues.joined(separator: "; "))")
+        }
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) {
@@ -676,6 +947,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             cacheManager.clear()
             NovaMLXLog.info("Prefix cache cleared for \(identifier.displayName)")
         }
+        // Drop cached TokenMaskBuilder so its per-token vocabulary tables
+        // (V × 3 arrays, 250k+ entries for Qwen3.6/Gemma-4) are released.
+        let cacheRef = tokenMaskBuilderCache
+        let modelIdForCache = identifier.id
+        Task { await cacheRef.invalidate(modelId: modelIdForCache) }
         _ = pool.remove(identifier.id)
         metricsStore.recordModelUnload()
         MLX.Memory.clearCache()
@@ -759,6 +1035,22 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             tool.mapValues { toSendable($0) }
         }
 
+        var additionalContext: [String: any Sendable]? = nil
+        // Forward thinking-related kwargs to chat-template renderer.
+        // Templates that don't reference these variables ignore them via
+        // Jinja `is defined` semantics, so pass-through is safe across
+        // families (Qwen / Gemma / Bailing / etc.).
+        var ctx: [String: any Sendable] = [:]
+        if let enableThinking = request.enableThinking {
+            ctx["enable_thinking"] = enableThinking
+        }
+        if let preserveThinking = request.preserveThinking {
+            ctx["preserve_thinking"] = preserveThinking
+        }
+        if !ctx.isEmpty {
+            additionalContext = ctx
+        }
+
         if hasImages {
             let chatMessages = request.messages.compactMap { msg -> Chat.Message? in
                 let images: [UserInput.Image] = (msg.images ?? []).compactMap { urlString -> UserInput.Image? in
@@ -778,7 +1070,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
                 return .user(msg.content ?? "", images: images)
             }
-            return UserInput(prompt: .chat(chatMessages), tools: toolSpecs)
+            return UserInput(prompt: .chat(chatMessages), tools: toolSpecs, additionalContext: additionalContext)
         } else {
             let messages: [Message] = request.messages.map { msg in
                 var m: Message = ["role": msg.role.rawValue, "content": msg.content ?? ""]
@@ -791,7 +1083,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
                 return m
             }
-            return UserInput(prompt: .messages(messages), tools: toolSpecs)
+            return UserInput(prompt: .messages(messages), tools: toolSpecs, additionalContext: additionalContext)
         }
     }
 
@@ -1088,6 +1380,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         try! NSRegularExpression(pattern: "<\\|start\\|>\\w+<\\|message\\|>")
     }()
 
+    /// Regex: matches Gemma-4 channel-thought block <|channel>thought\n...<channel|>.
+    /// The asymmetric markers (<|channel> vs <channel|>) wrap reasoning content;
+    /// captured content is normalized into <think>...</think> so ThinkingParser
+    /// extracts it as reasoning_content. dotMatchesLineSeparators allows multi-line
+    /// reasoning spans to be captured in one match.
+    static let gemmaChannelThoughtRegex: NSRegularExpression = {
+        try! NSRegularExpression(
+            pattern: "<\\|channel>thought\\n([\\s\\S]*?)<channel\\|>",
+            options: [.dotMatchesLineSeparators]
+        )
+    }()
+
     /// Known Harmony-format channel type words and role names that can be left behind
     /// when streaming scrubs <|channel|> and <|message|> individually.
     public static let harmonyResidueWords: Set<String> = [
@@ -1096,9 +1400,70 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     ]
 
     static func scrubControlTokens(_ text: String) -> String {
-        // First pass: remove multi-token structures (e.g. <|channel|>analysis<|message|>)
-        // These leave behind role/type words if only individual tokens are removed.
+        // Pre-pass: Gemma-4 channel-thought normalization.
+        // Pattern <|channel>thought\n...<channel|> wraps reasoning content. Convert
+        // it to <think>...</think> so ThinkingParser can extract reasoning_content.
+        // The pattern is highly specific (single-pipe asymmetric channel markers +
+        // literal "thought\n" prefix + matching <channel|> close) and does not
+        // collide with other families. Harmony uses <|channel|>type<|message|>
+        // (double-pipe), Qwen/DeepSeek use <think>, etc. Safe no-op for non-Gemma-4.
         var result = text
+        if result.contains("<|channel>thought") {
+            let nsRange = NSRange(result.startIndex..., in: result)
+            let matches = gemmaChannelThoughtRegex.matches(in: result, range: nsRange)
+            for match in matches.reversed() where match.numberOfRanges >= 2 {
+                if let full = Range(match.range, in: result),
+                   let inner = Range(match.range(at: 1), in: result) {
+                    let reasoning = String(result[inner])
+                    result.replaceSubrange(full, with: "<think>" + reasoning + "</think>")
+                }
+            }
+        }
+
+        // Pre-pass: Harmony (gpt-oss) channel normalization.
+        // Harmony emits assistant turns as
+        //     <|channel|>analysis<|message|>...thinking...<|end|>
+        //     <|start|>assistant<|channel|>final<|message|>...content...<|return|>
+        // Without normalization the channel-message regex below strips both
+        // boundaries entirely, leaving thinking and final content concatenated
+        // with no separator — `ThinkingParser` then has no way to tell them
+        // apart. Converting to explicit `<think>...</think>` tags lets the
+        // parser extract reasoning_content correctly without any family-
+        // specific knowledge in the parser itself.
+        //
+        // Strictly Harmony-only: the trigger string `<|channel|>analysis<|message|>`
+        // is unique to gpt-oss / Harmony format. Other families (Qwen, Gemma,
+        // DeepSeek, Bailing, Llama, etc.) never emit it.
+        //
+        // We only convert `<|channel|>final<|message|>` to `</think>` if a
+        // preceding `<think>` exists in the same string — otherwise the model
+        // skipped analysis and went straight to final, in which case we just
+        // strip the boundary marker (no thinking content to close).
+        if result.contains("<|channel|>analysis<|message|>") {
+            result = result.replacingOccurrences(
+                of: "<|channel|>analysis<|message|>",
+                with: "<think>"
+            )
+        }
+        if result.contains("<|channel|>final<|message|>") {
+            if let openRange = result.range(of: "<think>"),
+               let finalRange = result.range(of: "<|channel|>final<|message|>"),
+               openRange.lowerBound < finalRange.lowerBound {
+                result.replaceSubrange(finalRange, with: "</think>")
+            } else {
+                // No prior <think> — model skipped analysis. Just strip the
+                // boundary; trailing final content stays as content.
+                result = result.replacingOccurrences(
+                    of: "<|channel|>final<|message|>",
+                    with: ""
+                )
+            }
+        }
+
+        // First pass: remove remaining multi-token structures
+        // (e.g. <|channel|>commentary<|message|>, <|start|>user<|message|>)
+        // The analysis/final boundaries above are already converted; the regex
+        // catches everything else.
         for regex in [channelMessageRegex, startMessageRegex] {
             let nsRange = NSRange(result.startIndex..., in: result)
             let matches = regex.matches(in: result, range: nsRange)
@@ -1135,8 +1500,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         for word in harmonyResidueWords {
             if trimmed.hasPrefix(word) {
                 let afterWord = trimmed.dropFirst(word.count)
-                // Only strip if followed by uppercase (sentence start) or end of string
-                if afterWord.isEmpty || afterWord.first?.isUppercase == true || afterWord.first == "\n" {
+                // Only strip if followed by uppercase (sentence start) or end of string.
+                // Do NOT strip on newline — Qwen3 <|turn|>system\n leaves legitimate role text.
+                if afterWord.isEmpty || afterWord.first?.isUppercase == true {
                     result = String(afterWord)
                 }
             }
@@ -1926,6 +2292,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         case .chunk(let text):
                             let (rawText, shouldStop) = Self.filterControlInChunk(text, accumulated: &streamAccumulated, yieldedCount: &streamYieldedCount, patterns: controlPatterns)
                             let cleanText = Self.scrubControlTokens(rawText)
+                            if text.contains("<|turn") {
+                                NovaMLXLog.warning("[STREAM:\(reqTag)] <|turn> in chunk: raw=\(rawText.count) clean=\(cleanText.count) stop=\(shouldStop) patterns=\(controlPatterns.prefix(3))")
+                            }
                             if !cleanText.isEmpty {
                                 completionTokens += 1
                                 continuation.yield(Token(id: 0, text: cleanText))
@@ -2229,21 +2598,36 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             throw NovaMLXError.inferenceFailed("Tokenizer not available for \(request.model)")
         }
 
+        let sharedMaskBuilder = await tokenMaskBuilderCache.builder(
+            for: request.model, tokenizer: tokenizer
+        )
+        let modelConfig = await mlxContainer.configuration
+        // Build full EOS set: tokenizer primary + model config extras (e.g. Qwen3.6 has [248046, 248044])
+        var allEosIds = Set<Int>()
+        if let eosId = tokenizer.eosTokenId { allEosIds.insert(eosId) }
+        allEosIds = allEosIds.union(modelConfig.eosTokenIds)
+
         let grammarProcessor: any LogitProcessor
         if let schema = request.jsonSchemaDef {
-            grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: tokenizer)
+            grammarProcessor = SchemaGuidedProcessor(
+                schema: schema, tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder, allEosTokenIds: allEosIds
+            )
         } else if let pattern = request.regexPattern {
-            grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: tokenizer)
+            grammarProcessor = try RegexLogitProcessor(
+                pattern: pattern, tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder
+            )
         } else if let grammar = request.gbnfGrammar {
-            grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: tokenizer)
+            grammarProcessor = try GBNFLogitProcessor(
+                grammar: grammar, tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder
+            )
         } else {
-            grammarProcessor = JSONLogitProcessor(tokenizer: tokenizer)
+            grammarProcessor = JSONLogitProcessor(
+                tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder, allEosTokenIds: allEosIds
+            )
         }
 
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
         let penaltyProcessor = parameters.processor()
-
-        let modelConfig = await mlxContainer.configuration
 
         let turnStopProc = buildTurnStopProcessor(
             modelId: request.model,
@@ -2269,20 +2653,51 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
         let allMessages = systemMessages + request.messages.filter { $0.role != .system }
         let mappedMessages: [Message] = allMessages.map { msg in
-            ["role": msg.role.rawValue, "content": msg.content ?? ""]
+            // Mirror the rich mapping from `buildUserInput` so tool-call assistant
+            // messages and tool-result messages preserve their `tool_calls` /
+            // `tool_call_id` / `name` fields. Without this, multi-turn tool
+            // conversations on the JSON-mode path lose all tool context after
+            // the first round.
+            var m: Message = ["role": msg.role.rawValue, "content": msg.content ?? ""]
+            if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
+            if let name = msg.name { m["name"] = name }
+            if let tcs = msg.toolCalls {
+                m["tool_calls"] = tcs.map { tc in
+                    ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
+                }
+            }
+            return m
+        }
+        // Tool definitions must be plumbed into the chat template the same way
+        // `buildUserInput` does — otherwise swift-transformers receives
+        // `tools=nil` and the Jinja `{%- if tools %}` branch is skipped, so the
+        // model never sees tool schemas. Pre-fix: tool-using requests on the
+        // JSON-mode path produced ~25-token prompts (system + user only) and
+        // never invoked tools.
+        let toolSpecs: [[String: any Sendable]]? = request.tools?.map { tool in
+            tool.mapValues { toSendable($0) }
         }
 
-        let userInput = UserInput(prompt: .messages(mappedMessages))
+        // Grammar/JSON mode is incompatible with thinking tokens — the JSON FSM
+        // starts at .expectValue which doesn't allow < or > (thinking markers).
+        // Force disable thinking so the model outputs JSON directly.
+        var additionalContext: [String: any Sendable]? = nil
+        var ctx: [String: any Sendable] = [:]
+        ctx["enable_thinking"] = false
+        if let preserveThinking = request.preserveThinking {
+            ctx["preserve_thinking"] = preserveThinking
+        }
+        if !ctx.isEmpty { additionalContext = ctx }
+
+        let userInput = UserInput(prompt: .messages(mappedMessages), tools: toolSpecs, additionalContext: additionalContext)
         let input = try await mlxContainer.prepare(input: userInput)
 
         let promptTokenCount = input.text.tokens.size
         let maxTokens = request.maxTokens ?? container.config.maxTokens
         try await preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
-        let sampler = TopPSampler(
-            temperature: Float(request.temperature ?? container.config.temperature),
-            topP: Float(request.topP ?? container.config.topP)
-        )
+        // Use parameters.sampler() so temperature=0 returns ArgmaxSampler.
+        let sampler = parameters.sampler()
 
         let model = await mlxContainer.perform { context in SendableBox(context.model) }
         let mlxTokenizer = await mlxContainer.tokenizer
@@ -2366,21 +2781,36 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         throw NovaMLXError.inferenceFailed("Tokenizer not available for \(request.model)")
                     }
 
+                    let sharedMaskBuilder = await engine.tokenMaskBuilderCache.builder(
+                        for: request.model, tokenizer: tokenizer
+                    )
+                    let modelConfig = await mlxContainer.configuration
+                    // Build full EOS set (see generateWithProcessor for rationale)
+                    var allEosIds = Set<Int>()
+                    if let eosId = tokenizer.eosTokenId { allEosIds.insert(eosId) }
+                    allEosIds = allEosIds.union(modelConfig.eosTokenIds)
+
                     let grammarProcessor: any LogitProcessor
                     if let schema = request.jsonSchemaDef {
-                        grammarProcessor = SchemaGuidedProcessor(schema: schema, tokenizer: tokenizer)
+                        grammarProcessor = SchemaGuidedProcessor(
+                            schema: schema, tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder, allEosTokenIds: allEosIds
+                        )
                     } else if let pattern = request.regexPattern {
-                        grammarProcessor = try RegexLogitProcessor(pattern: pattern, tokenizer: tokenizer)
+                        grammarProcessor = try RegexLogitProcessor(
+                            pattern: pattern, tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder
+                        )
                     } else if let grammar = request.gbnfGrammar {
-                        grammarProcessor = try GBNFLogitProcessor(grammar: grammar, tokenizer: tokenizer)
+                        grammarProcessor = try GBNFLogitProcessor(
+                            grammar: grammar, tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder
+                        )
                     } else {
-                        grammarProcessor = JSONLogitProcessor(tokenizer: tokenizer)
+                        grammarProcessor = JSONLogitProcessor(
+                            tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder, allEosTokenIds: allEosIds
+                        )
                     }
 
                     let parameters = engine.buildGenerateParameters(request: request, config: container.config, settings: engine.settingsProvider?(request.model))
                     let penaltyProc = parameters.processor()
-
-                    let modelConfig = await mlxContainer.configuration
 
                     let turnStopProc = engine.buildTurnStopProcessor(
                         modelId: request.model,
@@ -2406,19 +2836,40 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     }
                     let allMessages = systemMessages + request.messages.filter { $0.role != .system }
                     let mappedMessages: [Message] = allMessages.map { msg in
-                        ["role": msg.role.rawValue, "content": msg.content ?? ""]
+                        // See generateWithProcessor for rationale — preserve
+                        // tool_calls / tool_call_id / name across the JSON-mode
+                        // streaming path.
+                        var m: Message = ["role": msg.role.rawValue, "content": msg.content ?? ""]
+                        if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
+                        if let name = msg.name { m["name"] = name }
+                        if let tcs = msg.toolCalls {
+                            m["tool_calls"] = tcs.map { tc in
+                                ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
+                            }
+                        }
+                        return m
+                    }
+                    // Plumb tools into the chat template (see generateWithProcessor).
+                    let toolSpecs: [[String: any Sendable]]? = request.tools?.map { tool in
+                        tool.mapValues { engine.toSendable($0) }
                     }
 
-                    let userInput = UserInput(prompt: .messages(mappedMessages))
+                    // Grammar/JSON mode — force disable thinking (see generateWithProcessor)
+                    var additionalContext: [String: any Sendable]? = nil
+                    var ctx: [String: any Sendable] = [:]
+                    ctx["enable_thinking"] = false
+                    if let preserveThinking = request.preserveThinking {
+                        ctx["preserve_thinking"] = preserveThinking
+                    }
+                    if !ctx.isEmpty { additionalContext = ctx }
+
+                    let userInput = UserInput(prompt: .messages(mappedMessages), tools: toolSpecs, additionalContext: additionalContext)
                     let input = try await mlxContainer.prepare(input: userInput)
                     let promptTokenCount = input.text.tokens.size
                     let maxTokens = request.maxTokens ?? container.config.maxTokens
                     try await engine.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
-                    let sampler = TopPSampler(
-                        temperature: Float(request.temperature ?? container.config.temperature),
-                        topP: Float(request.topP ?? container.config.topP)
-                    )
+                    let sampler = parameters.sampler()
 
                     let model = await mlxContainer.perform { context in SendableBox(context.model) }
                     let mlxTokenizer = await mlxContainer.tokenizer

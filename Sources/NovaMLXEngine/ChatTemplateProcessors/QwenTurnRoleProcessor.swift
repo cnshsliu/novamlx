@@ -1,4 +1,6 @@
 import Foundation
+import NovaMLXCore
+import NovaMLXUtils
 
 /// Qwen turn-role format processor — Qwen3.6+ models.
 /// Uses <|turn>role\n turn separators (undocumented divergence from official Qwen ChatML).
@@ -68,7 +70,14 @@ final class QwenTurnRoleProcessor: ChatTemplateProcessor, @unchecked Sendable {
     }
 
     func hallucinationPatterns() -> [String] {
-        hallucinationPatternsList
+        // Merge hardcoded defaults with registry-supplied patterns so additions
+        // (e.g. new locale-specific turn markers) don't require a recompile.
+        var merged = hallucinationPatternsList
+        let extras = ChatTemplateRegistry.shared.familyConfig(for: .qwen).hallucinationPatterns
+        for p in extras where !merged.contains(p) {
+            merged.append(p)
+        }
+        return merged
     }
 
     func scrubControlTokens(_ text: String) -> String {
@@ -90,8 +99,15 @@ final class QwenTurnRoleProcessor: ChatTemplateProcessor, @unchecked Sendable {
 
     func shouldStopForHallucination(generatedText: String, completionTokenCount: Int) -> Bool {
         guard completionTokenCount > 20 else { return false }
-        for pattern in hallucinationPatternsList {
-            if generatedText.contains(pattern) {
+        // Use the merged list (hardcoded + registry). Patterns may be plain
+        // substrings OR regex (registry entries are typically regex). We try
+        // regex first and fall back to substring, so both forms work.
+        for pattern in hallucinationPatterns() {
+            if pattern.range(of: "(?m)|^|\\s|\\\\", options: .regularExpression) != nil {
+                if generatedText.range(of: pattern, options: .regularExpression) != nil {
+                    return true
+                }
+            } else if generatedText.contains(pattern) {
                 return true
             }
         }

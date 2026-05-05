@@ -24,6 +24,8 @@ public struct CodableInferenceRequest: Codable, Sendable {
     public let regexPattern: String?
     public let gbnfGrammar: String?
     public let thinkingBudget: Int?
+    public let enableThinking: Bool?
+    public let preserveThinking: Bool?
     public let draftModel: String?
     public let numDraftTokens: Int?
 
@@ -61,6 +63,8 @@ public struct CodableInferenceRequest: Codable, Sendable {
         self.regexPattern = request.regexPattern
         self.gbnfGrammar = request.gbnfGrammar
         self.thinkingBudget = request.thinkingBudget
+        self.enableThinking = request.enableThinking
+        self.preserveThinking = request.preserveThinking
         self.draftModel = request.draftModel
         self.numDraftTokens = request.numDraftTokens
     }
@@ -101,6 +105,8 @@ public struct CodableInferenceRequest: Codable, Sendable {
             regexPattern: regexPattern,
             gbnfGrammar: gbnfGrammar,
             thinkingBudget: thinkingBudget,
+            enableThinking: enableThinking,
+            preserveThinking: preserveThinking,
             draftModel: draftModel,
             numDraftTokens: numDraftTokens
         )

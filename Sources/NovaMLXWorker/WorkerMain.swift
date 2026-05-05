@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import NovaMLXCore
 import NovaMLXUtils
 import NovaMLXEngine
@@ -99,9 +100,10 @@ struct NovaMLXWorker {
         }
         do {
             let url = URL(fileURLWithPath: path)
+            NovaMLXLog.info("[Worker] Loading \(modelId), MLX active=\(MLX.Memory.activeMemory / 1_048_576)MB, peak=\(MLX.Memory.peakMemory / 1_048_576)MB")
             _ = try await engine.loadModel(from: url, config: config)
             writer.write(WorkerMessage(type: WorkerMessageType.loaded, modelId: modelId))
-            NovaMLXLog.info("[Worker] Loaded model: \(modelId)")
+            NovaMLXLog.info("[Worker] Loaded model: \(modelId), MLX active=\(MLX.Memory.activeMemory / 1_048_576)MB, peak=\(MLX.Memory.peakMemory / 1_048_576)MB")
         } catch {
             writer.write(WorkerMessage(type: WorkerMessageType.error, modelId: modelId, errorMessage: error.localizedDescription))
             NovaMLXLog.error("[Worker] Failed to load \(modelId): \(error)")

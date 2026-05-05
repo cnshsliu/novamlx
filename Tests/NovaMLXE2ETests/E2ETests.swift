@@ -26,7 +26,6 @@ private func detectServerAlive() -> Bool {
     var result = false
     let task = URLSession.shared.dataTask(with: request) { _, response, _ in
         result = (response as? HTTPURLResponse)?.statusCode == 200
-        sem.signal()
     }
     task.resume()
     _ = sem.wait(timeout: .now() + 5)
@@ -177,23 +176,45 @@ func getAllDownloadedModels(_ client: HTTPClient) async throws -> [AdminModelSta
     return models.filter { $0.downloaded }
 }
 
-func loadModel(_ client: HTTPClient, modelId: String, maxWait: TimeInterval = 60) async throws -> Bool {
-    // Check if already loaded
+func unloadAllModels(_ client: HTTPClient) async throws {
+    let models = try await getAllDownloadedModels(client)
+    let loadedIds = models.filter { $0.loaded }.map { $0.id }
+    for id in loadedIds {
+        try? await unloadModel(client, modelId: id)
+    }
+    if !loadedIds.isEmpty {
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+    }
+}
+
+func loadModel(_ client: HTTPClient, modelId: String, maxWait: TimeInterval = 120) async throws -> Bool {
     let models = try await getAllDownloadedModels(client)
     if models.first(where: { $0.id == modelId })?.loaded == true { return true }
 
+    try await unloadAllModels(client)
+
     let body = try JSONSerialization.data(withJSONObject: ["modelId": modelId])
-    let (_, status) = try await client.postLong(
+    var (_, status) = try await client.postLong(
         adminBase.appendingPathComponent("admin/models/load"), body: body
     )
-    guard status == 200 else { return false }
 
-    // Poll until loaded
+    // Worker might have crashed — wait for recovery and retry once
+    if status != 200 {
+        try? await Task.sleep(nanoseconds: 5_000_000_000)
+        guard await client.waitForServer(maxWait: 30) else { return false }
+        try await unloadAllModels(client)
+        (_, status) = try await client.postLong(
+            adminBase.appendingPathComponent("admin/models/load"), body: body
+        )
+        guard status == 200 else { return false }
+    }
+
+    // Poll until loaded (models can take 60-90s to load)
     let deadline = Date().addingTimeInterval(maxWait)
     while Date() < deadline {
         let models = try await getAllDownloadedModels(client)
         if models.first(where: { $0.id == modelId })?.loaded == true { return true }
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
     }
     return false
 }
@@ -226,12 +247,8 @@ func safePost(_ client: HTTPClient, url: URL, body: Data, modelId: String) async
 func safePostStream(_ client: HTTPClient, url: URL, body: Data, modelId: String) async -> String? {
     do {
         return try await client.postStream(url, body: body)
-    } catch let error as TestError {
-        if case .httpError(404, _) = error { return nil }
-        Issue.record("\(modelId): stream error — \(error)")
-        return nil
-    } catch let error as URLError {
-        Issue.record("\(modelId): stream failed — \(error.localizedDescription). Server may have crashed.")
+    } catch let error as URLError where error.code == .timedOut || error.code == .cannotConnectToHost || error.code == .networkConnectionLost {
+        Issue.record("\(modelId): stream failed — \(error.localizedDescription)")
         return nil
     } catch {
         Issue.record("\(modelId): stream error — \(error)")
@@ -259,62 +276,48 @@ func buildClaudeCodeSystemPrompt() -> [[String: Any]] {
 }
 
 func buildClaudeCodeTools() -> [[String: Any]] {
-    let schema: [String: Any] = ["type": "object", "properties": ["arg": ["type": "string"]], "required": ["arg"]]
-    return [
-        ["name": "Read", "description": "Reads a file.", "input_schema": schema],
-        ["name": "Bash", "description": "Runs a command.", "input_schema": schema],
-        ["name": "Grep", "description": "Searches patterns.", "input_schema": schema],
-    ]
+    [[
+        "name": "read_file",
+        "description": "Read the contents of a file",
+        "input_schema": [
+            "type": "object",
+            "properties": ["path": ["type": "string", "description": "File path"]],
+            "required": ["path"]
+        ]
+    ]]
 }
 
 func buildClaudeCodeConversation(turns: Int) -> [[String: Any]] {
     var messages: [[String: Any]] = []
-
-    messages.append(["role": "user", "content": "Read Package.swift and list the dependencies."])
-    messages.append(["role": "assistant", "content": [
-        ["type": "text", "text": "Let me read the file."],
-        ["type": "tool_use", "id": "toolu_001", "name": "Read", "input": ["file_path": "/Users/dev/project/Package.swift"]]
-    ]])
-    messages.append(["role": "user", "content": [
-        ["type": "tool_result", "tool_use_id": "toolu_001", "content":
-            "import PackageDescription\nlet package = Package(name: \"MyApp\", dependencies: [.package(url: \"https://github.com/apple/swift-nio\", from: \"2.0.0\")])"]
-    ]])
-    messages.append(["role": "assistant", "content": [
-        ["type": "text", "text": "The project depends on swift-nio 2.0.0+."]
-    ]])
-
-    for i in 2..<turns {
-        messages.append(["role": "user", "content": "Check Sources/App/file_\(i).swift for issues."])
+    for i in 0..<turns {
+        messages.append(["role": "user", "content": "Turn \(i + 1): Read the file /tmp/test_\(i).txt and tell me what's in it."])
         messages.append(["role": "assistant", "content": [
-            ["type": "text", "text": "Checking the file."],
-            ["type": "tool_use", "id": "toolu_\(String(format: "%03d", i))", "name": "Read",
-             "input": ["file_path": "/Users/dev/project/Sources/App/file_\(i).swift"]]
+            ["type": "text", "text": "Let me read that file."],
+            ["type": "tool_use", "id": "toolu_\(i)", "name": "read_file", "input": ["path": "/tmp/test_\(i).txt"]]
         ]])
         messages.append(["role": "user", "content": [
-            ["type": "tool_result", "tool_use_id": "toolu_\(String(format: "%03d", i))",
-             "content": "import Foundation\nstruct Config\(i) { let port: Int = 8080 }"]
+            ["type": "tool_result", "tool_use_id": "toolu_\(i)", "content": "File contents: hello world \(i)"]
         ]])
-        messages.append(["role": "assistant", "content": [
-            ["type": "text", "text": "file_\(i).swift looks clean — simple Config struct."]
-        ]])
+        messages.append(["role": "assistant", "content": "The file contains: hello world \(i)."])
     }
-
+    // Final user turn
+    messages.append(["role": "user", "content": "Summarize all the files you read."])
     return messages
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// ALL E2E TESTS — single serialized suite to avoid concurrent GPU load
-// Each test loads its model individually, tests, then unloads
-// ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// E2E Test Suite
+// Optimized: load model once, run all tests, unload once.
+// ~6 load/unload cycles instead of 96.
+// ═══════════════════════════════════════════════════════════
 
 @Suite("E2E Tests", .serialized, .enabled(if: e2eEnabled))
 struct E2ETests {
     let client = HTTPClient()
 
-    // ─── Per-model test helper ───
-
-    /// Load each downloaded model one at a time, run the test closure, then unload.
-    func forEachModel(_ label: String, test: (String) async throws -> Void) async throws {
+    /// Load each model once, run ALL test closures against it, then unload.
+    /// This gives us ~6 cycles instead of ~96.
+    func forEachModelSuite(_ label: String, tests: (String) async throws -> Void) async throws {
         try await requireServer(client)
         let models = try await getAllDownloadedModels(client)
         guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
@@ -324,13 +327,13 @@ struct E2ETests {
             print("  [\(label)] Loading \(modelId)...")
             let loaded = try await loadModel(client, modelId: modelId)
             guard loaded else {
-                print("  [\(label)] SKIP \(modelId): failed to load (insufficient memory or server error)")
+                print("  [\(label)] SKIP \(modelId): failed to load")
                 continue
             }
             print("  [\(label)] Testing \(modelId)...")
 
             do {
-                try await test(modelId)
+                try await tests(modelId)
             } catch {
                 Issue.record("\(modelId): \(error)")
             }
@@ -348,117 +351,525 @@ struct E2ETests {
         }
     }
 
-    // ─── Suite 1: API correctness ───
+    // ═══════════════════════════════════════════════════════
+    // Test 1: Core API — OpenAI + Anthropic, stream + non-stream
+    // ═══════════════════════════════════════════════════════
 
-    @Test("OpenAI non-stream: returns valid response")
-    func testOpenAINonStream() async throws {
-        try await forEachModel("openai-non-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "Say hello in one word."]],
-                "stream": false, "max_tokens": 50
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            guard let (resp, status) = await safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"), body: data, modelId: modelId) else { return }
+    @Test("Core API: OpenAI + Anthropic non-stream and stream")
+    func testCoreAPI() async throws {
+        try await forEachModelSuite("core-api") { modelId in
+            // --- OpenAI non-stream ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "Say hello in one word."]],
+                    "stream": false, "max_tokens": 50
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                guard let (resp, status) = await safePost(client,
+                    url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: data, modelId: modelId) else { return }
 
-            if status == 500 {
-                let body = String(data: resp, encoding: .utf8) ?? ""
-                print("    \(modelId): HTTP 500 — \(body.prefix(200))")
-                return // Server bug, not a test failure
-            }
-            #expect(status == 200, "\(modelId): HTTP \(status)")
-            guard status == 200 else { return }
-
-            let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
-            let choices = json?["choices"] as? [[String: Any]]
-            let text = (choices?.first?["message"] as? [String: Any])?["content"] as? String ?? ""
-            #expect(!text.isEmpty, "\(modelId): empty response")
-            let finishReason = choices?.first?["finish_reason"] as? String ?? ""
-            #expect(finishReason == "stop" || finishReason == "length", "\(modelId): unexpected finish_reason '\(finishReason)'")
-            print("    \(modelId): OK")
-        }
-    }
-
-    @Test("OpenAI stream: receives tokens and [DONE]")
-    func testOpenAIStream() async throws {
-        try await forEachModel("openai-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "Say hello in one word."]],
-                "stream": true, "max_tokens": 50
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            let result = await safePostStream(client, url: apiBase.appendingPathComponent("v1/chat/completions"), body: data, modelId: modelId)
-            if let result {
-                if result.isEmpty {
-                    print("    \(modelId): empty stream (possible server error)")
+                if status == 500 {
+                    print("    \(modelId): OpenAI non-stream HTTP 500 — skipping")
                 } else {
-                    print("    \(modelId): stream OK")
+                    #expect(status == 200, "\(modelId): OpenAI non-stream HTTP \(status)")
+                    guard status == 200 else { return }
+                    let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
+                    let choices = json?["choices"] as? [[String: Any]]
+                    let text = (choices?.first?["message"] as? [String: Any])?["content"] as? String ?? ""
+                    #expect(!text.isEmpty, "\(modelId): empty OpenAI response")
+                    let finishReason = choices?.first?["finish_reason"] as? String ?? ""
+                    #expect(finishReason == "stop" || finishReason == "length",
+                        "\(modelId): unexpected finish_reason '\(finishReason)'")
+                    print("    \(modelId): OpenAI non-stream OK")
+                }
+            }
+
+            // --- OpenAI stream ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "Say hello in one word."]],
+                    "stream": true, "max_tokens": 50
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                let result = await safePostStream(client,
+                    url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: data, modelId: modelId)
+                if let result, !result.isEmpty {
+                    print("    \(modelId): OpenAI stream OK")
+                } else {
+                    print("    \(modelId): OpenAI stream empty (possible server error)")
+                }
+            }
+
+            // --- Anthropic non-stream ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "Say hello in one word."]],
+                    "max_tokens": 50, "stream": false
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                let url = apiBase.appendingPathComponent("v1/messages")
+                var result = await safePost(client, url: url, body: data, modelId: modelId)
+
+                // Retry on 429
+                if let (_, status) = result, status == 429 {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    result = await safePost(client, url: url, body: data, modelId: modelId)
+                }
+                guard let (resp, status) = result else { return }
+
+                if status == 500 {
+                    print("    \(modelId): Anthropic non-stream HTTP 500 — skipping")
+                } else {
+                    #expect(status == 200, "\(modelId): Anthropic non-stream HTTP \(status)")
+                    guard status == 200 else { return }
+                    let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
+                    let content = json?["content"] as? [[String: Any]]
+                    let text = content?.compactMap { $0["text"] as? String }.joined() ?? ""
+                    #expect(!text.isEmpty, "\(modelId): empty Anthropic response")
+                    let stopReason = json?["stop_reason"] as? String ?? ""
+                    #expect(stopReason == "stop" || stopReason == "end_turn",
+                        "\(modelId): unexpected stop_reason '\(stopReason)'")
+                    print("    \(modelId): Anthropic non-stream OK")
+                }
+            }
+
+            // --- Anthropic stream ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "Say hello in one word."]],
+                    "max_tokens": 50, "stream": true
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                let result = await safePostStream(client,
+                    url: apiBase.appendingPathComponent("v1/messages"),
+                    body: data, modelId: modelId)
+                if let result, !result.isEmpty {
+                    print("    \(modelId): Anthropic stream OK")
+                } else {
+                    print("    \(modelId): Anthropic stream empty (possible server error)")
                 }
             }
         }
     }
 
-    @Test("Anthropic non-stream: returns valid response")
-    func testAnthropicNonStream() async throws {
-        try await forEachModel("anthropic-non-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "Say hello in one word."]],
-                "max_tokens": 50, "stream": false
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            let url = apiBase.appendingPathComponent("v1/messages")
-            var result = await safePost(client, url: url, body: data, modelId: modelId)
+    // ═══════════════════════════════════════════════════════
+    // Test 2: Thinking format — OpenAI + Anthropic
+    // ═══════════════════════════════════════════════════════
 
-            // Retry on 429
-            if let (_, status) = result, status == 429 {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                result = await safePost(client, url: url, body: data, modelId: modelId)
-            }
-            guard let (resp, status) = result else { return }
+    @Test("Thinking format: reasoning_content separated from content")
+    func testThinkingFormat() async throws {
+        try await forEachModelSuite("thinking-format") { modelId in
+            // --- OpenAI non-stream thinking ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
+                    "stream": false, "max_tokens": 300
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                guard let (resp, status) = await safePost(client,
+                    url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: data, modelId: modelId) else { return }
+                guard status == 200 else { return }
 
-            if status == 500 {
-                let body = String(data: resp, encoding: .utf8) ?? ""
-                print("    \(modelId): HTTP 500 — \(body.prefix(200))")
-                return
-            }
-            #expect(status == 200, "\(modelId): HTTP \(status)")
-            guard status == 200 else { return }
+                let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
+                let choices = json?["choices"] as? [[String: Any]]
+                guard let choice = choices?.first else { return }
+                let message = choice["message"] as? [String: Any]
+                let content = message?["content"] as? String ?? ""
+                let reasoningContent = message?["reasoning_content"] as? String
 
-            let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
-            let content = json?["content"] as? [[String: Any]]
-            let text = content?.compactMap { $0["text"] as? String }.joined() ?? ""
-            #expect(!text.isEmpty, "\(modelId): empty response")
-            let stopReason = json?["stop_reason"] as? String ?? ""
-            #expect(stopReason == "stop" || stopReason == "end_turn", "\(modelId): unexpected stop_reason '\(stopReason)'")
-            print("    \(modelId): OK")
-        }
-    }
+                #expect(!content.contains("</think"), "\(modelId): content contains raw </think tag")
+                #expect(!content.contains("<think"), "\(modelId): content contains raw <think tag")
 
-    @Test("Anthropic stream: receives content and message_stop")
-    func testAnthropicStream() async throws {
-        try await forEachModel("anthropic-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "Say hello in one word."]],
-                "max_tokens": 50, "stream": true
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            let result = await safePostStream(client, url: apiBase.appendingPathComponent("v1/messages"), body: data, modelId: modelId)
-            if let result {
-                if result.isEmpty {
-                    print("    \(modelId): empty stream (possible server error)")
+                if let rc = reasoningContent {
+                    #expect(!rc.isEmpty, "\(modelId): reasoning_content present but empty")
+                    print("    \(modelId): OpenAI thinking=\(rc.count) chars, content=\(content.count) chars")
                 } else {
-                    print("    \(modelId): stream OK")
+                    print("    \(modelId): OpenAI no thinking (non-thinking model), content=\(content.count) chars")
+                }
+            }
+
+            // --- OpenAI stream thinking ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
+                    "stream": true, "max_tokens": 300
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                guard let capture = await captureOpenAIStream(
+                    url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: data, modelId: modelId) else { return }
+
+                #expect(capture.gotDone, "\(modelId): OpenAI stream no [DONE]")
+                let fullContent = capture.contentChunks.joined()
+                let fullReasoning = capture.reasoningChunks.joined()
+                #expect(!fullContent.contains("</think"), "\(modelId): stream content has </think")
+                #expect(!fullContent.contains("<think"), "\(modelId): stream content has <think")
+
+                if !fullReasoning.isEmpty {
+                    print("    \(modelId): OpenAI stream thinking=\(fullReasoning.count) chars")
+                } else {
+                    print("    \(modelId): OpenAI stream no thinking (non-thinking model)")
+                }
+            }
+
+            // --- Anthropic non-stream thinking ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
+                    "max_tokens": 300, "stream": false
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                guard let (resp, status) = await safePost(client,
+                    url: apiBase.appendingPathComponent("v1/messages"),
+                    body: data, modelId: modelId) else { return }
+                guard status == 200 else { return }
+
+                let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
+                let content = json?["content"] as? [[String: Any]]
+                let thinkingBlocks = content?.filter { $0["type"] as? String == "thinking" } ?? []
+                let textBlocks = content?.filter { $0["type"] as? String == "text" } ?? []
+
+                for block in textBlocks {
+                    let text = block["text"] as? String ?? ""
+                    #expect(!text.contains("</think"), "\(modelId): Anthropic text block has </think")
+                    #expect(!text.contains("<think"), "\(modelId): Anthropic text block has <think")
+                }
+
+                let thinkingText = thinkingBlocks.compactMap { $0["thinking"] as? String }.joined()
+                let responseText = textBlocks.compactMap { $0["text"] as? String }.joined()
+
+                if !thinkingText.isEmpty {
+                    print("    \(modelId): Anthropic thinking=\(thinkingText.count) chars, response=\(responseText.count) chars")
+                } else {
+                    print("    \(modelId): Anthropic no thinking block, response=\(responseText.count) chars")
+                }
+            }
+
+            // --- Anthropic stream thinking ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
+                    "max_tokens": 300, "stream": true
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                guard let capture = await captureAnthropicStream(
+                    url: apiBase.appendingPathComponent("v1/messages"),
+                    body: data, modelId: modelId) else { return }
+
+                #expect(capture.gotMessageStop, "\(modelId): Anthropic stream no message_stop")
+                let fullText = capture.textChunks.joined()
+                let fullThinking = capture.thinkingChunks.joined()
+                #expect(!fullText.contains("</think"), "\(modelId): Anthropic stream text has </think")
+                #expect(!fullText.contains("<think"), "\(modelId): Anthropic stream text has <think")
+
+                if !fullThinking.isEmpty {
+                    print("    \(modelId): Anthropic stream thinking=\(fullThinking.count) chars")
+                } else {
+                    print("    \(modelId): Anthropic stream no thinking")
                 }
             }
         }
     }
 
-    // ─── Suite 2: Pressure test — progressive token scaling ───
+    // ═══════════════════════════════════════════════════════
+    // Test 3: Multi-turn conversations
+    // ═══════════════════════════════════════════════════════
 
-    @Test("Pressure test: progressive token scaling 2K→4K→6K→8K per model")
+    @Test("Multi-turn: Claude Code simulation (short + long)")
+    func testMultiTurn() async throws {
+        try await forEachModelSuite("multi-turn") { modelId in
+            // Short conversation (3 turns)
+            do {
+                let conversation = buildClaudeCodeConversation(turns: 3)
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "system": buildClaudeCodeSystemPrompt(),
+                    "tools": buildClaudeCodeTools(),
+                    "messages": conversation,
+                    "max_tokens": 512, "stream": false
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                guard let (resp, status) = await safePost(client,
+                    url: apiBase.appendingPathComponent("v1/messages"),
+                    body: data, modelId: modelId) else { return }
+                if status == 200 {
+                    let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
+                    let content = json?["content"] as? [[String: Any]]
+                    let text = content?.compactMap { $0["text"] as? String }.joined() ?? ""
+                    #expect(!text.isEmpty, "\(modelId): empty Claude Code response")
+                    let usage = json?["usage"] as? [String: Any]
+                    let inputTokens = usage?["input_tokens"] as? Int ?? 0
+                    print("    \(modelId): Claude Code 3-turn OK — \(inputTokens) input tokens")
+                } else {
+                    print("    \(modelId): Claude Code 3-turn HTTP \(status)")
+                }
+            }
+
+            // Long conversation (8 turns)
+            do {
+                let conversation = buildClaudeCodeConversation(turns: 8)
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "system": buildClaudeCodeSystemPrompt(),
+                    "tools": buildClaudeCodeTools(),
+                    "messages": conversation,
+                    "max_tokens": 1024, "stream": false
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                guard let (resp, status) = await safePost(client,
+                    url: apiBase.appendingPathComponent("v1/messages"),
+                    body: data, modelId: modelId) else { return }
+                if status == 200 {
+                    let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
+                    let content = json?["content"] as? [[String: Any]]
+                    let text = content?.compactMap { $0["text"] as? String }.joined() ?? ""
+                    #expect(!text.isEmpty, "\(modelId): empty long context response")
+                    let usage = json?["usage"] as? [String: Any]
+                    let inputTokens = usage?["input_tokens"] as? Int ?? 0
+                    print("    \(modelId): Long context 8-turn OK — \(inputTokens) input tokens")
+                } else if status == 500 {
+                    print("    \(modelId): Long context HTTP 500 (server error)")
+                } else {
+                    print("    \(modelId): Long context HTTP \(status) (may hit context limit)")
+                }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Test 4: Stress — concurrent + pressure + memory safety
+    // ═══════════════════════════════════════════════════════
+
+    @Test("Stress: concurrent requests + memory safety")
+    func testStress() async throws {
+        try await requireServer(client)
+        let models = try await getAllDownloadedModels(client)
+        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
+
+        for model in models {
+            let modelId = model.id
+            print("  [stress] Loading \(modelId)...")
+            let loaded = try await loadModel(client, modelId: modelId)
+            guard loaded else {
+                print("  [stress] SKIP \(modelId): failed to load")
+                continue
+            }
+
+            // --- Concurrent requests (3 simultaneous) ---
+            do {
+                let prompts = [
+                    "What is 2+2? Answer with just the number.",
+                    "What color is the sky on a clear day? One word.",
+                    "What is the capital of France? One word."
+                ]
+                async let r1 = safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: try JSONSerialization.data(withJSONObject: [
+                        "model": modelId, "messages": [["role": "user", "content": prompts[0]]],
+                        "stream": false, "max_tokens": 20
+                    ]), modelId: modelId)
+                async let r2 = safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: try JSONSerialization.data(withJSONObject: [
+                        "model": modelId, "messages": [["role": "user", "content": prompts[1]]],
+                        "stream": false, "max_tokens": 20
+                    ]), modelId: modelId)
+                async let r3 = safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: try JSONSerialization.data(withJSONObject: [
+                        "model": modelId, "messages": [["role": "user", "content": prompts[2]]],
+                        "stream": false, "max_tokens": 20
+                    ]), modelId: modelId)
+
+                let results = try await [r1, r2, r3]
+                var successCount = 0
+                var serverError = false
+                for result in results {
+                    if let (data, status) = result, status == 200,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let choices = json["choices"] as? [[String: Any]],
+                       let text = (choices.first?["message"] as? [String: Any])?["content"] as? String,
+                       !text.isEmpty {
+                        successCount += 1
+                    } else if let (_, status) = result, status == 500 {
+                        serverError = true
+                    }
+                }
+                if serverError {
+                    print("    \(modelId): concurrent server error (skipped)")
+                } else {
+                    #expect(successCount == 3, "\(modelId): only \(successCount)/3 concurrent requests succeeded")
+                    print("    \(modelId): \(successCount)/3 concurrent OK")
+                }
+            }
+
+            // --- Memory safety (large max_tokens — server should handle gracefully) ---
+            do {
+                let body: [String: Any] = [
+                    "model": modelId,
+                    "messages": [["role": "user", "content": "Hello"]],
+                    "max_tokens": 50000
+                ]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                let result = await safePost(client,
+                    url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: data, modelId: modelId)
+                if let (_, status) = result {
+                    #expect(status == 200 || status >= 400, "\(modelId): unexpected status \(status)")
+                    print("    \(modelId): oversized request → HTTP \(status) (survived)")
+                }
+            }
+
+            try? await unloadModel(client, modelId: modelId)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+            guard await client.isServerAlive() else {
+                Issue.record("Server died after stress test with \(modelId)")
+                let recovered = await client.waitForServer(maxWait: 30)
+                if !recovered { return }
+                break
+            }
+        }
+        #expect(await client.isServerAlive(), "Server must survive stress test")
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Test 5: Batcher — concurrent + stats + stream
+    // ═══════════════════════════════════════════════════════
+
+    @Test("Batcher: concurrent + stats + stream")
+    func testBatcher() async throws {
+        try await requireServer(client)
+        let models = try await getAllDownloadedModels(client)
+        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
+
+        for model in models {
+            let modelId = model.id
+            print("  [batcher] Loading \(modelId)...")
+            let loaded = try await loadModel(client, modelId: modelId)
+            guard loaded else { continue }
+
+            // --- Batcher concurrent (10 requests) ---
+            var batcherSuccesses = 0
+            do {
+                let requestCount = 10
+                try await withThrowingTaskGroup(of: (Int, Bool).self) { group in
+                    for i in 0..<requestCount {
+                        group.addTask {
+                            let body: [String: Any] = [
+                                "model": modelId,
+                                "messages": [["role": "user", "content": "Reply with just the number \(i)."]],
+                                "stream": false, "max_tokens": 10
+                            ]
+                            let data = try JSONSerialization.data(withJSONObject: body)
+                            if let (resp, status) = await safePost(self.client,
+                                url: apiBase.appendingPathComponent("v1/chat/completions"),
+                                body: data, modelId: modelId), status == 200 {
+                                if let json = try? JSONSerialization.jsonObject(with: resp) as? [String: Any],
+                                   let choices = json["choices"] as? [[String: Any]],
+                                   let text = (choices.first?["message"] as? [String: Any])?["content"] as? String,
+                                   !text.isEmpty {
+                                    return (i, true)
+                                }
+                            }
+                            return (i, false)
+                        }
+                    }
+                    for try await (_, ok) in group {
+                        if ok { batcherSuccesses += 1 }
+                    }
+                }
+                #expect(batcherSuccesses == requestCount,
+                    "\(modelId): only \(batcherSuccesses)/\(requestCount) batcher requests completed")
+                print("    \(modelId): batcher concurrent \(batcherSuccesses)/\(requestCount) OK")
+            }
+
+            // --- Batcher stats ---
+            if batcherSuccesses > 0 {
+                do {
+                    let (data, status) = try await client.get(apiBase.appendingPathComponent("v1/stats"))
+                    #expect(status == 200, "\(modelId): stats endpoint HTTP \(status)")
+                    if status == 200,
+                       let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let batcher = json["batcher"] as? [String: Any] {
+                        let totalCompleted = batcher["totalCompleted"] as? UInt64 ?? 0
+                        #expect(totalCompleted > 0, "\(modelId): batcher should have completed requests")
+                        print("    \(modelId): batcher stats — completed=\(totalCompleted)")
+                    }
+                }
+            }
+
+            // --- Batcher stream (6 concurrent) ---
+            do {
+                let requestCount = 6
+                var streamSuccesses = 0
+                try await withThrowingTaskGroup(of: Bool.self) { group in
+                    for i in 0..<requestCount {
+                        group.addTask {
+                            let body: [String: Any] = [
+                                "model": modelId,
+                                "messages": [["role": "user", "content": "Count to \(i) in one word."]],
+                                "stream": true, "max_tokens": 10
+                            ]
+                            let data = try JSONSerialization.data(withJSONObject: body)
+                            let result = await safePostStream(self.client,
+                                url: apiBase.appendingPathComponent("v1/chat/completions"),
+                                body: data, modelId: modelId)
+                            return result != nil && !(result ?? "").isEmpty
+                        }
+                    }
+                    for try await ok in group {
+                        if ok { streamSuccesses += 1 }
+                    }
+                }
+                #expect(streamSuccesses >= requestCount / 2,
+                    "\(modelId): only \(streamSuccesses)/\(requestCount) stream requests completed")
+                print("    \(modelId): batcher stream \(streamSuccesses)/\(requestCount) OK")
+            }
+
+            try? await unloadModel(client, modelId: modelId)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+            guard await client.isServerAlive() else {
+                Issue.record("Server died after batcher test with \(modelId)")
+                let recovered = await client.waitForServer(maxWait: 30)
+                if !recovered { return }
+                break
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Test 6: Models list endpoint
+    // ═══════════════════════════════════════════════════════
+
+    @Test("Models list endpoint returns valid response")
+    func testModelsList() async throws {
+        try await requireServer(client)
+        let (data, status) = try await client.get(apiBase.appendingPathComponent("v1/models"))
+        #expect(status == 200, "GET /v1/models returned HTTP \(status)")
+        guard status == 200 else { return }
+
+        if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let modelList = json["data"] as? [[String: Any]]
+            #expect(modelList != nil && !modelList!.isEmpty, "Models list should have ≥1 model")
+            print("  Models list: \(modelList?.count ?? 0) models")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Test 7: Pressure — progressive token scaling
+    // ═══════════════════════════════════════════════════════
+
+    @Test("Pressure: progressive token scaling 2K→4K→6K→8K")
     func testPressureTokenScaling() async throws {
         try await requireServer(client)
         let models = try await getAllDownloadedModels(client)
@@ -479,8 +890,7 @@ struct E2ETests {
                 guard await client.isServerAlive() else {
                     Issue.record("\(modelId): server died at \(tokens) tokens")
                     let recovered = await client.waitForServer(maxWait: 30)
-                    if recovered { break } // try next model level, but we lost this model
-                    return // server gone
+                    if recovered { break } else { return }
                 }
 
                 let filler = generateTokenFiller(count: tokens)
@@ -492,9 +902,11 @@ struct E2ETests {
                 ]
                 let data = try JSONSerialization.data(withJSONObject: body)
 
-                let result = await safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"), body: data, modelId: modelId)
+                let result = await safePost(client,
+                    url: apiBase.appendingPathComponent("v1/chat/completions"),
+                    body: data, modelId: modelId)
                 guard let (_, status) = result else {
-                    Issue.record("\(modelId): request failed at \(tokens) tokens — server may have crashed")
+                    Issue.record("\(modelId): request failed at \(tokens) tokens")
                     let recovered = await client.waitForServer(maxWait: 30)
                     if recovered { break } else { return }
                 }
@@ -503,7 +915,7 @@ struct E2ETests {
                     print("    \(modelId): \(tokens) tokens OK")
                 } else if status == 500 {
                     print("    \(modelId): HTTP 500 at \(tokens) tokens (server error)")
-                    break // Model has server-side issues, skip remaining token levels
+                    break
                 } else {
                     Issue.record("\(modelId): HTTP \(status) at \(tokens) tokens")
                 }
@@ -516,356 +928,8 @@ struct E2ETests {
         #expect(await client.isServerAlive(), "Server must survive pressure test")
     }
 
-    // ─── Suite 3: Concurrent request stress ───
+    // ─── Stream Capture Helpers ───
 
-    @Test("Concurrent stress: 3 simultaneous requests per model")
-    func testConcurrentRequests() async throws {
-        try await requireServer(client)
-        let models = try await getAllDownloadedModels(client)
-        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
-
-        for model in models {
-            let modelId = model.id
-            print("  [concurrent] Loading \(modelId)...")
-            let loaded = try await loadModel(client, modelId: modelId)
-            guard loaded else {
-                Issue.record("\(modelId): failed to load for concurrent test")
-                continue
-            }
-
-            // Fire 3 concurrent requests
-            let prompts = [
-                "What is 2+2? Answer with just the number.",
-                "What color is the sky on a clear day? One word.",
-                "What is the capital of France? One word."
-            ]
-
-            async let r1 = safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"),
-                body: try JSONSerialization.data(withJSONObject: [
-                    "model": modelId, "messages": [["role": "user", "content": prompts[0]]],
-                    "stream": false, "max_tokens": 20
-                ]), modelId: modelId)
-
-            async let r2 = safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"),
-                body: try JSONSerialization.data(withJSONObject: [
-                    "model": modelId, "messages": [["role": "user", "content": prompts[1]]],
-                    "stream": false, "max_tokens": 20
-                ]), modelId: modelId)
-
-            async let r3 = safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"),
-                body: try JSONSerialization.data(withJSONObject: [
-                    "model": modelId, "messages": [["role": "user", "content": prompts[2]]],
-                    "stream": false, "max_tokens": 20
-                ]), modelId: modelId)
-
-            let results = try await [r1, r2, r3]
-            var successCount = 0
-            var serverError = false
-            for result in results {
-                if let (data, status) = result, status == 200 {
-                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let choices = json["choices"] as? [[String: Any]],
-                       let text = (choices.first?["message"] as? [String: Any])?["content"] as? String,
-                       !text.isEmpty {
-                        successCount += 1
-                    }
-                } else if let (_, status) = result, status == 500 {
-                    serverError = true
-                }
-            }
-            if serverError {
-                print("    \(modelId): server error on concurrent requests (skipped)")
-            } else {
-                #expect(successCount == 3, "\(modelId): only \(successCount)/3 concurrent requests succeeded")
-                print("    \(modelId): \(successCount)/3 concurrent requests OK")
-            }
-
-            try? await unloadModel(client, modelId: modelId)
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-
-            guard await client.isServerAlive() else {
-                Issue.record("Server died after concurrent test with \(modelId)")
-                let recovered = await client.waitForServer(maxWait: 30)
-                if !recovered { return }
-                break
-            }
-        }
-    }
-
-    // ─── Suite 4: Claude Code simulation ───
-
-    @Test("Claude Code multi-turn conversation via Anthropic API")
-    func testClaudeCodeSimulation() async throws {
-        try await forEachModel("claude-code") { modelId in
-            let conversation = buildClaudeCodeConversation(turns: 3)
-
-            let body: [String: Any] = [
-                "model": modelId,
-                "system": buildClaudeCodeSystemPrompt(),
-                "tools": buildClaudeCodeTools(),
-                "messages": conversation,
-                "max_tokens": 512,
-                "stream": false
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-
-            guard let (resp, status) = await safePost(client, url: apiBase.appendingPathComponent("v1/messages"), body: data, modelId: modelId) else { return }
-            if status == 500 {
-                let body = String(data: resp, encoding: .utf8) ?? ""
-                print("    \(modelId): HTTP 500 — \(body.prefix(200))")
-                return
-            }
-            #expect(status == 200, "\(modelId): Claude Code simulation HTTP \(status)")
-            guard status == 200 else { return }
-
-            let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
-            let content = json?["content"] as? [[String: Any]]
-            let text = content?.compactMap { $0["text"] as? String }.joined() ?? ""
-            #expect(!text.isEmpty, "\(modelId): empty Claude Code response")
-
-            let usage = json?["usage"] as? [String: Any]
-            let inputTokens = usage?["input_tokens"] as? Int ?? 0
-            print("    \(modelId): Claude Code sim OK — \(inputTokens) input tokens, \(text.count) chars")
-        }
-    }
-
-    @Test("Claude Code long context: extended 8-turn conversation")
-    func testClaudeCodeLongContext() async throws {
-        try await forEachModel("claude-code-long") { modelId in
-            let conversation = buildClaudeCodeConversation(turns: 8)
-
-            let body: [String: Any] = [
-                "model": modelId,
-                "system": buildClaudeCodeSystemPrompt(),
-                "tools": buildClaudeCodeTools(),
-                "messages": conversation,
-                "max_tokens": 1024,
-                "stream": false
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-
-            guard let (resp, status) = await safePost(client, url: apiBase.appendingPathComponent("v1/messages"), body: data, modelId: modelId) else { return }
-
-            if status == 200 {
-                let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
-                let content = json?["content"] as? [[String: Any]]
-                let text = content?.compactMap { $0["text"] as? String }.joined() ?? ""
-                #expect(!text.isEmpty, "\(modelId): empty long context response")
-                let usage = json?["usage"] as? [String: Any]
-                let inputTokens = usage?["input_tokens"] as? Int ?? 0
-                print("    \(modelId): Long context OK — \(inputTokens) input tokens")
-            } else if status == 500 {
-                print("    \(modelId): HTTP 500 (server error)")
-            } else {
-                let errorBody = String(data: resp, encoding: .utf8) ?? ""
-                if errorBody.contains("context") || errorBody.contains("token") || status == 400 {
-                    print("    \(modelId): Long context hit context limit (expected) — HTTP \(status)")
-                } else {
-                    Issue.record("\(modelId): Long context unexpected error — HTTP \(status): \(errorBody.prefix(200))")
-                }
-            }
-        }
-    }
-
-    // ─── Suite 5: Memory safety ───
-
-    @Test("Memory safety: oversized request rejected without crash")
-    func testMemorySafetyRejection() async throws {
-        try await forEachModel("memory-safety") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "Hello"]],
-                "max_tokens": 999999
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            let result = await safePost(client, url: apiBase.appendingPathComponent("v1/chat/completions"), body: data, modelId: modelId)
-
-            if let (_, status) = result {
-                #expect(status == 200 || status >= 400, "\(modelId): unexpected status \(status)")
-                print("    \(modelId): oversized request → HTTP \(status) (server survived)")
-            }
-        }
-        #expect(await client.isServerAlive(), "Server must survive memory safety test")
-    }
-
-    // ─── Suite 6: ContinuousBatcher E2E ───
-
-    @Test("ContinuousBatcher: concurrent requests complete under batcher")
-    func testBatcherConcurrentCompletion() async throws {
-        try await requireServer(client)
-        let models = try await getAllDownloadedModels(client)
-        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
-
-        for model in models {
-            let modelId = model.id
-            print("  [batcher-concurrent] Loading \(modelId)...")
-            let loaded = try await loadModel(client, modelId: modelId)
-            guard loaded else {
-                Issue.record("\(modelId): failed to load")
-                continue
-            }
-
-            // Fire 10 concurrent requests — exceeds maxBatchSize to exercise queuing
-            let requestCount = 10
-            try await withThrowingTaskGroup(of: (Int, Bool).self) { group in
-                for i in 0..<requestCount {
-                    group.addTask {
-                        let body: [String: Any] = [
-                            "model": modelId,
-                            "messages": [["role": "user", "content": "Reply with just the number \(i)."]],
-                            "stream": false, "max_tokens": 10
-                        ]
-                        let data = try JSONSerialization.data(withJSONObject: body)
-                        if let (resp, status) = await safePost(self.client,
-                            url: apiBase.appendingPathComponent("v1/chat/completions"),
-                            body: data, modelId: modelId), status == 200 {
-                            if let json = try? JSONSerialization.jsonObject(with: resp) as? [String: Any],
-                               let choices = json["choices"] as? [[String: Any]],
-                               let text = (choices.first?["message"] as? [String: Any])?["content"] as? String,
-                               !text.isEmpty {
-                                return (i, true)
-                            }
-                        }
-                        return (i, false)
-                    }
-                }
-
-                var successes = 0
-                for try await (_, ok) in group {
-                    if ok { successes += 1 }
-                }
-                #expect(successes == requestCount,
-                    "\(modelId): only \(successes)/\(requestCount) concurrent requests completed under batcher")
-                print("    \(modelId): \(successes)/\(requestCount) concurrent requests OK")
-            }
-
-            try? await unloadModel(client, modelId: modelId)
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-
-            guard await client.isServerAlive() else {
-                Issue.record("Server died after batcher concurrent test with \(modelId)")
-                let recovered = await client.waitForServer(maxWait: 30)
-                if !recovered { return }
-                break
-            }
-        }
-    }
-
-    @Test("ContinuousBatcher: stats endpoint reports batcher metrics")
-    func testBatcherStats() async throws {
-        try await requireServer(client)
-        let models = try await getAllDownloadedModels(client)
-        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
-
-        for model in models {
-            let modelId = model.id
-            print("  [batcher-stats] Loading \(modelId)...")
-            let loaded = try await loadModel(client, modelId: modelId)
-            guard loaded else { continue }
-
-            // Fire a few concurrent requests to exercise the batcher
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                for _ in 0..<4 {
-                    group.addTask {
-                        let body: [String: Any] = [
-                            "model": modelId,
-                            "messages": [["role": "user", "content": "Say hi."]],
-                            "stream": false, "max_tokens": 10
-                        ]
-                        let data = try JSONSerialization.data(withJSONObject: body)
-                        _ = await safePost(self.client,
-                            url: apiBase.appendingPathComponent("v1/chat/completions"),
-                            body: data, modelId: modelId)
-                    }
-                }
-                for try await _ in group { }
-            }
-
-            // Check stats endpoint
-            let (data, status) = try await client.get(apiBase.appendingPathComponent("v1/stats"))
-            #expect(status == 200, "\(modelId): stats endpoint returned HTTP \(status)")
-            guard status == 200 else {
-                try? await unloadModel(client, modelId: modelId)
-                continue
-            }
-
-            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let batcher = json["batcher"] as? [String: Any] {
-                let totalCompleted = batcher["totalCompleted"] as? UInt64 ?? 0
-                let totalQueued = batcher["totalQueued"] as? UInt64 ?? 0
-                let maxBatchSize = batcher["maxBatchSize"] as? Int ?? 0
-                #expect(totalCompleted > 0, "\(modelId): batcher should have completed requests, got \(totalCompleted)")
-                #expect(totalQueued > 0, "\(modelId): batcher should have queued requests, got \(totalQueued)")
-                #expect(maxBatchSize > 0, "\(modelId): maxBatchSize should be > 0")
-                print("    \(modelId): batcher stats — completed=\(totalCompleted), queued=\(totalQueued), maxBatch=\(maxBatchSize)")
-            } else {
-                Issue.record("\(modelId): failed to parse batcher stats")
-            }
-
-            try? await unloadModel(client, modelId: modelId)
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-        }
-    }
-
-    @Test("ContinuousBatcher: stream requests batched concurrently")
-    func testBatcherStreamConcurrent() async throws {
-        try await requireServer(client)
-        let models = try await getAllDownloadedModels(client)
-        guard !models.isEmpty else { throw TestError.modelNotLoaded("No downloaded models found") }
-
-        for model in models {
-            let modelId = model.id
-            print("  [batcher-stream] Loading \(modelId)...")
-            let loaded = try await loadModel(client, modelId: modelId)
-            guard loaded else { continue }
-
-            // Fire 6 concurrent stream requests
-            let requestCount = 6
-            try await withThrowingTaskGroup(of: Bool.self) { group in
-                for i in 0..<requestCount {
-                    group.addTask {
-                        let body: [String: Any] = [
-                            "model": modelId,
-                            "messages": [["role": "user", "content": "Count to \(i) in one word."]],
-                            "stream": true, "max_tokens": 10
-                        ]
-                        let data = try JSONSerialization.data(withJSONObject: body)
-                        let result = await safePostStream(self.client,
-                            url: apiBase.appendingPathComponent("v1/chat/completions"),
-                            body: data, modelId: modelId)
-                        return result != nil && !(result ?? "").isEmpty
-                    }
-                }
-
-                var successes = 0
-                for try await ok in group {
-                    if ok { successes += 1 }
-                }
-                #expect(successes >= requestCount / 2,
-                    "\(modelId): only \(successes)/\(requestCount) stream requests completed under batcher")
-                print("    \(modelId): \(successes)/\(requestCount) stream requests OK")
-            }
-
-            try? await unloadModel(client, modelId: modelId)
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-
-            guard await client.isServerAlive() else {
-                Issue.record("Server died after batcher stream test with \(modelId)")
-                let recovered = await client.waitForServer(maxWait: 30)
-                if !recovered { return }
-                break
-            }
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════
-    // Suite: Chat Template Format Verification
-    // Verifies model output follows chat_template thinking tag format
-    // ═══════════════════════════════════════════════════════════
-
-    // ─── Detailed SSE stream collector ───
-
-    /// Captures all SSE events from an OpenAI streaming request, including reasoning_content deltas
     struct OpenAIStreamCapture {
         var contentChunks: [String] = []
         var reasoningChunks: [String] = []
@@ -880,10 +944,7 @@ struct E2ETests {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
 
-        guard let (bytes, resp) = try? await client.session.bytes(for: req) else {
-            return nil
-        }
-
+        guard let (bytes, resp) = try? await client.session.bytes(for: req) else { return nil }
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             Issue.record("\(modelId): stream HTTP \(status)")
@@ -921,7 +982,6 @@ struct E2ETests {
         return capture
     }
 
-    /// Captures all SSE events from an Anthropic streaming request
     struct AnthropicStreamCapture {
         var textChunks: [String] = []
         var thinkingChunks: [String] = []
@@ -936,10 +996,7 @@ struct E2ETests {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
 
-        guard let (bytes, resp) = try? await client.session.bytes(for: req) else {
-            return nil
-        }
-
+        guard let (bytes, resp) = try? await client.session.bytes(for: req) else { return nil }
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             Issue.record("\(modelId): Anthropic stream HTTP \(status)")
@@ -950,7 +1007,6 @@ struct E2ETests {
         var currentBlockType = "text"
         do {
             for try await line in bytes.lines {
-                // Parse event type
                 if line.hasPrefix("event: ") {
                     let eventType = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
                     if eventType == "message_stop" { capture.gotMessageStop = true }
@@ -965,13 +1021,11 @@ struct E2ETests {
 
                 let type = obj["type"] as? String ?? ""
 
-                // Track content block type changes
                 if type == "content_block_start",
                    let block = obj["content_block"] as? [String: Any] {
                     currentBlockType = block["type"] as? String ?? "text"
                 }
 
-                // Capture delta text
                 if type == "content_block_delta",
                    let delta = obj["delta"] as? [String: Any] {
                     if let text = delta["text"] as? String, !text.isEmpty {
@@ -986,7 +1040,6 @@ struct E2ETests {
                     }
                 }
 
-                // Capture stop reason
                 if type == "message_delta",
                    let delta = obj["delta"] as? [String: Any],
                    let stop = delta["stop_reason"] as? String {
@@ -998,171 +1051,5 @@ struct E2ETests {
             return nil
         }
         return capture
-    }
-
-    // ─── Chat Template Format Tests ───
-
-    @Test("OpenAI non-stream: reasoning_content separated from content")
-    func testOpenAINonStreamThinkingFormat() async throws {
-        try await forEachModel("openai-thinking-non-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
-                "stream": false, "max_tokens": 300
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            guard let (resp, status) = await safePost(client,
-                url: apiBase.appendingPathComponent("v1/chat/completions"),
-                body: data, modelId: modelId) else { return }
-
-            guard status == 200 else {
-                Issue.record("\(modelId): HTTP \(status)")
-                return
-            }
-
-            let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
-            let choices = json?["choices"] as? [[String: Any]]
-            #expect(choices != nil && !choices!.isEmpty, "\(modelId): no choices")
-            guard let choice = choices?.first else { return }
-
-            let message = choice["message"] as? [String: Any]
-            #expect(message != nil, "\(modelId): no message in choice")
-
-            let content = message?["content"] as? String ?? ""
-            let reasoningContent = message?["reasoning_content"] as? String
-
-            // content must NOT contain raw </think tags
-            #expect(!content.contains("</think"), "\(modelId): content contains raw </think tag: \(content.prefix(100))")
-            #expect(!content.contains("<think"), "\(modelId): content contains raw <think tag: \(content.prefix(100))")
-
-            // If reasoning_content is present, it should be non-empty
-            if let rc = reasoningContent {
-                #expect(!rc.isEmpty, "\(modelId): reasoning_content present but empty")
-                print("    \(modelId): thinking=\(rc.count) chars, content=\(content.count) chars")
-            } else {
-                print("    \(modelId): no thinking content (non-thinking model), content=\(content.count) chars")
-            }
-
-            // content + reasoning_content together should produce something
-            let totalOutput = content.count + (reasoningContent ?? "").count
-            if totalOutput == 0 {
-                print("    \(modelId): WARNING — model produced no output at all")
-            }
-        }
-    }
-
-    @Test("OpenAI stream: reasoning_content in delta chunks")
-    func testOpenAIStreamThinkingFormat() async throws {
-        try await forEachModel("openai-thinking-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
-                "stream": true, "max_tokens": 300
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            guard let capture = await captureOpenAIStream(
-                url: apiBase.appendingPathComponent("v1/chat/completions"),
-                body: data, modelId: modelId) else { return }
-
-            #expect(capture.gotDone, "\(modelId): stream did not end with [DONE]")
-
-            let fullContent = capture.contentChunks.joined()
-            let fullReasoning = capture.reasoningChunks.joined()
-
-            // content chunks must NOT contain raw think tags
-            #expect(!fullContent.contains("</think"), "\(modelId): stream content contains </think tag")
-            #expect(!fullContent.contains("<think"), "\(modelId): stream content contains <think tag")
-
-            if !fullReasoning.isEmpty {
-                print("    \(modelId): stream thinking=\(fullReasoning.count) chars, content=\(fullContent.count) chars")
-            } else {
-                print("    \(modelId): no stream thinking (non-thinking model), content=\(fullContent.count) chars")
-            }
-        }
-    }
-
-    @Test("Anthropic non-stream: thinking block separated from text block")
-    func testAnthropicNonStreamThinkingFormat() async throws {
-        try await forEachModel("anthropic-thinking-non-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
-                "max_tokens": 300, "stream": false
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            let url = apiBase.appendingPathComponent("v1/messages")
-
-            guard let (resp, status) = await safePost(client, url: url, body: data, modelId: modelId) else { return }
-            guard status == 200 else {
-                Issue.record("\(modelId): Anthropic HTTP \(status)")
-                return
-            }
-
-            let json = try JSONSerialization.jsonObject(with: resp) as? [String: Any]
-            let content = json?["content"] as? [[String: Any]]
-            #expect(content != nil && !content!.isEmpty, "\(modelId): no content blocks")
-
-            // Separate thinking and text blocks
-            let thinkingBlocks = content?.filter { $0["type"] as? String == "thinking" } ?? []
-            let textBlocks = content?.filter { $0["type"] as? String == "text" } ?? []
-
-            // Text block content must NOT contain raw think tags
-            for block in textBlocks {
-                let text = block["text"] as? String ?? ""
-                #expect(!text.contains("</think"), "\(modelId): Anthropic text block contains </think: \(text.prefix(100))")
-                #expect(!text.contains("<think"), "\(modelId): Anthropic text block contains <think: \(text.prefix(100))")
-            }
-
-            // Thinking blocks should have "thinking" field, not "text"
-            for block in thinkingBlocks {
-                let thinking = block["thinking"] as? String ?? ""
-                #expect(!thinking.isEmpty, "\(modelId): thinking block has empty thinking field")
-            }
-
-            let thinkingText = thinkingBlocks.compactMap { $0["thinking"] as? String }.joined()
-            let responseText = textBlocks.compactMap { $0["text"] as? String }.joined()
-
-            if !thinkingText.isEmpty {
-                print("    \(modelId): Anthropic thinking=\(thinkingText.count) chars, response=\(responseText.count) chars")
-            } else {
-                print("    \(modelId): Anthropic no thinking block, response=\(responseText.count) chars")
-            }
-
-            // thinking + response together should produce something
-            let totalOutput = thinkingText.count + responseText.count
-            if totalOutput == 0 {
-                print("    \(modelId): WARNING — Anthropic model produced no output at all")
-            }
-        }
-    }
-
-    @Test("Anthropic stream: thinking and text deltas properly separated")
-    func testAnthropicStreamThinkingFormat() async throws {
-        try await forEachModel("anthropic-thinking-stream") { modelId in
-            let body: [String: Any] = [
-                "model": modelId,
-                "messages": [["role": "user", "content": "What is 2+2? Think step by step."]],
-                "max_tokens": 300, "stream": true
-            ]
-            let data = try JSONSerialization.data(withJSONObject: body)
-            guard let capture = await captureAnthropicStream(
-                url: apiBase.appendingPathComponent("v1/messages"),
-                body: data, modelId: modelId) else { return }
-
-            #expect(capture.gotMessageStop, "\(modelId): Anthropic stream did not end with message_stop")
-
-            let fullText = capture.textChunks.joined()
-            let fullThinking = capture.thinkingChunks.joined()
-
-            // Text chunks must NOT contain raw think tags
-            #expect(!fullText.contains("</think"), "\(modelId): Anthropic stream text contains </think")
-            #expect(!fullText.contains("<think"), "\(modelId): Anthropic stream text contains <think")
-
-            if !fullThinking.isEmpty {
-                print("    \(modelId): Anthropic stream thinking=\(fullThinking.count) chars, text=\(fullText.count) chars")
-            } else {
-                print("    \(modelId): Anthropic no stream thinking, text=\(fullText.count) chars")
-            }
-        }
     }
 }

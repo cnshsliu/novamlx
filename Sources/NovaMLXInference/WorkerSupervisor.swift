@@ -33,6 +33,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
     private let workerBinaryPath: String
 
     public private(set) var isRunning = false
+    private var pendingLoadModelId: String?
+    private var lastCrashTime: Date?
+    private static let restartCooldown: TimeInterval = 2.0
 
     public var onCrash: (() -> Void)?
 
@@ -80,6 +83,32 @@ public final class WorkerSupervisor: @unchecked Sendable {
         NovaMLXLog.info("[WorkerSupervisor] Worker started (pid=\(proc.processIdentifier))")
     }
 
+    /// Restart the worker if it's not running. Returns true if worker is ready.
+    public func ensureRunning() -> Bool {
+        lock.lock()
+        let running = isRunning
+        lock.unlock()
+        if running { return true }
+
+        // Respect crash cooldown to avoid rapid restart loops
+        if let lastCrash = lastCrashTime {
+            let elapsed = Date().timeIntervalSince(lastCrash)
+            if elapsed < Self.restartCooldown {
+                Thread.sleep(forTimeInterval: Self.restartCooldown - elapsed)
+            }
+        }
+
+        NovaMLXLog.warning("[WorkerSupervisor] Worker not running — attempting restart")
+        do {
+            try start()
+            NovaMLXLog.info("[WorkerSupervisor] Worker restarted successfully")
+            return true
+        } catch {
+            NovaMLXLog.error("[WorkerSupervisor] Worker restart failed: \(error)")
+            return false
+        }
+    }
+
     public func stop() {
         lock.lock()
         defer { lock.unlock() }
@@ -110,7 +139,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     public func sendLoad(modelId: String, path: String, config: ModelConfig) async throws {
         let msg = WorkerMessage(type: WorkerMessageType.load, modelId: modelId, modelPath: path, modelConfig: config)
+        pendingLoadModelId = modelId
         let response = try await sendAndWait(msg, requestId: modelId)
+        pendingLoadModelId = nil
         guard response.type == WorkerMessageType.loaded else {
             throw NovaMLXError.modelLoadFailed(modelId, underlying: NovaMLXError.apiError(response.errorMessage ?? "Unknown load error"))
         }
@@ -149,6 +180,10 @@ public final class WorkerSupervisor: @unchecked Sendable {
         let msg = WorkerMessage(type: WorkerMessageType.stream, requestId: requestId, request: codable)
 
         return AsyncThrowingStream { continuation in
+            if !self.ensureRunning() {
+                continuation.finish(throwing: NovaMLXError.inferenceFailed("Worker not running and restart failed"))
+                return
+            }
             self.lock.lock()
             self.streamContinuations[requestId] = continuation
             self.streamCompletionTokens[requestId] = 0
@@ -187,8 +222,10 @@ public final class WorkerSupervisor: @unchecked Sendable {
     }
 
     private func sendAndWait(_ msg: WorkerMessage, requestId: String) async throws -> WorkerMessage {
-        guard isRunning else {
-            throw NovaMLXError.inferenceFailed("Worker not running")
+        if !isRunning {
+            guard ensureRunning() else {
+                throw NovaMLXError.inferenceFailed("Worker not running and restart failed")
+            }
         }
 
         return try await withCheckedThrowingContinuation { continuation in
@@ -326,17 +363,21 @@ public final class WorkerSupervisor: @unchecked Sendable {
     private func handleWorkerCrash() {
         lock.lock()
         let wasRunning = isRunning
+        let crashedModelId = pendingLoadModelId
         isRunning = false
+        lastCrashTime = Date()
+        pendingLoadModelId = nil
 
         // Fail all pending requests
+        let crashMsg = crashedModelId.map { "Worker crashed while loading \($0)" } ?? "Worker crashed"
         for (_, cont) in pendingRequests {
-            cont.resume(throwing: NovaMLXError.inferenceFailed("Worker crashed"))
+            cont.resume(throwing: NovaMLXError.inferenceFailed(crashMsg))
         }
         pendingRequests.removeAll()
 
         // Fail all active streams
         for (_, cont) in streamContinuations {
-            cont.finish(throwing: NovaMLXError.inferenceFailed("Worker crashed"))
+            cont.finish(throwing: NovaMLXError.inferenceFailed(crashMsg))
         }
         streamContinuations.removeAll()
         streamFinishReasons.removeAll()
@@ -345,7 +386,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
         lock.unlock()
 
         if wasRunning {
-            NovaMLXLog.error("[WorkerSupervisor] Worker crashed! All pending requests failed.")
+            NovaMLXLog.error("[WorkerSupervisor] Worker crashed!\(crashedModelId.map { " While loading: \($0)" } ?? "")")
             onCrash?()
         }
     }

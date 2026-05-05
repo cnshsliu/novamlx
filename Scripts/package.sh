@@ -60,11 +60,21 @@ cat >"$APP_CONTENTS/Info.plist" <<'PLIST'
     <true/>
     <key>NSSupportsSuddenTermination</key>
     <true/>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>NovaMLX needs access to external drives to store and load AI models.</string>
 </dict>
 </plist>
 PLIST
 
 sed -i '' "s/VERSION_PLACEHOLDER/$VERSION/g" "$APP_CONTENTS/Info.plist"
+
+echo "→ Signing with entitlements..."
+ENTITLEMENTS="NovaMLX.entitlements"
+if [ -f "$ENTITLEMENTS" ]; then
+    codesign --force --deep --entitlements "$ENTITLEMENTS" --sign - "$DIST_DIR/$APP_NAME"
+else
+    codesign --force --deep --sign - "$DIST_DIR/$APP_NAME"
+fi
 
 DMG_NAME="NovaMLX-${VERSION}-arm64.dmg"
 TAR_NAME="NovaMLX-${VERSION}-arm64.tar.gz"

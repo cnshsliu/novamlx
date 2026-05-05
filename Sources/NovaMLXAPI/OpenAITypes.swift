@@ -176,6 +176,9 @@ public struct OpenAIRequest: Codable, Sendable {
     public let sessionId: String?
     public let responseFormat: OpenAIResponseFormat?
     public let thinkingBudget: Int?
+    public let enableThinking: Bool?
+    public let preserveThinking: Bool?
+    public let chatTemplateKwargs: [String: AnyCodable]?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools
@@ -191,6 +194,9 @@ public struct OpenAIRequest: Codable, Sendable {
         case responseFormat = "response_format"
         case streamOptions = "stream_options"
         case thinkingBudget = "thinking_budget"
+        case enableThinking = "enable_thinking"
+        case preserveThinking = "preserve_thinking"
+        case chatTemplateKwargs = "chat_template_kwargs"
     }
 
     public init(
@@ -213,7 +219,10 @@ public struct OpenAIRequest: Codable, Sendable {
         seed: UInt64? = nil,
         sessionId: String? = nil,
         responseFormat: OpenAIResponseFormat? = nil,
-        thinkingBudget: Int? = nil
+        thinkingBudget: Int? = nil,
+        enableThinking: Bool? = nil,
+        preserveThinking: Bool? = nil,
+        chatTemplateKwargs: [String: AnyCodable]? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -235,7 +244,48 @@ public struct OpenAIRequest: Codable, Sendable {
         self.sessionId = sessionId
         self.responseFormat = responseFormat
         self.thinkingBudget = thinkingBudget
+        self.enableThinking = enableThinking
+        self.preserveThinking = preserveThinking
+        self.chatTemplateKwargs = chatTemplateKwargs
     }
+
+    /// Resolve thinking toggle from multiple client formats:
+    /// 1. `enable_thinking: false` (Qwen / DashScope)
+    /// 2. `chat_template_kwargs.enable_thinking: false` (vLLM / SGLang)
+    /// 3. `chat_template_kwargs.thinking: false` (alternative Qwen)
+    public var resolvedEnableThinking: Bool? {
+        if let v = enableThinking { return v }
+        if let kwargs = chatTemplateKwargs {
+            if let ac = kwargs["enable_thinking"] {
+                if case .bool(let v) = ac { return v }
+            }
+            if let ac = kwargs["thinking"] {
+                if case .bool(let v) = ac { return v }
+            }
+        }
+        return nil
+    }
+
+    /// Resolve `preserve_thinking` toggle from multiple client formats:
+    /// 1. `preserve_thinking: true` (top-level)
+    /// 2. `chat_template_kwargs.preserve_thinking: true` (vLLM / SGLang)
+    ///
+    /// When set, the chat template is asked to keep historical
+    /// `reasoning_content` blocks in the rendered prompt — useful for models
+    /// that benefit from re-grounding on prior reasoning (Qwen3.5/3.6).
+    /// Templates that don't reference the variable simply ignore it (Jinja
+    /// `is defined` evaluates false), so forwarding to non-Qwen families is
+    /// safe.
+    public var resolvedPreserveThinking: Bool? {
+        if let v = preserveThinking { return v }
+        if let kwargs = chatTemplateKwargs {
+            if let ac = kwargs["preserve_thinking"] {
+                if case .bool(let v) = ac { return v }
+            }
+        }
+        return nil
+    }
+
 }
 
 public enum MessageContent: Codable, Sendable {

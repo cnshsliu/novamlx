@@ -111,7 +111,9 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             jsonSchemaDef: request.jsonSchemaDef,
             regexPattern: request.regexPattern,
             gbnfGrammar: request.gbnfGrammar,
-            thinkingBudget: request.thinkingBudget ?? thinkingBudget
+            thinkingBudget: request.thinkingBudget ?? thinkingBudget,
+            enableThinking: request.enableThinking,
+            preserveThinking: request.preserveThinking
         )
     }
 }

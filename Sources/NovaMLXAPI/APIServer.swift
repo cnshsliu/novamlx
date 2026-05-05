@@ -491,7 +491,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     },
                     temperature: ocrSampling.temperature,
                     maxTokens: ocrSampling.maxTokens,
-                    topP: anthropicReq.topP, stream: false, stop: ocrStop
+                    topP: anthropicReq.topP, topK: anthropicReq.topK,
+                    stream: false, stop: ocrStop,
+                    thinkingBudget: anthropicReq.thinkingBudget,
+                    enableThinking: anthropicReq.resolvedEnableThinking,
+                    preserveThinking: anthropicReq.resolvedPreserveThinking
                 )
 
                 let result = try await inference.generate(request)
@@ -504,16 +508,48 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     : result.completionTokens
 
                 var content: [AnthropicContentBlock] = []
-                // Parse thinking tags from raw output — match streaming's model-aware detection
-                let isAnthropicImplicit = ModelContainer.isImplicitThinkingModel(for: anthropicReq.model)
-                let thinkingParser = ThinkingParser(expectImplicitThinking: isAnthropicImplicit)
-                _ = thinkingParser.feed(result.text)
-                let finalResult = thinkingParser.finalize()
-                if !finalResult.thinking.isEmpty {
-                    content.append(AnthropicContentBlock(type: "thinking", thinking: finalResult.thinking))
+                // Scrub control tokens and parse thinking
+                let shouldParseThinking = anthropicReq.resolvedEnableThinking != false
+                var scrubbedText = result.text
+                if scrubbedText.contains("<|") || (!shouldParseThinking && scrubbedText.contains("<think")) {
+                    if let regex = try? NSRegularExpression(pattern: shouldParseThinking ? "<\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)" : "<(?:\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)|/?think[^>]*)>") {
+                        let nsRange = NSRange(scrubbedText.startIndex..., in: scrubbedText)
+                        let matches = regex.matches(in: scrubbedText, range: nsRange)
+                        for match in matches.reversed() {
+                            if let range = Range(match.range, in: scrubbedText) {
+                                if shouldParseThinking {
+                                    let matched = String(scrubbedText[range])
+                                    if matched.contains("think") || matched.contains("thinking") { continue }
+                                }
+                                scrubbedText.removeSubrange(range)
+                            }
+                        }
+                    }
                 }
-                if !finalResult.response.isEmpty {
-                    content.append(AnthropicContentBlock(text: finalResult.response))
+                if shouldParseThinking {
+                    let isAnthropicImplicit = ModelContainer.isImplicitThinkingModel(for: anthropicReq.model)
+                    let thinkingParser = ThinkingParser(expectImplicitThinking: isAnthropicImplicit)
+                    _ = thinkingParser.feed(scrubbedText)
+                    let finalResult = thinkingParser.finalize()
+                    // Truncate hallucinated role markers
+                    var cleanThinking = finalResult.thinking
+                    var cleanResponse = finalResult.response
+                    let hallucPatterns = ["\nuser\n", "\nmodel\n", "\nassistant\n", "user\n", "model\n"]
+                    for p in hallucPatterns {
+                        if let range = cleanThinking.range(of: p) { cleanThinking = String(cleanThinking[..<range.lowerBound]) }
+                        if let range = cleanResponse.range(of: p) { cleanResponse = String(cleanResponse[..<range.lowerBound]) }
+                    }
+                    if !cleanThinking.isEmpty {
+                        content.append(AnthropicContentBlock(type: "thinking", thinking: cleanThinking))
+                    }
+                    if !cleanResponse.isEmpty {
+                        content.append(AnthropicContentBlock(text: cleanResponse))
+                    }
+                } else {
+                    // enable_thinking=false — all output is content, no thinking
+                    if !scrubbedText.isEmpty {
+                        content.append(AnthropicContentBlock(text: scrubbedText))
+                    }
                 }
                 if let toolCalls = result.toolCalls {
                     for tc in toolCalls {
@@ -1167,6 +1203,19 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let info = DeviceInfo.current()
                 return try Self.jsonResponse(info)
             }
+            Get("/admin/api/chat-template/diagnose/{modelId}") { [modelManager] _, context in
+                // The {modelId} parameter is URL-encoded by the client (slashes
+                // become %2F); Hummingbird's parameter capture decodes that.
+                let modelId = try context.parameters.require("modelId")
+                // Look up the registered family for this model.
+                let family: NovaMLXCore.ModelFamily = modelManager.getRecord(modelId)?.family ?? .other
+                let report = ChatTemplateDiagnostics.diagnose(
+                    modelId: modelId,
+                    modelsDir: NovaMLXPaths.modelsDir,
+                    family: family
+                )
+                return try Self.jsonResponse(report)
+            }
             Post("/admin/api/bench/start") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let benchReq = try JSONDecoder().decode(BenchmarkRequest.self, from: body)
@@ -1676,20 +1725,56 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             sessionId: sessionId, responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
-            thinkingBudget: openAIReq.thinkingBudget
+            thinkingBudget: openAIReq.thinkingBudget,
+            enableThinking: openAIReq.resolvedEnableThinking,
+            preserveThinking: openAIReq.resolvedPreserveThinking
         )
 
         let result = try await inference.generate(request)
         let finishReason: String
         let message: OpenAIChatMessage
 
-        // Parse thinking tags from raw output — match streaming's model-aware detection
-        let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
-        let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
-        _ = thinkingParser.feed(result.text)
-        let finalResult = thinkingParser.finalize()
-        let thinkingText = finalResult.thinking.isEmpty ? nil : finalResult.thinking
-        let responseText = finalResult.response
+        // Scrub control tokens from raw output
+        var scrubbedText = result.text
+        let shouldParseThinking = openAIReq.resolvedEnableThinking != false
+        // When enable_thinking=false, scrub ALL control tokens including think tags
+        if scrubbedText.contains("<|") || (!shouldParseThinking && scrubbedText.contains("<think")) {
+            if let regex = try? NSRegularExpression(pattern: shouldParseThinking ? "<\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)" : "<(?:\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)|/?think[^>]*)>") {
+                let nsRange = NSRange(scrubbedText.startIndex..., in: scrubbedText)
+                let matches = regex.matches(in: scrubbedText, range: nsRange)
+                for match in matches.reversed() {
+                    if let range = Range(match.range, in: scrubbedText) {
+                        if shouldParseThinking {
+                            let matched = String(scrubbedText[range])
+                            if matched.contains("think") || matched.contains("thinking") { continue }
+                        }
+                        scrubbedText.removeSubrange(range)
+                    }
+                }
+            }
+        }
+        let thinkingText: String?
+        let responseText: String
+        if shouldParseThinking {
+            let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
+            let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
+            _ = thinkingParser.feed(scrubbedText)
+            let finalResult = thinkingParser.finalize()
+            // Truncate hallucinated role markers
+            var cleanThinking = finalResult.thinking
+            var cleanResponse = finalResult.response
+            let hallucPatterns = ["\nuser\n", "\nmodel\n", "\nassistant\n", "user\n", "model\n"]
+            for p in hallucPatterns {
+                if let range = cleanThinking.range(of: p) { cleanThinking = String(cleanThinking[..<range.lowerBound]) }
+                if let range = cleanResponse.range(of: p) { cleanResponse = String(cleanResponse[..<range.lowerBound]) }
+            }
+            thinkingText = cleanThinking.isEmpty ? nil : cleanThinking
+            responseText = cleanResponse
+        } else {
+            // enable_thinking=false — all output is content, no thinking
+            responseText = scrubbedText
+            thinkingText = nil
+        }
 
         // Engine-produced tool calls take priority
         if let engineToolCalls = result.toolCalls, !engineToolCalls.isEmpty {
@@ -1775,7 +1860,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             sessionId: sessionId, responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
-            thinkingBudget: openAIReq.thinkingBudget
+            thinkingBudget: openAIReq.thinkingBudget,
+            enableThinking: openAIReq.resolvedEnableThinking,
+            preserveThinking: openAIReq.resolvedPreserveThinking
         )
 
         let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request))
@@ -1796,8 +1883,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try await writer.write(ByteBuffer(string: "data: \(String(data: roleData, encoding: .utf8) ?? "")\n\n"))
 
                 var completionTokenCount = 0
+                let shouldParseThinking = openAIReq.resolvedEnableThinking != false
                 let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
-                let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
+                let thinkingParser = shouldParseThinking ? ThinkingParser(expectImplicitThinking: isImplicitModel) : nil
+                // Track content already streamed via feed() so finalize() only
+                // emits the unflushed leftover (preCloseContent + remaining buffer).
+                // Without this, content that feed() yielded incrementally is also
+                // included in finalize().response and would be emitted twice.
+                var streamedResponse = ""
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
@@ -1818,13 +1911,26 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                         } else if let finish = token.finishReason {
                             // Flush ThinkingParser before emitting stop chunk
-                            let finalParsed = thinkingParser.finalize()
-                            if !finalParsed.response.isEmpty {
-                                completionTokenCount += 1
-                                let respDelta = OpenAIDelta(content: finalParsed.response)
-                                let respChunk = OpenAIStreamChunk(id: chunkId, model: openAIReq.model, choices: [OpenAIStreamChoice(index: 0, delta: respDelta)])
-                                let respData = try JSONEncoder().encode(respChunk)
-                                try await writer.write(ByteBuffer(string: "data: \(String(data: respData, encoding: .utf8) ?? "")\n\n"))
+                            if let tp = thinkingParser {
+                                let finalParsed = tp.finalize()
+                                // Strip the prefix that was already emitted via feed() so
+                                // we only emit the unflushed leftover.
+                                var cleanResp = finalParsed.response
+                                if !streamedResponse.isEmpty, cleanResp.hasPrefix(streamedResponse) {
+                                    cleanResp = String(cleanResp.dropFirst(streamedResponse.count))
+                                }
+                                // Truncate hallucinated role markers in finalize
+                                let hallucPatterns = ["\nuser\n", "\nmodel\n", "\nassistant\n", "user\n", "model\n"]
+                                for p in hallucPatterns {
+                                    if let range = cleanResp.range(of: p) { cleanResp = String(cleanResp[..<range.lowerBound]) }
+                                }
+                                if !cleanResp.isEmpty {
+                                    completionTokenCount += 1
+                                    let respDelta = OpenAIDelta(content: cleanResp)
+                                    let respChunk = OpenAIStreamChunk(id: chunkId, model: openAIReq.model, choices: [OpenAIStreamChoice(index: 0, delta: respDelta)])
+                                    let respData = try JSONEncoder().encode(respChunk)
+                                    try await writer.write(ByteBuffer(string: "data: \(String(data: respData, encoding: .utf8) ?? "")\n\n"))
+                                }
                             }
                             let finalChunk = OpenAIStreamChunk(
                                 id: chunkId,
@@ -1841,18 +1947,64 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             try await writer.write(ByteBuffer(string: "data: \(String(data: finalData, encoding: .utf8) ?? "")\n\n"))
                         } else {
                             completionTokenCount += 1
-                            let parsed = thinkingParser.feed(token.text)
-                            if parsed.text.isEmpty { continue }
-                            let delta: OpenAIDelta = parsed.type == .thinking
-                                ? OpenAIDelta(reasoningContent: parsed.text)
-                                : OpenAIDelta(content: parsed.text)
-                            let chunk = OpenAIStreamChunk(
-                                id: chunkId,
-                                model: openAIReq.model,
-                                choices: [OpenAIStreamChoice(index: 0, delta: delta)]
-                            )
-                            let data = try JSONEncoder().encode(chunk)
-                            try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
+                            var cleanText = token.text
+                            if cleanText.contains("<|") || (!shouldParseThinking && cleanText.contains("<think")) {
+                                // When enable_thinking=false, scrub ALL control tokens including think tags
+                                let pattern = shouldParseThinking
+                                    ? "<\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)"
+                                    : "<(?:\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)|/?think[^>]*)>"
+                                if let regex = try? NSRegularExpression(pattern: pattern) {
+                                    let nsRange = NSRange(cleanText.startIndex..., in: cleanText)
+                                    let matches = regex.matches(in: cleanText, range: nsRange)
+                                    for match in matches.reversed() {
+                                        if let range = Range(match.range, in: cleanText) {
+                                            if shouldParseThinking {
+                                                let matched = String(cleanText[range])
+                                                if matched.contains("think") || matched.contains("thinking") { continue }
+                                            }
+                                            cleanText.removeSubrange(range)
+                                        }
+                                    }
+                                }
+                            }
+                            if let tp = thinkingParser {
+                                // Drain repeatedly: a single token.text may contain
+                                // both a thinking block and content (e.g. when an
+                                // upstream scrubber normalizes a non-standard
+                                // thinking marker into <think>...</think> in one
+                                // shot). feed() emits one type at a time, breaking
+                                // on type transitions, so we loop until empty.
+                                var remaining = cleanText
+                                while true {
+                                    let parsed = tp.feed(remaining)
+                                    remaining = ""
+                                    if parsed.text.isEmpty { break }
+                                    if parsed.type == .content {
+                                        streamedResponse += parsed.text
+                                    }
+                                    let delta: OpenAIDelta = parsed.type == .thinking
+                                        ? OpenAIDelta(reasoningContent: parsed.text)
+                                        : OpenAIDelta(content: parsed.text)
+                                    let chunk = OpenAIStreamChunk(
+                                        id: chunkId,
+                                        model: openAIReq.model,
+                                        choices: [OpenAIStreamChoice(index: 0, delta: delta)]
+                                    )
+                                    let data = try JSONEncoder().encode(chunk)
+                                    try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
+                                }
+                            } else {
+                                // enable_thinking=false — all output is content
+                                if cleanText.isEmpty { continue }
+                                let delta = OpenAIDelta(content: cleanText)
+                                let chunk = OpenAIStreamChunk(
+                                    id: chunkId,
+                                    model: openAIReq.model,
+                                    choices: [OpenAIStreamChoice(index: 0, delta: delta)]
+                                )
+                                let data = try JSONEncoder().encode(chunk)
+                                try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
+                            }
                         }
                     case .keepAlive:
                         try await writer.write(ByteBuffer(string: ": keep-alive\n\n"))
@@ -1920,7 +2072,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             model: anthropicReq.model, messages: messages,
             temperature: ocrSampling.temperature,
             maxTokens: ocrSampling.maxTokens,
-            topP: anthropicReq.topP, stream: true, stop: ocrStop
+            topP: anthropicReq.topP, topK: anthropicReq.topK,
+            stream: true, stop: ocrStop,
+            thinkingBudget: anthropicReq.thinkingBudget,
+            enableThinking: anthropicReq.resolvedEnableThinking,
+            preserveThinking: anthropicReq.resolvedPreserveThinking
         )
 
         let reqTag = request.id.uuidString.prefix(8)
@@ -1942,11 +2098,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 NovaMLXLog.info("[SSE:\(reqTag)] Waiting for first token from inference stream...")
 
+                let shouldParseThinking = anthropicReq.resolvedEnableThinking != false
                 let isAnthropicImplicitModel = ModelContainer.isImplicitThinkingModel(for: anthropicReq.model)
-                let thinkingParser = ThinkingParser(expectImplicitThinking: isAnthropicImplicitModel)
+                let thinkingParser = shouldParseThinking ? ThinkingParser(expectImplicitThinking: isAnthropicImplicitModel) : nil
                 var currentBlockIndex = 0
                 var isInThinkingBlock = false
                 var hasStartedTextBlock = false
+                // Track content already streamed via feed() so finalize() only
+                // emits leftover. Mirrors the OpenAI streaming path. See comment
+                // in handleStreamChat for rationale.
+                var streamedResponse = ""
 
                 func startThinkingBlock() async throws {
                     let evt = AnthropicStreamEvent.contentBlockStart(index: currentBlockIndex, blockType: "thinking")
@@ -1974,8 +2135,19 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     case .token(let token):
                         if token.finishReason != nil {
                             // Flush ThinkingParser before closing blocks
-                            let finalParsed = thinkingParser.finalize()
-                            if !finalParsed.response.isEmpty {
+                            if let tp = thinkingParser {
+                                let finalParsed = tp.finalize()
+                                // Strip prefix already emitted via feed()
+                                var cleanFinalResp = finalParsed.response
+                                if !streamedResponse.isEmpty, cleanFinalResp.hasPrefix(streamedResponse) {
+                                    cleanFinalResp = String(cleanFinalResp.dropFirst(streamedResponse.count))
+                                }
+                                // Truncate hallucinated role markers
+                                let hallucPatterns = ["\nuser\n", "\nmodel\n", "\nassistant\n", "user\n", "model\n"]
+                                for p in hallucPatterns {
+                                    if let range = cleanFinalResp.range(of: p) { cleanFinalResp = String(cleanFinalResp[..<range.lowerBound]) }
+                                }
+                                if !cleanFinalResp.isEmpty {
                                 if isInThinkingBlock {
                                     try await endCurrentBlock()
                                 }
@@ -1983,9 +2155,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                     try await startTextBlock()
                                 }
                                 tokenCount += 1
-                                let deltaEvent = AnthropicStreamEvent.textDelta(finalParsed.response)
+                                let deltaEvent = AnthropicStreamEvent.textDelta(cleanFinalResp)
                                 let deltaData = try JSONEncoder().encode(deltaEvent)
                                 try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+                                }
                             }
                             // Close current block if open
                             if isInThinkingBlock || hasStartedTextBlock {
@@ -2009,29 +2182,64 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             }
                             tokenCount += 1
 
-                            let parsed = thinkingParser.feed(token.text)
-                            if parsed.text.isEmpty { continue }
-
-                            if parsed.type == .thinking {
-                                if !isInThinkingBlock {
-                                    if hasStartedTextBlock {
-                                        try await endCurrentBlock()
+                            // Scrub control tokens from stream chunk
+                            var cleanText = token.text
+                            if cleanText.contains("<|") {
+                                if let regex = try? NSRegularExpression(pattern: "<\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)") {
+                                    let nsRange = NSRange(cleanText.startIndex..., in: cleanText)
+                                    let matches = regex.matches(in: cleanText, range: nsRange)
+                                    for match in matches.reversed() {
+                                        if let range = Range(match.range, in: cleanText) {
+                                            let matched = String(cleanText[range])
+                                            if !matched.contains("think") && !matched.contains("thinking") {
+                                                cleanText.removeSubrange(range)
+                                            }
+                                        }
                                     }
-                                    try await startThinkingBlock()
                                 }
-                                let deltaEvent = AnthropicStreamEvent.thinkingDelta(parsed.text)
-                                let deltaData = try JSONEncoder().encode(deltaEvent)
-                                try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+                            }
+
+                            // Drain repeatedly: see handleStreamChat for rationale.
+                            var remaining = cleanText
+                            if let tp = thinkingParser {
+                                while true {
+                                    let parsed = tp.feed(remaining)
+                                    remaining = ""
+                                    if parsed.text.isEmpty { break }
+
+                                    if parsed.type == .thinking {
+                                        if !isInThinkingBlock {
+                                            if hasStartedTextBlock {
+                                                try await endCurrentBlock()
+                                            }
+                                            try await startThinkingBlock()
+                                        }
+                                        let deltaEvent = AnthropicStreamEvent.thinkingDelta(parsed.text)
+                                        let deltaData = try JSONEncoder().encode(deltaEvent)
+                                        try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+                                    } else {
+                                        streamedResponse += parsed.text
+                                        if isInThinkingBlock {
+                                            try await endCurrentBlock()
+                                        }
+                                        if !hasStartedTextBlock {
+                                            try await startTextBlock()
+                                        }
+                                        let deltaEvent = AnthropicStreamEvent.textDelta(parsed.text)
+                                        let deltaData = try JSONEncoder().encode(deltaEvent)
+                                        try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
+                                    }
+                                }
                             } else {
-                                if isInThinkingBlock {
-                                    try await endCurrentBlock()
+                                // No thinking parser — emit text directly
+                                if !cleanText.isEmpty {
+                                    if !hasStartedTextBlock {
+                                        try await startTextBlock()
+                                    }
+                                    let deltaEvent = AnthropicStreamEvent.textDelta(cleanText)
+                                    let deltaData = try JSONEncoder().encode(deltaEvent)
+                                    try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
                                 }
-                                if !hasStartedTextBlock {
-                                    try await startTextBlock()
-                                }
-                                let deltaEvent = AnthropicStreamEvent.textDelta(parsed.text)
-                                let deltaData = try JSONEncoder().encode(deltaEvent)
-                                try await writer.write(ByteBuffer(string: "event: content_block_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
                             }
                         }
                     case .keepAlive:

@@ -72,6 +72,23 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// This flag lets us suppress "final"/"analysis" when they follow a control token.
     var previousTokenWasControl: Bool = false
 
+    /// Harmony channel type seen between a `<|channel|>` and `<|message|>`. When a
+    /// channel-type residue word ("analysis" / "final" / "commentary") arrives
+    /// immediately after the scrubbed `<|channel|>`, we remember it so the
+    /// subsequent scrubbed `<|message|>` can emit the appropriate `<think>` /
+    /// `</think>` boundary instead of an empty string. This is the streaming
+    /// counterpart of `MLXEngine.scrubControlTokens`'s text-level Harmony
+    /// normalization — necessary because in streaming the 3-token boundary
+    /// (`<|channel|>`, channel-type, `<|message|>`) is split across deltas.
+    var pendingHarmonyChannel: String? = nil
+
+    /// Tracks whether we have emitted an opening `<think>` tag without yet
+    /// emitting `</think>`. Guards against malformed output if the model
+    /// emits `<|channel|>final<|message|>` without a preceding analysis
+    /// channel: in that case we strip the boundary instead of emitting a
+    /// stray closing `</think>`.
+    var harmonyInThinking: Bool = false
+
     mutating func decodeNextToken(_ tokenId: Int, tokenizer: Tokenizer) -> String? {
         accumulatedTokenIds.append(tokenId)
         let fullText = tokenizer.decode(accumulatedTokenIds)
@@ -1122,24 +1139,82 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                     let decoded: String
                     if let tok = container.tokenizer, let delta = seq.decodeNextToken(tokenId, tokenizer: tok) {
+                        // Inspect the RAW delta (before scrubbing) for Harmony
+                        // channel-type residue words. `MLXEngine.scrubControlTokens`
+                        // scrubs `analysis` / `final` / `commentary` to "" via its
+                        // `harmonyResidueWords` filter, so by the time we look at
+                        // `scrubbed` the channel-type information is gone. We need
+                        // the raw delta to detect "this empty scrubbed result is
+                        // a channel-type residue word" vs "this empty scrubbed
+                        // result is a control token".
+                        let rawTrimmed = delta.trimmingCharacters(in: .whitespaces)
                         let scrubbed = MLXEngine.scrubControlTokens(delta)
 
-                        // Harmony format: suppress residue words (analysis, final, user, etc.)
-                        // that appear as standalone tokens between scrubbed control tokens.
-                        // Pattern: <|channel|> → scrubbed to "" → "final" → passes through → <|message|> → scrubbed to ""
-                        // The "final" token would be the output, but it's a channel type, not content.
-                        if scrubbed.isEmpty && !delta.isEmpty {
-                            // Previous token was a control token that got scrubbed
-                            seq.previousTokenWasControl = true
+                        // Harmony streaming flow (3-token boundary, split across deltas):
+                        //   <|channel|>  → scrubbed=""  delta="<|channel|>"   (control token)
+                        //   "analysis"   → scrubbed=""  delta="analysis"      (residue word)
+                        //   <|message|>  → scrubbed=""  delta="<|message|>"   (control token)
+                        //   ...thinking text streams normally...
+                        //   <|end|>      → scrubbed=""
+                        //   <|start|>    → scrubbed=""
+                        //   "assistant"  → scrubbed=""  delta="assistant"     (residue word)
+                        //   <|channel|>  → scrubbed=""
+                        //   "final"      → scrubbed=""  delta="final"
+                        //   <|message|>  → scrubbed=""
+                        //   ...final text streams normally...
+                        //   <|return|>   → scrubbed=""  (stop signal handled separately)
+                        //
+                        // We distinguish "control token" from "residue word" via the
+                        // raw delta: control tokens contain `<|`, residue words don't.
+                        let isHarmonyResidueWord =
+                            scrubbed.isEmpty && !delta.isEmpty &&
+                            !delta.contains("<|") && !delta.contains("|>") &&
+                            MLXEngine.harmonyResidueWords.contains(rawTrimmed)
+                        let isControlTokenChunk =
+                            scrubbed.isEmpty && !delta.isEmpty && !isHarmonyResidueWord
+
+                        if isHarmonyResidueWord {
+                            // For channel-type residue words ("analysis", "final",
+                            // "commentary"), remember which one — the next control-
+                            // token chunk (i.e. `<|message|>`) will emit the matching
+                            // boundary tag. For role-type residues ("assistant",
+                            // "user", etc.) just drop them.
+                            if rawTrimmed == "analysis" || rawTrimmed == "final" || rawTrimmed == "commentary" {
+                                seq.pendingHarmonyChannel = rawTrimmed
+                            }
+                            seq.previousTokenWasControl = false
                             decoded = ""
+                        } else if isControlTokenChunk {
+                            // If we have a pending Harmony channel type, this is
+                            // the closing `<|message|>` of the channel header —
+                            // emit the appropriate boundary.
+                            if let channel = seq.pendingHarmonyChannel {
+                                seq.pendingHarmonyChannel = nil
+                                switch channel {
+                                case "analysis":
+                                    decoded = "<think>"
+                                    seq.harmonyInThinking = true
+                                case "final":
+                                    if seq.harmonyInThinking {
+                                        decoded = "</think>"
+                                        seq.harmonyInThinking = false
+                                    } else {
+                                        // Model went straight to final without analysis.
+                                        // No prior <think> to close — just strip the boundary.
+                                        decoded = ""
+                                    }
+                                default:
+                                    // commentary / unknown channel — strip entirely
+                                    decoded = ""
+                                }
+                                seq.previousTokenWasControl = true
+                            } else {
+                                seq.previousTokenWasControl = true
+                                decoded = ""
+                            }
                         } else if seq.previousTokenWasControl && !scrubbed.isEmpty {
                             seq.previousTokenWasControl = false
-                            // Check if this is a known residue word between control tokens
-                            if MLXEngine.harmonyResidueWords.contains(scrubbed.trimmingCharacters(in: .whitespaces)) {
-                                decoded = ""
-                            } else {
-                                decoded = scrubbed
-                            }
+                            decoded = scrubbed
                         } else {
                             seq.previousTokenWasControl = false
                             decoded = scrubbed
@@ -1194,6 +1269,17 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                     if isEOS || atMax || hitStop || hitControlToken {
                         let finishReason: FinishReason = atMax ? .length : .stop
+                        // Harmony: if generation ends while still in the
+                        // analysis channel (no `<|channel|>final<|message|>`
+                        // emitted yet), close the open `<think>` block so
+                        // `ThinkingParser` can finalize cleanly. Without
+                        // this, the parser sees an unclosed `<think>` and
+                        // its fallback promotes the entire buffer to
+                        // `content`, leaving `reasoning_content` empty.
+                        if seq.harmonyInThinking {
+                            seq.continuation.yield(Token(id: 0, text: "</think>"))
+                            seq.harmonyInThinking = false
+                        }
                         seq.continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
                         seq.continuation.finish()
                         seq.isFinished = true

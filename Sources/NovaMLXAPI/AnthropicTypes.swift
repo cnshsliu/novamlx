@@ -26,15 +26,24 @@ public struct AnthropicRequest: Codable, Sendable {
     public let system: AnthropicContent?
     public let temperature: Double?
     public let topP: Double?
+    public let topK: Int?
     public let stream: Bool?
     public let stopSequences: [String]?
     public let tools: [AnthropicTool]?
     public let toolChoice: AnyCodable?
+    public let thinkingBudget: Int?
+    public let enableThinking: Bool?
+    public let preserveThinking: Bool?
+    public let chatTemplateKwargs: [String: AnyCodable]?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, maxTokens = "max_tokens", system, temperature
-        case topP = "top_p", stream, stopSequences = "stop_sequences"
+        case topP = "top_p", topK = "top_k", stream, stopSequences = "stop_sequences"
         case tools, toolChoice = "tool_choice"
+        case thinkingBudget = "thinking_budget"
+        case enableThinking = "enable_thinking"
+        case preserveThinking = "preserve_thinking"
+        case chatTemplateKwargs = "chat_template_kwargs"
     }
 
     public init(
@@ -44,10 +53,15 @@ public struct AnthropicRequest: Codable, Sendable {
         system: AnthropicContent? = nil,
         temperature: Double? = nil,
         topP: Double? = nil,
+        topK: Int? = nil,
         stream: Bool? = nil,
         stopSequences: [String]? = nil,
         tools: [AnthropicTool]? = nil,
-        toolChoice: AnyCodable? = nil
+        toolChoice: AnyCodable? = nil,
+        thinkingBudget: Int? = nil,
+        enableThinking: Bool? = nil,
+        preserveThinking: Bool? = nil,
+        chatTemplateKwargs: [String: AnyCodable]? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -55,10 +69,40 @@ public struct AnthropicRequest: Codable, Sendable {
         self.system = system
         self.temperature = temperature
         self.topP = topP
+        self.topK = topK
         self.stream = stream
         self.stopSequences = stopSequences
         self.tools = tools
         self.toolChoice = toolChoice
+        self.thinkingBudget = thinkingBudget
+        self.enableThinking = enableThinking
+        self.preserveThinking = preserveThinking
+        self.chatTemplateKwargs = chatTemplateKwargs
+    }
+
+    /// Resolve thinking toggle from multiple client formats, mirrors OpenAI pattern
+    public var resolvedEnableThinking: Bool? {
+        if let v = enableThinking { return v }
+        if let kwargs = chatTemplateKwargs {
+            if let ac = kwargs["enable_thinking"] {
+                if case .bool(let v) = ac { return v }
+            }
+            if let ac = kwargs["thinking"] {
+                if case .bool(let v) = ac { return v }
+            }
+        }
+        return nil
+    }
+
+    /// Resolve preserve_thinking from multiple client formats, mirrors OpenAI pattern
+    public var resolvedPreserveThinking: Bool? {
+        if let v = preserveThinking { return v }
+        if let kwargs = chatTemplateKwargs {
+            if let ac = kwargs["preserve_thinking"] {
+                if case .bool(let v) = ac { return v }
+            }
+        }
+        return nil
     }
 }
 

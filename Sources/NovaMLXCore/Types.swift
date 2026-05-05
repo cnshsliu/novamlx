@@ -204,6 +204,13 @@ public struct InferenceRequest: @unchecked Sendable {
     public let regexPattern: String?
     public let gbnfGrammar: String?
     public let thinkingBudget: Int?
+    public let enableThinking: Bool?
+    /// When true, the chat template is asked to keep historical
+    /// `reasoning_content` blocks in the rendered prompt (Qwen3.5/3.6's
+    /// `preserve_thinking` Jinja kwarg). Templates that don't reference the
+    /// variable ignore it via Jinja `is defined` semantics, so forwarding to
+    /// non-Qwen families is safe.
+    public let preserveThinking: Bool?
     /// Draft model ID for speculative decoding. If provided, the engine uses
     /// SpeculativeTokenIterator (draft-model verify) instead of plain autoregressive decode.
     /// Both models must share the same tokenizer.
@@ -233,6 +240,8 @@ public struct InferenceRequest: @unchecked Sendable {
         regexPattern: String? = nil,
         gbnfGrammar: String? = nil,
         thinkingBudget: Int? = nil,
+        enableThinking: Bool? = nil,
+        preserveThinking: Bool? = nil,
         draftModel: String? = nil,
         numDraftTokens: Int? = nil
     ) {
@@ -257,6 +266,8 @@ public struct InferenceRequest: @unchecked Sendable {
         self.regexPattern = regexPattern
         self.gbnfGrammar = gbnfGrammar
         self.thinkingBudget = thinkingBudget
+        self.enableThinking = enableThinking
+        self.preserveThinking = preserveThinking
         self.draftModel = draftModel
         self.numDraftTokens = numDraftTokens
     }

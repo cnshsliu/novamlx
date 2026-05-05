@@ -1,4 +1,6 @@
 import Foundation
+import NovaMLXCore
+import NovaMLXUtils
 
 /// Default processor — fallback for unknown model families.
 /// Uses detected template format for format-based behavior.
@@ -58,7 +60,11 @@ final class DefaultProcessor: ChatTemplateProcessor, @unchecked Sendable {
         return template.contains("<think") || template.contains("<thinking")
     }
 
-    func hallucinationPatterns() -> [String] { [] }
+    func hallucinationPatterns() -> [String] {
+        // Use the registry's "other" entry — conservative defaults that catch
+        // the most common bare-text turn impersonations across all families.
+        ChatTemplateRegistry.shared.familyConfig(for: .other).hallucinationPatterns
+    }
 
     func scrubControlTokens(_ text: String) -> String {
         SharedControlTokenLogic.scrubControlTokens(text)
@@ -78,6 +84,14 @@ final class DefaultProcessor: ChatTemplateProcessor, @unchecked Sendable {
     }
 
     func shouldStopForHallucination(generatedText: String, completionTokenCount: Int) -> Bool {
-        false
+        guard completionTokenCount > 20 else { return false }
+        let patterns = hallucinationPatterns()
+        guard !patterns.isEmpty else { return false }
+        for pattern in patterns {
+            if generatedText.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 }

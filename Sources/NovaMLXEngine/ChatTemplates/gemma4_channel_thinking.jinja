@@ -1,0 +1,50 @@
+{#-
+  Corrected chat template for Gemma-4 26B-A4B / 31B (channel-thought) models.
+
+  The mlx-community quantized repos ship a stripped-down chat template that
+  drops the `enable_thinking` handling. Without that handling the `<|think|>`
+  token is never injected into the system prompt, and the model emits an
+  empty `<|channel>thought\n<channel|>` block followed by content — making
+  reasoning_content always empty regardless of the request flag.
+
+  Per the official google/gemma-4-26B-A4B-it model card:
+    "Trigger Thinking: Thinking is enabled by including the `<|think|>` token
+     at the start of the system prompt. To disable thinking, remove the token."
+
+  This template restores that behavior on top of the model's <|turn>role
+  message format.
+-#}
+{%- set ns = namespace(prev_message_type=None) -%}
+{%- set loop_messages = messages -%}
+{{ bos_token }}
+{#- A system turn is required whenever (a) the caller passes a system/developer
+    message, OR (b) enable_thinking=true (so we have somewhere to inject the
+    <|think|> trigger token). -#}
+{%- if (enable_thinking is defined and enable_thinking) or messages[0]['role'] in ['system', 'developer'] -%}
+{{- '<|turn>system\n' -}}
+{%- if enable_thinking is defined and enable_thinking -%}
+{{- '<|think|>\n' -}}
+{%- endif -%}
+{%- if messages[0]['role'] in ['system', 'developer'] -%}
+{{- messages[0]['content'] | trim -}}
+{{- '\n' -}}
+{%- set loop_messages = messages[1:] -%}
+{%- endif -%}
+{%- endif -%}
+{%- for message in loop_messages -%}
+{%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}
+{{- '<|turn>' + role + '\n' -}}
+{%- if message['content'] is string -%}
+{{- message['content'] | trim -}}
+{%- elif message['content'] is sequence -%}
+{%- for item in message['content'] -%}
+{%- if item['type'] == 'text' -%}
+{{- item['text'] | trim -}}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{{- '\n' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- '<|turn>model\n' -}}
+{%- endif -%}

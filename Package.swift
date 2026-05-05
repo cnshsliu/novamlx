@@ -45,6 +45,7 @@ let package = Package(
                 "NovaMLXCore",
                 .product(name: "Logging", package: "swift-log"),
             ],
+            resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
         ),
         .target(
@@ -73,6 +74,7 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Hub", package: "swift-transformers"),
             ],
+            resources: [.copy("ChatTemplates")],
             swiftSettings: concurrencySettings
         ),
         .target(

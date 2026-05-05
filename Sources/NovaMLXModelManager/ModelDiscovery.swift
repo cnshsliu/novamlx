@@ -305,19 +305,41 @@ public final class ModelDiscovery: Sendable {
     }
 
     private func detectFamily(config: HFConfig, modelId: String) -> ModelFamily {
+        // Resolution order (most-specific first, with data-driven extensions overlaying built-ins):
+        //   1. ChatTemplateRegistry user/bundled extensions by model_type
+        //   2. Built-in Swift familyByModelType map
+        //   3. ChatTemplateRegistry by architecture
+        //   4. Built-in familyByArchitecture map
+        //   5. Substring match in modelId (last resort)
+        //   6. .other
+        //
+        // Adding support for a new family without recompiling: drop entries
+        // into ~/.nova/templates/registry.json under `familyDetection`.
+
         if let rawType = config.modelType {
             let normalized = rawType.lowercased().replacingOccurrences(of: "-", with: "_")
+
+            // 1. Registry override
+            if let f = ChatTemplateRegistry.shared.familyByModelType(normalized) { return f }
+
+            // 2. Built-in
             if let family = Self.familyByModelType[normalized] { return family }
+
+            // Prefix match against built-in (e.g. "qwen3_5" → "qwen3" → .qwen)
             let baseType = normalized.components(separatedBy: CharacterSet(charactersIn: "_0123456789")).first ?? normalized
             for (key, family) in Self.familyByModelType where key.hasPrefix(baseType) { return family }
         }
 
         if let architectures = config.architectures {
             for arch in architectures {
+                // 3. Registry override
+                if let f = ChatTemplateRegistry.shared.familyByArchitecture(arch) { return f }
+                // 4. Built-in
                 if let family = Self.familyByArchitecture[arch] { return family }
             }
         }
 
+        // 5. Substring match — non-conservative, but better than .other for popular families.
         let idLower = modelId.lowercased()
         if idLower.contains("llama") { return .llama }
         if idLower.contains("mistral") || idLower.contains("mixtral") { return .mistral }

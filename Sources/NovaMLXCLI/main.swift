@@ -49,6 +49,8 @@ struct NovaMLXCLI {
                 handleLogout()
             case "account":
                 try await handleAccount()
+            case "chat-template":
+                try await handleChatTemplate(subArgs)
             case "--help", "-h":
                 printUsage()
             case "--version", "-v":
@@ -116,6 +118,9 @@ struct NovaMLXCLI {
           nova login                      Login to NovaMLX Cloud
           nova logout                     Logout from NovaMLX Cloud
           nova account                    Show account & subscription status
+
+        DIAGNOSTICS
+          nova chat-template diagnose <model-id>   Inspect chat template & rendering health
 
         OPTIONS
           --help, -h     Show this help
@@ -507,6 +512,123 @@ struct NovaMLXCLI {
             print("Status: \(response.status ?? "none")")
             print("\nCloud inference: Not available")
             print("Subscribe at: https://novamlx.com/cloud")
+        }
+    }
+
+    // MARK: - Chat-template diagnostics
+
+    static func handleChatTemplate(_ args: [String]) async throws {
+        guard let sub = args.first else {
+            print("Usage: nova chat-template diagnose <model-id>")
+            return
+        }
+        switch sub {
+        case "diagnose":
+            guard args.count >= 2 else {
+                print("Usage: nova chat-template diagnose <model-id>")
+                return
+            }
+            let modelId = args[1]
+            let encoded = modelId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? modelId
+            let resp = try await CLIClient.get("/admin/api/chat-template/diagnose/\(encoded)", admin: true)
+            renderChatTemplateReport(Data(resp.body.utf8))
+        case "--help", "-h":
+            print("Subcommands:")
+            print("  diagnose <model-id>  Inspect chat template files, format detection, and family config")
+        default:
+            print("Unknown chat-template subcommand: \(sub)")
+        }
+    }
+
+    /// Pretty-printer for the JSON report from /admin/api/chat-template/diagnose.
+    /// Falls back to raw JSON if the structure is unexpected.
+    private static func renderChatTemplateReport(_ data: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            CLIClient.printJSON(String(data: data, encoding: .utf8) ?? "")
+            return
+        }
+        func s(_ k: String) -> String { (json[k] as? String) ?? "-" }
+        func i(_ k: String) -> Int { (json[k] as? Int) ?? 0 }
+        func b(_ k: String) -> Bool { (json[k] as? Bool) ?? false }
+        func arr(_ k: String) -> [String] { (json[k] as? [String]) ?? [] }
+
+        let modelId = s("modelId")
+        let dir = json["modelDir"] as? String ?? "(not on disk)"
+        let family = s("family")
+        let archs = arr("architectures").joined(separator: ", ")
+        let mt = s("modelType")
+        let label = s("familyConfigLabel")
+
+        print("Chat-Template Diagnostic Report")
+        print(String(repeating: "─", count: 60))
+        print("Model:           \(modelId)")
+        print("Directory:       \(dir)")
+        print("Family:          \(family)  (\(label))")
+        print("Architecture:    \(archs.isEmpty ? "-" : archs)")
+        print("model_type:      \(mt)")
+        print("")
+
+        // Template file state
+        let tcLen = i("tokenizerConfigChatTemplateLength")
+        let tcExc = s("tokenizerConfigChatTemplateExcerpt")
+        let jinjaPresent = b("chatTemplateJinjaPresent")
+        let jinjaLen = i("chatTemplateJinjaLength")
+        let quarantined = b("chatTemplateJinjaQuarantined")
+        let agree = b("templatesAgree")
+        let regOverride = json["registryOverrideName"] as? String
+
+        print("Template files on disk")
+        print("  tokenizer_config.json.chat_template:  \(tcLen) chars")
+        if !tcExc.isEmpty {
+            let firstLine = tcExc.split(separator: "\n", maxSplits: 0, omittingEmptySubsequences: true).first ?? ""
+            print("    excerpt: \(firstLine)…")
+        }
+        print("  chat_template.jinja:                  \(jinjaPresent ? "\(jinjaLen) chars" : "absent")")
+        print("  chat_template.jinja.disabled-by-novamlx (quarantine): \(quarantined ? "yes" : "no")")
+        print("  chat_template.json:                   \(b("chatTemplateJsonPresent") ? "present" : "absent")")
+        print("  templates agree:                      \(agree ? "yes" : "NO — risk of corruption")")
+        if let reg = regOverride {
+            print("  registry override:                    \(reg) (NovaMLX-maintained template will be applied)")
+        } else {
+            print("  registry override:                    none")
+        }
+        print("")
+
+        // Format detection
+        if let detected = json["detectedFormats"] as? [[String: Any]], !detected.isEmpty {
+            print("Detected formats (highest confidence first):")
+            for d in detected {
+                let f = d["format"] as? String ?? "?"
+                let c = d["confidence"] as? Int ?? 0
+                let ev = (d["evidence"] as? [String]) ?? []
+                print("  • \(f)  ×\(c)  evidence: \(ev.joined(separator: ", "))")
+            }
+        } else {
+            print("Detected formats: none recognized (template may use a brand-new format)")
+        }
+        print("")
+
+        // Family interpretation
+        print("Family interpretation (from registry)")
+        print("  Expected EOS tokens:    \(arr("expectedEosTokens").joined(separator: ", "))")
+        print("  Hallucination patterns: \(arr("hallucinationPatterns").joined(separator: ", "))")
+        print("  Leakage blacklist:      \(arr("leakageBlacklist").joined(separator: ", "))")
+        print("  Thinking markers:       \(arr("thinkingMarkers").joined(separator: ", "))")
+        print("  preserve_thinking:      \(b("preserveThinkingSupported") ? "supported" : "not supported")")
+        print("")
+
+        // Health
+        let healthy = b("healthy")
+        let issues = arr("healthIssues")
+        if healthy {
+            print("Status: HEALTHY ✓")
+        } else {
+            print("Status: \(issues.count) issue(s) found")
+            for issue in issues {
+                print("  ! \(issue)")
+            }
+            print("")
+            print("See `architecture.md` → Diagnostic Playbook for fix paths.")
         }
     }
 }

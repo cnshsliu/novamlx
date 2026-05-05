@@ -72,7 +72,9 @@ public final class InferenceService: @unchecked Sendable {
             jsonSchemaDef: finalRequest.jsonSchemaDef,
             regexPattern: finalRequest.regexPattern,
             gbnfGrammar: finalRequest.gbnfGrammar,
-            thinkingBudget: finalRequest.thinkingBudget
+            thinkingBudget: finalRequest.thinkingBudget,
+            enableThinking: finalRequest.enableThinking,
+            preserveThinking: finalRequest.preserveThinking
         )
 
         // Cloud mode: proxy to remote inference engine
@@ -146,7 +148,9 @@ public final class InferenceService: @unchecked Sendable {
             jsonSchemaDef: finalRequest.jsonSchemaDef,
             regexPattern: finalRequest.regexPattern,
             gbnfGrammar: finalRequest.gbnfGrammar,
-            thinkingBudget: finalRequest.thinkingBudget
+            thinkingBudget: finalRequest.thinkingBudget,
+            enableThinking: finalRequest.enableThinking,
+            preserveThinking: finalRequest.preserveThinking
         )
 
         // Cloud mode: proxy stream to remote inference engine

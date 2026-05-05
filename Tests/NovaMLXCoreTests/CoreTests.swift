@@ -232,6 +232,60 @@ struct CoreTypesTests {
         #expect(result.response == "No thinking here, just response.")
     }
 
+    @Test("ThinkingParser sticky-close: explicit </think> + empty response keeps reasoning_content")
+    func thinkingParserStickyCloseEmptyResponse() {
+        // Streaming-mode regression: gpt-oss / Harmony emits <think>analysis</think>
+        // and may end (max_tokens or EOS) with no final-channel content. Pre-fix,
+        // finalize()'s "promote thinking → response" fallback fired because
+        // responseContent was empty, **moving the analysis text into content** and
+        // emptying reasoning_content. Then APIServer's streaming finish branch
+        // emitted the moved-into-content text as a SECOND `content` chunk after
+        // the `reasoning_content` chunks already streamed — duplicating the same
+        // text under two delta keys ("WhatWhat is is" when a naive client
+        // concatenates). Fix: sticky `sawExplicitCloseEver` flag prevents the
+        // promotion when an explicit </think> was observed at any point.
+        let parser = ThinkingParser()
+        // Streaming feed: <think>...analysis...</think> with no content after
+        let tokens = ["<", "think", ">", "Let me reason about this", "</think", ">"]
+        for token in tokens { _ = parser.feed(token) }
+
+        let result = parser.finalize()
+        // Reasoning content stays in thinking — NOT promoted to response
+        #expect(result.thinking == "Let me reason about this",
+               "thinking should retain analysis text; got \(result.thinking)")
+        #expect(result.response == "",
+               "response must remain empty when explicit </think> seen and nothing followed; got \(result.response)")
+    }
+
+    @Test("ThinkingParser sticky-close: streaming path through .insideThinking sets the flag")
+    func thinkingParserStickyCloseStreamingPath() {
+        // Confirms the sticky flag is set even when </think> is processed via the
+        // .insideThinking → .normal transition (streaming path), not just the
+        // .normal-path detection. Drives the same input via single-char feeds
+        // so the parser must traverse the streaming state machine.
+        let parser = ThinkingParser()
+        for ch in "<think>analysis text</think>" {
+            _ = parser.feed(String(ch))
+        }
+        let result = parser.finalize()
+        #expect(result.thinking == "analysis text")
+        #expect(result.response == "")
+    }
+
+    @Test("ThinkingParser fallback STILL fires for truncated thinking (no close ever)")
+    func thinkingParserFallbackStillWorksForTruncated() {
+        // Negative test: ensure the sticky-close guard doesn't break the
+        // legitimate case where a model truncated mid-thinking and never
+        // emitted </think>. In that case the fallback should still fire
+        // (promote thinking → response so the user gets *some* answer).
+        let parser = ThinkingParser()
+        _ = parser.feed("<think>I was reasoning about this when I got cut off")
+        let result = parser.finalize()
+        // sawExplicitCloseEver was never set → fallback fires
+        #expect(result.thinking == "")
+        #expect(result.response == "I was reasoning about this when I got cut off")
+    }
+
     @Test("ThinkingParser implicit open tag — close without open")
     func thinkingParserImplicitOpen() {
         let parser = ThinkingParser()

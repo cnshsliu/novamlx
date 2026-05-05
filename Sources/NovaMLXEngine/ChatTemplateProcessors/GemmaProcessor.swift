@@ -1,4 +1,6 @@
 import Foundation
+import NovaMLXCore
+import NovaMLXUtils
 
 /// Gemma processor — Gemma3/4 models.
 /// Uses <start_of_turn> / <end_of_turn> (NOT bare <|turn>).
@@ -44,15 +46,26 @@ final class GemmaProcessor: ChatTemplateProcessor, @unchecked Sendable {
                 return true
             }
         }
+        // Gemma-4: detect channel-thought capability via added_tokens.
+        // Models with both <|channel> (open) and <channel|> (close) tokens emit
+        // <|channel>thought\n...<channel|> blocks at runtime even when the chat
+        // template doesn't reference them (template injects no prefix).
+        var hasChannelOpen = false
+        var hasChannelClose = false
+        var hasThinkToken = false
         for entry in addedTokens {
             if let content = entry["content"] as? String {
                 if content.contains("begin_of_thought") || content.contains("end_of_thought")
                     || content.contains("begin_of_think") || content.contains("end_of_think")
                     || content.contains("<|think|>") {
-                    return true
+                    hasThinkToken = true
                 }
+                if content == "<|channel>" { hasChannelOpen = true }
+                if content == "<channel|>" { hasChannelClose = true }
             }
         }
+        if hasThinkToken { return true }
+        if hasChannelOpen && hasChannelClose { return true }
         return false
     }
 
@@ -61,7 +74,9 @@ final class GemmaProcessor: ChatTemplateProcessor, @unchecked Sendable {
         return template.contains("<think") || template.contains("<thinking")
     }
 
-    func hallucinationPatterns() -> [String] { [] }
+    func hallucinationPatterns() -> [String] {
+        ChatTemplateRegistry.shared.familyConfig(for: .gemma).hallucinationPatterns
+    }
 
     func scrubControlTokens(_ text: String) -> String {
         var result = SharedControlTokenLogic.scrubControlTokens(text)
@@ -92,6 +107,14 @@ final class GemmaProcessor: ChatTemplateProcessor, @unchecked Sendable {
     }
 
     func shouldStopForHallucination(generatedText: String, completionTokenCount: Int) -> Bool {
-        false
+        guard completionTokenCount > 20 else { return false }
+        let patterns = hallucinationPatterns()
+        guard !patterns.isEmpty else { return false }
+        for pattern in patterns {
+            if generatedText.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 }

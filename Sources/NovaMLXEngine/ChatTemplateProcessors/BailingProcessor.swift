@@ -1,4 +1,6 @@
 import Foundation
+import NovaMLXCore
+import NovaMLXUtils
 
 /// Bailing (Ling) series chat template processor.
 /// Uses <|turn>role\n format: <|turn>system, <|turn>user, <|turn>model
@@ -62,7 +64,12 @@ final class BailingProcessor: ChatTemplateProcessor, @unchecked Sendable {
     }
 
     func hallucinationPatterns() -> [String] {
-        hallucinationPatternsList
+        var merged = hallucinationPatternsList
+        let extras = ChatTemplateRegistry.shared.familyConfig(for: .bailing).hallucinationPatterns
+        for p in extras where !merged.contains(p) {
+            merged.append(p)
+        }
+        return merged
     }
 
     func scrubControlTokens(_ text: String) -> String {
@@ -84,8 +91,12 @@ final class BailingProcessor: ChatTemplateProcessor, @unchecked Sendable {
 
     func shouldStopForHallucination(generatedText: String, completionTokenCount: Int) -> Bool {
         guard completionTokenCount > 20 else { return false }
-        for pattern in hallucinationPatternsList {
-            if generatedText.contains(pattern) {
+        for pattern in hallucinationPatterns() {
+            if pattern.hasPrefix("(?") {
+                if generatedText.range(of: pattern, options: .regularExpression) != nil {
+                    return true
+                }
+            } else if generatedText.contains(pattern) {
                 return true
             }
         }

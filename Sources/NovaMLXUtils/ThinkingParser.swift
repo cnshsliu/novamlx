@@ -41,6 +41,14 @@ public final class ThinkingParser: @unchecked Sendable {
     private var preCloseContent: String
     private var implicitCloseTag: Bool
     private var closeWasSeen: Bool
+    /// Sticky version of `closeWasSeen` — once a `</think>` has been observed,
+    /// stays `true` for the lifetime of the parser. Used by the `finalize()`
+    /// fallback to distinguish "model truncated mid-thinking, no close ever
+    /// arrived" from "model emitted explicit close but no response content
+    /// after it". The first case wants to promote thinking → response (so the
+    /// user gets *some* answer); the second case wants to keep them separate
+    /// so a properly-terminated thinking block stays in `reasoning_content`.
+    private var sawExplicitCloseEver: Bool
     private var expectImplicitThinking: Bool
 
     private enum State: Sendable {
@@ -63,6 +71,7 @@ public final class ThinkingParser: @unchecked Sendable {
         self.preCloseContent = ""
         self.implicitCloseTag = false
         self.closeWasSeen = false
+        self.sawExplicitCloseEver = false
         self.expectImplicitThinking = expectImplicitThinking
     }
 
@@ -74,6 +83,7 @@ public final class ThinkingParser: @unchecked Sendable {
         preCloseContent = ""
         implicitCloseTag = false
         closeWasSeen = false
+        sawExplicitCloseEver = false
         // expectImplicitThinking is preserved across resets
     }
 
@@ -99,7 +109,24 @@ public final class ThinkingParser: @unchecked Sendable {
                 // Check close tag first — handles implicit open tag case where
                 // chat template injects <think> in prompt so only </think> is generated
                 if let closeRange = buffer.range(of: Self.thinkClose) {
-                    let beforeClose = String(buffer[buffer.startIndex..<closeRange.lowerBound])
+                    var beforeClose = String(buffer[buffer.startIndex..<closeRange.lowerBound])
+                    // Explicit case: a single feed may contain the WHOLE <think>...</think>
+                    // block (e.g. when an upstream scrubber normalized a non-standard
+                    // marker into <think>...</think> in one shot). Strip the literal
+                    // <think> open tag so it doesn't leak into reasoning_content.
+                    // Implicit thinking models never emit the open tag, so this is a no-op.
+                    if !expectImplicitThinking,
+                       let openRange = beforeClose.range(of: Self.thinkOpen) {
+                        let afterOpen = beforeClose[openRange.upperBound...]
+                        if let gtIdx = afterOpen.firstIndex(of: ">") {
+                            // Any text BEFORE the open tag is response content
+                            let preOpen = String(beforeClose[..<openRange.lowerBound])
+                            if !preOpen.isEmpty {
+                                responseContent += preOpen
+                            }
+                            beforeClose = String(afterOpen[afterOpen.index(after: gtIdx)...])
+                        }
+                    }
                     let thinkingText = preCloseContent + beforeClose
                     if !thinkingText.isEmpty {
                         thinkingContent += thinkingText
@@ -117,6 +144,16 @@ public final class ThinkingParser: @unchecked Sendable {
                         implicitCloseTag = true
                     }
                     closeWasSeen = true
+                    sawExplicitCloseEver = true
+                    // If we just emitted thinking and the buffer still has content,
+                    // break out so the caller gets a thinking-typed ParsedToken now.
+                    // The remaining content is processed on the next feed() call (or
+                    // flushed by finalize()) and emitted as a separate content-typed
+                    // ParsedToken. Without this, thinking and content would be
+                    // concatenated into one ParsedToken with the wrong (last) type.
+                    if resultType == .thinking && !buffer.isEmpty {
+                        break loop
+                    }
                 } else if let openRange = buffer.range(of: Self.thinkOpen) {
                     // Explicit open tag — flush preCloseContent as response
                     let beforeOpen = String(buffer[buffer.startIndex..<openRange.lowerBound])
@@ -208,6 +245,7 @@ public final class ThinkingParser: @unchecked Sendable {
                         buffer = String(afterClose[afterClose.index(closeAngle, offsetBy: 1)...])
                         state = .normal
                         closeWasSeen = true
+                        sawExplicitCloseEver = true
                     } else {
                         state = .potentialCloseTag
                     }
@@ -229,6 +267,7 @@ public final class ThinkingParser: @unchecked Sendable {
                     state = .normal
                     implicitCloseTag = false
                     closeWasSeen = true
+                    sawExplicitCloseEver = true
                 } else if buffer.count > 1 {
                     thinkingContent += Self.thinkClose + buffer
                     resultText += Self.thinkClose + buffer
@@ -270,9 +309,18 @@ public final class ThinkingParser: @unchecked Sendable {
         // no response content, the answer is embedded in thinking. Move it to
         // response so the user gets it in `content` instead of `reasoning_content`.
         // Only applies for explicit-thinking models (not implicit like DeepSeek-R1).
+        //
+        // **Sticky-close guard:** when an explicit `</think>` was observed at
+        // any point, the model successfully terminated the thinking block —
+        // empty response content after that means the model was cut off
+        // mid-final-answer (e.g. max_tokens), not that thinking is the answer.
+        // Promoting in that case would corrupt `reasoning_content` (e.g. the
+        // gpt-oss / Harmony scenario where channel boundaries are normalized
+        // to `<think>...</think>` upstream).
         if !expectImplicitThinking
             && responseContent.isEmpty
-            && !thinkingContent.isEmpty {
+            && !thinkingContent.isEmpty
+            && !sawExplicitCloseEver {
             responseContent = thinkingContent
             thinkingContent = ""
         }

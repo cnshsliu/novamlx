@@ -230,7 +230,6 @@ public final class GBNFLogitProcessor: LogitProcessor, @unchecked Sendable {
     private let rootRuleName: String
     private let tokenizer: NovaMLXEngine.Tokenizer
     private let eosTokenId: Int?
-    private let vocabSize: Int
     private let maskBuilder: TokenMaskBuilder
     private var generatedText: String = ""
     private var done = false
@@ -243,7 +242,6 @@ public final class GBNFLogitProcessor: LogitProcessor, @unchecked Sendable {
         self.tokenizer = tokenizer
         self.eosTokenId = tokenizer.eosTokenId
         self.maskBuilder = TokenMaskBuilder(tokenizer: tokenizer)
-        self.vocabSize = maskBuilder.vocabSize
     }
 
     public init(rules: [GBNFRule], rootRule: String, tokenizer: NovaMLXEngine.Tokenizer) {
@@ -252,12 +250,24 @@ public final class GBNFLogitProcessor: LogitProcessor, @unchecked Sendable {
         self.tokenizer = tokenizer
         self.eosTokenId = tokenizer.eosTokenId
         self.maskBuilder = TokenMaskBuilder(tokenizer: tokenizer)
-        self.vocabSize = maskBuilder.vocabSize
+    }
+
+    /// Caller-supplied builder for cache reuse.
+    init(grammar: String, rootRule: String? = nil, tokenizer: NovaMLXEngine.Tokenizer, sharedBuilder: TokenMaskBuilder) throws {
+        let parsed = try GBNFParser.parse(grammar)
+        self.rules = Dictionary(uniqueKeysWithValues: parsed.map { ($0.name, $0) })
+        self.rootRuleName = rootRule ?? parsed.first?.name ?? "root"
+        self.tokenizer = tokenizer
+        self.eosTokenId = tokenizer.eosTokenId
+        self.maskBuilder = sharedBuilder
     }
 
     public func prompt(_ prompt: MLXArray) {}
 
     public func process(logits: MLXArray) -> MLXArray {
+        if maskBuilder.vocabSize == 0 {
+            maskBuilder.materialize(vocabSize: logits.shape[logits.shape.count - 1])
+        }
         if done {
             return forceEOS(logits: logits)
         }

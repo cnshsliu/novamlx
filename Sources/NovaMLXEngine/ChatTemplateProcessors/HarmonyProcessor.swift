@@ -1,4 +1,6 @@
 import Foundation
+import NovaMLXCore
+import NovaMLXUtils
 
 /// GPT-OSS (OpenAI Harmony) chat template processor.
 /// Format: <|start|>role<|channel|>type<|message|>content
@@ -49,7 +51,9 @@ final class HarmonyProcessor: ChatTemplateProcessor, @unchecked Sendable {
         return template.contains("<|channel|>analysis")
     }
 
-    func hallucinationPatterns() -> [String] { [] }
+    func hallucinationPatterns() -> [String] {
+        ChatTemplateRegistry.shared.familyConfig(for: .gptOss).hallucinationPatterns
+    }
 
     // Regex: matches <|channel|>word<|message|> — channel+type+message structure
     private static let channelMessageRegex: NSRegularExpression = {
@@ -97,6 +101,14 @@ final class HarmonyProcessor: ChatTemplateProcessor, @unchecked Sendable {
     }
 
     func shouldStopForHallucination(generatedText: String, completionTokenCount: Int) -> Bool {
-        false
+        guard completionTokenCount > 20 else { return false }
+        let patterns = hallucinationPatterns()
+        guard !patterns.isEmpty else { return false }
+        for pattern in patterns {
+            if generatedText.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 }
