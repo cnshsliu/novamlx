@@ -3,7 +3,7 @@ import Logging
 
 public enum NovaMLX {}
 
-public let version = "1.0.0"
+public let version = "1.0.5"
 
 public var buildTimestamp: String {
     guard let execURL = Bundle.main.executableURL,
