@@ -91,6 +91,10 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// finish — `isFinished` is advisory for fast reads, `finishGuard` is the
     /// truth for continuation lifecycle and budget release ownership.
     let finishGuard: FinishGuard
+    /// True only when *this* decode step was the one that successfully
+    /// called `safeFinish()` — prevents double budget release when
+    /// preempt/abort already released the sequence.
+    var _finishedByDecodeStep: Bool = false
     /// Recent token IDs for N-gram speculation context.
     var recentTokenIds: [Int]
     /// Frequency penalty value — prevents repetition collapse in small quantized models.
@@ -265,21 +269,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     public func submit(_ request: InferenceRequest) async throws -> InferenceResult {
         let modelId = request.model
-        let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
-        let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
 
-        // Quick admission check — if memory is tight, fall back to engine (no fused optimization)
-        guard await canAdmit(request) else {
+        // Atomic admission check + slot reserve — if memory/concurrency tight, fall back to engine
+        guard await canAdmitAndReserve(request) else {
             NovaMLXLog.info("FusedScheduler: submit() can't admit — falling back to engine")
             return try await engine.generate(request)
         }
-
-        // Reserve budget
-        lock.withLock { activeModelCounts[modelId] = (activeModelCounts[modelId] ?? 0) + 1 }
-        await budgetTracker.reserve(
-            modelId: modelId, sequenceId: request.id,
-            weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
-        )
 
         let startTime = Date()
         let promptTokensBox = MutableSendableBox<Int>(0)
@@ -304,6 +299,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         await self.budgetTracker.release(sequenceId: request.id)
                     }
                 } catch {
+                    // SAFE: pre-prefill error path, continuation is exclusively owned
                     continuation.finish(throwing: error)
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
@@ -349,8 +345,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
-                    // Check admission
-                    let canStart = await self.canAdmit(request)
+                    // Atomic admission check + slot reserve
+                    let canStart = await self.canAdmitAndReserve(request)
                     if !canStart {
                         // Queue for later admission
                         NovaMLXLog.info("FusedScheduler: queuing stream \(reqTag) — memory/concurrency limit")
@@ -363,15 +359,6 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         self.scheduleRunLoop()
                         return
                     }
-
-                    // Reserve budget
-                    let bytesPerToken = self.engine.effectiveBytesPerToken(modelId: modelId)
-                    let estimatedTokens = self.engine.estimateRequestTokens(modelId: modelId, request: request)
-                    self.lock.withLock { self.activeModelCounts[modelId] = (self.activeModelCounts[modelId] ?? 0) + 1 }
-                    await self.budgetTracker.reserve(
-                        modelId: modelId, sequenceId: request.id,
-                        weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
-                    )
 
                     // Prefill and add to active sequences
                     let seq = try await self.prefillSequence(request: request, continuation: continuation)
@@ -390,6 +377,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         await self.budgetTracker.release(sequenceId: request.id)
                     }
                 } catch {
+                    // SAFE: pre-prefill error path, continuation is exclusively owned
                     continuation.finish(throwing: error)
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
@@ -415,6 +403,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     }
                     self.scheduleRunLoop()
                 } catch {
+                    // SAFE: pre-prefill error path, continuation is exclusively owned
                     continuation.finish(throwing: error)
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
@@ -448,6 +437,47 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             NovaMLXLog.info("FusedScheduler: queuing \(request.id.uuidString.prefix(8)) — insufficient memory")
         }
         return canAdmitMemory
+    }
+
+    /// Atomically check admission AND reserve the concurrency slot.
+    /// Returns `false` if the concurrency limit is reached or memory budget insufficient.
+    /// On `true`, the caller MUST proceed — the slot is already counted.
+    private func canAdmitAndReserve(_ request: InferenceRequest) async -> Bool {
+        let modelId = request.model
+        let concurrentLimit = await optimalConcurrency(for: modelId)
+
+        // Atomically check limit AND reserve slot
+        let reserved = lock.withLock { () -> Bool in
+            let current = activeModelCounts[modelId] ?? 0
+            guard current < concurrentLimit else { return false }
+            activeModelCounts[modelId] = current + 1
+            return true
+        }
+        guard reserved else {
+            NovaMLXLog.info("FusedScheduler: queuing \(request.id.uuidString.prefix(8)) — model at concurrency limit")
+            return false
+        }
+
+        // Check memory budget — roll back slot if insufficient
+        let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
+        let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
+        let canAdmitMemory = await budgetTracker.canAdmit(
+            modelId: modelId, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
+        )
+
+        guard canAdmitMemory else {
+            // Roll back the slot we just reserved
+            lock.withLock { activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1) }
+            NovaMLXLog.info("FusedScheduler: queuing \(request.id.uuidString.prefix(8)) — insufficient memory")
+            return false
+        }
+
+        // Reserve memory budget (slot already counted above)
+        await budgetTracker.reserve(
+            modelId: modelId, sequenceId: request.id,
+            weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
+        )
+        return true
     }
 
     // MARK: - Preemption
@@ -484,7 +514,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
 
         // Finish the victim's stream with a retryable error
-        victim.continuation.finish(throwing: NovaMLXError.inferenceFailed(
+        victim.safeFinish(throwing: NovaMLXError.inferenceFailed(
             "Sequence preempted due to memory pressure — please retry"
         ))
 
@@ -690,6 +720,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let isEOS = eosId == firstTokenId
 
         // Yield first token to client (unless it's EOS and we finish immediately)
+        // SAFE: pre-shared-state yields — seq hasn't entered activeByModel yet
         let scrubbedFirstToken = MLXEngine.scrubControlTokens(firstTokenText)
         if !isEOS && !scrubbedFirstToken.isEmpty {
             continuation.yield(Token(id: 0, text: scrubbedFirstToken))
@@ -796,6 +827,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
         NovaMLXLog.info("[Prefill:\(reqTag)] First token (remaining): id=\(firstTokenId), text='\(firstTokenText)'")
 
+        // SAFE: pre-shared-state yield — seq hasn't entered activeByModel yet
         let scrubbedPrefixToken = MLXEngine.scrubControlTokens(firstTokenText)
         if !scrubbedPrefixToken.isEmpty {
             continuation.yield(Token(id: 0, text: scrubbedPrefixToken))
@@ -903,7 +935,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
 
         for item in sortedGenerate {
-            let canStart = await canAdmit(item.request)
+            let canStart = await canAdmitAndReserve(item.request)
             if canStart {
                 admittedGenerate.append(item)
             } else {
@@ -912,7 +944,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let preempted = await preemptNewest(for: item.request.model, toMakeRoomFor: item.request.id)
                     if preempted {
                         // Re-check admission after preemption freed some memory
-                        let retryCanAdmit = await canAdmit(item.request)
+                        let retryCanAdmit = await canAdmitAndReserve(item.request)
                         if retryCanAdmit {
                             admittedGenerate.append(item)
                             continue
@@ -926,18 +958,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         for item in admittedGenerate {
             let modelId = item.request.model
-            let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
-            let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: item.request)
-
-            lock.withLock { activeModelCounts[modelId] = (activeModelCounts[modelId] ?? 0) + 1 }
-            await budgetTracker.reserve(
-                modelId: modelId, sequenceId: item.request.id,
-                weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
-            )
-
+            // Budget already reserved atomically by canAdmitAndReserve()
             // Wrap generate as stream, collect result
             let stream = internalSubmitStream(item.request)
             Task {
+                var resumed = false
+                defer {
+                    if !resumed {
+                        item.continuation.resume(throwing: CancellationError())
+                    }
+                }
                 var text = ""
                 var completionTokens = 0
                 var finishReason: FinishReason = .stop
@@ -949,12 +979,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let promptTokens = lock.withLock {
                         activeByModel[modelId]?.first?.promptTokenCount ?? 0
                     }
+                    resumed = true
                     item.continuation.resume(returning: InferenceResult(
                         id: item.request.id, model: modelId, text: text,
                         tokensPerSecond: 0, promptTokens: promptTokens,
                         completionTokens: completionTokens, finishReason: finishReason
                     ))
                 } catch {
+                    resumed = true
                     item.continuation.resume(throwing: error)
                 }
             }
@@ -972,7 +1004,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
 
         for item in sortedStream {
-            let canStart = await canAdmit(item.request)
+            let canStart = await canAdmitAndReserve(item.request)
             if canStart {
                 admittedStream.append(item)
             } else {
@@ -980,7 +1012,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 if item.priority == .high {
                     let preempted = await preemptNewest(for: item.request.model, toMakeRoomFor: item.request.id)
                     if preempted {
-                        let retryCanAdmit = await canAdmit(item.request)
+                        let retryCanAdmit = await canAdmitAndReserve(item.request)
                         if retryCanAdmit {
                             admittedStream.append(item)
                             continue
@@ -994,14 +1026,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         for item in admittedStream {
             let modelId = item.request.model
-            let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
-            let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: item.request)
-
-            lock.withLock { activeModelCounts[modelId] = (activeModelCounts[modelId] ?? 0) + 1 }
-            await budgetTracker.reserve(
-                modelId: modelId, sequenceId: item.request.id,
-                weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
-            )
+            // Budget already reserved atomically by canAdmitAndReserve()
 
             do {
                 let seq = try await prefillSequence(request: item.request, continuation: item.continuation)
@@ -1010,6 +1035,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     activeByModel[modelId]?.append(seq)
                 }
             } catch {
+                // SAFE: pre-prefill error path, continuation is exclusively owned
                 item.continuation.finish(throwing: error)
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
@@ -1036,8 +1062,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             guard let container = engine.getContainer(for: modelId),
                   let mlxContainer = container.mlxContainer else {
                 for seq in active {
-                    seq.continuation.finish(throwing: NovaMLXError.modelNotFound(modelId))
-                    await budgetTracker.release(sequenceId: seq.id)
+                    if seq.safeFinish(throwing: NovaMLXError.modelNotFound(modelId)) {
+                        await budgetTracker.release(sequenceId: seq.id)
+                    }
                 }
                 lock.withLock { activeByModel[modelId] = []; activeModelCounts[modelId] = 0 }
                 continue
@@ -1285,7 +1312,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     }
                     seq.generatedText = seq.lastDecodedText
                     if !decoded.isEmpty {
-                        seq.continuation.yield(Token(id: 0, text: decoded))
+                        seq.safeYield(Token(id: 0, text: decoded))
                     }
 
                     lock.withLock { totalTokensViaFused += 1 }
@@ -1337,13 +1364,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         // its fallback promotes the entire buffer to
                         // `content`, leaving `reasoning_content` empty.
                         if seq.harmonyInThinking {
-                            seq.continuation.yield(Token(id: 0, text: "</think>"))
+                            seq.safeYield(Token(id: 0, text: "</think>"))
                             seq.harmonyInThinking = false
                         }
-                        seq.continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
-                        seq.continuation.finish()
+                        seq.safeYield(Token(id: 0, text: "", finishReason: finishReason))
+                        let finishedByUs = seq.safeFinish()
                         seq.isFinished = true
                         sequenceFinished = true
+                        seq._finishedByDecodeStep = finishedByUs
                         break
                     }
                 }
@@ -1380,6 +1408,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             }
 
             for seq in finished {
+                // Only release budget if WE finished the sequence in this decode step.
+                // Preempt/abort paths release budget themselves; skip to avoid double-release.
+                guard seq._finishedByDecodeStep else { continue }
                 await budgetTracker.release(sequenceId: seq.id)
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
@@ -1452,7 +1483,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             for (_, var sequences) in activeByModel {
                 if let idx = sequences.firstIndex(where: { $0.id == requestId }) {
                     sequences[idx].isFinished = true
-                    sequences[idx].continuation.finish()
+                    sequences[idx].safeFinish()
                     sequences.remove(at: idx)
                 }
             }
