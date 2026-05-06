@@ -488,4 +488,253 @@ struct APITypesTests {
         #expect(req.resolvedThinkingBudget == 2048,
                 "Explicit thinking_budget should take precedence over reasoning_effort")
     }
+
+    // MARK: - Logprobs
+
+    @Test("OpenAI request with logprobs decoding")
+    func openAIRequestLogprobs() throws {
+        let json = """
+        {"model":"test","messages":[],"logprobs":true,"top_logprobs":5}
+        """
+        let data = json.data(using: .utf8)!
+        let req = try JSONDecoder().decode(OpenAIRequest.self, from: data)
+        #expect(req.logprobs == true)
+        #expect(req.topLogprobs == 5)
+    }
+
+    @Test("OpenAI request without logprobs defaults to nil")
+    func openAIRequestNoLogprobs() throws {
+        let json = """
+        {"model":"test","messages":[]}
+        """
+        let data = json.data(using: .utf8)!
+        let req = try JSONDecoder().decode(OpenAIRequest.self, from: data)
+        #expect(req.logprobs == nil)
+        #expect(req.topLogprobs == nil)
+    }
+
+    @Test("OpenAI logprob response types encoding")
+    func openAILogprobResponseEncoding() throws {
+        let topLogprobs = [
+            OpenAITopLogprob(token: " Hello", logprob: -0.999),
+            OpenAITopLogprob(token: " Hi", logprob: -2.5),
+        ]
+        let entry = OpenAILogprobEntry(
+            token: " Hello",
+            logprob: -0.999,
+            topLogprobs: topLogprobs
+        )
+        let logprobs = OpenAILogprobs(content: [entry])
+
+        let response = OpenAIResponse(
+            id: "chatcmpl-test",
+            model: "test",
+            choices: [
+                OpenAIChoice(
+                    index: 0,
+                    message: OpenAIChatMessage(role: "assistant", content: "Hello!"),
+                    finishReason: "stop",
+                    logprobs: logprobs
+                )
+            ]
+        )
+
+        let data = try JSONEncoder().encode(response)
+        let decoded = try JSONDecoder().decode(OpenAIResponse.self, from: data)
+
+        #expect(decoded.choices[0].logprobs != nil)
+        let lp = decoded.choices[0].logprobs!
+        #expect(lp.content?.count == 1)
+        #expect(lp.content?[0].token == " Hello")
+        #expect(lp.content?[0].logprob == -0.999)
+        #expect(lp.content?[0].topLogprobs.count == 2)
+        #expect(lp.content?[0].topLogprobs[0].token == " Hello")
+        #expect(lp.content?[0].topLogprobs[1].token == " Hi")
+    }
+
+    @Test("OpenAI stream chunk with logprobs")
+    func openAIStreamChunkLogprobs() throws {
+        let entry = OpenAILogprobEntry(token: " Hello", logprob: -0.5)
+        let chunk = OpenAIStreamChunk(
+            id: "chatcmpl-test",
+            model: "test",
+            choices: [
+                OpenAIStreamChoice(
+                    index: 0,
+                    delta: OpenAIDelta(content: "Hello"),
+                    logprobs: OpenAILogprobs(content: [entry])
+                )
+            ]
+        )
+        let data = try JSONEncoder().encode(chunk)
+        let decoded = try JSONDecoder().decode(OpenAIStreamChunk.self, from: data)
+        #expect(decoded.choices[0].logprobs?.content?.count == 1)
+        #expect(decoded.choices[0].logprobs?.content?[0].token == " Hello")
+    }
+
+    @Test("OpenAI choice with nil logprobs")
+    func openAIChoiceNilLogprobs() throws {
+        let response = OpenAIResponse(
+            id: "chatcmpl-test",
+            model: "test",
+            choices: [
+                OpenAIChoice(
+                    index: 0,
+                    message: OpenAIChatMessage(role: "assistant", content: "Hi"),
+                    finishReason: "stop"
+                )
+            ]
+        )
+        let data = try JSONEncoder().encode(response)
+        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let choice = (json["choices"] as! [[String: Any]])[0]
+        // logprobs should be absent (nil) not present with null
+        #expect(choice["logprobs"] == nil)
+    }
+
+    @Test("TopLogprob encoding/decoding")
+    func topLogprobEncoding() throws {
+        let tl = TopLogprob(tokenId: 42, tokenText: " hello", logprob: -1.5)
+        let data = try JSONEncoder().encode(tl)
+        let decoded = try JSONDecoder().decode(TopLogprob.self, from: data)
+        #expect(decoded.tokenId == 42)
+        #expect(decoded.tokenText == " hello")
+        #expect(decoded.logprob == -1.5)
+    }
+
+    @Test("Token with logprobs")
+    func tokenWithLogprobs() throws {
+        let token = Token(
+            id: 0,
+            text: "hello",
+            logprob: -0.5,
+            topLogprobs: [
+                TopLogprob(tokenId: 1, tokenText: "hello", logprob: -0.5),
+                TopLogprob(tokenId: 2, tokenText: " world", logprob: -2.0)
+            ]
+        )
+        let data = try JSONEncoder().encode(token)
+        let decoded = try JSONDecoder().decode(Token.self, from: data)
+        #expect(decoded.logprob == -0.5)
+        #expect(decoded.topLogprobs?.count == 2)
+        #expect(decoded.topLogprobs?[0].tokenId == 1)
+        #expect(decoded.topLogprobs?[1].logprob == -2.0)
+    }
+
+    @Test("Token without logprobs backward compat")
+    func tokenWithoutLogprobs() throws {
+        let token = Token(id: 0, text: "hello")
+        let data = try JSONEncoder().encode(token)
+        let decoded = try JSONDecoder().decode(Token.self, from: data)
+        #expect(decoded.logprob == nil)
+        #expect(decoded.topLogprobs == nil)
+    }
+
+    @Test("InferenceRequest includes logprobs fields")
+    func inferenceRequestLogprobs() {
+        let req = InferenceRequest(
+            model: "test",
+            messages: [],
+            includeLogprobs: true,
+            topLogprobsCount: 5
+        )
+        #expect(req.includeLogprobs == true)
+        #expect(req.topLogprobsCount == 5)
+    }
+
+    @Test("InferenceRequest logprobs defaults to false")
+    func inferenceRequestLogprobsDefaults() {
+        let req = InferenceRequest(model: "test", messages: [])
+        #expect(req.includeLogprobs == false)
+        #expect(req.topLogprobsCount == nil)
+    }
+
+    @Test("InferenceResult includes tokenLogprobs")
+    func inferenceResultLogprobs() {
+        let result = InferenceResult(
+            id: UUID(),
+            model: "test",
+            text: "hello world",
+            tokensPerSecond: 100,
+            promptTokens: 5,
+            completionTokens: 2,
+            finishReason: .stop,
+            tokenLogprobs: [
+                Token(id: 0, text: "hello", logprob: -0.5),
+                Token(id: 1, text: " world", logprob: -1.0)
+            ]
+        )
+        #expect(result.tokenLogprobs?.count == 2)
+        #expect(result.tokenLogprobs?[0].logprob == -0.5)
+        #expect(result.tokenLogprobs?[1].logprob == -1.0)
+    }
+
+    // MARK: - Logprobs Semantic Invariants
+
+    @Test("buildLogprobs preserves token order and counts")
+    func buildLogprobsAggregation() {
+        // Aggregator must produce one entry per token-with-logprob, in order,
+        // and skip tokens that have no logprob (e.g., from non-logprob requests).
+        let tokens: [Token] = [
+            Token(id: 0, text: "A", logprob: -0.1),
+            Token(id: 1, text: "B", logprob: nil),                 // skipped
+            Token(id: 2, text: "C", logprob: -0.3),
+        ]
+        let lp = NovaMLXAPIServer.buildLogprobs(from: tokens)
+        #expect(lp?.content?.count == 2, "Tokens without logprob must be skipped")
+        #expect(lp?.content?[0].token == "A")
+        #expect(lp?.content?[1].token == "C")
+        #expect(lp?.content?[0].logprob == -0.1)
+        #expect(lp?.content?[1].logprob == -0.3)
+    }
+
+    @Test("buildLogprobs returns nil when no token has logprobs")
+    func buildLogprobsEmpty() {
+        let tokens = [Token(id: 0, text: "A"), Token(id: 1, text: "B")]
+        #expect(NovaMLXAPIServer.buildLogprobs(from: tokens) == nil)
+    }
+
+    @Test("Logprob entries populate UTF-8 bytes per OpenAI spec")
+    func logprobBytesPopulated() {
+        // ASCII single byte
+        let asciiToken = Token(id: 0, text: "A", logprob: -0.5,
+                               topLogprobs: [TopLogprob(tokenId: 0, tokenText: "A", logprob: -0.5)])
+        let asciiEntry = NovaMLXAPIServer.tokenToLogprobEntry(asciiToken)
+        #expect(asciiEntry?.bytes == [65])
+        #expect(asciiEntry?.topLogprobs.first?.bytes == [65])
+
+        // Multi-byte UTF-8 (CJK char "中" → 0xE4 0xB8 0xAD)
+        let cjkToken = Token(id: 1, text: "中", logprob: -1.0,
+                             topLogprobs: [TopLogprob(tokenId: 1, tokenText: "中", logprob: -1.0)])
+        let cjkEntry = NovaMLXAPIServer.tokenToLogprobEntry(cjkToken)
+        #expect(cjkEntry?.bytes == [0xE4, 0xB8, 0xAD])
+        #expect(cjkEntry?.topLogprobs.first?.bytes == [0xE4, 0xB8, 0xAD])
+    }
+
+    @Test("Logprob ordering invariant: top_logprobs descending")
+    func logprobTopKOrdering() {
+        // The scheduler emits top_logprobs sorted by logprob descending so that
+        // index 0 is the most likely alternative. Verify the contract.
+        let token = Token(
+            id: 0,
+            text: "X",
+            logprob: -0.5,
+            topLogprobs: [
+                TopLogprob(tokenId: 1, tokenText: "X", logprob: -0.5),
+                TopLogprob(tokenId: 2, tokenText: "Y", logprob: -1.2),
+                TopLogprob(tokenId: 3, tokenText: "Z", logprob: -2.4),
+            ]
+        )
+        let entry = NovaMLXAPIServer.tokenToLogprobEntry(token)
+        let lps = entry?.topLogprobs.map { $0.logprob } ?? []
+        for i in 1..<lps.count {
+            #expect(lps[i - 1] >= lps[i],
+                    "top_logprobs must be in descending order at position \(i)")
+        }
+        // Logprobs must be ≤ 0 (they are log-probabilities)
+        #expect(entry?.logprob ?? 0 <= 0)
+        for tp in entry?.topLogprobs ?? [] {
+            #expect(tp.logprob <= 0, "log-probabilities must be non-positive")
+        }
+    }
 }

@@ -1728,7 +1728,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
             thinkingBudget: openAIReq.resolvedThinkingBudget,
             enableThinking: openAIReq.resolvedEnableThinking,
-            preserveThinking: openAIReq.resolvedPreserveThinking
+            preserveThinking: openAIReq.resolvedPreserveThinking,
+            includeLogprobs: openAIReq.logprobs == true,
+            topLogprobsCount: openAIReq.topLogprobs
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -1819,7 +1821,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 OpenAIChoice(
                     index: 0,
                     message: message,
-                    finishReason: finishReason
+                    finishReason: finishReason,
+                    logprobs: result.tokenLogprobs.map { Self.buildLogprobs(from: $0) } ?? nil
                 )
             ],
             usage: {
@@ -1865,7 +1868,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
             thinkingBudget: openAIReq.resolvedThinkingBudget,
             enableThinking: openAIReq.resolvedEnableThinking,
-            preserveThinking: openAIReq.resolvedPreserveThinking
+            preserveThinking: openAIReq.resolvedPreserveThinking,
+            includeLogprobs: openAIReq.logprobs == true,
+            topLogprobsCount: openAIReq.topLogprobs
         )
 
         let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request))
@@ -1899,6 +1904,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
+                        // Compute logprob data once per token. A single decode token
+                        // can split into multiple SSE chunks (e.g., ThinkingParser
+                        // emits thinking + content separately). Attach logprobs to
+                        // only the FIRST emitted chunk to avoid double-counting.
+                        var tokenLogprobs: OpenAILogprobs? = Self.tokenToLogprobEntry(token).map {
+                            OpenAILogprobs(content: [$0])
+                        }
                         if let tc = token.toolCall {
                             let idx = toolCallCounter.increment()
                             let tcDelta = OpenAIToolCallDelta(
@@ -1993,8 +2005,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                     let chunk = OpenAIStreamChunk(
                                         id: chunkId,
                                         model: openAIReq.model,
-                                        choices: [OpenAIStreamChoice(index: 0, delta: delta)]
+                                        choices: [OpenAIStreamChoice(index: 0, delta: delta, logprobs: tokenLogprobs)]
                                     )
+                                    tokenLogprobs = nil  // consume — only first chunk carries logprobs
                                     let data = try JSONEncoder().encode(chunk)
                                     try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                                 }
@@ -2005,8 +2018,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 let chunk = OpenAIStreamChunk(
                                     id: chunkId,
                                     model: openAIReq.model,
-                                    choices: [OpenAIStreamChoice(index: 0, delta: delta)]
+                                    choices: [OpenAIStreamChoice(index: 0, delta: delta, logprobs: tokenLogprobs)]
                                 )
+                                tokenLogprobs = nil  // consume — only first chunk carries logprobs
                                 let data = try JSONEncoder().encode(chunk)
                                 try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                             }
@@ -2584,6 +2598,32 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     private static func jsonResponse<T: Encodable>(_ value: T) throws -> Response {
         try jsonResponse(value, httpStatus: .ok)
+    }
+
+    /// Convert a stream Token's logprob data to OpenAI response format.
+    /// Populates `bytes` with UTF-8 byte values per OpenAI spec.
+    static func tokenToLogprobEntry(_ token: Token) -> OpenAILogprobEntry? {
+        guard let logprob = token.logprob else { return nil }
+        let topEntries: [OpenAITopLogprob] = (token.topLogprobs ?? []).map { tp in
+            OpenAITopLogprob(
+                token: tp.tokenText,
+                logprob: tp.logprob,
+                bytes: tp.tokenText.utf8.map(Int.init)
+            )
+        }
+        return OpenAILogprobEntry(
+            token: token.text,
+            logprob: logprob,
+            bytes: token.text.utf8.map(Int.init),
+            topLogprobs: topEntries
+        )
+    }
+
+    /// Build `OpenAILogprobs` from a collection of tokens with logprob data.
+    static func buildLogprobs(from tokens: [Token]) -> OpenAILogprobs? {
+        let entries = tokens.compactMap { tokenToLogprobEntry($0) }
+        guard !entries.isEmpty else { return nil }
+        return OpenAILogprobs(content: entries)
     }
 
     private static func jsonResponse<T: Encodable>(_ value: T, httpStatus: HTTPResponse.Status) throws -> Response {

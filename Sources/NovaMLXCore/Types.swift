@@ -217,6 +217,10 @@ public struct InferenceRequest: @unchecked Sendable {
     public let draftModel: String?
     /// Number of tokens the draft model proposes per speculation round (default: 4).
     public let numDraftTokens: Int?
+    /// When true, compute log probabilities for sampled tokens and top-K alternatives.
+    public let includeLogprobs: Bool
+    /// Number of top logprobs to return per token (only used when includeLogprobs is true).
+    public let topLogprobsCount: Int?
 
     public init(
         id: UUID = UUID(),
@@ -243,7 +247,9 @@ public struct InferenceRequest: @unchecked Sendable {
         enableThinking: Bool? = nil,
         preserveThinking: Bool? = nil,
         draftModel: String? = nil,
-        numDraftTokens: Int? = nil
+        numDraftTokens: Int? = nil,
+        includeLogprobs: Bool = false,
+        topLogprobsCount: Int? = nil
     ) {
         self.id = id
         self.model = model
@@ -270,6 +276,8 @@ public struct InferenceRequest: @unchecked Sendable {
         self.preserveThinking = preserveThinking
         self.draftModel = draftModel
         self.numDraftTokens = numDraftTokens
+        self.includeLogprobs = includeLogprobs
+        self.topLogprobsCount = topLogprobsCount
     }
 }
 
@@ -307,6 +315,7 @@ public struct InferenceResult: Codable, Sendable {
     public let promptTokens: Int
     public let completionTokens: Int
     public let finishReason: FinishReason
+    public let tokenLogprobs: [Token]?
 
     public init(
         id: UUID,
@@ -316,7 +325,8 @@ public struct InferenceResult: Codable, Sendable {
         tokensPerSecond: Double,
         promptTokens: Int,
         completionTokens: Int,
-        finishReason: FinishReason
+        finishReason: FinishReason,
+        tokenLogprobs: [Token]? = nil
     ) {
         self.id = id
         self.model = model
@@ -326,6 +336,7 @@ public struct InferenceResult: Codable, Sendable {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.finishReason = finishReason
+        self.tokenLogprobs = tokenLogprobs
     }
 }
 
@@ -335,17 +346,31 @@ public enum FinishReason: String, Codable, Sendable {
     case toolCalls = "tool_calls"
 }
 
+public struct TopLogprob: Codable, Sendable {
+    public let tokenId: Int
+    public let tokenText: String
+    public let logprob: Float
+
+    public init(tokenId: Int, tokenText: String, logprob: Float) {
+        self.tokenId = tokenId
+        self.tokenText = tokenText
+        self.logprob = logprob
+    }
+}
+
 public struct Token: Codable, Sendable {
     public let id: Int
     public let text: String
     public let logprob: Float?
+    public let topLogprobs: [TopLogprob]?
     public let finishReason: FinishReason?
     public let toolCall: ToolCallResult?
 
-    public init(id: Int, text: String, logprob: Float? = nil, finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil) {
+    public init(id: Int, text: String, logprob: Float? = nil, topLogprobs: [TopLogprob]? = nil, finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil) {
         self.id = id
         self.text = text
         self.logprob = logprob
+        self.topLogprobs = topLogprobs
         self.finishReason = finishReason
         self.toolCall = toolCall
     }

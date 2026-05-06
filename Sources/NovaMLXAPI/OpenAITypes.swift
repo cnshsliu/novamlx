@@ -180,9 +180,11 @@ public struct OpenAIRequest: Codable, Sendable {
     public let preserveThinking: Bool?
     public let chatTemplateKwargs: [String: AnyCodable]?
     public let reasoningEffort: String?
+    public let logprobs: Bool?
+    public let topLogprobs: Int?
 
     private enum CodingKeys: String, CodingKey {
-        case model, messages, temperature, stream, stop, n, seed, tools
+        case model, messages, temperature, stream, stop, n, seed, tools, logprobs
         case toolChoice = "tool_choice"
         case topP = "top_p"
         case topK = "top_k"
@@ -199,6 +201,7 @@ public struct OpenAIRequest: Codable, Sendable {
         case preserveThinking = "preserve_thinking"
         case chatTemplateKwargs = "chat_template_kwargs"
         case reasoningEffort = "reasoning_effort"
+        case topLogprobs = "top_logprobs"
     }
 
     public init(
@@ -225,7 +228,9 @@ public struct OpenAIRequest: Codable, Sendable {
         enableThinking: Bool? = nil,
         preserveThinking: Bool? = nil,
         chatTemplateKwargs: [String: AnyCodable]? = nil,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        logprobs: Bool? = nil,
+        topLogprobs: Int? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -251,6 +256,8 @@ public struct OpenAIRequest: Codable, Sendable {
         self.preserveThinking = preserveThinking
         self.chatTemplateKwargs = chatTemplateKwargs
         self.reasoningEffort = reasoningEffort
+        self.logprobs = logprobs
+        self.topLogprobs = topLogprobs
     }
 
     /// Resolve thinking toggle from multiple client formats:
@@ -475,16 +482,18 @@ public struct OpenAIChoice: Codable, Sendable {
     public let index: Int
     public let message: OpenAIChatMessage
     public let finishReason: String?
+    public let logprobs: OpenAILogprobs?
 
     private enum CodingKeys: String, CodingKey {
-        case index, message
+        case index, message, logprobs
         case finishReason = "finish_reason"
     }
 
-    public init(index: Int, message: OpenAIChatMessage, finishReason: String? = nil) {
+    public init(index: Int, message: OpenAIChatMessage, finishReason: String? = nil, logprobs: OpenAILogprobs? = nil) {
         self.index = index
         self.message = message
         self.finishReason = finishReason
+        self.logprobs = logprobs
     }
 }
 
@@ -528,16 +537,18 @@ public struct OpenAIStreamChoice: Codable, Sendable {
     public let index: Int
     public let delta: OpenAIDelta
     public let finishReason: String?
+    public let logprobs: OpenAILogprobs?
 
     private enum CodingKeys: String, CodingKey {
-        case index, delta
+        case index, delta, logprobs
         case finishReason = "finish_reason"
     }
 
-    public init(index: Int, delta: OpenAIDelta, finishReason: String? = nil) {
+    public init(index: Int, delta: OpenAIDelta, finishReason: String? = nil, logprobs: OpenAILogprobs? = nil) {
         self.index = index
         self.delta = delta
         self.finishReason = finishReason
+        self.logprobs = logprobs
     }
 }
 
@@ -558,6 +569,45 @@ public struct OpenAIDelta: Codable, Sendable {
         self.content = content
         self.reasoningContent = reasoningContent
         self.toolCalls = toolCalls
+    }
+}
+
+public struct OpenAILogprobs: Codable, Sendable {
+    public let content: [OpenAILogprobEntry]?
+
+    public init(content: [OpenAILogprobEntry]? = nil) {
+        self.content = content
+    }
+}
+
+public struct OpenAILogprobEntry: Codable, Sendable {
+    public let token: String
+    public let logprob: Float
+    public let bytes: [Int]?
+    public let topLogprobs: [OpenAITopLogprob]
+
+    private enum CodingKeys: String, CodingKey {
+        case token, logprob, bytes
+        case topLogprobs = "top_logprobs"
+    }
+
+    public init(token: String, logprob: Float, bytes: [Int]? = nil, topLogprobs: [OpenAITopLogprob] = []) {
+        self.token = token
+        self.logprob = logprob
+        self.bytes = bytes
+        self.topLogprobs = topLogprobs
+    }
+}
+
+public struct OpenAITopLogprob: Codable, Sendable {
+    public let token: String
+    public let logprob: Float
+    public let bytes: [Int]?
+
+    public init(token: String, logprob: Float, bytes: [Int]? = nil) {
+        self.token = token
+        self.logprob = logprob
+        self.bytes = bytes
     }
 }
 

@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import MLX
 @preconcurrency import MLXLMCommon
+@preconcurrency import MLXNN
 import NovaMLXCore
 import NovaMLXUtils
 
@@ -28,6 +29,8 @@ struct SpecDecodeResult: Sendable {
     /// How many draft tokens were proposed.
     let draftProposed: Int
     let sequenceId: UUID
+    /// Logprob data for the first accepted token (the real decode token).
+    let logprobs: (logprob: Float, topLogprobs: [TopLogprob])?
 }
 
 /// Sampler configuration passed into perform closure.
@@ -36,6 +39,12 @@ struct SamplerConfig: Sendable {
     let topP: Float
     let topK: Int
     let minP: Float
+}
+
+/// Raw logprob data extracted inside `perform` — token texts resolved outside.
+struct RawLogprobData: Sendable {
+    let logprob: Float
+    let topLogprobs: [(tokenId: Int, logprob: Float)]
 }
 
 // MARK: - FinishGuard
@@ -661,7 +670,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 let elapsed = Date().timeIntervalSince(prefillStart)
                 if elapsed > prefillTimeoutSeconds {
                     NovaMLXLog.error("[Prefill:\(reqTag)] Timeout after \(String(format: "%.1f", elapsed))s at chunk offset \(offset)/\(tokenIds.count)")
-                    return SendableBox((-1, "Timeout after \(Int(elapsed))s (\(offset)/\(tokenIds.count) tokens processed)"))
+                    return SendableBox((-1, "Timeout after \(Int(elapsed))s (\(offset)/\(tokenIds.count) tokens processed)", nil as RawLogprobData?))
                 }
                 let end = min(offset + chunkSize, tokenIds.count)
                 let chunk = MLXArray(Array(tokenIds[offset..<end])).reshaped(1, end - offset)
@@ -684,16 +693,21 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             let minLogit = logitsF32.min().item(Float.self)
             if maxLogit.isNaN || maxLogit.isInfinite || minLogit.isNaN || minLogit.isInfinite {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit)) — sequence too long or model unstable")
-                return SendableBox((-1, "NaN/Inf"))
+                return SendableBox((-1, "NaN/Inf", nil as RawLogprobData?))
             }
             let stats = "max=\(String(format: "%.2f", maxLogit)), min=\(String(format: "%.2f", minLogit)), shape=\(logitsToSample.shape), dtype=\(logitsToSample.dtype)"
             let prefillSampled = sampler.sample(logits: logitsToSample)
             eval(prefillSampled)
+            let sampledId = prefillSampled.item(Int.self)
+
+            let rawLogprobs: RawLogprobData? = request.includeLogprobs
+                ? Self.computeRawLogprobs(from: logitsToSample, sampledTokenId: sampledId, topK: request.topLogprobsCount ?? 0)
+                : nil
 
             cachesBox.value = caches
-            return SendableBox((prefillSampled.item(Int.self), stats))
+            return SendableBox((sampledId, stats, rawLogprobs))
         }
-        let (firstTokenId, logitStats) = prefillResultBox.value
+        let (firstTokenId, logitStats, prefillLogprobs) = prefillResultBox.value
         let caches = cachesBox.value ?? []
         let firstTokenText: String
         var initialAccumulatedIds: [Int] = []
@@ -721,11 +735,18 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let eosId = container.tokenizer?.eosTokenId
         let isEOS = eosId == firstTokenId
 
+        // Resolve logprob data (token IDs → text) outside perform
+        let resolvedLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? = prefillLogprobs.map {
+            Self.resolveLogprobs($0, tokenizer: container.tokenizer)
+        }
+
         // Yield first token to client (unless it's EOS and we finish immediately)
         // SAFE: pre-shared-state yields — seq hasn't entered activeByModel yet
         let scrubbedFirstToken = MLXEngine.scrubControlTokens(firstTokenText)
         if !isEOS && !scrubbedFirstToken.isEmpty {
-            continuation.yield(Token(id: 0, text: scrubbedFirstToken))
+            continuation.yield(Token(id: 0, text: scrubbedFirstToken,
+                logprob: resolvedLogprobs?.logprob,
+                topLogprobs: resolvedLogprobs?.topLogprobs))
         }
 
         let completionCount: Int
@@ -803,13 +824,19 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             let minLogit = logitsF32.min().item(Float.self)
             if maxLogit.isNaN || maxLogit.isInfinite || minLogit.isNaN || minLogit.isInfinite {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Remaining prefill logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit))")
-                return SendableBox(-1)
+                return SendableBox((-1, nil as RawLogprobData?))
             }
             let sampled = sampler.sample(logits: logitsToSample)
             eval(sampled)
-            return SendableBox(sampled.item(Int.self))
+            let sampledId = sampled.item(Int.self)
+
+            let rawLogprobs: RawLogprobData? = request.includeLogprobs
+                ? Self.computeRawLogprobs(from: logitsToSample, sampledTokenId: sampledId, topK: request.topLogprobsCount ?? 0)
+                : nil
+
+            return SendableBox((sampledId, rawLogprobs))
         }
-        let firstTokenId = firstTokenIdBox.value
+        let (firstTokenId, prefixRawLogprobs) = firstTokenIdBox.value
 
         guard firstTokenId >= 0 else {
             throw NovaMLXError.inferenceFailed(
@@ -829,10 +856,17 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
         NovaMLXLog.info("[Prefill:\(reqTag)] First token (remaining): id=\(firstTokenId), text='\(firstTokenText)'")
 
+        // Resolve logprob data outside perform
+        let prefixLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? = prefixRawLogprobs.map {
+            Self.resolveLogprobs($0, tokenizer: container.tokenizer)
+        }
+
         // SAFE: pre-shared-state yield — seq hasn't entered activeByModel yet
         let scrubbedPrefixToken = MLXEngine.scrubControlTokens(firstTokenText)
         if !scrubbedPrefixToken.isEmpty {
-            continuation.yield(Token(id: 0, text: scrubbedPrefixToken))
+            continuation.yield(Token(id: 0, text: scrubbedPrefixToken,
+                logprob: prefixLogprobs?.logprob,
+                topLogprobs: prefixLogprobs?.topLogprobs))
         }
 
         return ActiveStreamSequence(
@@ -857,6 +891,64 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             accumulatedTokenIds: prefixAccumulatedIds,
             lastDecodedText: prefixDecodedText
         )
+    }
+
+    // MARK: - Logprob Helper
+
+    /// Compute log probabilities from logits inside a `perform` block.
+    /// Returns nil when logprobs are not requested (zero overhead for the common case).
+    static func computeRawLogprobs(
+        from logits: MLXArray,
+        sampledTokenId: Int,
+        topK: Int
+    ) -> RawLogprobData? {
+        var l = logits
+        if l.dtype == .bfloat16 { l = l.asType(.float32) }
+        if l.ndim > 1 { l = l.reshaped(-1) }
+
+        let logProbs = logSoftmax(l)
+        let vocabSize = l.dim(0)
+        let safeId = max(0, min(sampledTokenId, vocabSize - 1))
+        let k = max(0, min(topK, vocabSize))
+
+        // Fast path: only the sampled-token logprob is needed. Pull a single
+        // scalar — MLX evaluates only what's required.
+        guard k > 0 else {
+            let sampledLogprob = logProbs[safeId].item(Float.self)
+            return RawLogprobData(logprob: sampledLogprob, topLogprobs: [])
+        }
+
+        eval(logProbs)
+        let sampledLogprob = logProbs[safeId].item(Float.self)
+
+        // argPartition with kth=(vocab-k) places the K largest at indices
+        // [vocab-k ..< vocab] in O(N) — vastly cheaper than a full O(N log N)
+        // argSort over a 150K vocabulary. Sort just those K elements after.
+        let pivot = vocabSize - k
+        let partIdx = argPartition(logProbs, kth: pivot, axis: -1)
+        eval(partIdx)
+
+        var pairs: [(tokenId: Int, logprob: Float)] = []
+        pairs.reserveCapacity(k)
+        for i in pivot..<vocabSize {
+            let idx = partIdx[i].item(Int.self)
+            let lp = logProbs[idx].item(Float.self)
+            pairs.append((tokenId: idx, logprob: lp))
+        }
+        pairs.sort { $0.logprob > $1.logprob }
+        return RawLogprobData(logprob: sampledLogprob, topLogprobs: pairs)
+    }
+
+    /// Resolve raw logprob data to `TopLogprob` with token text from tokenizer.
+    private static func resolveLogprobs(
+        _ raw: RawLogprobData,
+        tokenizer: Tokenizer?
+    ) -> (logprob: Float, topLogprobs: [TopLogprob]) {
+        let top = raw.topLogprobs.map { pair -> TopLogprob in
+            let text = tokenizer.map { $0.decode([pair.tokenId]) } ?? ""
+            return TopLogprob(tokenId: pair.tokenId, tokenText: text, logprob: pair.logprob)
+        }
+        return (raw.logprob, top)
     }
 
     // MARK: - Run Loop
@@ -973,10 +1065,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 var text = ""
                 var completionTokens = 0
                 var finishReason: FinishReason = .stop
+                var logprobTokens: [Token] = []
                 do {
                     for try await token in stream {
                         if let fr = token.finishReason { finishReason = fr }
                         if !token.text.isEmpty { text += token.text; completionTokens += 1 }
+                        if token.logprob != nil { logprobTokens.append(token) }
                     }
                     let promptTokens = lock.withLock {
                         activeByModel[modelId]?.first?.promptTokenCount ?? 0
@@ -985,7 +1079,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     item.continuation.resume(returning: InferenceResult(
                         id: item.request.id, model: modelId, text: text,
                         tokensPerSecond: 0, promptTokens: promptTokens,
-                        completionTokens: completionTokens, finishReason: finishReason
+                        completionTokens: completionTokens, finishReason: finishReason,
+                        tokenLogprobs: logprobTokens.isEmpty ? nil : logprobTokens
                     ))
                 } catch {
                     resumed = true
@@ -1100,7 +1195,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             var specResults: [SpecDecodeResult] = []
 
             for seq in active {
-                let draftTokens = specDecoder.speculate(context: seq.recentTokenIds)
+                // Logprobs require per-step logits — bypass spec decoding when requested
+                // so every accepted token has logprob data (avoids silent gaps in the API).
+                let wantLogprobs = seq.request.includeLogprobs
+                let draftTokens = wantLogprobs
+                    ? []
+                    : specDecoder.speculate(context: seq.recentTokenIds)
 
                 if draftTokens.isEmpty {
                     // No draft — standard single-token decode (zero overhead).
@@ -1109,6 +1209,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let seqSampler = seq.sampler
                     let recentIds = seq.recentTokenIds
                     let freqPen = seq.frequencyPenalty
+                    let logprobTopK = seq.request.topLogprobsCount ?? 0
                     let tidBox = await mlxContainer.perform(nonSendable: (token, seqCaches)) { context, values in
                         let (tokenInput, caches) = values
                         let logits = context.model(tokenInput, cache: caches)
@@ -1127,11 +1228,22 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                         let sampled = seqSampler.sample(logits: lastLogits)
                         eval(sampled)
-                        return SendableBox(sampled.item(Int.self))
+                        let sampledId = sampled.item(Int.self)
+
+                        let rawLogprobs: RawLogprobData? = wantLogprobs
+                            ? Self.computeRawLogprobs(from: lastLogits, sampledTokenId: sampledId, topK: logprobTopK)
+                            : nil
+
+                        return SendableBox((sampledId, rawLogprobs))
                     }
-                    let tid = tidBox.value
+                    let (tid, decodeRawLogprobs) = tidBox.value
+                    // Resolve logprob token IDs to text using tokenizer
+                    let decodedLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? = decodeRawLogprobs.map {
+                        Self.resolveLogprobs($0, tokenizer: container.tokenizer)
+                    }
                     specResults.append(SpecDecodeResult(
-                        acceptedTokens: [tid], draftAccepted: 0, draftProposed: 0, sequenceId: seq.id
+                        acceptedTokens: [tid], draftAccepted: 0, draftProposed: 0, sequenceId: seq.id,
+                        logprobs: decodedLogprobs
                     ))
                 } else {
                     // Speculative decode: [lastToken] + draftTokens in one forward pass.
@@ -1195,7 +1307,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         acceptedTokens: acceptedTokens,
                         draftAccepted: draftAccepted,
                         draftProposed: numDraft,
-                        sequenceId: seq.id
+                        sequenceId: seq.id,
+                        logprobs: nil  // speculative path doesn't compute logprobs
                     ))
                 }
             }
@@ -1213,7 +1326,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                 // Yield all accepted tokens.
                 var sequenceFinished = false
-                for tokenId in result.acceptedTokens {
+                for (tokenIdx, tokenId) in result.acceptedTokens.enumerated() {
                     seq.lastTokenId = tokenId
                     seq.completionTokens += 1
 
@@ -1314,7 +1427,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     }
                     seq.generatedText = seq.lastDecodedText
                     if !decoded.isEmpty {
-                        seq.safeYield(Token(id: 0, text: decoded))
+                        // Attach logprobs to the first (real decode) token only
+                        let tokenLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? =
+                            (tokenIdx == 0) ? result.logprobs : nil
+                        seq.safeYield(Token(id: 0, text: decoded,
+                            logprob: tokenLogprobs?.logprob,
+                            topLogprobs: tokenLogprobs?.topLogprobs))
                     }
 
                     lock.withLock { totalTokensViaFused += 1 }
