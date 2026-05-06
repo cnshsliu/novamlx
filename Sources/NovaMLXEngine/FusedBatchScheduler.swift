@@ -38,6 +38,37 @@ struct SamplerConfig: Sendable {
     let minP: Float
 }
 
+// MARK: - FinishGuard
+
+/// Reference-type finish guard for `ActiveStreamSequence`. Because
+/// `ActiveStreamSequence` is a value type, writes to its `isFinished` field
+/// through one copy are not observable through other copies — but every
+/// copy holds the same `AsyncThrowingStream.Continuation` reference, so
+/// without a shared guard, two concurrent code paths can both call
+/// `continuation.finish()` and double-finish (use-after-free / SIGSEGV).
+///
+/// `tryMarkFinished()` is the only safe way to call `continuation.finish()`:
+/// it returns `true` exactly once across all copies.
+final class FinishGuard: @unchecked Sendable {
+    private var _lock = os_unfair_lock()
+    private var _done = false
+
+    @discardableResult
+    func tryMarkFinished() -> Bool {
+        os_unfair_lock_lock(&_lock)
+        defer { os_unfair_lock_unlock(&_lock) }
+        if _done { return false }
+        _done = true
+        return true
+    }
+
+    var isDone: Bool {
+        os_unfair_lock_lock(&_lock)
+        defer { os_unfair_lock_unlock(&_lock) }
+        return _done
+    }
+}
+
 // MARK: - Active Stream Sequence
 
 struct ActiveStreamSequence: @unchecked Sendable {
@@ -56,6 +87,10 @@ struct ActiveStreamSequence: @unchecked Sendable {
     let startTime: Date
     let admittedAt: Date       // When this sequence was admitted (for preemption ordering)
     var isFinished: Bool
+    /// Shared across all copies (reference type). Authoritative for stream-side
+    /// finish — `isFinished` is advisory for fast reads, `finishGuard` is the
+    /// truth for continuation lifecycle and budget release ownership.
+    let finishGuard: FinishGuard
     /// Recent token IDs for N-gram speculation context.
     var recentTokenIds: [Int]
     /// Frequency penalty value — prevents repetition collapse in small quantized models.
@@ -88,6 +123,29 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// channel: in that case we strip the boundary instead of emitting a
     /// stray closing `</think>`.
     var harmonyInThinking: Bool = false
+
+    /// Yield a token to the stream IFF the sequence has not been finished
+    /// by any concurrent path. Silent no-op if already finished.
+    func safeYield(_ token: Token) {
+        guard !finishGuard.isDone else { return }
+        continuation.yield(token)
+    }
+
+    /// Atomically transition the sequence to "finished" exactly once
+    /// across all copies, then call `continuation.finish(...)`.
+    /// Returns `true` if this call performed the finish (caller should
+    /// release budget, record metrics); `false` if another path already
+    /// finished it (caller should skip cleanup).
+    @discardableResult
+    func safeFinish(throwing error: Error? = nil) -> Bool {
+        guard finishGuard.tryMarkFinished() else { return false }
+        if let error {
+            continuation.finish(throwing: error)
+        } else {
+            continuation.finish()
+        }
+        return true
+    }
 
     mutating func decodeNextToken(_ tokenId: Int, tokenizer: Tokenizer) -> String? {
         accumulatedTokenIds.append(tokenId)
@@ -665,6 +723,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             startTime: Date(),
             admittedAt: Date(),
             isFinished: isFinished,
+            finishGuard: FinishGuard(),
             recentTokenIds: Array(allTokens.suffix(20)),
             frequencyPenalty: freqPenaltyValue,
             accumulatedTokenIds: initialAccumulatedIds,
@@ -758,6 +817,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             startTime: Date(),
             admittedAt: Date(),
             isFinished: false,
+            finishGuard: FinishGuard(),
             recentTokenIds: Array(allTokens.suffix(20)),
             frequencyPenalty: freqPenaltyValue,
             accumulatedTokenIds: prefixAccumulatedIds,
