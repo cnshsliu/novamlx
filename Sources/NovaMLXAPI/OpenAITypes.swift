@@ -179,6 +179,7 @@ public struct OpenAIRequest: Codable, Sendable {
     public let enableThinking: Bool?
     public let preserveThinking: Bool?
     public let chatTemplateKwargs: [String: AnyCodable]?
+    public let reasoningEffort: String?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools
@@ -197,6 +198,7 @@ public struct OpenAIRequest: Codable, Sendable {
         case enableThinking = "enable_thinking"
         case preserveThinking = "preserve_thinking"
         case chatTemplateKwargs = "chat_template_kwargs"
+        case reasoningEffort = "reasoning_effort"
     }
 
     public init(
@@ -222,7 +224,8 @@ public struct OpenAIRequest: Codable, Sendable {
         thinkingBudget: Int? = nil,
         enableThinking: Bool? = nil,
         preserveThinking: Bool? = nil,
-        chatTemplateKwargs: [String: AnyCodable]? = nil
+        chatTemplateKwargs: [String: AnyCodable]? = nil,
+        reasoningEffort: String? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -247,6 +250,7 @@ public struct OpenAIRequest: Codable, Sendable {
         self.enableThinking = enableThinking
         self.preserveThinking = preserveThinking
         self.chatTemplateKwargs = chatTemplateKwargs
+        self.reasoningEffort = reasoningEffort
     }
 
     /// Resolve thinking toggle from multiple client formats:
@@ -284,6 +288,25 @@ public struct OpenAIRequest: Codable, Sendable {
             }
         }
         return nil
+    }
+
+    /// Map OpenAI-standard `reasoning_effort` to internal `thinkingBudget`.
+    /// Only used when `thinkingBudget` is not explicitly set — explicit budget wins.
+    /// - "high" → 32768 tokens (deep thinking)
+    /// - "medium" → 8192 tokens (balanced)
+    /// - "low" → 1024 tokens (brief thinking)
+    /// - "none" → 0 (disables thinking entirely)
+    public var resolvedThinkingBudget: Int? {
+        // Explicit thinking_budget takes precedence
+        if let budget = thinkingBudget { return budget }
+        guard let effort = reasoningEffort?.lowercased() else { return nil }
+        switch effort {
+        case "high": return 32768
+        case "medium": return 8192
+        case "low": return 1024
+        case "none": return 0
+        default: return nil
+        }
     }
 
 }

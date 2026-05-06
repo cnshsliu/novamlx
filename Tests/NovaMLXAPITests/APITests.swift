@@ -442,4 +442,50 @@ struct APITypesTests {
         #expect(img.url == "https://example.com/photo.jpg")
         #expect(img.detail == "high")
     }
+
+    // MARK: - reasoning_effort mapping
+
+    @Test("reasoning_effort decodes from JSON")
+    func reasoningEffortDecodes() throws {
+        let json = """
+        {"model":"test","messages":[],"reasoning_effort":"high"}
+        """
+        let data = json.data(using: .utf8)!
+        let req = try JSONDecoder().decode(OpenAIRequest.self, from: data)
+        #expect(req.reasoningEffort == "high")
+    }
+
+    @Test("reasoning_effort maps to thinking budget")
+    func reasoningEffortMapping() throws {
+        let cases: [(String?, Int?)] = [
+            ("high", 32768),
+            ("medium", 8192),
+            ("low", 1024),
+            ("none", 0),
+            ("HIGH", 32768), // case-insensitive
+            (nil, nil),
+            ("unknown", nil),
+        ]
+        for (effort, expected) in cases {
+            let req = OpenAIRequest(
+                model: "test",
+                messages: [],
+                reasoningEffort: effort
+            )
+            #expect(req.resolvedThinkingBudget == expected,
+                    "reasoning_effort=\(effort ?? "nil") should map to \(String(describing: expected))")
+        }
+    }
+
+    @Test("explicit thinking_budget wins over reasoning_effort")
+    func thinkingBudgetPrecedence() throws {
+        let req = OpenAIRequest(
+            model: "test",
+            messages: [],
+            thinkingBudget: 2048,
+            reasoningEffort: "high"
+        )
+        #expect(req.resolvedThinkingBudget == 2048,
+                "Explicit thinking_budget should take precedence over reasoning_effort")
+    }
 }

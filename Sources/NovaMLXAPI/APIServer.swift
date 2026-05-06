@@ -481,7 +481,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     maxTokens: ocrSampling.maxTokens,
                     topP: anthropicReq.topP, topK: anthropicReq.topK,
                     stream: false, stop: ocrStop,
-                    thinkingBudget: anthropicReq.thinkingBudget,
+                    thinkingBudget: anthropicReq.resolvedThinkingBudget,
                     enableThinking: anthropicReq.resolvedEnableThinking,
                     preserveThinking: anthropicReq.resolvedPreserveThinking
                 )
@@ -1726,7 +1726,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             sessionId: sessionId, responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
-            thinkingBudget: openAIReq.thinkingBudget,
+            thinkingBudget: openAIReq.resolvedThinkingBudget,
             enableThinking: openAIReq.resolvedEnableThinking,
             preserveThinking: openAIReq.resolvedPreserveThinking
         )
@@ -1863,7 +1863,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             sessionId: sessionId, responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
             regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
-            thinkingBudget: openAIReq.thinkingBudget,
+            thinkingBudget: openAIReq.resolvedThinkingBudget,
             enableThinking: openAIReq.resolvedEnableThinking,
             preserveThinking: openAIReq.resolvedPreserveThinking
         )
