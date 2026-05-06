@@ -2461,27 +2461,38 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         reqTag: String = "unknown"
     ) -> AsyncThrowingStream<SSEKeepAliveEvent, Error> {
         AsyncThrowingStream { continuation in
+            // Shared guard prevents double-yield/finish when onTermination
+            // races with the inference consumer or heartbeat tasks.
+            let guard_ = FinishGuard()
+
             let task = Task {
                 do {
+                    guard !guard_.isDone else { return }
                     continuation.yield(.keepAlive)
                     for try await token in stream {
                         if Task.isCancelled {
                             NovaMLXLog.warning("[SSE:\(reqTag)] Inference stream consumer cancelled")
                             break
                         }
+                        guard !guard_.isDone else { return }
                         continuation.yield(.token(token))
                     }
                     NovaMLXLog.info("[SSE:\(reqTag)] Inference stream finished normally")
-                    continuation.finish()
+                    if guard_.tryMarkFinished() {
+                        continuation.finish()
+                    }
                 } catch {
                     NovaMLXLog.error("[SSE:\(reqTag)] Inference stream error: \(error)")
-                    continuation.finish(throwing: error)
+                    if guard_.tryMarkFinished() {
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
             let heartbeat = Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: interval)
                     guard !Task.isCancelled else { break }
+                    guard !guard_.isDone else { return }
                     continuation.yield(.keepAlive)
                 }
             }

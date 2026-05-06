@@ -49,12 +49,14 @@ struct SamplerConfig: Sendable {
 ///
 /// `tryMarkFinished()` is the only safe way to call `continuation.finish()`:
 /// it returns `true` exactly once across all copies.
-final class FinishGuard: @unchecked Sendable {
+public final class FinishGuard: @unchecked Sendable {
     private var _lock = os_unfair_lock()
     private var _done = false
 
+    public init() {}
+
     @discardableResult
-    func tryMarkFinished() -> Bool {
+    public func tryMarkFinished() -> Bool {
         os_unfair_lock_lock(&_lock)
         defer { os_unfair_lock_unlock(&_lock) }
         if _done { return false }
@@ -62,7 +64,7 @@ final class FinishGuard: @unchecked Sendable {
         return true
     }
 
-    var isDone: Bool {
+    public var isDone: Bool {
         os_unfair_lock_lock(&_lock)
         defer { os_unfair_lock_unlock(&_lock) }
         return _done
