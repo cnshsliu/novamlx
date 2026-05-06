@@ -1013,6 +1013,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
     }
 
+    // Memory recovery on Apple Silicon is synchronous, not a deferred VRAM problem:
+    //  - pool.remove() drops array refs → ARC deallocates → MLX.Memory.activeMemory reflects freed bytes
+    //  - MLX.Memory.clearCache() flushes the 512MB compute buffer cache immediately
+    //  - ensureMemoryHeadroom() adds a 200ms settle per LRU eviction for Metal command buffer recycling
+    //  - unified memory means no separate VRAM to recover; if activeMemory says it's free, it's free
+    // Do NOT add a VRAM-recovery polling loop (a la Ollama's waitForVRAMRecovery) — that is a CUDA/ROCm
+    // concern that does not apply to Apple Silicon. Verified 2026-05-06: back-to-back unload→load of
+    // 20GB models succeeds without any explicit wait.
     public func unloadModel(_ identifier: ModelIdentifier) {
         if let container = pool.get(identifier.id),
            let ticket = container.wiredReservationTicket {
