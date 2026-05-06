@@ -6,6 +6,31 @@ import NovaMLXEngine
 import NovaMLXModelManager
 import AsyncAlgorithms
 
+/// Per-model load dedup. Concurrent callers for the same modelId await a
+/// single underlying task. Cleanup is synchronous in the actor's isolation
+/// context so a failed load releases its slot before the error propagates,
+/// allowing immediate retry by piled-up callers.
+actor LoadDedup {
+    private var inFlight: [String: Task<Void, Error>] = [:]
+
+    /// Number of in-flight loads (test/observability hook).
+    var inFlightCount: Int { inFlight.count }
+
+    func ensureSingle(
+        modelId: String,
+        work: @Sendable @escaping () async throws -> Void
+    ) async throws {
+        if let existing = inFlight[modelId] {
+            try await existing.value
+            return
+        }
+        let task = Task<Void, Error> { try await work() }
+        inFlight[modelId] = task
+        defer { inFlight.removeValue(forKey: modelId) }
+        try await task.value
+    }
+}
+
 public final class InferenceService: @unchecked Sendable {
     public let engine: MLXEngine
     private let batcher: ContinuousBatcher
@@ -18,6 +43,8 @@ public final class InferenceService: @unchecked Sendable {
     private var worker: WorkerSupervisor?
     private var workerLoadedModels: Set<String> = []
     private var workerModelTypes: [String: ModelType] = [:]
+    private let loadDedup = LoadDedup()
+    private var ttlSweepTask: Task<Void, Never>?
 
     public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil) {
         self.engine = engine
@@ -33,6 +60,15 @@ public final class InferenceService: @unchecked Sendable {
 
         engine.settingsProvider = { [settingsManager] modelId in
             settingsManager.getSettings(modelId)
+        }
+
+        // TTL sweep: auto-evict models that exceed their idle TTL every 60s
+        ttlSweepTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard let self = self else { return }
+                self.checkTTLExpirations()
+            }
         }
     }
 
@@ -223,21 +259,23 @@ public final class InferenceService: @unchecked Sendable {
         }
     }
 
-    public func loadModel(at url: URL, config: ModelConfig) async throws {
+    public func loadModel(at url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws {
         let modelId = config.identifier.id
 
-        if workerMode, let worker = worker {
-            try await worker.sendLoad(modelId: modelId, path: url.path, config: config)
-            workerLoadedModels.insert(modelId)
-            workerModelTypes[modelId] = config.modelType
-        } else {
-            _ = try await engine.loadModel(from: url, config: config)
-            let settings = settingsManager.getSettings(modelId)
-            if settings.isPinned {
-                engine.pool.pin(modelId)
+        try await loadDedup.ensureSingle(modelId: modelId) { [self] in
+            if self.workerMode, let worker = self.worker {
+                try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
+                self.workerLoadedModels.insert(modelId)
+                self.workerModelTypes[modelId] = config.modelType
+            } else {
+                _ = try await self.engine.loadModel(from: url, config: config, progress: progress)
+                let settings = self.settingsManager.getSettings(modelId)
+                if settings.isPinned {
+                    self.engine.pool.pin(modelId)
+                }
             }
+            self.saveLoadedModelsList()
         }
-        saveLoadedModelsList()
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) async {
@@ -266,49 +304,20 @@ public final class InferenceService: @unchecked Sendable {
     /// Check if a model can be loaded given current memory constraints.
     /// Works in both direct and worker mode — uses Metal device info directly.
     public func checkMemoryFeasibility(modelId: String, sizeBytes: UInt64, localURL: URL) async -> MemoryFeasibility? {
-        // Already loaded?
         if isModelLoaded(modelId) { return nil }
 
         let maxGPU = MLX.GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? 0
         guard maxGPU > 0 else { return nil }
 
-        // Estimate weight size
         let estimatedBytes = MLXEngine.estimateModelWeightSize(at: localURL) ?? sizeBytes
-        let modelMB = estimatedBytes / 1_048_576
-
-        // Safety margin (same as pre-load gate)
-        let safetyMargin: UInt64
-        if estimatedBytes > 30 * 1_073_741_824 {
-            safetyMargin = 5 * 1_073_741_824
-        } else if estimatedBytes > 20 * 1_073_741_824 {
-            safetyMargin = UInt64(Double(estimatedBytes) * 0.3)
-        } else {
-            safetyMargin = UInt64(Double(estimatedBytes) * 0.2)
-        }
-        let neededBytes = estimatedBytes + safetyMargin
-
         let currentBytes = UInt64(MLX.Memory.activeMemory)
         let available = currentBytes < maxGPU ? maxGPU - currentBytes : 0
-        let gpuMB = maxGPU / 1_048_576
-        let availableMB = available / 1_048_576
 
-        if neededBytes > maxGPU {
-            let neededMB = neededBytes / 1_048_576
-            let physMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
-            return MemoryFeasibility(
-                canLoad: false,
-                modelSizeMB: modelMB,
-                availableMB: availableMB,
-                gpuBudgetMB: gpuMB,
-                reason: "Model peak (\(neededMB)MB) exceeds GPU budget (\(gpuMB)MB). Try: sudo sysctl iogpu.wired_limit_mb=\(max(physMB - 2048, gpuMB + 30000))"
-            )
-        }
-
-        return MemoryFeasibility(
-            canLoad: true,
-            modelSizeMB: modelMB,
-            availableMB: availableMB,
-            gpuBudgetMB: gpuMB
+        return MemoryFeasibility.evaluate(
+            modelId: modelId,
+            modelSizeBytes: estimatedBytes,
+            currentlyAvailableBytes: available,
+            gpuBudgetBytes: maxGPU
         )
     }
 

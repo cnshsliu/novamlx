@@ -27,6 +27,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
     private var streamFinishReasons: [String: FinishReason] = [:]
     private var streamCompletionTokens: [String: Int] = [:]
 
+    // Progress callbacks for model loads
+    private var loadProgressCallbacks: [String: @Sendable (LoadPhase) -> Void] = [:]
+
     // Latest memory stats from worker
     public private(set) var latestMemoryStats: WorkerMemoryStats?
 
@@ -137,14 +140,38 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     // MARK: - Send Messages
 
-    public func sendLoad(modelId: String, path: String, config: ModelConfig) async throws {
+    public func sendLoad(modelId: String, path: String, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws {
         let msg = WorkerMessage(type: WorkerMessageType.load, modelId: modelId, modelPath: path, modelConfig: config)
         pendingLoadModelId = modelId
+
+        // Store progress callback so handleMessage can forward loadProgress frames.
+        // Must set before entering async context.
+        setProgressCallback(progress, for: modelId)
+
         let response = try await sendAndWait(msg, requestId: modelId)
         pendingLoadModelId = nil
+
+        // Clean up progress callback
+        removeProgressCallback(for: modelId)
+
         guard response.type == WorkerMessageType.loaded else {
             throw NovaMLXError.modelLoadFailed(modelId, underlying: NovaMLXError.apiError(response.errorMessage ?? "Unknown load error"))
         }
+    }
+
+    /// Stores a progress callback. Safe to call from any context (sync).
+    private func setProgressCallback(_ callback: (@Sendable (LoadPhase) -> Void)?, for modelId: String) {
+        guard let callback = callback else { return }
+        lock.lock()
+        loadProgressCallbacks[modelId] = callback
+        lock.unlock()
+    }
+
+    /// Removes a progress callback. Safe to call from any context (sync).
+    private func removeProgressCallback(for modelId: String) {
+        lock.lock()
+        loadProgressCallbacks.removeValue(forKey: modelId)
+        lock.unlock()
     }
 
     public func sendUnload(modelId: String) async throws {
@@ -293,14 +320,28 @@ public final class WorkerSupervisor: @unchecked Sendable {
         }
 
         guard let requestId = msg.requestId else {
-            // No requestId — likely load/unload response
+            // No requestId — likely load/unload/loadProgress response
             if msg.type == WorkerMessageType.loaded || msg.type == WorkerMessageType.unloaded {
                 let key = msg.modelId ?? ""
                 lock.lock()
+                let callback = loadProgressCallbacks.removeValue(forKey: key)
                 if let cont = pendingRequests.removeValue(forKey: key) {
                     cont.resume(returning: msg)
                 }
                 lock.unlock()
+                if let callback = callback, msg.type == WorkerMessageType.loaded {
+                    callback(.ready)
+                }
+            } else if msg.type == WorkerMessageType.loadProgress {
+                // Forward load progress from worker to host
+                let key = msg.modelId ?? ""
+                let phase: LoadPhase? = msg.loadPhase.flatMap { LoadPhase(rawValue: $0) }
+                lock.lock()
+                let callback = loadProgressCallbacks[key]
+                lock.unlock()
+                if let callback = callback, let phase = phase {
+                    callback(phase)
+                }
             } else if msg.type == WorkerMessageType.error {
                 // Worker rejected load/unload — resume the waiting continuation
                 let key = msg.modelId ?? ""

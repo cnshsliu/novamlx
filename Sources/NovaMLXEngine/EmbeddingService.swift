@@ -53,12 +53,14 @@ public final class EmbeddingService: @unchecked Sendable {
         self.containers = [:]
     }
 
-    public func loadModel(from url: URL, config: ModelConfig) async throws -> EmbeddingContainer {
+    public func loadModel(from url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws -> EmbeddingContainer {
         let container = EmbeddingContainer(
             identifier: config.identifier,
             config: config
         )
         NovaMLXLog.info("Loading embedding model from: \(url.path)")
+
+        progress?(.loadingWeights)
 
         let embedderContainer = try await EmbedderModelFactory.shared.loadContainer(
             from: url,
@@ -67,10 +69,13 @@ public final class EmbeddingService: @unchecked Sendable {
 
         container.setLoaded(embedderContainer)
 
+        progress?(.warmingUp)
+
         lock.withLock {
             containers[config.identifier.id] = container
         }
 
+        progress?(.ready)
         return container
     }
 

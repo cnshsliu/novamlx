@@ -26,6 +26,8 @@ public enum NovaMLXError: Error, LocalizedError {
     case unsupportedModel(String)
     case contextWindowExceeded(promptTokens: Int, maxTokens: Int, contextLength: Int)
     case insufficientMemory(neededMB: UInt64, availableMB: UInt64, modelId: String)
+    case modelNotLoaded(String)
+    case modelLoadInProgress(modelId: String, etaSeconds: Int?)
 
     public var errorDescription: String? {
         switch self {
@@ -41,7 +43,16 @@ public enum NovaMLXError: Error, LocalizedError {
             "Context window exceeded: prompt has \(promptTokens) tokens + max_tokens \(maxTokens) = \(promptTokens + maxTokens), but model context length is \(contextLength). Reduce your prompt or max_tokens."
         case .insufficientMemory(let neededMB, let availableMB, let modelId):
             "Insufficient memory to load '\(modelId)': need \(neededMB)MB but only \(availableMB)MB available under the current memory limit. Unload unused models, pin important ones, or increase maxProcessMemory."
+        case .modelNotLoaded(let id):
+            "Model '\(id)' is not loaded. Send the request again with auto-load enabled or use POST /admin/models/load first."
+        case .modelLoadInProgress(let id, let eta):
+            "Model '\(id)' is loading. Retry in approximately \(eta ?? 60) seconds."
         }
+    }
+
+    public var retryAfter: Int? {
+        if case .modelLoadInProgress(_, let eta) = self { return eta ?? 60 }
+        return nil
     }
 }
 
@@ -392,6 +403,58 @@ public struct MemoryFeasibility: Codable, Sendable {
         self.gpuBudgetMB = gpuBudgetMB
         self.reason = reason
     }
+
+    public static func evaluateSafetyMargin(estimatedBytes: UInt64) -> UInt64 {
+        if estimatedBytes > 30 * 1_073_741_824 {
+            return 5 * 1_073_741_824
+        } else if estimatedBytes > 20 * 1_073_741_824 {
+            return UInt64(Double(estimatedBytes) * 0.3)
+        } else {
+            return UInt64(Double(estimatedBytes) * 0.2)
+        }
+    }
+
+    public static func evaluate(
+        modelId: String,
+        modelSizeBytes: UInt64,
+        currentlyAvailableBytes: UInt64,
+        gpuBudgetBytes: UInt64
+    ) -> MemoryFeasibility {
+        let modelMB = modelSizeBytes / 1_048_576
+        let availableMB = currentlyAvailableBytes / 1_048_576
+        let gpuMB = gpuBudgetBytes / 1_048_576
+        let safetyMargin = evaluateSafetyMargin(estimatedBytes: modelSizeBytes)
+        let neededBytes = modelSizeBytes + safetyMargin
+
+        if neededBytes > gpuBudgetBytes {
+            let neededMB = neededBytes / 1_048_576
+            let physMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
+            return MemoryFeasibility(
+                canLoad: false,
+                modelSizeMB: modelMB,
+                availableMB: availableMB,
+                gpuBudgetMB: gpuMB,
+                reason: "Model peak (\(neededMB)MB) exceeds GPU budget (\(gpuMB)MB). Try: sudo sysctl iogpu.wired_limit_mb=\(max(physMB - 2048, gpuMB + 30000))"
+            )
+        }
+
+        return MemoryFeasibility(
+            canLoad: true,
+            modelSizeMB: modelMB,
+            availableMB: availableMB,
+            gpuBudgetMB: gpuMB
+        )
+    }
+}
+
+public enum LoadPhase: String, Codable, Sendable {
+    case queued
+    case feasibilityChecking
+    case evicting
+    case loadingWeights
+    case warmingUp
+    case ready
+    case failed
 }
 
 public protocol TokenizerProtocol: Sendable {
@@ -496,6 +559,37 @@ public enum ProcessMemoryLimit: Codable, Sendable, Equatable {
     }
 }
 
+public struct AutoLoadConfig: Codable, Sendable {
+    public var enabled: Bool
+    public var evictOnConflict: Bool
+    public var allowDownload: Bool
+    public var coldLoadTimeoutSeconds: Double
+    public var coldLoadTimeoutMaxSeconds: Double
+    public var coldLoadTimeoutMultiplier: Double
+    public var defaultTTLSecondsAfterAutoLoad: Double?
+    public var emitProgressEvents: Bool
+
+    public init(
+        enabled: Bool = true,
+        evictOnConflict: Bool = true,
+        allowDownload: Bool = false,
+        coldLoadTimeoutSeconds: Double = 180,
+        coldLoadTimeoutMaxSeconds: Double = 600,
+        coldLoadTimeoutMultiplier: Double = 3.0,
+        defaultTTLSecondsAfterAutoLoad: Double? = 600,
+        emitProgressEvents: Bool = false
+    ) {
+        self.enabled = enabled
+        self.evictOnConflict = evictOnConflict
+        self.allowDownload = allowDownload
+        self.coldLoadTimeoutSeconds = coldLoadTimeoutSeconds
+        self.coldLoadTimeoutMaxSeconds = coldLoadTimeoutMaxSeconds
+        self.coldLoadTimeoutMultiplier = coldLoadTimeoutMultiplier
+        self.defaultTTLSecondsAfterAutoLoad = defaultTTLSecondsAfterAutoLoad
+        self.emitProgressEvents = emitProgressEvents
+    }
+}
+
 public struct ServerConfig: Codable, Sendable {
     public let host: String
     public let port: Int
@@ -514,6 +608,7 @@ public struct ServerConfig: Codable, Sendable {
     /// or `storeCache` calls are issued, and `getOrCreatePrefixCacheManager`
     /// returns `nil` for every model.
     public let prefixCacheEnabled: Bool
+    public let autoLoad: AutoLoadConfig
 
     private enum CodingKeys: String, CodingKey {
         case host, port, adminPort, apiKeys, maxConcurrentRequests
@@ -521,6 +616,7 @@ public struct ServerConfig: Codable, Sendable {
         case tlsCertPath, tlsKeyPath, tlsKeyPassword, maxRequestSizeMB
         case maxProcessMemory
         case prefixCacheEnabled
+        case autoLoad
     }
 
     public init(
@@ -536,7 +632,8 @@ public struct ServerConfig: Codable, Sendable {
         tlsKeyPassword: String? = nil,
         maxRequestSizeMB: Double = 100,
         maxProcessMemory: String = "auto",
-        prefixCacheEnabled: Bool = true
+        prefixCacheEnabled: Bool = true,
+        autoLoad: AutoLoadConfig = .init()
     ) {
         self.host = host
         self.port = port
@@ -551,6 +648,7 @@ public struct ServerConfig: Codable, Sendable {
         self.maxRequestSizeMB = maxRequestSizeMB
         self.maxProcessMemory = maxProcessMemory
         self.prefixCacheEnabled = prefixCacheEnabled
+        self.autoLoad = autoLoad
     }
 
     public var isTLSEnabled: Bool { tlsCertPath != nil }
@@ -570,6 +668,7 @@ public struct ServerConfig: Codable, Sendable {
         maxRequestSizeMB = try container.decodeIfPresent(Double.self, forKey: .maxRequestSizeMB) ?? 100
         maxProcessMemory = try container.decodeIfPresent(String.self, forKey: .maxProcessMemory) ?? "auto"
         prefixCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .prefixCacheEnabled) ?? true
+        autoLoad = try container.decodeIfPresent(AutoLoadConfig.self, forKey: .autoLoad) ?? .init()
     }
 
     public func scaleTokenCount(_ count: Int, modelContextWindow: Int) -> Int {

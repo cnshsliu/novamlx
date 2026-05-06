@@ -64,7 +64,11 @@ struct NovaMLXErrorMiddleware: RouterMiddleware {
                 type: error.apiErrorType,
                 code: error.apiErrorCode
             )
-            return Self.jsonError(status: error.httpStatus, detail: detail)
+            var response = Self.jsonError(status: error.httpStatus, detail: detail)
+            if let retryAfter = error.retryAfter {
+                response.headers[.init("Retry-After")!] = "\(retryAfter)"
+            }
+            return response
         } catch let error as DecodingError {
             let detail = OpenAIErrorDetail(
                 message: Self.decodingErrorMessage(error),
@@ -261,6 +265,8 @@ extension NovaMLXError {
         case .unsupportedModel: .badRequest
         case .contextWindowExceeded: .badRequest
         case .insufficientMemory: .serviceUnavailable
+        case .modelNotLoaded: .notFound
+        case .modelLoadInProgress: .serviceUnavailable
         }
     }
 
@@ -276,6 +282,8 @@ extension NovaMLXError {
         case .unsupportedModel: "invalid_request_error"
         case .contextWindowExceeded: "invalid_request_error"
         case .insufficientMemory: "server_error"
+        case .modelNotLoaded: "not_found_error"
+        case .modelLoadInProgress: "server_error"
         }
     }
 
@@ -291,6 +299,8 @@ extension NovaMLXError {
         case .unsupportedModel: "unsupported_model"
         case .contextWindowExceeded: "context_window_exceeded"
         case .insufficientMemory: "insufficient_memory"
+        case .modelNotLoaded: "model_not_loaded"
+        case .modelLoadInProgress: "model_load_in_progress"
         }
     }
 }
@@ -307,6 +317,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private let hfService: HuggingFaceService
     private let config: ServerConfig
     private let startTime = Date()
+    private var coordinator: AutoLoadCoordinator?
 
     public init(
         inferenceService: InferenceService,
@@ -345,6 +356,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let cfg = self.config
         let hf = self.hfService
 
+        // Auto-load coordinator — lazy init
+        let coordinator = AutoLoadCoordinator(
+            inference: inference,
+            embeddings: embeddings,
+            models: models,
+            settings: inference.settingsManager,
+            defaultTTLSeconds: cfg.autoLoad.defaultTTLSecondsAfterAutoLoad.map { Int($0) }
+        )
+        self.coordinator = coordinator
+
         let rateLimiter = RateLimiter(config: RateLimitConfig())
         let securityHeaders = SecurityHeadersMiddleware()
         let requestSizeLimit = RequestSizeLimitMiddleware(maxMB: cfg.maxRequestSizeMB)
@@ -379,9 +400,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     messages = OCROptimizer.applyPrompt(messages: messages, modelName: openAIReq.model)
                 }
 
-                if !inference.isModelLoaded(openAIReq.model) {
-                    throw NovaMLXError.modelNotFound(openAIReq.model)
-                }
+                let loadOutcome = try await Self.ensureModelReady(
+                    modelId: openAIReq.model, isStreaming: openAIReq.stream ?? false,
+                    cfg: cfg, inference: inference, embeddings: embeddings,
+                    coordinator: coordinator, request: request
+                )
 
                 let sessionId = Self.extractSessionId(request: request, body: openAIReq.sessionId)
                 let responseFormat: ResponseFormat?
@@ -408,21 +431,28 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
 
                 let clientType = ClientDetector.detect(request: request)
+                var response: Response
                 if openAIReq.stream ?? false {
-                    return try await Self.handleStreamChat(
+                    response = try await Self.handleStreamChat(
                         openAIReq: openAIReq, messages: messages, inference: inference,
                         sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
                         regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
-                        cfg: cfg, clientType: clientType
+                        cfg: cfg, clientType: clientType,
+                        coordinator: coordinator
                     )
                 } else {
-                    return try await Self.handleChat(
+                    response = try await Self.handleChat(
                         openAIReq: openAIReq, messages: messages, inference: inference,
                         sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
                         regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
                         cfg: cfg, clientType: clientType
                     )
                 }
+                if case .justLoaded(let ms) = loadOutcome {
+                    response.headers[.init("X-Model-Cold-Load")!] = "true"
+                    response.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                }
+                return response
             }
             Post("/v1/messages") { request, context in
                 let body = try await request.body.collect(upTo: .max)
@@ -444,16 +474,24 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.apiError(String(describing: err))
                 }
 
-                if !inference.isModelLoaded(anthropicReq.model) {
-                    throw NovaMLXError.modelNotFound(anthropicReq.model)
-                }
+                let anthropicLoadOutcome = try await Self.ensureModelReady(
+                    modelId: anthropicReq.model, isStreaming: anthropicReq.stream ?? false,
+                    cfg: cfg, inference: inference, embeddings: embeddings,
+                    coordinator: coordinator, request: request
+                )
 
                 let anthropicClientType = ClientDetector.detect(request: request)
                 if anthropicReq.stream ?? false {
-                    return try await Self.handleStreamAnthropic(
+                    var streamResp = try await Self.handleStreamAnthropic(
                         anthropicReq: anthropicReq, messages: messages, inference: inference,
-                        cfg: cfg, clientType: anthropicClientType
+                        cfg: cfg, clientType: anthropicClientType,
+                        coordinator: coordinator
                     )
+                    if case .justLoaded(let ms) = anthropicLoadOutcome {
+                        streamResp.headers[.init("X-Model-Cold-Load")!] = "true"
+                        streamResp.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                    }
+                    return streamResp
                 }
 
                 let ocrSampling = OCROptimizer.samplingOverrides(
@@ -566,7 +604,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     stopReason: (result.toolCalls != nil && !result.toolCalls!.isEmpty) ? "tool_use" : result.finishReason.rawValue,
                     usage: AnthropicUsage(inputTokens: scaledInput, outputTokens: scaledOutput)
                 )
-                return try Self.jsonResponse(response)
+                var httpResponse = try Self.jsonResponse(response)
+                if case .justLoaded(let ms) = anthropicLoadOutcome {
+                    httpResponse.headers[.init("X-Model-Cold-Load")!] = "true"
+                    httpResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                }
+                return httpResponse
             }
             Post("/v1/messages/count_tokens") { request, context in
                 let body = try await request.body.collect(upTo: .max)
@@ -599,30 +642,41 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let body = try await request.body.collect(upTo: .max)
                 let compReq = try JSONDecoder().decode(OpenAICompletionRequest.self, from: body)
 
-                if !inference.isModelLoaded(compReq.model) {
-                    throw NovaMLXError.modelNotFound(compReq.model)
-                }
+                let compLoadOutcome = try await Self.ensureModelReady(
+                    modelId: compReq.model, isStreaming: compReq.stream ?? false,
+                    cfg: cfg, inference: inference, embeddings: embeddings,
+                    coordinator: coordinator, request: request
+                )
 
                 let compClientType = ClientDetector.detect(request: request)
+                var compResponse: Response
                 if compReq.stream ?? false {
-                    return try await Self.handleStreamCompletion(
+                    compResponse = try await Self.handleStreamCompletion(
                         compReq: compReq, inference: inference,
-                        cfg: cfg, clientType: compClientType
+                        cfg: cfg, clientType: compClientType,
+                        coordinator: coordinator
                     )
                 } else {
-                    return try await Self.handleCompletion(
+                    compResponse = try await Self.handleCompletion(
                         compReq: compReq, inference: inference,
                         cfg: cfg, clientType: compClientType
                     )
                 }
+                if case .justLoaded(let ms) = compLoadOutcome {
+                    compResponse.headers[.init("X-Model-Cold-Load")!] = "true"
+                    compResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                }
+                return compResponse
             }
             Post("/v1/embeddings") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let embReq = try JSONDecoder().decode(OpenAIEmbeddingRequest.self, from: body)
 
-                if !embeddings.isLoaded(embReq.model) {
-                    throw NovaMLXError.modelNotFound(embReq.model)
-                }
+                let embLoadOutcome = try await Self.ensureModelReady(
+                    modelId: embReq.model, isStreaming: false,
+                    cfg: cfg, inference: inference, embeddings: embeddings,
+                    coordinator: coordinator, request: request
+                )
 
                 let texts = embReq.input.texts
                 let result = try await embeddings.embed(model: embReq.model, inputs: texts)
@@ -645,18 +699,30 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         totalTokens: scaledTotal
                     )
                 )
-                return try Self.jsonResponse(response)
+                var embHttpResponse = try Self.jsonResponse(response)
+                if case .justLoaded(let ms) = embLoadOutcome {
+                    embHttpResponse.headers[.init("X-Model-Cold-Load")!] = "true"
+                    embHttpResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                }
+                return embHttpResponse
             }
             Post("/v1/responses") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let req = try JSONDecoder().decode(OpenAIResponseRequest.self, from: body)
 
-                if !inference.isModelLoaded(req.model) {
-                    throw NovaMLXError.modelNotFound(req.model)
-                }
+                let respLoadOutcome = try await Self.ensureModelReady(
+                    modelId: req.model, isStreaming: false,
+                    cfg: cfg, inference: inference, embeddings: embeddings,
+                    coordinator: coordinator, request: request
+                )
 
                 let respClientType = ClientDetector.detect(request: request)
-                return try await Self.handleResponsesRequest(req: req, inference: inference, cfg: cfg, clientType: respClientType)
+                var respResponse = try await Self.handleResponsesRequest(req: req, inference: inference, cfg: cfg, clientType: respClientType)
+                if case .justLoaded(let ms) = respLoadOutcome {
+                    respResponse.headers[.init("X-Model-Cold-Load")!] = "true"
+                    respResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                }
+                return respResponse
             }
             Get("/v1/responses/{id}") { request, context in
                 let responseId = try context.parameters.require("id")
@@ -1695,6 +1761,165 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Auto-Load Helpers
+
+    enum LoadOutcome: Sendable {
+        case alreadyLoaded
+        case justLoaded(coldLoadMs: Int)
+        /// Streaming: load is required but deferred to inside the response body
+        /// so that withSSEKeepAlive's heartbeat covers the load window.
+        case deferred
+    }
+
+    private static func ensureModelReady(
+        modelId: String,
+        isStreaming: Bool,
+        cfg: ServerConfig,
+        inference: InferenceService,
+        embeddings: EmbeddingService,
+        coordinator: AutoLoadCoordinator,
+        request: Request
+    ) async throws -> LoadOutcome {
+        // Fast path: already loaded
+        if inference.isModelLoaded(modelId) || embeddings.isLoaded(modelId) {
+            return .alreadyLoaded
+        }
+
+        // Auto-load disabled — throw original error
+        if !cfg.autoLoad.enabled {
+            throw NovaMLXError.modelNotLoaded(modelId)
+        }
+
+        // X-Wait-Cold-Load: false → fire-and-forget + immediate 503
+        let waitForColdLoad = parseWaitColdLoadHeader(request)
+        if waitForColdLoad == false {
+            Task.detached {
+                try? await coordinator.ensureLoaded(
+                    modelId,
+                    options: AutoLoadCoordinator.Options(
+                        evictOnConflict: cfg.autoLoad.evictOnConflict,
+                        allowDownload: cfg.autoLoad.allowDownload
+                    )
+                )
+            }
+            throw NovaMLXError.modelLoadInProgress(modelId: modelId, etaSeconds: 60)
+        }
+
+        // For streaming requests: defer the actual load to inside the response
+        // body. The streaming handler wraps inference.stream(...) with
+        // loadAwareStream, and withSSEKeepAlive's heartbeat fires while the
+        // load runs — so the client never sees dead air during a 30-90s cold
+        // load. Without this, the client would block waiting for the response
+        // headers/body to start while the eager load completes here.
+        if isStreaming {
+            return .deferred
+        }
+
+        // Non-streaming: do the load now (the connection blocks anyway).
+        let deadline = computeColdLoadDeadline(request: request, cfg: cfg)
+        let started = Date()
+
+        let options = AutoLoadCoordinator.Options(
+            evictOnConflict: cfg.autoLoad.evictOnConflict,
+            allowDownload: cfg.autoLoad.allowDownload,
+            coldLoadDeadline: deadline
+        )
+
+        try await withColdLoadTimeout(deadline: deadline, modelId: modelId) {
+            try await coordinator.ensureLoaded(modelId, options: options)
+        }
+
+        let coldLoadMs = Int(Date().timeIntervalSince(started) * 1000)
+        return .justLoaded(coldLoadMs: coldLoadMs)
+    }
+
+    /// Wraps an inference token stream with an optional pre-load step. When the
+    /// model isn't loaded and auto-load is enabled, the load runs *before* the
+    /// inference stream begins yielding tokens. Combined with withSSEKeepAlive,
+    /// this produces SSE `:keep-alive\n\n` heartbeat traffic during the load
+    /// window so the connection stays open through cold-load delays.
+    private static func loadAwareStream(
+        modelId: String,
+        inference: InferenceService,
+        coordinator: AutoLoadCoordinator,
+        autoLoadCfg: AutoLoadConfig,
+        inferenceStreamProducer: @Sendable @escaping () -> AsyncThrowingStream<Token, Error>
+    ) -> AsyncThrowingStream<Token, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    if !inference.isModelLoaded(modelId), autoLoadCfg.enabled {
+                        try await coordinator.ensureLoaded(
+                            modelId,
+                            options: AutoLoadCoordinator.Options(
+                                evictOnConflict: autoLoadCfg.evictOnConflict,
+                                allowDownload: autoLoadCfg.allowDownload
+                            )
+                        )
+                    }
+                    for try await token in inferenceStreamProducer() {
+                        if Task.isCancelled { break }
+                        continuation.yield(token)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private static func computeColdLoadDeadline(request: Request, cfg: ServerConfig) -> Date {
+        if let headerVal = request.headers[.init("X-Request-Timeout")!]?.first,
+           let secs = Double(String(headerVal)) {
+            let capped = min(secs, cfg.autoLoad.coldLoadTimeoutMaxSeconds)
+            return Date().addingTimeInterval(capped)
+        }
+
+        let base = cfg.requestTimeout
+        let multiplied = base * cfg.autoLoad.coldLoadTimeoutMultiplier
+        let withFloor = max(multiplied, cfg.autoLoad.coldLoadTimeoutSeconds)
+        let capped = min(withFloor, cfg.autoLoad.coldLoadTimeoutMaxSeconds)
+        return Date().addingTimeInterval(capped)
+    }
+
+    private static func withColdLoadTimeout<T: Sendable>(
+        deadline: Date,
+        modelId: String,
+        operation: @Sendable @escaping () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                let interval = deadline.timeIntervalSinceNow
+                if interval > 0 {
+                    try await Task.sleep(for: .seconds(interval))
+                }
+                throw NovaMLXError.modelLoadInProgress(
+                    modelId: modelId,
+                    etaSeconds: 60
+                )
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw NovaMLXError.inferenceFailed("cold-load timeout race lost")
+            }
+            return result
+        }
+    }
+
+    private static func parseWaitColdLoadHeader(_ request: Request) -> Bool? {
+        guard let v = request.headers[.init("X-Wait-Cold-Load")!]?.first?.lowercased() else {
+            return nil
+        }
+        return v == "false" || v == "0" || v == "no" ? false : (v == "true" || v == "1" || v == "yes" ? true : nil)
+    }
+
+    // MARK: - Inference Handlers
+
     private static func handleChat(
         openAIReq: OpenAIRequest, messages: [ChatMessage], inference: InferenceService,
         sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
@@ -1839,7 +2064,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         openAIReq: OpenAIRequest, messages: [ChatMessage], inference: InferenceService,
         sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
-        cfg: ServerConfig, clientType: ClientType
+        cfg: ServerConfig, clientType: ClientType,
+        coordinator: AutoLoadCoordinator
     ) async throws -> Response {
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: openAIReq.model,
@@ -1873,7 +2099,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             topLogprobsCount: openAIReq.topLogprobs
         )
 
-        let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request))
+        let modelId = openAIReq.model
+        let autoLoadCfg = cfg.autoLoad
+        let keepAliveStream = Self.withSSEKeepAlive(
+            Self.loadAwareStream(
+                modelId: modelId, inference: inference,
+                coordinator: coordinator, autoLoadCfg: autoLoadCfg,
+                inferenceStreamProducer: { inference.stream(request) }
+            )
+        )
         let chunkId = "chatcmpl-\(request.id.uuidString.prefix(8))"
         let includeUsage = openAIReq.streamOptions?.includeUsage == true
         let toolCallCounter = LockedCounter()
@@ -2077,7 +2311,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     private static func handleStreamAnthropic(
         anthropicReq: AnthropicRequest, messages: [ChatMessage], inference: InferenceService,
-        cfg: ServerConfig, clientType: ClientType
+        cfg: ServerConfig, clientType: ClientType,
+        coordinator: AutoLoadCoordinator
     ) async throws -> Response {
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: anthropicReq.model,
@@ -2101,7 +2336,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let reqTag = request.id.uuidString.prefix(8)
         NovaMLXLog.info("[SSE:\(reqTag)] Anthropic stream request started — model=\(anthropicReq.model), maxTokens=\(anthropicReq.maxTokens)")
 
-        let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request), reqTag: String(reqTag))
+        let modelId = anthropicReq.model
+        let autoLoadCfg = cfg.autoLoad
+        let keepAliveStream = Self.withSSEKeepAlive(
+            Self.loadAwareStream(
+                modelId: modelId, inference: inference,
+                coordinator: coordinator, autoLoadCfg: autoLoadCfg,
+                inferenceStreamProducer: { inference.stream(request) }
+            ),
+            reqTag: String(reqTag)
+        )
         let msgId = "msg_\(request.id.uuidString.prefix(24))"
 
         let body: ResponseBody = .init { writer in
@@ -2332,7 +2576,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     private static func handleStreamCompletion(
         compReq: OpenAICompletionRequest, inference: InferenceService,
-        cfg: ServerConfig, clientType: ClientType
+        cfg: ServerConfig, clientType: ClientType,
+        coordinator: AutoLoadCoordinator
     ) async throws -> Response {
         let messages = [ChatMessage(role: .user, content: compReq.prompt)]
         let request = InferenceRequest(
@@ -2347,7 +2592,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             stream: true, stop: compReq.stop
         )
 
-        let keepAliveStream = Self.withSSEKeepAlive(inference.stream(request))
+        let modelId = compReq.model
+        let autoLoadCfg = cfg.autoLoad
+        let keepAliveStream = Self.withSSEKeepAlive(
+            Self.loadAwareStream(
+                modelId: modelId, inference: inference,
+                coordinator: coordinator, autoLoadCfg: autoLoadCfg,
+                inferenceStreamProducer: { inference.stream(request) }
+            )
+        )
         let chunkId = "cmpl-\(request.id.uuidString.prefix(8))"
 
         let body: ResponseBody = .init { writer in

@@ -134,6 +134,7 @@ public struct WorkerMessage: Codable, Sendable {
     public let memoryUtilization: Double?
     public let memoryEvictions: UInt64?
     public let cpuUsage: Double?
+    public let loadPhase: String?
 
     public init(
         type: String,
@@ -153,7 +154,8 @@ public struct WorkerMessage: Codable, Sendable {
         memoryHardLimitBytes: UInt64? = nil,
         memoryUtilization: Double? = nil,
         memoryEvictions: UInt64? = nil,
-        cpuUsage: Double? = nil
+        cpuUsage: Double? = nil,
+        loadPhase: String? = nil
     ) {
         self.type = type
         self.modelId = modelId
@@ -173,6 +175,7 @@ public struct WorkerMessage: Codable, Sendable {
         self.memoryUtilization = memoryUtilization
         self.memoryEvictions = memoryEvictions
         self.cpuUsage = cpuUsage
+        self.loadPhase = loadPhase
     }
 }
 
@@ -193,4 +196,5 @@ public enum WorkerMessageType {
     public static let ping = "ping"
     public static let pong = "pong"
     public static let memoryStats = "memoryStats"
+    public static let loadProgress = "loadProgress"
 }

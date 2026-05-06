@@ -651,7 +651,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
     }
 
-    public func loadModel(from url: URL, config: ModelConfig) async throws -> ModelContainer {
+    public func loadModel(from url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws -> ModelContainer {
         await CustomModelRegistration.ensureRegistered()
         let container = ModelContainer(identifier: config.identifier, config: config)
         NovaMLXLog.info("Loading model from: \(url.path)")
@@ -664,6 +664,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family, architecture: arch)
 
         // --- Pre-load memory gate ---
+        progress?(.feasibilityChecking)
         // Check ProcessMemoryEnforcer soft limit BEFORE loading weights.
         // If we can't fit the new model under the soft limit, evict LRU unpinned
         // models to make room. If that's not enough, fail fast with a clear error
@@ -675,15 +676,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     // Peak memory during eval(): model weights + Metal buffer materialization.
                     // Staged eval (for models >30GB) keeps peak to ~model_size + one batch.
                     // Without staged eval, peak can reach ~1.3x.
-                    let safetyMargin: UInt64
-                    if estimatedBytes > 30 * 1_073_741_824 {
-                        // Staged eval: peak ≈ weight_size + 5GB batch overhead
-                        safetyMargin = 5 * 1_073_741_824
-                    } else if estimatedBytes > 20 * 1_073_741_824 {
-                        safetyMargin = UInt64(Double(estimatedBytes) * 0.3)  // 30% for medium models
-                    } else {
-                        safetyMargin = UInt64(Double(estimatedBytes) * 0.2)  // 20% for small models
-                    }
+                    let safetyMargin = MemoryFeasibility.evaluateSafetyMargin(estimatedBytes: estimatedBytes)
                     let neededBytes = estimatedBytes + safetyMargin
 
                     // Also check against Metal's recommended working set size.
@@ -699,6 +692,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let currentBytes = UInt64(MLX.Memory.activeMemory)
                     if currentBytes + neededBytes > enforcerStatus.softLimitBytes {
                         NovaMLXLog.info("[MemoryGate] Need \(neededBytes / 1_048_576)MB, have \(currentBytes / 1_048_576)MB free of \(enforcerStatus.softLimitBytes / 1_048_576)MB limit — attempting LRU eviction")
+                        progress?(.evicting)
                         let ok = await ensureMemoryHeadroom(neededBytes: neededBytes, softLimitBytes: enforcerStatus.softLimitBytes)
                         if !ok {
                             let afterCurrent = UInt64(MLX.Memory.activeMemory)
@@ -713,6 +707,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
         }
         // --- End pre-load memory gate ---
+
+        progress?(.loadingWeights)
 
         // VLM models must be loaded via VLMModelFactory — they need vision tower
         // and VLM-specific prepare()/callAsFunction implementations
@@ -749,6 +745,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         )
 
         container.setLoaded(mlxContainer: mlxContainer, tokenizer: tokenizer)
+
+        progress?(.warmingUp)
 
         let model = await mlxContainer.perform { (context: ModelContext) in
             SendableBox(context.model)
@@ -909,6 +907,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         pool.add(container)
         metricsStore.recordModelLoad()
+        progress?(.ready)
         return container
     }
 
