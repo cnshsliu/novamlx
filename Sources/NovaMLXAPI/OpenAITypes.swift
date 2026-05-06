@@ -620,6 +620,7 @@ public struct AdminModelStatus: Codable, Sendable {
     public let loaded: Bool
     public let sizeBytes: UInt64
     public let downloadedAt: String?
+    public let memoryFeasibility: MemoryFeasibility?
 
     public init(
         id: String,
@@ -627,13 +628,15 @@ public struct AdminModelStatus: Codable, Sendable {
         downloaded: Bool,
         loaded: Bool,
         sizeBytes: UInt64,
-        downloadedAt: Date?
+        downloadedAt: Date?,
+        memoryFeasibility: MemoryFeasibility? = nil
     ) {
         self.id = id
         self.family = family
         self.downloaded = downloaded
         self.loaded = loaded
         self.sizeBytes = sizeBytes
+        self.memoryFeasibility = memoryFeasibility
         if let date = downloadedAt {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

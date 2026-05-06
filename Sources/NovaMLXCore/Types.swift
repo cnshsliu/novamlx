@@ -3,7 +3,7 @@ import Logging
 
 public enum NovaMLX {}
 
-public let version = "1.0.7"
+public let version = "1.0.8"
 
 public var buildTimestamp: String {
     guard let execURL = Bundle.main.executableURL,
@@ -348,6 +348,24 @@ public struct Token: Codable, Sendable {
         self.logprob = logprob
         self.finishReason = finishReason
         self.toolCall = toolCall
+    }
+}
+
+/// Pre-emptive memory feasibility check for model loading.
+/// Returned by `GET /admin/models` so the GUI can show badges before load attempt.
+public struct MemoryFeasibility: Codable, Sendable {
+    public let canLoad: Bool
+    public let modelSizeMB: UInt64
+    public let availableMB: UInt64
+    public let gpuBudgetMB: UInt64
+    public let reason: String?
+
+    public init(canLoad: Bool, modelSizeMB: UInt64, availableMB: UInt64, gpuBudgetMB: UInt64, reason: String? = nil) {
+        self.canLoad = canLoad
+        self.modelSizeMB = modelSizeMB
+        self.availableMB = availableMB
+        self.gpuBudgetMB = gpuBudgetMB
+        self.reason = reason
     }
 }
 

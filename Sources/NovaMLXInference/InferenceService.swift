@@ -263,6 +263,55 @@ public final class InferenceService: @unchecked Sendable {
         return container.isLoaded
     }
 
+    /// Check if a model can be loaded given current memory constraints.
+    /// Works in both direct and worker mode — uses Metal device info directly.
+    public func checkMemoryFeasibility(modelId: String, sizeBytes: UInt64, localURL: URL) async -> MemoryFeasibility? {
+        // Already loaded?
+        if isModelLoaded(modelId) { return nil }
+
+        let maxGPU = MLX.GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? 0
+        guard maxGPU > 0 else { return nil }
+
+        // Estimate weight size
+        let estimatedBytes = MLXEngine.estimateModelWeightSize(at: localURL) ?? sizeBytes
+        let modelMB = estimatedBytes / 1_048_576
+
+        // Safety margin (same as pre-load gate)
+        let safetyMargin: UInt64
+        if estimatedBytes > 30 * 1_073_741_824 {
+            safetyMargin = 5 * 1_073_741_824
+        } else if estimatedBytes > 20 * 1_073_741_824 {
+            safetyMargin = UInt64(Double(estimatedBytes) * 0.3)
+        } else {
+            safetyMargin = UInt64(Double(estimatedBytes) * 0.2)
+        }
+        let neededBytes = estimatedBytes + safetyMargin
+
+        let currentBytes = UInt64(MLX.Memory.activeMemory)
+        let available = currentBytes < maxGPU ? maxGPU - currentBytes : 0
+        let gpuMB = maxGPU / 1_048_576
+        let availableMB = available / 1_048_576
+
+        if neededBytes > maxGPU {
+            let neededMB = neededBytes / 1_048_576
+            let physMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
+            return MemoryFeasibility(
+                canLoad: false,
+                modelSizeMB: modelMB,
+                availableMB: availableMB,
+                gpuBudgetMB: gpuMB,
+                reason: "Model peak (\(neededMB)MB) exceeds GPU budget (\(gpuMB)MB). Try: sudo sysctl iogpu.wired_limit_mb=\(max(physMB - 2048, gpuMB + 30000))"
+            )
+        }
+
+        return MemoryFeasibility(
+            canLoad: true,
+            modelSizeMB: modelMB,
+            availableMB: availableMB,
+            gpuBudgetMB: gpuMB
+        )
+    }
+
     public func listLoadedModels() -> [String] {
         var models: [String]
         if workerMode {

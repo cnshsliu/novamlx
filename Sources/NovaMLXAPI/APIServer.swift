@@ -941,15 +941,27 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             NovaMLXErrorMiddleware()
             Get("/admin/models") { request, context in
                 let records = models.allRegisteredModels()
-                let statuses = records.map { record -> AdminModelStatus in
-                    AdminModelStatus(
+                var statuses: [AdminModelStatus] = []
+                statuses.reserveCapacity(records.count)
+                for record in records {
+                    let isDownloaded = models.isDownloaded(record.id)
+                    let isLoaded = inference.isModelLoaded(record.id) || embeddings.isLoaded(record.id)
+                    // Only check feasibility for downloaded, non-loaded, non-embedding models
+                    var feasibility: MemoryFeasibility? = nil
+                    if isDownloaded && !isLoaded && record.modelType != .embedding {
+                        feasibility = await inference.checkMemoryFeasibility(
+                            modelId: record.id, sizeBytes: record.sizeBytes, localURL: record.localURL
+                        )
+                    }
+                    statuses.append(AdminModelStatus(
                         id: record.id,
                         family: record.family.rawValue,
-                        downloaded: models.isDownloaded(record.id),
-                        loaded: inference.isModelLoaded(record.id) || embeddings.isLoaded(record.id),
+                        downloaded: isDownloaded,
+                        loaded: isLoaded,
                         sizeBytes: record.sizeBytes,
-                        downloadedAt: record.downloadedAt
-                    )
+                        downloadedAt: record.downloadedAt,
+                        memoryFeasibility: feasibility
+                    ))
                 }
                 return try Self.jsonResponse(statuses)
             }

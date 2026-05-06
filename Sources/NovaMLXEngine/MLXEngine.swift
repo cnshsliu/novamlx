@@ -1225,7 +1225,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
     /// Estimate model weight size from config.json params or directory size.
     /// Used by the pre-load memory gate to decide whether we need LRU eviction.
-    static func estimateModelWeightSize(at url: URL) -> UInt64? {
+    public static func estimateModelWeightSize(at url: URL) -> UInt64? {
         let configFile = url.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configFile),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -1252,6 +1252,85 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms settle for Metal
         }
         return UInt64(MLX.Memory.activeMemory) + neededBytes <= softLimitBytes
+    }
+
+    /// Pre-emptive memory feasibility check — can this model be loaded?
+    /// Returns nil if the model is already loaded or if info is unavailable.
+    public func checkMemoryFeasibility(modelId: String, sizeBytes: UInt64, localURL: URL) async -> MemoryFeasibility? {
+        // Already loaded — no need to check
+        guard getContainer(for: modelId) == nil else { return nil }
+
+        let maxGPU = GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? 0
+        guard maxGPU > 0 else { return nil }
+
+        // Estimate weight size: prefer config.json, fall back to directory size or provided sizeBytes
+        let estimatedBytes = Self.estimateModelWeightSize(at: localURL) ?? sizeBytes
+        let modelMB = estimatedBytes / 1_048_576
+
+        // Same safety margin logic as the pre-load gate (lines 678-686)
+        let safetyMargin: UInt64
+        if estimatedBytes > 30 * 1_073_741_824 {
+            safetyMargin = 5 * 1_073_741_824
+        } else if estimatedBytes > 20 * 1_073_741_824 {
+            safetyMargin = UInt64(Double(estimatedBytes) * 0.3)
+        } else {
+            safetyMargin = UInt64(Double(estimatedBytes) * 0.2)
+        }
+        let neededBytes = estimatedBytes + safetyMargin
+
+        let currentBytes = UInt64(MLX.Memory.activeMemory)
+        let available = currentBytes < maxGPU ? maxGPU - currentBytes : 0
+        let gpuMB = maxGPU / 1_048_576
+        let availableMB = available / 1_048_576
+
+        if neededBytes > maxGPU {
+            let neededMB = neededBytes / 1_048_576
+            return MemoryFeasibility(
+                canLoad: false,
+                modelSizeMB: modelMB,
+                availableMB: availableMB,
+                gpuBudgetMB: gpuMB,
+                reason: "Model peak (\(neededMB)MB) exceeds GPU budget (\(gpuMB)MB). Try: sudo sysctl iogpu.wired_limit_mb=\(min(maxGPU / 1_048_576 + 30000, ProcessInfo.processInfo.physicalMemory / 1_048_576 - 2048))"
+            )
+        }
+
+        // Check against process soft limit if enforcer is active
+        if let enforcer = memoryEnforcer {
+            let status = await enforcer.status
+            if status.enabled && status.softLimitBytes > 0 {
+                let softLimitMB = status.softLimitBytes / 1_048_576
+                if currentBytes + neededBytes > status.softLimitBytes {
+                    // Would need LRU eviction — borderline
+                    let freeAfterEvict = status.softLimitBytes > currentBytes
+                        ? (status.softLimitBytes - currentBytes) / 1_048_576 : 0
+                    let neededMB = neededBytes / 1_048_576
+                    if freeAfterEvict >= neededMB {
+                        return MemoryFeasibility(
+                            canLoad: true,
+                            modelSizeMB: modelMB,
+                            availableMB: availableMB,
+                            gpuBudgetMB: gpuMB,
+                            reason: "Loadable after evicting other models (need \(neededMB)MB, \(freeAfterEvict)MB available after LRU eviction)"
+                        )
+                    } else {
+                        return MemoryFeasibility(
+                            canLoad: false,
+                            modelSizeMB: modelMB,
+                            availableMB: availableMB,
+                            gpuBudgetMB: gpuMB,
+                            reason: "Insufficient memory: need \(neededMB)MB, only \(freeAfterEvict)MB available after full LRU eviction"
+                        )
+                    }
+                }
+            }
+        }
+
+        return MemoryFeasibility(
+            canLoad: true,
+            modelSizeMB: modelMB,
+            availableMB: availableMB,
+            gpuBudgetMB: gpuMB
+        )
     }
 
     public func preflightCheck(modelId: String, promptTokens: Int, maxTokens: Int) async throws {
