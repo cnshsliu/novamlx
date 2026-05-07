@@ -2787,7 +2787,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
             }
             continuation.onTermination = { reason in
-                NovaMLXLog.warning("[SSE:\(reqTag)] SSE connection terminated: \(reason)")
+                // Command-009: finished(nil) is the normal AsyncThrowingStream completion
+                // (no error thrown). Only WARN on real failures; normal close is DEBUG.
+                if case .finished(let error?) = reason {
+                    NovaMLXLog.warning("[SSE:\(reqTag)] SSE connection terminated with error: \(error)")
+                } else {
+                    NovaMLXLog.debug("[SSE:\(reqTag)] SSE connection terminated: \(reason)")
+                }
                 task.cancel()
                 heartbeat.cancel()
             }
