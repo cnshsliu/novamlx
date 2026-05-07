@@ -645,22 +645,34 @@ public struct OpenAIModelsResponse: Codable, Sendable {
     }
 }
 
-public struct OpenAIModel: Codable, Sendable {
+/// NovaMLX-specific extension for /v1/models entries.
+public struct OpenAIModelNova: Codable, Sendable, Equatable {
+    public let capabilities: ModelCapabilities
+
+    public init(capabilities: ModelCapabilities) {
+        self.capabilities = capabilities
+    }
+}
+
+public struct OpenAIModel: Codable, Sendable, Equatable {
     public let id: String
     public let object: String
     public let created: Int
     public let ownedBy: String
+    public let nova: OpenAIModelNova?
 
     private enum CodingKeys: String, CodingKey {
         case id, object, created
         case ownedBy = "owned_by"
+        case nova
     }
 
-    public init(id: String) {
+    public init(id: String, nova: OpenAIModelNova? = nil) {
         self.id = id
         self.object = "model"
         self.created = Int(Date().timeIntervalSince1970)
         self.ownedBy = "novamlx"
+        self.nova = nova
     }
 }
 

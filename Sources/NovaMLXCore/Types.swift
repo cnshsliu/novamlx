@@ -96,6 +96,22 @@ public enum ModelType: String, Codable, Sendable {
     case embedding
 }
 
+/// Advertised capabilities for a model, surfaced via /v1/models under nova.capabilities.
+public struct ModelCapabilities: Codable, Sendable, Equatable {
+    public let reasoning: Bool
+    public let thinking: Bool
+    public let tools: Bool
+    public let vision: Bool
+
+    public init(reasoning: Bool = false, thinking: Bool = false,
+                tools: Bool = false, vision: Bool = false) {
+        self.reasoning = reasoning
+        self.thinking = thinking
+        self.tools = tools
+        self.vision = vision
+    }
+}
+
 public struct ModelConfig: Codable, Sendable {
     public let identifier: ModelIdentifier
     public let modelType: ModelType

@@ -318,6 +318,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private let config: ServerConfig
     private let startTime = Date()
     private var coordinator: AutoLoadCoordinator?
+    private let capabilitiesDetector = ModelCapabilitiesDetector()
 
     public init(
         inferenceService: InferenceService,
@@ -380,11 +381,21 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             APIKeyAuthMiddleware(validKeys: cfg.apiKeys)
             NovaMLXErrorMiddleware()
             Get("/v1/models") { request, context in
+                let detector = self.capabilitiesDetector
                 let modelList = models.downloadedModels()
                     .filter { inference.isModelLoaded($0.id) }
-                    .map { OpenAIModel(id: $0.id) }
+                    .map { record -> OpenAIModel in
+                        let caps = detector.capabilities(
+                            for: record.id,
+                            modelType: record.modelType,
+                            localURL: record.localURL
+                        )
+                        return OpenAIModel(
+                            id: record.id,
+                            nova: OpenAIModelNova(capabilities: caps)
+                        )
+                    }
 
-                // Append cloud models
                 let cloudModelList = await inference.listCloudModels().map { OpenAIModel(id: $0) }
                 let response = OpenAIModelsResponse(data: modelList + cloudModelList)
                 return try Self.jsonResponse(response)
