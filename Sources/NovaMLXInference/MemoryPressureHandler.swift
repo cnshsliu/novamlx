@@ -54,12 +54,14 @@ public final class MemoryPressureHandler: @unchecked Sendable {
         default: pressure = .normal
         }
 
-        NovaMLXLog.warning("OS memory pressure: \(pressure.rawValue)")
-
         switch pressure {
         case .critical:
+            NovaMLXLog.warning("OS memory pressure: \(pressure.rawValue)")
             evictUnpinnedModels(keepLast: 0)
         case .warning:
+            // macOS fires this routinely at ~60% RAM use; only escalation to .critical is actionable.
+            // See investigation 2026-05-06 (P1 audit, candidate 4).
+            NovaMLXLog.debug("OS memory pressure: \(pressure.rawValue)")
             evictUnpinnedModels(keepLast: 1)
         case .normal:
             break
