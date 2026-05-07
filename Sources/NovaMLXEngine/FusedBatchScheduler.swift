@@ -283,7 +283,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         // Atomic admission check + slot reserve — if memory/concurrency tight, fall back to engine
         guard await canAdmitAndReserve(request) else {
-            NovaMLXLog.info("FusedScheduler: submit() can't admit — falling back to engine")
+            NovaMLXLog.info("FusedScheduler: submit(\(request.id.uuidString.prefix(8))) can't admit — falling back to engine")
             return try await engine.generate(request)
         }
 
@@ -306,6 +306,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         // EOS on first token — release budget immediately
                         self.lock.withLock {
                             self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
+                            assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in EOS-first-token path")
                         }
                         await self.budgetTracker.release(sequenceId: request.id)
                     }
@@ -314,6 +315,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     continuation.finish(throwing: error)
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
+                        assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in submit() prefill error path")
                     }
                     await self.budgetTracker.release(sequenceId: request.id)
                 }
@@ -384,6 +386,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         // EOS on first token — release budget
                         self.lock.withLock {
                             self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
+                            assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in submitStream EOS path")
                         }
                         await self.budgetTracker.release(sequenceId: request.id)
                     }
@@ -392,6 +395,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     continuation.finish(throwing: error)
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
+                        assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in submitStream error path")
                     }
                     await self.budgetTracker.release(sequenceId: request.id)
                 }
@@ -418,6 +422,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     continuation.finish(throwing: error)
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
+                        assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in internalSubmitStream error path")
                     }
                     await self.budgetTracker.release(sequenceId: request.id)
                 }
@@ -519,8 +524,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         // Release the victim's memory budget
         await budgetTracker.release(sequenceId: victim.id)
+        NovaMLXLog.debug("[BudgetRelease] seq=\(victim.id.uuidString.prefix(8)) model=\(modelId) path=preempt")
         lock.withLock {
             activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+            assert((activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow after preemption release")
             totalPreemptions += 1
         }
 
@@ -1075,6 +1082,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let promptTokens = lock.withLock {
                         activeByModel[modelId]?.first?.promptTokenCount ?? 0
                     }
+                    assert(!resumed, "BUG: double-resume of generate continuation for \(item.request.id)")
                     resumed = true
                     item.continuation.resume(returning: InferenceResult(
                         id: item.request.id, model: modelId, text: text,
@@ -1083,6 +1091,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         tokenLogprobs: logprobTokens.isEmpty ? nil : logprobTokens
                     ))
                 } catch {
+                    assert(!resumed, "BUG: double-resume (throwing) of generate continuation for \(item.request.id)")
                     resumed = true
                     item.continuation.resume(throwing: error)
                 }
@@ -1136,6 +1145,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 item.continuation.finish(throwing: error)
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                    assert((activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in admitQueued error path")
                 }
                 await self.budgetTracker.release(sequenceId: item.request.id)
             }
@@ -1147,6 +1157,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     @discardableResult
     private func fusedDecodeStep() async -> Bool {
         let groups = lock.withLock { activeByModel }
+        let stepNum = lock.withLock { totalDecodeSteps }
         var anyActive = false
 
         for (modelId, sequences) in groups {
@@ -1155,12 +1166,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 lock.withLock { activeByModel[modelId] = [] }
                 continue
             }
+            NovaMLXLog.debug("[DecodeStep:\(stepNum)] entering model=\(modelId) active=\(active.count)")
 
             guard let container = engine.getContainer(for: modelId),
                   let mlxContainer = container.mlxContainer else {
                 for seq in active {
                     if seq.safeFinish(throwing: NovaMLXError.modelNotFound(modelId)) {
                         await budgetTracker.release(sequenceId: seq.id)
+                        NovaMLXLog.debug("[BudgetRelease] seq=\(seq.id.uuidString.prefix(8)) model=\(modelId) path=modelNotFound")
                     }
                 }
                 lock.withLock { activeByModel[modelId] = []; activeModelCounts[modelId] = 0 }
@@ -1492,6 +1505,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         seq.isFinished = true
                         sequenceFinished = true
                         seq._finishedByDecodeStep = finishedByUs
+                        NovaMLXLog.debug("[DecodeStep:\(stepNum)] seq \(seq.id.uuidString.prefix(8)) finished owned=\(finishedByUs) reason=\(finishReason)")
                         break
                     }
                 }
@@ -1532,8 +1546,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // Preempt/abort paths release budget themselves; skip to avoid double-release.
                 guard seq._finishedByDecodeStep else { continue }
                 await budgetTracker.release(sequenceId: seq.id)
+                assert(seq._finishedByDecodeStep, "BUG: budget released for sequence not owned by decode step — double-release")
+                NovaMLXLog.debug("[BudgetRelease] seq=\(seq.id.uuidString.prefix(8)) model=\(modelId) path=decodeStep")
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                    assert((activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow for \(modelId)")
                 }
                 let elapsed = Date().timeIntervalSince(seq.startTime)
                 engine.metricsStore.recordRequest(
@@ -1560,6 +1577,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     activeByModel.removeValue(forKey: modelId)
                 }
             }
+            // Invariant: total active sequences must never exceed total admitted count
+            let totalActive = activeByModel.values.reduce(0) { $0 + $1.count }
+            let totalCounts = activeModelCounts.values.reduce(0, +)
+            assert(totalActive <= totalCounts,
+                "BUG: active(\(totalActive)) > admitted(\(totalCounts)) — scheduler invariant violated")
         }
 
         // Report live TPS to MetricsStore so the status chart updates during generation
@@ -1597,17 +1619,42 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     // MARK: - Abort
 
     public func abort(requestId: UUID) {
+        let tag = requestId.uuidString.prefix(8)
+        var wasInQueue = false
+        var wasActive = false
+        var activeModel: String?
         lock.withLock {
+            let sqBefore = streamQueue.count
             streamQueue.removeAll { $0.request.id == requestId }
+            wasInQueue = wasInQueue || streamQueue.count < sqBefore
+
+            let gqBefore = generateQueue.count
             generateQueue.removeAll { $0.request.id == requestId }
-            for (_, var sequences) in activeByModel {
+            wasInQueue = wasInQueue || generateQueue.count < gqBefore
+
+            for (modelId, var sequences) in activeByModel {
                 if let idx = sequences.firstIndex(where: { $0.id == requestId }) {
                     sequences[idx].isFinished = true
                     sequences[idx].safeFinish()
                     sequences.remove(at: idx)
+                    activeByModel[modelId] = sequences
+                    wasActive = true
+                    activeModel = modelId
                 }
             }
         }
+
+        if wasActive {
+            // NOTE: abort() does not release budgetTracker or decrement activeModelCounts.
+            // The decode step's _finishedByDecodeStep guard will skip cleanup for this
+            // sequence (since safeFinish() already returned true from this path).
+            // Budget is reclaimed when the decode step runs and sees the sequence is gone.
+            NovaMLXLog.debug("[Abort:\(tag)] active sequence aborted (model=\(activeModel ?? "?")), budget release deferred to decode step")
+        }
+        if !wasInQueue && !wasActive {
+            NovaMLXLog.debug("[Abort:\(tag)] request not found in any queue or active set")
+        }
+
         engine.abort(requestId: requestId)
     }
 }
