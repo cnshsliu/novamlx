@@ -181,4 +181,134 @@ struct AnthropicMessageMapperTests {
         #expect(result[1].toolCalls == nil)
         #expect(result[1].toolCallId == nil)
     }
+
+    /// tool_result with no content field at all — maps to empty string
+    @Test("tool_result with no content maps to empty string")
+    func testToolResultWithNoContent() throws {
+        let json = """
+        {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_empty", "name": "noop", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_empty"}
+                ]}
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let req = try JSONDecoder().decode(AnthropicRequest.self, from: json)
+        let result = try mapAnthropicMessages(req.messages, system: nil)
+
+        #expect(result.count == 2)
+        #expect(result[1].role == .tool)
+        #expect(result[1].toolCallId == "toolu_empty")
+        #expect(result[1].content == "")
+    }
+
+    /// tool_result with empty string content — should map to empty string, not nil
+    @Test("tool_result with empty string content maps correctly")
+    func testToolResultEmptyStringContent() throws {
+        let json = """
+        {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_blank", "name": "echo", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_blank", "content": ""}
+                ]}
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let req = try JSONDecoder().decode(AnthropicRequest.self, from: json)
+        let result = try mapAnthropicMessages(req.messages, system: nil)
+
+        #expect(result.count == 2)
+        #expect(result[1].role == .tool)
+        #expect(result[1].toolCallId == "toolu_blank")
+        #expect(result[1].content == "")
+    }
+
+    /// User message with text + tool_result blocks — must expand to 2+ ChatMessages
+    @Test("Mixed text + tool_result in user message expands to multiple ChatMessages")
+    func testMixedTextAndToolResultExpansion() throws {
+        let json = """
+        {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_x", "name": "read", "input": {"f": "a.txt"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Here is the context you asked for."},
+                    {"type": "tool_result", "tool_use_id": "toolu_x", "content": "file contents here"}
+                ]}
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let req = try JSONDecoder().decode(AnthropicRequest.self, from: json)
+        let result = try mapAnthropicMessages(req.messages, system: nil)
+
+        // Expect: assistant(tool_use) + user(text) + tool(result) = 3 messages
+        #expect(result.count == 3)
+
+        // [0] Assistant with toolCalls
+        #expect(result[0].role == .assistant)
+        #expect(result[0].toolCalls?.count == 1)
+
+        // [1] User text extracted from mixed message
+        #expect(result[1].role == .user)
+        #expect(result[1].content == "Here is the context you asked for.")
+
+        // [2] Tool result
+        #expect(result[2].role == .tool)
+        #expect(result[2].toolCallId == "toolu_x")
+        #expect(result[2].content == "file contents here")
+    }
+
+    /// tool_result with is_error=true — documents schema gap: is_error is silently dropped.
+    /// See TODO(novamlx-tool-fidelity) in AnthropicTypes.swift and Types.swift.
+    @Test("tool_result with is_error=true maps content but drops is_error flag (schema gap)")
+    func testToolResultIsErrorFieldDropped() throws {
+        let json = """
+        {
+            "model": "test",
+            "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_err", "name": "run", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_err",
+                        "is_error": true,
+                        "content": "Command failed with exit code 1"
+                    }
+                ]}
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let req = try JSONDecoder().decode(AnthropicRequest.self, from: json)
+        let result = try mapAnthropicMessages(req.messages, system: nil)
+
+        #expect(result.count == 2)
+        #expect(result[1].role == .tool)
+        #expect(result[1].toolCallId == "toolu_err")
+        // Content is preserved but is_error flag is silently dropped — schema gap documented
+        // via TODO(novamlx-tool-fidelity) in AnthropicContentBlock + ChatMessage
+        #expect(result[1].content == "Command failed with exit code 1")
+        // ChatMessage has no isError field — this information is lost
+        // When tool-fidelity work is scheduled, add isError to ChatMessage and wire it through
+    }
 }

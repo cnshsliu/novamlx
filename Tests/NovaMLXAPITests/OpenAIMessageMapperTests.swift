@@ -197,4 +197,66 @@ struct OpenAIMessageMapperTests {
         #expect(images.count == 1)
         #expect(images[0] == "https://example.com/cat.jpg")
     }
+
+    /// Empty tool_calls array should not crash — maps to nil, not empty array
+    @Test("Empty tool_calls array maps without crash")
+    func testEmptyToolCallsArray() throws {
+        let json = """
+        {
+            "model": "test",
+            "messages": [{
+                "role": "assistant",
+                "content": "I considered tools but decided not to use any.",
+                "tool_calls": []
+            }]
+        }
+        """.data(using: .utf8)!
+
+        let req = try JSONDecoder().decode(OpenAIRequest.self, from: json)
+        let result = mapOpenAIMessages(req.messages)
+
+        #expect(result.count == 1)
+        #expect(result[0].role == .assistant)
+        #expect(result[0].content == "I considered tools but decided not to use any.")
+        // Empty array decodes as non-nil; mapper should handle it gracefully
+        let toolCalls = result[0].toolCalls
+        #expect(toolCalls == nil || toolCalls?.isEmpty == true)
+    }
+
+    /// Tool message missing tool_call_id — should not crash, toolCallId is nil
+    @Test("Tool message without tool_call_id maps with nil toolCallId")
+    func testToolMessageWithoutToolCallId() throws {
+        let messages: [OpenAIChatMessage] = [
+            .init(role: "tool", content: "Some tool output", toolCallId: nil),
+        ]
+
+        let result = mapOpenAIMessages(messages)
+
+        #expect(result.count == 1)
+        #expect(result[0].role == .tool)
+        #expect(result[0].content == "Some tool output")
+        #expect(result[0].toolCallId == nil)
+    }
+
+    /// Assistant with null content and no tool_calls — edge case from some API clients
+    @Test("Assistant with null content and no tool_calls maps cleanly")
+    func testAssistantNullContentAndNoToolCalls() throws {
+        let json = """
+        {
+            "model": "test",
+            "messages": [{
+                "role": "assistant",
+                "content": null
+            }]
+        }
+        """.data(using: .utf8)!
+
+        let req = try JSONDecoder().decode(OpenAIRequest.self, from: json)
+        let result = mapOpenAIMessages(req.messages)
+
+        #expect(result.count == 1)
+        #expect(result[0].role == .assistant)
+        #expect(result[0].content == nil)
+        #expect(result[0].toolCalls == nil)
+    }
 }

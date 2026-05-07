@@ -305,6 +305,8 @@ public struct ChatMessage: Codable, Sendable {
     public let images: [String]?
     public let name: String?
     public let toolCallId: String?
+    // TODO(novamlx-tool-fidelity): No isError field — Anthropic tool_result.is_error is dropped.
+    // See AnthropicTypes.swift AnthropicContentBlock.
     public let toolCalls: [ToolCallResult]?
 
     public init(role: Role, content: String? = nil, images: [String]? = nil, name: String? = nil, toolCallId: String? = nil, toolCalls: [ToolCallResult]? = nil) {

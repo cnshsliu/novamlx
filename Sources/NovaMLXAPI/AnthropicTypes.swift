@@ -226,6 +226,9 @@ public struct AnthropicContentBlock: Codable, Sendable {
     public let toolUseId: String?
     public let source: AnyCodable?
     /// tool_result content: Anthropic spec allows string or [{type:"text",...}] or [{type:"image",...}]
+    // TODO(novamlx-tool-fidelity): Anthropic spec defines `is_error: Bool?` on tool_result blocks.
+    // Not modeled here — silently dropped during mapping. Add field + propagate through ChatMessage
+    // when tool-fidelity work is scheduled.
     public let content: AnyCodable?
 
     private enum CodingKeys: String, CodingKey {
