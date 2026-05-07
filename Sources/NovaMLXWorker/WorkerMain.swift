@@ -198,7 +198,7 @@ struct NovaMLXWorker {
             tokenStream = fusedScheduler.submitStream(request)
         }
 
-        let promptTokens = 0
+        var promptTokens = 0
         var completionTokens = 0
         var finishReason: FinishReason = .stop
 
@@ -207,6 +207,9 @@ struct NovaMLXWorker {
                 completionTokens += 1
                 if let fr = token.finishReason {
                     finishReason = fr
+                }
+                if let pt = token.promptTokens {
+                    promptTokens = pt
                 }
                 writer.write(WorkerMessage(
                     type: WorkerMessageType.token,

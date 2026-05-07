@@ -2553,7 +2553,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                         self.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
-                        continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
+                        continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: Int(promptTokenCount)))
                         continuation.finish()
                         self.lock.withLock { self.activeCount -= 1 }
                         self.deferredClearCache()
@@ -2745,7 +2745,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     self.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
-                    continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
+                    continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: Int(promptTokenCount)))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -2928,6 +2928,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     var streamYieldedCount = 0
                     let controlPatterns = Self.controlTokensForModel(modelId: request.model)
 
+                    var promptTokens = estimatedPromptTokens
                     let stream = sessionBox.streamDetails(to: lastUserMessage)
                     for try await generation in stream {
                         if Task.isCancelled { break }
@@ -2941,6 +2942,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             }
                             if shouldStop { break }
                         case .info(let info):
+                            promptTokens = info.promptTokenCount
                             completionTokens = info.generationTokenCount
                             if case .length = info.stopReason { finishReason = .length }
                         case .toolCall(let tc):
@@ -2963,7 +2965,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     engine.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
-                    continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
+                    continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: promptTokens))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -3346,7 +3348,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     self.deferredClearCache()
 
-                    continuation.yield(Token(id: 0, text: "", finishReason: finishReason))
+                    continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: Int(promptTokenCount)))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)

@@ -394,14 +394,16 @@ public struct Token: Codable, Sendable {
     public let topLogprobs: [TopLogprob]?
     public let finishReason: FinishReason?
     public let toolCall: ToolCallResult?
+    public let promptTokens: Int?
 
-    public init(id: Int, text: String, logprob: Float? = nil, topLogprobs: [TopLogprob]? = nil, finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil) {
+    public init(id: Int, text: String, logprob: Float? = nil, topLogprobs: [TopLogprob]? = nil, finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil, promptTokens: Int? = nil) {
         self.id = id
         self.text = text
         self.logprob = logprob
         self.topLogprobs = topLogprobs
         self.finishReason = finishReason
         self.toolCall = toolCall
+        self.promptTokens = promptTokens
     }
 }
 

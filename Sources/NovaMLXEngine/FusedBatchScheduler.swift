@@ -759,7 +759,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let completionCount: Int
         let isFinished: Bool
         if isEOS {
-            continuation.yield(Token(id: 0, text: "", finishReason: .stop))
+            continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount))
             continuation.finish()
             completionCount = 0
             isFinished = true
@@ -1500,7 +1500,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             seq.safeYield(Token(id: 0, text: "</think>"))
                             seq.harmonyInThinking = false
                         }
-                        seq.safeYield(Token(id: 0, text: "", finishReason: finishReason))
+                        seq.safeYield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: seq.promptTokenCount))
                         let finishedByUs = seq.safeFinish()
                         seq.isFinished = true
                         sequenceFinished = true

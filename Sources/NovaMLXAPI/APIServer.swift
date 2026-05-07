@@ -2138,6 +2138,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try await writer.write(ByteBuffer(string: "data: \(String(data: roleData, encoding: .utf8) ?? "")\n\n"))
 
                 var completionTokenCount = 0
+                var promptTokenCount: Int? = nil
                 let shouldParseThinking = openAIReq.resolvedEnableThinking != false
                 let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
                 let thinkingParser = shouldParseThinking ? ThinkingParser(expectImplicitThinking: isImplicitModel) : nil
@@ -2172,6 +2173,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let data = try JSONEncoder().encode(chunk)
                             try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                         } else if let finish = token.finishReason {
+                            // Capture prompt token count from engine's final token
+                            if let pt = token.promptTokens { promptTokenCount = pt }
                             // Flush ThinkingParser before emitting stop chunk
                             if let tp = thinkingParser {
                                 let finalParsed = tp.finalize()
@@ -2277,15 +2280,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     }
                 }
                 if includeUsage {
-                    let promptTokenCount: Int
-                    if let tc = inference.countTokens(model: openAIReq.model, messages: messages) {
-                        promptTokenCount = tc
-                    } else {
-                        promptTokenCount = 0
-                    }
+                    let resolvedPromptCount = promptTokenCount ?? inference.countTokens(model: openAIReq.model, messages: messages) ?? 0
                     let ctxWin = inference.getContextWindow(for: openAIReq.model) ?? 0
                     let scaledPrompt = clientType.shouldScaleContext
-                        ? cfg.scaleTokenCount(promptTokenCount, modelContextWindow: ctxWin) : promptTokenCount
+                        ? cfg.scaleTokenCount(resolvedPromptCount, modelContextWindow: ctxWin) : resolvedPromptCount
                     let scaledCompletion = clientType.shouldScaleContext
                         ? cfg.scaleTokenCount(completionTokenCount, modelContextWindow: ctxWin) : completionTokenCount
                     let usageChunk = OpenAIStreamChunk(
@@ -2441,7 +2439,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 try await writer.write(ByteBuffer(string: "event: content_block_stop\ndata: {}\n\n"))
                             }
                             let ctxWin = inference.getContextWindow(for: anthropicReq.model) ?? 0
-                            let promptCount = inference.countTokens(model: anthropicReq.model, messages: messages) ?? 0
+                            let promptCount = token.promptTokens ?? inference.countTokens(model: anthropicReq.model, messages: messages) ?? 0
                             let scaledIn = clientType.shouldScaleContext ? cfg.scaleTokenCount(promptCount, modelContextWindow: ctxWin) : promptCount
                             let scaledOut = clientType.shouldScaleContext ? cfg.scaleTokenCount(tokenCount, modelContextWindow: ctxWin) : tokenCount
                             let stopReason = token.finishReason?.rawValue ?? "end_turn"
@@ -2618,11 +2616,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             CurrentInferenceModel.shared.modelID = compReq.model
             defer { CurrentInferenceModel.shared.modelID = nil }
             var completionTokenCount = 0
+            var completionPromptTokenCount: Int? = nil
             do {
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
                         if let finish = token.finishReason {
+                            if let pt = token.promptTokens { completionPromptTokenCount = pt }
                             let finalChunk = OpenAICompletionStreamChunk(
                                 id: chunkId,
                                 model: compReq.model,
@@ -2655,7 +2655,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     }
                 }
                 if clientType.shouldScaleContext, completionTokenCount > 0 {
-                    let promptCount = inference.countTokens(model: compReq.model, messages: messages) ?? 0
+                    let promptCount = completionPromptTokenCount ?? inference.countTokens(model: compReq.model, messages: messages) ?? 0
                     let ctxWin = inference.getContextWindow(for: compReq.model) ?? 0
                     let sp = clientType.shouldScaleContext ? cfg.scaleTokenCount(promptCount, modelContextWindow: ctxWin) : promptCount
                     let sc = clientType.shouldScaleContext ? cfg.scaleTokenCount(completionTokenCount, modelContextWindow: ctxWin) : completionTokenCount
