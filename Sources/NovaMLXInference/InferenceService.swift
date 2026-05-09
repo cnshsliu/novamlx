@@ -36,6 +36,8 @@ public final class InferenceService: @unchecked Sendable {
     private let batcher: ContinuousBatcher
     private let fusedScheduler: FusedBatchScheduler
     public let settingsManager: ModelSettingsManager
+    public let transcriptionService: TranscriptionService
+    public let imageGenerationService: ImageGenerationService
     private let loadedModelsFile: URL
 
     // Worker subprocess mode
@@ -51,6 +53,8 @@ public final class InferenceService: @unchecked Sendable {
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
         self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         self.settingsManager = settingsManager
+        self.transcriptionService = TranscriptionService()
+        self.imageGenerationService = ImageGenerationService()
         self.loadedModelsFile = NovaMLXPaths.loadedModelsFile
         self.workerMode = workerMode
 
@@ -341,6 +345,15 @@ public final class InferenceService: @unchecked Sendable {
         let now = Date()
         for info in allInfo {
             if info.pinned { continue }
+
+            if let prd = info.perRequestDeadline {
+                if prd > now { continue }
+                let identifier = ModelIdentifier(id: info.id, family: .other)
+                engine.unloadModel(identifier)
+                NovaMLXLog.info("Per-request keep_alive expired for \(info.id), unloaded")
+                continue
+            }
+
             let settings = settingsManager.getSettings(info.id)
             guard let ttl = settings.ttlSeconds, ttl > 0 else { continue }
             let idleTime = now.timeIntervalSince(info.lastAccessed)

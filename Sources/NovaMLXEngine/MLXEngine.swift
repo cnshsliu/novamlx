@@ -1876,6 +1876,21 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// Filter a streaming chunk for control tokens. Returns (cleanText, shouldStop).
     /// Handles both full matches and partial matches (where TurnStopProcessor
     /// forces EOS mid-token, leaving e.g. "<|turn" without the closing ">").
+    /// Detects the current Harmony channel from accumulated raw text.
+    /// Scans for the latest `<|channel|>TYPE<|message|>` pattern and returns the channel type.
+    /// Returns nil if no channel marker is found or if the model is not Harmony.
+    private static let harmonyChannelRegex: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "<\\|channel\\|>(\\w+)<\\|message\\|>")
+    }()
+
+    static func detectHarmonyChannel(in accumulatedText: String) -> String? {
+        let nsRange = NSRange(accumulatedText.startIndex..., in: accumulatedText)
+        let matches = harmonyChannelRegex.matches(in: accumulatedText, range: nsRange)
+        guard let lastMatch = matches.last else { return nil }
+        guard let range = Range(lastMatch.range(at: 1), in: accumulatedText) else { return nil }
+        return String(accumulatedText[range])
+    }
+
     static func filterControlInChunk(
         _ text: String,
         accumulated: inout String,
@@ -2694,6 +2709,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let startTime = Date()
                     let reqTag = request.id.uuidString.prefix(8).description
 
+                    let isHarmonyModel = container.identifier.family == .gptOss
+                    var currentHarmonyChannel: String? = nil
+
                     for await generation in stream {
                         if Task.isCancelled {
                             NovaMLXLog.error("[STREAM:\(reqTag)] Task cancelled during generation after \(completionTokens) tokens")
@@ -2708,7 +2726,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             }
                             if !cleanText.isEmpty {
                                 completionTokens += 1
-                                continuation.yield(Token(id: 0, text: cleanText))
+                                var channels: [HarmonyChannel]? = nil
+                                if isHarmonyModel {
+                                    if let detectedChannel = Self.detectHarmonyChannel(in: streamAccumulated) {
+                                        if detectedChannel != currentHarmonyChannel {
+                                            currentHarmonyChannel = detectedChannel
+                                        }
+                                    }
+                                    if let ch = currentHarmonyChannel {
+                                        channels = [HarmonyChannel(channel: ch, text: cleanText)]
+                                    }
+                                }
+                                continuation.yield(Token(id: 0, text: cleanText, channels: channels))
                             }
                             if shouldStop { break }
                         case .info(let info):
@@ -2929,6 +2958,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let controlPatterns = Self.controlTokensForModel(modelId: request.model)
 
                     var promptTokens = estimatedPromptTokens
+                    let isHarmonyModel = container.identifier.family == .gptOss
+                    var currentHarmonyChannel: String? = nil
                     let stream = sessionBox.streamDetails(to: lastUserMessage)
                     for try await generation in stream {
                         if Task.isCancelled { break }
@@ -2938,7 +2969,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             let cleanText = Self.scrubControlTokens(rawText)
                             if !cleanText.isEmpty {
                                 completionTokens += 1
-                                continuation.yield(Token(id: 0, text: cleanText))
+                                var channels: [HarmonyChannel]? = nil
+                                if isHarmonyModel {
+                                    if let detectedChannel = Self.detectHarmonyChannel(in: streamAccumulated) {
+                                        if detectedChannel != currentHarmonyChannel {
+                                            currentHarmonyChannel = detectedChannel
+                                        }
+                                    }
+                                    if let ch = currentHarmonyChannel {
+                                        channels = [HarmonyChannel(channel: ch, text: cleanText)]
+                                    }
+                                }
+                                continuation.yield(Token(id: 0, text: cleanText, channels: channels))
                             }
                             if shouldStop { break }
                         case .info(let info):

@@ -968,6 +968,175 @@ struct E2ETests {
         #expect(await client.isServerAlive(), "Server must survive pressure test")
     }
 
+    // ═══════════════════════════════════════════════════════
+    // Test 8: Image generation with SDXL-Turbo
+    // ═══════════════════════════════════════════════════════
+
+    @Test("Image generation: SDXL-Turbo produces valid PNG")
+    func testImageGeneration() async throws {
+        try await requireServer(client)
+
+        let modelId = "stabilityai/sdxl-turbo"
+        let models = try await getAllDownloadedModels(client)
+        guard models.contains(where: { $0.id == modelId }) else {
+            print("  [image-gen] SKIP: \(modelId) not downloaded")
+            return
+        }
+
+        print("  [image-gen] Loading \(modelId)...")
+        let loaded = try await loadModel(client, modelId: modelId)
+        guard loaded else {
+            Issue.record("\(modelId): failed to load for image generation test")
+            return
+        }
+
+        let body: [String: Any] = [
+            "prompt": "a red apple on a wooden table",
+            "model": modelId,
+            "n": 1,
+            "size": "512x512",
+            "response_format": "b64_json",
+            "seed": 42
+        ]
+        let data = try JSONSerialization.data(withJSONObject: body)
+
+        let result = await safePost(client,
+            url: apiBase.appendingPathComponent("v1/images/generations"),
+            body: data, modelId: modelId)
+        guard let (responseData, status) = result else {
+            Issue.record("\(modelId): image generation request failed")
+            return
+        }
+
+        #expect(status == 200, "Image generation returned HTTP \(status)")
+        guard status == 200 else { return }
+
+        guard let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+              let imageList = json["data"] as? [[String: Any]],
+              !imageList.isEmpty else {
+            Issue.record("\(modelId): invalid image generation response structure")
+            return
+        }
+
+        #expect(json["model"] as? String == modelId, "Response should include model ID")
+        #expect(imageList.count == 1, "Should return exactly 1 image (n=1)")
+
+        guard let b64 = imageList[0]["b64_json"] as? String, !b64.isEmpty else {
+            Issue.record("\(modelId): missing or empty b64_json in response")
+            return
+        }
+
+        guard let imageData = Data(base64Encoded: b64) else {
+            Issue.record("\(modelId): b64_json is not valid Base64")
+            return
+        }
+
+        // Verify it's a valid PNG (magic bytes: 89 50 4E 47 0D 0A 1A 0A)
+        let pngMagic: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        let header = [UInt8](imageData.prefix(8))
+        #expect(header == pngMagic, "Response should be a valid PNG file")
+
+        print("  [image-gen] \(modelId): generated \(imageData.count) byte PNG OK")
+
+        try? await unloadModel(client, modelId: modelId)
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // Test 9: Image variation with SDXL-Turbo
+    // ═══════════════════════════════════════════════════════
+
+    @Test("Image variation: SDXL-Turbo produces valid PNG from input")
+    func testImageVariation() async throws {
+        try await requireServer(client)
+
+        let modelId = "stabilityai/sdxl-turbo"
+        let models = try await getAllDownloadedModels(client)
+        guard models.contains(where: { $0.id == modelId }) else {
+            print("  [image-var] SKIP: \(modelId) not downloaded")
+            return
+        }
+
+        print("  [image-var] Loading \(modelId)...")
+        let loaded = try await loadModel(client, modelId: modelId)
+        guard loaded else {
+            Issue.record("\(modelId): failed to load for image variation test")
+            return
+        }
+
+        // First, generate a base image to use as input
+        let genBody: [String: Any] = [
+            "prompt": "a simple red circle on white background",
+            "model": modelId,
+            "n": 1,
+            "size": "512x512",
+            "response_format": "b64_json"
+        ]
+        let genData = try JSONSerialization.data(withJSONObject: genBody)
+        let genResult = await safePost(client,
+            url: apiBase.appendingPathComponent("v1/images/generations"),
+            body: genData, modelId: modelId)
+        guard let (genResp, genStatus) = genResult, genStatus == 200,
+              let genJson = try? JSONSerialization.jsonObject(with: genResp) as? [String: Any],
+              let genDataList = genJson["data"] as? [[String: Any]],
+              let genB64 = genDataList.first?["b64_json"] as? String,
+              let inputImageData = Data(base64Encoded: genB64)
+        else {
+            Issue.record("\(modelId): failed to generate base image for variation test")
+            return
+        }
+
+        // Now send variation request via multipart
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var multipartBody = Data()
+        multipartBody.append("--\(boundary)\r\n".data(using: .utf8)!)
+        multipartBody.append("Content-Disposition: form-data; name=\"image\"; filename=\"input.png\"\r\n".data(using: .utf8)!)
+        multipartBody.append("Content-Type: image/png\r\n\r\n".data(using: .utf8)!)
+        multipartBody.append(inputImageData)
+        multipartBody.append("\r\n".data(using: .utf8)!)
+        multipartBody.append("--\(boundary)\r\n".data(using: .utf8)!)
+        multipartBody.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n".data(using: .utf8)!)
+        multipartBody.append(modelId.data(using: .utf8)!)
+        multipartBody.append("\r\n".data(using: .utf8)!)
+        multipartBody.append("--\(boundary)\r\n".data(using: .utf8)!)
+        multipartBody.append("Content-Disposition: form-data; name=\"n\"\r\n\r\n".data(using: .utf8)!)
+        multipartBody.append("1".data(using: .utf8)!)
+        multipartBody.append("\r\n".data(using: .utf8)!)
+        multipartBody.append("--\(boundary)\r\n".data(using: .utf8)!)
+        multipartBody.append("Content-Disposition: form-data; name=\"size\"\r\n\r\n".data(using: .utf8)!)
+        multipartBody.append("512x512".data(using: .utf8)!)
+        multipartBody.append("\r\n".data(using: .utf8)!)
+        multipartBody.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+        var varReq = URLRequest(url: apiBase.appendingPathComponent("v1/images/variations"))
+        varReq.httpMethod = "POST"
+        varReq.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        varReq.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        varReq.httpBody = multipartBody
+
+        let (varRespData, varResp) = try await client.session.data(for: varReq)
+        let varStatus = (varResp as? HTTPURLResponse)?.statusCode ?? 0
+        #expect(varStatus == 200, "Image variation returned HTTP \(varStatus)")
+        guard varStatus == 200 else { return }
+
+        guard let varJson = try? JSONSerialization.jsonObject(with: varRespData) as? [String: Any],
+              let varDataList = varJson["data"] as? [[String: Any]],
+              let varB64 = varDataList.first?["b64_json"] as? String,
+              let varImageData = Data(base64Encoded: varB64)
+        else {
+            Issue.record("\(modelId): invalid variation response structure")
+            return
+        }
+
+        // Verify it's a valid PNG
+        let pngMagic: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        let header = [UInt8](varImageData.prefix(8))
+        #expect(header == pngMagic, "Variation should be a valid PNG file")
+
+        print("  [image-var] \(modelId): variation generated \(varImageData.count) byte PNG OK")
+
+        try? await unloadModel(client, modelId: modelId)
+    }
+
     // ─── Stream Capture Helpers ───
 
     struct OpenAIStreamCapture {

@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import NovaMLXCore
 import NovaMLXUtils
@@ -6,6 +7,22 @@ import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXAPI
 import NovaMLXMenuBar
+
+/// Early env-var setup: runs before any GPU work because the static
+/// initializer is triggered when the module is loaded.
+private struct MLXEnvSetup {
+    static let configure: Void = {
+        // Force MLX to commit Metal command buffers after every operation
+        // (and 1 MB of data).  The default batching (up to 40 ops / 40–50 MB
+        // per buffer) can cause a single command buffer to take tens of
+        // seconds on SDXL-Turbo, which exceeds the macOS background-process
+        // timeout (~5 s) and triggers a `MTLCommandBufferStatusError` /
+        // `SIGABRT`.  MLX reads these variables once on first use, so we
+        // must set them before any GPU evaluation.
+        setenv("MLX_MAX_OPS_PER_BUFFER", "1", 1)
+        setenv("MLX_MAX_MB_PER_BUFFER", "1", 1)
+    }()
+}
 
 @main
 struct NovaMLXApp: App {
@@ -67,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let pathValidationErrors: [String]
 
     override init() {
+        // Trigger MLX environment setup before any GPU library initialisation.
+        _ = MLXEnvSetup.configure
+
         // Validate BEFORE creating ModelManager (which auto-creates dirs)
         let errors = NovaMLXPaths.validateConfiguredPaths()
         self.pathValidationErrors = errors

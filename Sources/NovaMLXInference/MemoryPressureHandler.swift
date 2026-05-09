@@ -89,6 +89,15 @@ public final class MemoryPressureHandler: @unchecked Sendable {
         let now = Date()
         for info in allInfo {
             if info.pinned { continue }
+
+            if let prd = info.perRequestDeadline {
+                if prd > now { continue }
+                let identifier = ModelIdentifier(id: info.id, family: .other)
+                engine.unloadModel(identifier)
+                NovaMLXLog.info("Per-request keep_alive expired for \(info.id), unloaded")
+                continue
+            }
+
             let settings = settingsManager.getSettings(info.id)
             guard let ttl = settings.ttlSeconds, ttl > 0 else { continue }
             let idleTime = now.timeIntervalSince(info.lastAccessed)

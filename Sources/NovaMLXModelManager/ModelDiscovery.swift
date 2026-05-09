@@ -81,6 +81,27 @@ public final class ModelDiscovery: Sendable {
         "jina_embeddings_v3",
     ]
 
+    private static let audioArchitectures: Set<String> = [
+        "WhisperForConditionalGeneration",
+        "Qwen3ASRForConditionalGeneration",
+    ]
+
+    private static let audioModelTypes: Set<String> = [
+        "whisper",
+        "qwen3_asr",
+    ]
+
+    private static let imageArchitectures: Set<String> = [
+        "StableDiffusionXLPipeline",
+        "StableDiffusionPipeline",
+        "UNet2DConditionModel",
+    ]
+
+    private static let imageModelTypes: Set<String> = [
+        "stable-diffusion-xl",
+        "stable-diffusion",
+    ]
+
     private static let familyByModelType: [String: ModelFamily] = [
         "llama": .llama, "llama2": .llama, "llama3": .llama,
         "mistral": .mistral, "mixtral": .mistral,
@@ -91,6 +112,9 @@ public final class ModelDiscovery: Sendable {
         "bailing_moe": .bailing, "bailing_hybrid": .bailing,
         "deepseek_v3": .qwen, "deepseek_v4": .qwen,
         "gpt_oss": .gptOss,
+        "whisper": .whisper,
+        "stable-diffusion": .stableDiffusion, "stable_diffusion": .stableDiffusion,
+        "stable-diffusion-xl": .stableDiffusion, "stable_diffusion_xl": .stableDiffusion,
     ]
 
     private static let familyByArchitecture: [String: ModelFamily] = [
@@ -140,7 +164,8 @@ public final class ModelDiscovery: Sendable {
                 for child in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                     guard child.directoryExists, !child.lastPathComponent.hasPrefix(".") else { continue }
                     let childConfig = child.appendingPathComponent("config.json")
-                    guard childConfig.fileExists else { continue }
+                    let unetConfig = child.appendingPathComponent("unet/config.json")
+                    guard childConfig.fileExists || unetConfig.fileExists else { continue }
                     let adapterConfigPath = child.appendingPathComponent("adapter_config.json")
                     let adapterWeightsPath = child.appendingPathComponent("adapters.safetensors")
                     let isAdapter = adapterConfigPath.fileExists && adapterWeightsPath.fileExists
@@ -168,6 +193,17 @@ public final class ModelDiscovery: Sendable {
 
     private func registerModel(at path: URL, id: String, isAdapter: Bool = false) -> DiscoveredModel? {
         let configPath = path.appendingPathComponent("config.json")
+
+        // Diffusers-format models (SDXL-Turbo, etc.) have no root config.json
+        // but have unet/config.json. Create a synthetic config for them.
+        if !configPath.fileExists {
+            let unetConfig = path.appendingPathComponent("unet/config.json")
+            if unetConfig.fileExists {
+                return registerDiffusersModel(at: path, id: id)
+            }
+            return nil
+        }
+
         guard let data = try? Data(contentsOf: configPath) else { return nil }
 
         let config: HFConfig
@@ -198,9 +234,32 @@ public final class ModelDiscovery: Sendable {
         )
     }
 
+    /// Register a diffusers-format model (e.g. SDXL-Turbo) that has no root config.json.
+    /// Uses unet/config.json to infer model metadata.
+    private func registerDiffusersModel(at path: URL, id: String) -> DiscoveredModel? {
+        let size = estimateSize(at: path)
+        let modelType = detectModelType(config: HFConfig(architectures: nil, modelType: nil, visionConfig: nil), path: path)
+        let family = detectFamily(config: HFConfig(architectures: nil, modelType: nil, visionConfig: nil), modelId: id)
+
+        NovaMLXLog.info("Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=[], size=\(size.bytesFormatted), complete=true (diffusers)")
+
+        return DiscoveredModel(
+            modelId: id,
+            modelPath: path,
+            modelType: modelType,
+            family: family,
+            estimatedSizeBytes: size,
+            architectures: [],
+            configModelType: "",
+            isAdapter: false,
+            isComplete: true
+        )
+    }
+
     /// A model is "complete" if it has non-zero weight files.
     /// - Has at least one .safetensors file with size > 0 (or adapters.safetensors for adapters)
-    /// - No zero-byte safetensors files (indicates interrupted download)
+    /// - Or has at least one .gguf file with size > 0
+    /// - No zero-byte weight files (indicates interrupted download)
     private static func checkCompleteness(at path: URL, isAdapter: Bool) -> Bool {
         let fm = FileManager.default
 
@@ -225,11 +284,14 @@ public final class ModelDiscovery: Sendable {
         }
 
         let safetensors = contents.filter { $0.pathExtension == "safetensors" }
-        // Must have at least one safetensors file
-        guard !safetensors.isEmpty else { return false }
+        let ggufFiles = contents.filter { $0.pathExtension == "gguf" }
+        let weightFiles = safetensors + ggufFiles
 
-        // All safetensors files must be non-zero (zero-byte = interrupted download)
-        for file in safetensors {
+        // Must have at least one weight file (safetensors or gguf)
+        guard !weightFiles.isEmpty else { return false }
+
+        // All weight files must be non-zero (zero-byte = interrupted download)
+        for file in weightFiles {
             guard let size = fm.fileSize(at: file), size > 0 else {
                 #if DEBUG
                 NovaMLXLog.info("[Discovery] Incomplete model: zero-byte file \(file.lastPathComponent) in \(path.lastPathComponent)")
@@ -286,6 +348,22 @@ public final class ModelDiscovery: Sendable {
         }
 
         if Self.embeddingModelTypes.contains(rawType) { return .embedding }
+
+        // Audio detection (encoder-decoder ASR models)
+        for arch in architectures {
+            if Self.audioArchitectures.contains(arch) { return .audio }
+        }
+        if Self.audioModelTypes.contains(rawType) { return .audio }
+
+        // Image detection (diffusion models: SDXL-Turbo, Stable Diffusion 2.1)
+        // Also detect by directory structure (unet/ subdirectory present)
+        for arch in architectures {
+            if Self.imageArchitectures.contains(arch) { return .image }
+        }
+        if Self.imageModelTypes.contains(rawType) { return .image }
+        // Heuristic: if unet/config.json exists in the directory, it's a diffusion model
+        let unetConfig = path.appendingPathComponent("unet/config.json")
+        if FileManager.default.fileExists(atPath: unetConfig.path) { return .image }
 
         if rawType == "qwen3" || rawType == "gemma3_text" || rawType == "gemma3-text" {
             let llmArchs: Set<String> = ["Qwen3ForCausalLM", "Gemma3ForCausalLM"]

@@ -182,6 +182,7 @@ public struct OpenAIRequest: Codable, Sendable {
     public let reasoningEffort: String?
     public let logprobs: Bool?
     public let topLogprobs: Int?
+    public let keepAlive: KeepAliveValue?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools, logprobs
@@ -202,6 +203,7 @@ public struct OpenAIRequest: Codable, Sendable {
         case chatTemplateKwargs = "chat_template_kwargs"
         case reasoningEffort = "reasoning_effort"
         case topLogprobs = "top_logprobs"
+        case keepAlive = "keep_alive"
     }
 
     public init(
@@ -230,7 +232,8 @@ public struct OpenAIRequest: Codable, Sendable {
         chatTemplateKwargs: [String: AnyCodable]? = nil,
         reasoningEffort: String? = nil,
         logprobs: Bool? = nil,
-        topLogprobs: Int? = nil
+        topLogprobs: Int? = nil,
+        keepAlive: KeepAliveValue? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -258,6 +261,7 @@ public struct OpenAIRequest: Codable, Sendable {
         self.reasoningEffort = reasoningEffort
         self.logprobs = logprobs
         self.topLogprobs = topLogprobs
+        self.keepAlive = keepAlive
     }
 
     /// Resolve thinking toggle from multiple client formats:
@@ -515,6 +519,17 @@ public struct OpenAIUsage: Codable, Sendable {
     }
 }
 
+/// NovaMLX extension: channel metadata for GPT-OSS (Harmony) streaming.
+public struct NovaHarmonyChannel: Codable, Sendable {
+    public let channel: String
+    public let text: String
+
+    public init(channel: String, text: String) {
+        self.channel = channel
+        self.text = text
+    }
+}
+
 public struct OpenAIStreamChunk: Codable, Sendable {
     public let id: String
     public let object: String
@@ -522,14 +537,26 @@ public struct OpenAIStreamChunk: Codable, Sendable {
     public let model: String
     public let choices: [OpenAIStreamChoice]
     public let usage: OpenAIUsage?
+    /// NovaMLX extension: Harmony channel boundaries for GPT-OSS models.
+    /// Only present when the model emits channel-structured output.
+    public let novaChannels: [NovaHarmonyChannel]?
 
-    public init(id: String, model: String, choices: [OpenAIStreamChoice], usage: OpenAIUsage? = nil) {
+    private enum CodingKeys: String, CodingKey {
+        case id, object, created, model, choices, usage
+        case novaChannels = "nova.channels"
+    }
+
+    public init(
+        id: String, model: String, choices: [OpenAIStreamChoice], usage: OpenAIUsage? = nil,
+        novaChannels: [NovaHarmonyChannel]? = nil
+    ) {
         self.id = id
         self.object = "chat.completion.chunk"
         self.created = Int(Date().timeIntervalSince1970)
         self.model = model
         self.choices = choices
         self.usage = usage
+        self.novaChannels = novaChannels
     }
 }
 
@@ -871,6 +898,7 @@ public struct OpenAICompletionRequest: Codable, Sendable {
     public let repetitionPenalty: Double?
     public let seed: UInt64?
     public let n: Int?
+    public let keepAlive: KeepAliveValue?
 
     private enum CodingKeys: String, CodingKey {
         case model, prompt, temperature, stream, stop, n
@@ -882,6 +910,7 @@ public struct OpenAICompletionRequest: Codable, Sendable {
         case presencePenalty = "presence_penalty"
         case repetitionPenalty = "repetition_penalty"
         case seed
+        case keepAlive = "keep_alive"
     }
 }
 
@@ -947,16 +976,19 @@ public struct OpenAIEmbeddingRequest: Codable, Sendable {
     public let model: String
     public let input: EmbeddingInput
     public let encodingFormat: String?
+    public let keepAlive: KeepAliveValue?
 
     private enum CodingKeys: String, CodingKey {
         case model, input
         case encodingFormat = "encoding_format"
+        case keepAlive = "keep_alive"
     }
 
-    public init(model: String, input: EmbeddingInput, encodingFormat: String? = nil) {
+    public init(model: String, input: EmbeddingInput, encodingFormat: String? = nil, keepAlive: KeepAliveValue? = nil) {
         self.model = model
         self.input = input
         self.encodingFormat = encodingFormat
+        self.keepAlive = keepAlive
     }
 }
 
@@ -1068,11 +1100,13 @@ public struct OpenAIResponseRequest: Codable, Sendable {
     public let topP: Double?
     public let maxOutputTokens: Int?
     public let stream: Bool?
+    public let keepAlive: KeepAliveValue?
 
     private enum CodingKeys: String, CodingKey {
         case model, input, instructions, temperature, stream
         case topP = "top_p"
         case maxOutputTokens = "max_output_tokens"
+        case keepAlive = "keep_alive"
     }
 
     public init(
@@ -1082,7 +1116,8 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         temperature: Double? = nil,
         topP: Double? = nil,
         maxOutputTokens: Int? = nil,
-        stream: Bool? = nil
+        stream: Bool? = nil,
+        keepAlive: KeepAliveValue? = nil
     ) {
         self.model = model
         self.input = input
@@ -1091,6 +1126,7 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         self.topP = topP
         self.maxOutputTokens = maxOutputTokens
         self.stream = stream
+        self.keepAlive = keepAlive
     }
 }
 

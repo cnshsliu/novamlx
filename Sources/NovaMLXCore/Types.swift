@@ -82,6 +82,8 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case claude
     case bailing
     case gptOss
+    case whisper
+    case stableDiffusion
     case other
 
     public init(from decoder: Decoder) throws {
@@ -94,6 +96,8 @@ public enum ModelType: String, Codable, Sendable {
     case llm
     case vlm
     case embedding
+    case audio
+    case image
 }
 
 /// Advertised capabilities for a model, surfaced via /v1/models under nova.capabilities.
@@ -102,13 +106,23 @@ public struct ModelCapabilities: Codable, Sendable, Equatable {
     public let thinking: Bool
     public let tools: Bool
     public let vision: Bool
+    public let audio: Bool
+    public let imageGeneration: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case reasoning, thinking, tools, vision, audio
+        case imageGeneration = "image_generation"
+    }
 
     public init(reasoning: Bool = false, thinking: Bool = false,
-                tools: Bool = false, vision: Bool = false) {
+                tools: Bool = false, vision: Bool = false,
+                audio: Bool = false, imageGeneration: Bool = false) {
         self.reasoning = reasoning
         self.thinking = thinking
         self.tools = tools
         self.vision = vision
+        self.audio = audio
+        self.imageGeneration = imageGeneration
     }
 }
 
@@ -387,6 +401,18 @@ public struct TopLogprob: Codable, Sendable {
     }
 }
 
+/// A channel segment in GPT-OSS (Harmony) streaming output.
+/// Used to expose raw channel boundaries (analysis, commentary, final) to clients.
+public struct HarmonyChannel: Codable, Sendable {
+    public let channel: String
+    public let text: String
+
+    public init(channel: String, text: String) {
+        self.channel = channel
+        self.text = text
+    }
+}
+
 public struct Token: Codable, Sendable {
     public let id: Int
     public let text: String
@@ -395,8 +421,14 @@ public struct Token: Codable, Sendable {
     public let finishReason: FinishReason?
     public let toolCall: ToolCallResult?
     public let promptTokens: Int?
+    /// Harmony channel metadata for GPT-OSS models. Nil for non-Harmony models.
+    public let channels: [HarmonyChannel]?
 
-    public init(id: Int, text: String, logprob: Float? = nil, topLogprobs: [TopLogprob]? = nil, finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil, promptTokens: Int? = nil) {
+    public init(
+        id: Int, text: String, logprob: Float? = nil, topLogprobs: [TopLogprob]? = nil,
+        finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil, promptTokens: Int? = nil,
+        channels: [HarmonyChannel]? = nil
+    ) {
         self.id = id
         self.text = text
         self.logprob = logprob
@@ -404,6 +436,7 @@ public struct Token: Codable, Sendable {
         self.finishReason = finishReason
         self.toolCall = toolCall
         self.promptTokens = promptTokens
+        self.channels = channels
     }
 }
 

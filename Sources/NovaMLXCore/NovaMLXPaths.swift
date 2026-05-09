@@ -80,6 +80,7 @@ public enum NovaMLXPaths {
     public static var loadedModelsFile: URL { baseDir.appendingPathComponent("loaded_models.json") }
     public static var prefixCacheBaseDir: URL { baseDir.appendingPathComponent("prefix_cache") }
     public static var chatHistoryDir: URL { baseDir.appendingPathComponent("chat_history") }
+    public static var modelfilesDir: URL { baseDir.appendingPathComponent("modelfiles") }
 
     // Auth & subscription
     public static var sessionFile: URL { baseDir.appendingPathComponent("session") }

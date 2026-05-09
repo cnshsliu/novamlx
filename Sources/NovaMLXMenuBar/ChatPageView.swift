@@ -664,6 +664,8 @@ struct ChatPageView: View {
         case .llm: return "LLM"
         case .vlm: return "VLM"
         case .embedding: return "EMB"
+        case .audio: return "ASR"
+        case .image: return "IMG"
         }
     }
 
@@ -672,6 +674,8 @@ struct ChatPageView: View {
         case .llm: return .blue.opacity(0.8)
         case .vlm: return .purple.opacity(0.8)
         case .embedding: return .green.opacity(0.8)
+        case .audio: return .orange.opacity(0.8)
+        case .image: return .pink.opacity(0.8)
         }
     }
 }

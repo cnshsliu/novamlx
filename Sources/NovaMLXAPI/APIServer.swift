@@ -2,6 +2,7 @@ import Foundation
 import HTTPTypes
 import Hummingbird
 import HummingbirdRouter
+import ImageIO
 import Logging
 import NovaMLXCore
 import NovaMLXEngine
@@ -319,6 +320,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private let startTime = Date()
     private var coordinator: AutoLoadCoordinator?
     private let capabilitiesDetector = ModelCapabilitiesDetector()
+    private let modelfileManager = ModelfileManager()
 
     public init(
         inferenceService: InferenceService,
@@ -356,6 +358,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let updater = self.updateChecker
         let cfg = self.config
         let hf = self.hfService
+        let modelfileMgr = self.modelfileManager
 
         // Auto-load coordinator — lazy init
         let coordinator = AutoLoadCoordinator(
@@ -383,7 +386,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             Get("/v1/models") { request, context in
                 let detector = self.capabilitiesDetector
                 let modelList = models.downloadedModels()
-                    .filter { inference.isModelLoaded($0.id) }
+                    .filter { inference.isModelLoaded($0.id) || embeddings.isLoaded($0.id) || inference.transcriptionService.isLoaded($0.id) || inference.imageGenerationService.isLoaded($0.id) }
                     .map { record -> OpenAIModel in
                         let caps = detector.capabilities(
                             for: record.id,
@@ -402,9 +405,58 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             }
             Post("/v1/chat/completions") { request, context in
                 let body = try await request.body.collect(upTo: .max)
-                let openAIReq = try JSONDecoder().decode(OpenAIRequest.self, from: body)
+                var openAIReq = try JSONDecoder().decode(OpenAIRequest.self, from: body)
+
+                // Modelfile resolution: if model name matches a modelfile, swap to base model
+                var modelfileName: String? = nil
+                var modelfileSystemPrompt: String? = nil
+                if let resolved = modelfileMgr.resolve(openAIReq.model) {
+                    modelfileName = resolved.modelfileName
+                    modelfileSystemPrompt = resolved.systemPrompt
+                    let mfParams = resolved.parameters
+                    // Merge tools: modelfile tools first, then request tools
+                    var mergedTools = resolved.tools?.map { tool in
+                        tool.mapValues { anyToAnyCodable($0.toAny()) }
+                    } ?? []
+                    if let reqTools = openAIReq.tools { mergedTools.append(contentsOf: reqTools) }
+                    openAIReq = OpenAIRequest(
+                        model: resolved.baseModel,
+                        messages: openAIReq.messages,
+                        tools: mergedTools.isEmpty ? nil : mergedTools,
+                        toolChoice: openAIReq.toolChoice,
+                        temperature: openAIReq.temperature ?? mfParams?.temperature,
+                        topP: openAIReq.topP ?? mfParams?.topP,
+                        topK: openAIReq.topK ?? mfParams?.topK,
+                        minP: openAIReq.minP ?? mfParams?.minP,
+                        maxTokens: openAIReq.maxTokens ?? mfParams?.maxTokens,
+                        stream: openAIReq.stream,
+                        streamOptions: openAIReq.streamOptions,
+                        stop: openAIReq.stop ?? mfParams?.stop,
+                        n: openAIReq.n,
+                        frequencyPenalty: openAIReq.frequencyPenalty ?? mfParams?.frequencyPenalty,
+                        presencePenalty: openAIReq.presencePenalty ?? mfParams?.presencePenalty,
+                        repetitionPenalty: openAIReq.repetitionPenalty ?? mfParams?.repetitionPenalty,
+                        seed: openAIReq.seed ?? mfParams?.seed,
+                        sessionId: openAIReq.sessionId,
+                        responseFormat: openAIReq.responseFormat,
+                        thinkingBudget: openAIReq.thinkingBudget,
+                        enableThinking: openAIReq.enableThinking,
+                        preserveThinking: openAIReq.preserveThinking,
+                        chatTemplateKwargs: openAIReq.chatTemplateKwargs,
+                        reasoningEffort: openAIReq.reasoningEffort,
+                        logprobs: openAIReq.logprobs,
+                        topLogprobs: openAIReq.topLogprobs,
+                        keepAlive: openAIReq.keepAlive
+                    )
+                    NovaMLXLog.info("[API] Modelfile resolved: \(resolved.modelfileName) -> base=\(resolved.baseModel)")
+                }
 
                 var messages = mapOpenAIMessages(openAIReq.messages)
+
+                // Modelfile system prompt injection
+                if let sp = modelfileSystemPrompt {
+                    messages.insert(ChatMessage(role: .system, content: sp), at: 0)
+                }
 
                 // OCR auto-optimization
                 if OCROptimizer.isOCRModel(openAIReq.model) {
@@ -449,15 +501,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
                         regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
                         cfg: cfg, clientType: clientType,
-                        coordinator: coordinator
+                        coordinator: coordinator,
+                        responseModelOverride: modelfileName
                     )
                 } else {
                     response = try await Self.handleChat(
                         openAIReq: openAIReq, messages: messages, inference: inference,
                         sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
                         regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
-                        cfg: cfg, clientType: clientType
+                        cfg: cfg, clientType: clientType,
+                        responseModelOverride: modelfileName
                     )
+                    Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
                 }
                 if case .justLoaded(let ms) = loadOutcome {
                     response.headers[.init("X-Model-Cold-Load")!] = "true"
@@ -620,6 +675,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     httpResponse.headers[.init("X-Model-Cold-Load")!] = "true"
                     httpResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
                 }
+                Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
                 return httpResponse
             }
             Post("/v1/messages/count_tokens") { request, context in
@@ -672,6 +728,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         compReq: compReq, inference: inference,
                         cfg: cfg, clientType: compClientType
                     )
+                    Self.applyKeepAlive(compReq.keepAlive, modelId: compReq.model, pool: inference.engine.pool)
                 }
                 if case .justLoaded(let ms) = compLoadOutcome {
                     compResponse.headers[.init("X-Model-Cold-Load")!] = "true"
@@ -715,8 +772,309 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     embHttpResponse.headers[.init("X-Model-Cold-Load")!] = "true"
                     embHttpResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
                 }
+                Self.applyKeepAlive(embReq.keepAlive, modelId: embReq.model, pool: inference.engine.pool)
                 return embHttpResponse
             }
+            Post("/v1/audio/transcriptions") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let contentType = request.headers[fields: HTTPField.Name("content-type")!].first?.value ?? ""
+
+                let model: String
+                let audioData: Data
+                let language: String?
+                let responseFormat: String
+                let stream: Bool
+
+                if contentType.lowercased().contains("multipart/form-data") {
+                    let parts = try MultipartParser.parse(body: Data(body.readableBytesView), contentType: contentType)
+                    guard let filePart = parts["file"] else {
+                        throw NovaMLXError.apiError("Missing 'file' part in multipart upload")
+                    }
+                    audioData = filePart.body
+                    model = parts["model"].flatMap { String(data: $0.body, encoding: .utf8) } ?? ""
+                    language = parts["language"].flatMap { String(data: $0.body, encoding: .utf8) }
+                    responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "json"
+                    stream = parts["stream"].flatMap { String(data: $0.body, encoding: .utf8) } == "true"
+                } else {
+                    let req = try JSONDecoder().decode(TranscriptionRequest.self, from: body)
+                    guard let data = Data(base64Encoded: req.file) else {
+                        throw NovaMLXError.apiError("Invalid base64 audio data in 'file' field")
+                    }
+                    audioData = data
+                    model = req.model
+                    language = req.language
+                    responseFormat = req.resolvedResponseFormat
+                    stream = req.stream ?? false
+                }
+
+                if stream {
+                    let tokenStream = inference.transcriptionService.transcribeStream(
+                        modelId: model,
+                        audioData: audioData,
+                        language: language
+                    )
+                    return Response(
+                        status: .ok,
+                        headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive"],
+                        body: AudioSSEStream.body(from: tokenStream)
+                    )
+                }
+
+                let result = try await inference.transcriptionService.transcribe(
+                    modelId: model,
+                    audioData: audioData,
+                    language: language,
+                    responseFormat: responseFormat
+                )
+
+                switch responseFormat {
+                case "text":
+                    let textData = result.text.data(using: .utf8) ?? Data()
+                    return Response(status: .ok, headers: [.contentType: "text/plain"],
+                                    body: .init(byteBuffer: ByteBuffer(data: textData)))
+                default:
+                    let response = TranscriptionResponse(
+                        text: result.text,
+                        language: result.language,
+                        duration: result.duration
+                    )
+                    return try Self.jsonResponse(response)
+                }
+            }
+            Post("/v1/images/generations") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(ImageGenerationRequest.self, from: body)
+
+                guard !req.prompt.isEmpty else {
+                    throw NovaMLXError.apiError("'prompt' is required and must be non-empty")
+                }
+
+                let model = req.model
+                let n = req.resolvedN
+                let (width, height) = req.resolvedSize
+                let format = req.resolvedResponseFormat
+
+                // Auto-load check
+                if !inference.imageGenerationService.isLoaded(model) {
+                    guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
+                        throw NovaMLXError.modelNotFound(model)
+                    }
+                    guard record.modelType == .image else {
+                        throw NovaMLXError.unsupportedModel("Model '\(model)' is not an image generation model (type: \(record.modelType))")
+                    }
+                    let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
+                    _ = try await inference.imageGenerationService.loadModel(
+                        from: record.localURL, config: config)
+                }
+
+                let result = try await inference.imageGenerationService.generate(
+                    modelId: model,
+                    prompt: req.prompt,
+                    negativePrompt: req.negativePrompt ?? "",
+                    n: n,
+                    width: width,
+                    height: height,
+                    seed: req.seed.map { UInt64($0) }
+                )
+
+                let imageData: [ImageData]
+                switch format {
+                case "url":
+                    // Write to temp file and return URL
+                    imageData = try result.images.enumerated().map { (i, b64) in
+                        guard let data = Data(base64Encoded: b64) else {
+                            throw NovaMLXError.apiError("Failed to decode generated image")
+                        }
+                        let tempDir = FileManager.default.temporaryDirectory
+                        let url = tempDir.appendingPathComponent("novamlx_img_\(Int(Date().timeIntervalSince1970))_\(i).png")
+                        try data.write(to: url)
+                        return ImageData(b64Json: nil, url: url.absoluteString, revisedPrompt: req.prompt)
+                    }
+                default:
+                    imageData = result.images.map { b64 in
+                        ImageData(b64Json: b64, url: nil, revisedPrompt: req.prompt)
+                    }
+                }
+
+                let response = ImageGenerationResponse(
+                    created: Int(Date().timeIntervalSince1970),
+                    data: imageData,
+                    model: model
+                )
+                return try Self.jsonResponse(response)
+            }
+
+            // MARK: - Image Edit
+
+            Post("/v1/images/edits") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let contentType = request.headers[fields: HTTPField.Name("content-type")!].first?.value ?? ""
+
+                guard contentType.lowercased().contains("multipart/form-data") else {
+                    throw NovaMLXError.apiError("Content-Type must be multipart/form-data for image edits")
+                }
+
+                let parts = try MultipartParser.parse(body: Data(body.readableBytesView), contentType: contentType)
+
+                guard let imagePart = parts["image"] else {
+                    throw NovaMLXError.apiError("Missing 'image' part in multipart upload")
+                }
+                guard let promptPart = parts["prompt"] else {
+                    throw NovaMLXError.apiError("Missing 'prompt' part in multipart upload")
+                }
+
+                let imageData = imagePart.body
+                let maskData = parts["mask"]?.body
+                let prompt = String(data: promptPart.body, encoding: .utf8) ?? ""
+                let model = parts["model"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "sdxl-turbo"
+                let n = Int(parts["n"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "1") ?? 1
+                let size = parts["size"].flatMap { String(data: $0.body, encoding: .utf8) }
+                let responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) }
+
+                guard !prompt.isEmpty else {
+                    throw NovaMLXError.apiError("'prompt' is required and must be non-empty")
+                }
+
+                let (width, height) = ImageEditRequest(
+                    image: imageData, mask: maskData, prompt: prompt, model: model,
+                    n: n, size: size, responseFormat: responseFormat
+                ).resolvedSize
+                let format = responseFormat ?? "b64_json"
+                let resolvedN = min(max(n, 1), 4)
+
+                // Convert uploaded image to CGImage
+                guard let inputCGImage = Self.dataToCGImage(imageData) else {
+                    throw NovaMLXError.apiError("Failed to decode input image")
+                }
+                let maskCGImage = maskData.flatMap { Self.dataToCGImage($0) }
+
+                // Auto-load check
+                if !inference.imageGenerationService.isLoaded(model) {
+                    guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
+                        throw NovaMLXError.modelNotFound(model)
+                    }
+                    guard record.modelType == .image else {
+                        throw NovaMLXError.unsupportedModel("Model '\(model)' is not an image generation model")
+                    }
+                    let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
+                    _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
+                }
+
+                let result = try await inference.imageGenerationService.edit(
+                    modelId: model,
+                    image: inputCGImage,
+                    mask: maskCGImage,
+                    prompt: prompt,
+                    n: resolvedN,
+                    width: width,
+                    height: height
+                )
+
+                let imageDataResp: [ImageData]
+                switch format {
+                case "url":
+                    imageDataResp = try result.images.enumerated().map { (i, b64) in
+                        guard let data = Data(base64Encoded: b64) else {
+                            throw NovaMLXError.apiError("Failed to decode generated image")
+                        }
+                        let url = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("novamlx_edit_\(Int(Date().timeIntervalSince1970))_\(i).png")
+                        try data.write(to: url)
+                        return ImageData(b64Json: nil, url: url.absoluteString, revisedPrompt: prompt)
+                    }
+                default:
+                    imageDataResp = result.images.map { b64 in
+                        ImageData(b64Json: b64, url: nil, revisedPrompt: prompt)
+                    }
+                }
+
+                let response = ImageGenerationResponse(
+                    created: Int(Date().timeIntervalSince1970),
+                    data: imageDataResp,
+                    model: model
+                )
+                return try Self.jsonResponse(response)
+            }
+
+            // MARK: - Image Variation
+
+            Post("/v1/images/variations") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let contentType = request.headers[fields: HTTPField.Name("content-type")!].first?.value ?? ""
+
+                guard contentType.lowercased().contains("multipart/form-data") else {
+                    throw NovaMLXError.apiError("Content-Type must be multipart/form-data for image variations")
+                }
+
+                let parts = try MultipartParser.parse(body: Data(body.readableBytesView), contentType: contentType)
+
+                guard let imagePart = parts["image"] else {
+                    throw NovaMLXError.apiError("Missing 'image' part in multipart upload")
+                }
+
+                let imageData = imagePart.body
+                let model = parts["model"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "sdxl-turbo"
+                let n = Int(parts["n"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "1") ?? 1
+                let size = parts["size"].flatMap { String(data: $0.body, encoding: .utf8) }
+                let responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) }
+
+                let (width, height) = ImageVariationRequest(
+                    image: imageData, model: model, n: n, size: size, responseFormat: responseFormat
+                ).resolvedSize
+                let format = responseFormat ?? "b64_json"
+                let resolvedN = min(max(n, 1), 4)
+
+                // Convert uploaded image to CGImage
+                guard let inputCGImage = Self.dataToCGImage(imageData) else {
+                    throw NovaMLXError.apiError("Failed to decode input image")
+                }
+
+                // Auto-load check
+                if !inference.imageGenerationService.isLoaded(model) {
+                    guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
+                        throw NovaMLXError.modelNotFound(model)
+                    }
+                    guard record.modelType == .image else {
+                        throw NovaMLXError.unsupportedModel("Model '\(model)' is not an image generation model")
+                    }
+                    let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
+                    _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
+                }
+
+                let result = try await inference.imageGenerationService.variation(
+                    modelId: model,
+                    image: inputCGImage,
+                    n: resolvedN,
+                    width: width,
+                    height: height
+                )
+
+                let imageDataResp: [ImageData]
+                switch format {
+                case "url":
+                    imageDataResp = try result.images.enumerated().map { (i, b64) in
+                        guard let data = Data(base64Encoded: b64) else {
+                            throw NovaMLXError.apiError("Failed to decode generated image")
+                        }
+                        let url = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("novamlx_var_\(Int(Date().timeIntervalSince1970))_\(i).png")
+                        try data.write(to: url)
+                        return ImageData(b64Json: nil, url: url.absoluteString, revisedPrompt: nil)
+                    }
+                default:
+                    imageDataResp = result.images.map { b64 in
+                        ImageData(b64Json: b64, url: nil, revisedPrompt: nil)
+                    }
+                }
+
+                let response = ImageGenerationResponse(
+                    created: Int(Date().timeIntervalSince1970),
+                    data: imageDataResp,
+                    model: model
+                )
+                return try Self.jsonResponse(response)
+            }
+
             Post("/v1/responses") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let req = try JSONDecoder().decode(OpenAIResponseRequest.self, from: body)
@@ -729,6 +1087,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 let respClientType = ClientDetector.detect(request: request)
                 var respResponse = try await Self.handleResponsesRequest(req: req, inference: inference, cfg: cfg, clientType: respClientType)
+                Self.applyKeepAlive(req.keepAlive, modelId: req.model, pool: inference.engine.pool)
                 if case .justLoaded(let ms) = respLoadOutcome {
                     respResponse.headers[.init("X-Model-Cold-Load")!] = "true"
                     respResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
@@ -1022,7 +1381,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 statuses.reserveCapacity(records.count)
                 for record in records {
                     let isDownloaded = models.isDownloaded(record.id)
-                    let isLoaded = inference.isModelLoaded(record.id) || embeddings.isLoaded(record.id)
+                    let isLoaded = inference.isModelLoaded(record.id) || embeddings.isLoaded(record.id) || inference.transcriptionService.isLoaded(record.id) || inference.imageGenerationService.isLoaded(record.id)
                     // Only check feasibility for downloaded, non-loaded, non-embedding models
                     var feasibility: MemoryFeasibility? = nil
                     if isDownloaded && !isLoaded && record.modelType != .embedding {
@@ -1060,7 +1419,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     }
                     return try Self.jsonResponse(AdminModelStatus(
                         id: req.modelId, family: record.family.rawValue,
-                        downloaded: true, loaded: inference.isModelLoaded(req.modelId),
+                        downloaded: true, loaded: inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId),
                         sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt
                     ))
                 }
@@ -1088,7 +1447,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.modelNotFound(req.modelId)
                 }
 
-                if inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) {
+                if inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId) {
                     let record = models.getRecord(req.modelId)
                     return try Self.jsonResponse(AdminModelStatus(
                         id: req.modelId, family: record?.family.rawValue ?? "other",
@@ -1108,6 +1467,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 if record.modelType == .embedding {
                     _ = try await embeddings.loadModel(from: record.localURL, config: config)
+                } else if record.modelType == .audio {
+                    _ = try await inference.transcriptionService.loadModel(from: record.localURL, config: config)
+                } else if record.modelType == .image {
+                    _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
                 } else {
                     try await inference.loadModel(at: record.localURL, config: config)
                 }
@@ -1122,7 +1485,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let body = try await request.body.collect(upTo: .max)
                 let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
 
-                guard inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) else {
+                guard inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId) else {
                     throw NovaMLXError.modelNotFound(req.modelId)
                 }
 
@@ -1134,6 +1497,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 if embeddings.isLoaded(req.modelId) {
                     embeddings.unloadModel(req.modelId)
+                }
+
+                if inference.transcriptionService.isLoaded(req.modelId) {
+                    inference.transcriptionService.unload(modelId: req.modelId)
+                }
+
+                if inference.imageGenerationService.isLoaded(req.modelId) {
+                    inference.imageGenerationService.unload(modelId: req.modelId)
                 }
 
                 return try Self.jsonResponse(AdminModelStatus(
@@ -1539,6 +1910,43 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let adapters = inference.engine.adapterService.discoverAdapters(in: searchDir)
                 return try Self.jsonResponse(["adapters": adapters])
             }
+
+            // MARK: - Modelfiles
+            Get("/admin/modelfiles") { _, _ in
+                let files = modelfileMgr.list()
+                return try Self.jsonResponse(files)
+            }
+            Get("/admin/modelfiles/{name}") { request, context in
+                let name = try context.parameters.require("name")
+                guard let mf = modelfileMgr.get(name) else {
+                    throw NovaMLXError.modelNotFound("Modelfile '\(name)' not found")
+                }
+                return try Self.jsonResponse(mf)
+            }
+            Post("/admin/modelfiles") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                let mf = try JSONDecoder().decode(Modelfile.self, from: body)
+                try modelfileMgr.create(mf)
+                return try Self.jsonResponse(mf, httpStatus: .created)
+            }
+            Put("/admin/modelfiles/{name}") { request, context in
+                let name = try context.parameters.require("name")
+                let body = try await request.body.collect(upTo: .max)
+                var mf = try JSONDecoder().decode(Modelfile.self, from: body)
+                // Force name to match URL parameter to prevent mismatches
+                mf = Modelfile(
+                    name: name, baseModel: mf.baseModel,
+                    systemPrompt: mf.systemPrompt, parameters: mf.parameters,
+                    tools: mf.tools, description: mf.description
+                )
+                try modelfileMgr.update(mf)
+                return try Self.jsonResponse(mf)
+            }
+            Delete("/admin/modelfiles/{name}") { request, context in
+                let name = try context.parameters.require("name")
+                try modelfileMgr.delete(name)
+                return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
+            }
             Post("/admin/api/grammar/validate") { request, _ in
                 struct GrammarValidateRequest: Codable, Sendable {
                     let type: String
@@ -1772,6 +2180,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Per-Request keep_alive
+
+    private static func applyKeepAlive(_ keepAlive: KeepAliveValue?, modelId: String, pool: EnginePool) {
+        guard let ka = keepAlive else { return }
+        pool.applyKeepAlive(modelId: modelId, deadline: ka.deadline())
+    }
+
     // MARK: - Auto-Load Helpers
 
     enum LoadOutcome: Sendable {
@@ -1935,7 +2350,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         openAIReq: OpenAIRequest, messages: [ChatMessage], inference: InferenceService,
         sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
-        cfg: ServerConfig, clientType: ClientType
+        cfg: ServerConfig, clientType: ClientType,
+        responseModelOverride: String? = nil
     ) async throws -> Response {
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: openAIReq.model,
@@ -2052,7 +2468,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         }
         let response = OpenAIResponse(
             id: "chatcmpl-\(result.id.uuidString.prefix(8))",
-            model: result.model,
+            model: responseModelOverride ?? result.model,
             choices: [
                 OpenAIChoice(
                     index: 0,
@@ -2076,8 +2492,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
         cfg: ServerConfig, clientType: ClientType,
-        coordinator: AutoLoadCoordinator
+        coordinator: AutoLoadCoordinator,
+        responseModelOverride: String? = nil
     ) async throws -> Response {
+        let responseModel = responseModelOverride ?? openAIReq.model
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: openAIReq.model,
             userTemperature: openAIReq.temperature,
@@ -2129,7 +2547,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             do {
                 let roleChunk = OpenAIStreamChunk(
                     id: chunkId,
-                    model: openAIReq.model,
+                    model: responseModel,
                     choices: [
                         OpenAIStreamChoice(index: 0, delta: OpenAIDelta(role: "assistant", content: ""))
                     ]
@@ -2167,7 +2585,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             )
                             let chunk = OpenAIStreamChunk(
                                 id: chunkId,
-                                model: openAIReq.model,
+                                model: responseModel,
                                 choices: [OpenAIStreamChoice(index: 0, delta: OpenAIDelta(toolCalls: [tcDelta]))]
                             )
                             let data = try JSONEncoder().encode(chunk)
@@ -2192,21 +2610,22 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 if !cleanResp.isEmpty {
                                     completionTokenCount += 1
                                     let respDelta = OpenAIDelta(content: cleanResp)
-                                    let respChunk = OpenAIStreamChunk(id: chunkId, model: openAIReq.model, choices: [OpenAIStreamChoice(index: 0, delta: respDelta)])
+                                    let respChunk = OpenAIStreamChunk(id: chunkId, model: responseModel, choices: [OpenAIStreamChoice(index: 0, delta: respDelta)], novaChannels: token.channels?.map { NovaHarmonyChannel(channel: $0.channel, text: $0.text) })
                                     let respData = try JSONEncoder().encode(respChunk)
                                     try await writer.write(ByteBuffer(string: "data: \(String(data: respData, encoding: .utf8) ?? "")\n\n"))
                                 }
                             }
                             let finalChunk = OpenAIStreamChunk(
                                 id: chunkId,
-                                model: openAIReq.model,
+                                model: responseModel,
                                 choices: [
                                     OpenAIStreamChoice(
                                         index: 0,
                                         delta: OpenAIDelta(),
                                         finishReason: finish.rawValue
                                     )
-                                ]
+                                ],
+                                novaChannels: token.channels?.map { NovaHarmonyChannel(channel: $0.channel, text: $0.text) }
                             )
                             let finalData = try JSONEncoder().encode(finalChunk)
                             try await writer.write(ByteBuffer(string: "data: \(String(data: finalData, encoding: .utf8) ?? "")\n\n"))
@@ -2252,8 +2671,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                         : OpenAIDelta(content: parsed.text)
                                     let chunk = OpenAIStreamChunk(
                                         id: chunkId,
-                                        model: openAIReq.model,
-                                        choices: [OpenAIStreamChoice(index: 0, delta: delta, logprobs: tokenLogprobs)]
+                                        model: responseModel,
+                                        choices: [OpenAIStreamChoice(index: 0, delta: delta, logprobs: tokenLogprobs)],
+                                        novaChannels: token.channels?.map { NovaHarmonyChannel(channel: $0.channel, text: $0.text) }
                                     )
                                     tokenLogprobs = nil  // consume — only first chunk carries logprobs
                                     let data = try JSONEncoder().encode(chunk)
@@ -2265,8 +2685,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 let delta = OpenAIDelta(content: cleanText)
                                 let chunk = OpenAIStreamChunk(
                                     id: chunkId,
-                                    model: openAIReq.model,
-                                    choices: [OpenAIStreamChoice(index: 0, delta: delta, logprobs: tokenLogprobs)]
+                                    model: responseModel,
+                                    choices: [OpenAIStreamChoice(index: 0, delta: delta, logprobs: tokenLogprobs)],
+                                    novaChannels: token.channels?.map { NovaHarmonyChannel(channel: $0.channel, text: $0.text) }
                                 )
                                 tokenLogprobs = nil  // consume — only first chunk carries logprobs
                                 let data = try JSONEncoder().encode(chunk)
@@ -2288,7 +2709,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         ? cfg.scaleTokenCount(completionTokenCount, modelContextWindow: ctxWin) : completionTokenCount
                     let usageChunk = OpenAIStreamChunk(
                         id: chunkId,
-                        model: openAIReq.model,
+                        model: responseModel,
                         choices: [],
                         usage: OpenAIUsage(promptTokens: scaledPrompt, completionTokens: scaledCompletion)
                     )
@@ -2296,6 +2717,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try await writer.write(ByteBuffer(string: "data: \(String(data: usageData, encoding: .utf8) ?? "")\n\n"))
                 }
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
                 try await writer.finish(nil)
             } catch {
                 NovaMLXLog.error("Stream error: \(error)")
@@ -2307,6 +2729,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try? await writer.write(ByteBuffer(string: sseError))
                 }
                 try? await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
                 try? await writer.finish(nil)
             }
         }
@@ -2523,6 +2946,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         NovaMLXLog.info("[SSE:\(reqTag)] Stream done signal")
                     }
                 }
+                Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
             } catch {
                 let elapsed = Date().timeIntervalSince(streamStart)
                 NovaMLXLog.error("[SSE:\(reqTag)] Stream ERROR after \(String(format: "%.1f", elapsed))s, \(tokenCount) tokens sent: \(error)")
@@ -2533,7 +2957,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 if let data = try? JSONEncoder().encode(errorResp) {
                     try? await writer.write(ByteBuffer(string: "event: error\ndata: \(String(data: data, encoding: .utf8) ?? "{}")\n\n"))
                 }
+                Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
                 try? await writer.finish(nil)
+                return
             }
             try? await writer.finish(nil)
         }
@@ -2667,6 +3093,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try await writer.write(ByteBuffer(string: "data: \(String(data: usageData, encoding: .utf8) ?? "")\n\n"))
                 }
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                Self.applyKeepAlive(compReq.keepAlive, modelId: compReq.model, pool: inference.engine.pool)
                 try await writer.finish(nil)
             } catch {
                 NovaMLXLog.error("Completion stream error: \(error)")
@@ -2677,6 +3104,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try? await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                 }
                 try? await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
+                Self.applyKeepAlive(compReq.keepAlive, modelId: compReq.model, pool: inference.engine.pool)
                 try? await writer.finish(nil)
             }
         }
@@ -2903,6 +3331,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             headers: [.contentType: "application/json"],
             body: .init(byteBuffer: ByteBuffer(data: data))
         )
+    }
+
+    /// Convert raw PNG/JPEG data to a CGImage.
+    private static func dataToCGImage(_ data: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
     private static func dashboardHTML() -> String {

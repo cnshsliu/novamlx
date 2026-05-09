@@ -39,12 +39,16 @@ final class ModelCapabilitiesDetector: @unchecked Sendable {
         let tools = Self.detectTools(template: template)
         let thinking = Self.detectImplicitThinking(template: template)
         let reasoning = Self.detectReasoning(template: template, thinking: thinking)
+        let audio = modelType == .audio
+        let imageGeneration = modelType == .image
 
         return ModelCapabilities(
             reasoning: reasoning,
             thinking: thinking,
             tools: tools,
-            vision: vision
+            vision: vision,
+            audio: audio,
+            imageGeneration: imageGeneration
         )
     }
 

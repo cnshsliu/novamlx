@@ -51,6 +51,8 @@ struct NovaMLXCLI {
                 try await handleAccount()
             case "chat-template":
                 try await handleChatTemplate(subArgs)
+            case "modelfile":
+                try await handleModelfile(subArgs)
             case "--help", "-h":
                 printUsage()
             case "--version", "-v":
@@ -121,6 +123,12 @@ struct NovaMLXCLI {
 
         DIAGNOSTICS
           nova chat-template diagnose <model-id>   Inspect chat template & rendering health
+
+        MODELFILES
+          nova modelfile list                      List stored modelfiles
+          nova modelfile show <name>               Show modelfile details
+          nova modelfile create <name> <base-model> Create a modelfile (interactive)
+          nova modelfile delete <name>             Delete a modelfile
 
         OPTIONS
           --help, -h     Show this help
@@ -629,6 +637,99 @@ struct NovaMLXCLI {
             }
             print("")
             print("See `architecture.md` → Diagnostic Playbook for fix paths.")
+        }
+    }
+
+    // MARK: - Modelfiles
+
+    static func handleModelfile(_ args: [String]) async throws {
+        guard let sub = args.first else {
+            print("Usage: nova modelfile <list|show|create|delete> [args]")
+            return
+        }
+        let subArgs = Array(args.dropFirst())
+        switch sub {
+        case "list":
+            let resp = try await CLIClient.get("/admin/modelfiles", admin: true)
+            guard let data = resp.body.data(using: .utf8),
+                  let files = try? JSONDecoder().decode([Modelfile].self, from: data) else {
+                CLIClient.printJSON(resp.body)
+                return
+            }
+            if files.isEmpty {
+                print("No modelfiles. Create one with: nova modelfile create <name> <base-model>")
+                return
+            }
+            print(String(repeating: "─", count: 60))
+            for mf in files {
+                print("  \(mf.name)")
+                print("    base: \(mf.baseModel)")
+                if let desc = mf.description { print("    desc: \(desc)") }
+                if let sp = mf.systemPrompt {
+                    let preview = sp.count > 60 ? String(sp.prefix(57)) + "..." : sp
+                    print("    system: \(preview)")
+                }
+                if let p = mf.parameters {
+                    var parts: [String] = []
+                    if let t = p.temperature { parts.append("temp=\(t)") }
+                    if let tp = p.topP { parts.append("top_p=\(tp)") }
+                    if let mt = p.maxTokens { parts.append("max_tokens=\(mt)") }
+                    if !parts.isEmpty { print("    params: \(parts.joined(separator: ", "))") }
+                }
+                if let tools = mf.tools, !tools.isEmpty { print("    tools: \(tools.count) tool(s)") }
+            }
+            print(String(repeating: "─", count: 60))
+            print("\(files.count) modelfile(s)")
+        case "show":
+            guard let name = subArgs.first else {
+                print("Usage: nova modelfile show <name>")
+                return
+            }
+            let encoded = name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? name
+            let resp = try await CLIClient.get("/admin/modelfiles/\(encoded)", admin: true)
+            if resp.statusCode == 200 {
+                CLIClient.printJSON(resp.body)
+            } else {
+                print("Failed: \(resp.statusCode) — \(resp.body)")
+            }
+        case "create":
+            guard subArgs.count >= 2 else {
+                print("Usage: nova modelfile create <name> <base-model> [system-prompt]")
+                return
+            }
+            let name = subArgs[0]
+            let baseModel = subArgs[1]
+            let systemPrompt = subArgs.count >= 3 ? subArgs[2] : nil
+
+            var bodyDict: [String: Any] = [
+                "name": name,
+                "baseModel": baseModel
+            ]
+            if let sp = systemPrompt { bodyDict["systemPrompt"] = sp }
+            let bodyData = try JSONSerialization.data(withJSONObject: bodyDict)
+            let body = String(data: bodyData, encoding: .utf8) ?? "{}"
+
+            let resp = try await CLIClient.post("/admin/modelfiles", body: body, admin: true)
+            if resp.statusCode == 201 || resp.statusCode == 200 {
+                print("Modelfile '\(name)' created (base: \(baseModel)).")
+            } else {
+                print("Failed: \(resp.statusCode) — \(resp.body)")
+            }
+        case "delete":
+            guard let name = subArgs.first else {
+                print("Usage: nova modelfile delete <name>")
+                return
+            }
+            let encoded = name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? name
+            let resp = try await CLIClient.delete("/admin/modelfiles/\(encoded)", admin: true)
+            if resp.statusCode == 200 {
+                print("Modelfile '\(name)' deleted.")
+            } else {
+                print("Failed: \(resp.statusCode) — \(resp.body)")
+            }
+        default:
+            print("Unknown modelfile subcommand: \(sub)")
+            print("Use: nova modelfile <list|show|create|delete>")
         }
     }
 }

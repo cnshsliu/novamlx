@@ -36,6 +36,7 @@ public struct AnthropicRequest: Codable, Sendable {
     public let preserveThinking: Bool?
     public let chatTemplateKwargs: [String: AnyCodable]?
     public let reasoningEffort: String?
+    public let keepAlive: KeepAliveValue?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, maxTokens = "max_tokens", system, temperature
@@ -46,6 +47,7 @@ public struct AnthropicRequest: Codable, Sendable {
         case preserveThinking = "preserve_thinking"
         case chatTemplateKwargs = "chat_template_kwargs"
         case reasoningEffort = "reasoning_effort"
+        case keepAlive = "keep_alive"
     }
 
     public init(
@@ -64,7 +66,8 @@ public struct AnthropicRequest: Codable, Sendable {
         enableThinking: Bool? = nil,
         preserveThinking: Bool? = nil,
         chatTemplateKwargs: [String: AnyCodable]? = nil,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        keepAlive: KeepAliveValue? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -82,6 +85,7 @@ public struct AnthropicRequest: Codable, Sendable {
         self.preserveThinking = preserveThinking
         self.chatTemplateKwargs = chatTemplateKwargs
         self.reasoningEffort = reasoningEffort
+        self.keepAlive = keepAlive
     }
 
     /// Resolve thinking toggle from multiple client formats, mirrors OpenAI pattern

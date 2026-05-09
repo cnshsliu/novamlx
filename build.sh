@@ -19,21 +19,25 @@ if [ -d .build/checkouts/mlx-swift-lm ] && ! grep -q "NOVAMLX_FUSED_SDPA_PATCHED
 fi
 
 # Compile MLX Metal shaders if metallib is missing
-METALLIB=".build/arm64-apple-macosx/release/mlx.metallib"
-METAL_SRC=".build/checkouts/mlx-swift/Source/Cmlx/mlx-generated/metal"
-if [ -d "$METAL_SRC" ] && [ ! -f "$METALLIB" ]; then
-	echo "→ Compiling MLX Metal shaders..."
-	TMPDIR_BUILD=$(mktemp -d)
-	trap "rm -rf $TMPDIR_BUILD" EXIT
-	cd "$METAL_SRC"
-	find . -name "*.metal" | while read f; do
-		base=$(basename "$f" .metal)
-		xcrun -sdk macosx metal -target air64-apple-macos14.0 -fno-fast-math \
-			-c "$f" -I . -o "$TMPDIR_BUILD/${base}.air" 2>/dev/null
+METAL_SRC="vendors/mlx-swift/Source/Cmlx/mlx-generated/metal"
+if [ -d "$METAL_SRC" ]; then
+	for cfg in debug release; do
+		METALLIB=".build/arm64-apple-macosx/${cfg}/mlx.metallib"
+		if [ ! -f "$METALLIB" ]; then
+			echo "→ Compiling MLX Metal shaders (${cfg})..."
+			TMPDIR_BUILD=$(mktemp -d)
+			trap "rm -rf $TMPDIR_BUILD" EXIT
+			( cd "$METAL_SRC" && \
+			  find . -name "*.metal" | while read f; do
+				  base=$(basename "$f" .metal)
+				  xcrun -sdk macosx metal -target air64-apple-macos14.0 -fno-fast-math \
+					  -c "$f" -I . -o "$TMPDIR_BUILD/${base}.air" 2>/dev/null
+			  done )
+			mkdir -p "$(dirname "$METALLIB")"
+			xcrun -sdk macosx metallib "$TMPDIR_BUILD"/*.air -o "$METALLIB" 2>/dev/null
+			echo "→ Built $(ls -lh "$METALLIB" | awk '{print $5}') metallib (${cfg})"
+		fi
 	done
-	xcrun -sdk macosx metallib "$TMPDIR_BUILD"/*.air -o "$(cd ../.. && pwd)/$METALLIB" 2>/dev/null
-	cd -
-	echo "→ Built $(ls -lh "$METALLIB" | awk '{print $5}') metallib"
 fi
 
 # Now build with whatever args were passed
@@ -131,6 +135,16 @@ for bin in "${SYNC_BINARIES[@]}"; do
 	codesign --force --sign - "$dst" 2>/dev/null || true
 	UPDATED+=("$bin")
 done
+
+# Also sync mlx.metallib if present in build dir but missing/different in app bundle.
+METALLIB_SRC="$BUILD_BIN_DIR/mlx.metallib"
+METALLIB_DST="$APP_MACOS/mlx.metallib"
+if [ -f "$METALLIB_SRC" ]; then
+	if [ ! -f "$METALLIB_DST" ] || [ "$METALLIB_SRC" -nt "$METALLIB_DST" ]; then
+		cp "$METALLIB_SRC" "$METALLIB_DST"
+		UPDATED+=("mlx.metallib")
+	fi
+fi
 
 # Re-sign the bundle as a whole if any contained binary changed, so the
 # bundle's CodeResources stays consistent with the new mach-o hashes.

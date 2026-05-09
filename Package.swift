@@ -59,11 +59,34 @@ let package = Package(
             swiftSettings: concurrencySettings
         ),
         .target(
+            name: "NovaMLXAudio",
+            dependencies: [
+                "NovaMLXCore",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Hub", package: "swift-transformers"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .target(
+            name: "NovaMLXImage",
+            dependencies: [
+                "NovaMLXCore",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .target(
             name: "NovaMLXEngine",
             dependencies: [
                 "NovaMLXCore",
                 "NovaMLXUtils",
                 "NovaMLXPrefixCache",
+                "NovaMLXAudio",
+                "NovaMLXImage",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
@@ -217,6 +240,11 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Hub", package: "swift-transformers"),
             ],
+            swiftSettings: concurrencySettings
+        ),
+        .testTarget(
+            name: "NovaMLXImageTests",
+            dependencies: ["NovaMLXImage"],
             swiftSettings: concurrencySettings
         ),
         .testTarget(

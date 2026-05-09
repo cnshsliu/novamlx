@@ -177,8 +177,19 @@ public actor ProcessMemoryEnforcer {
         let now = Date()
 
         for model in models {
-            guard !model.pinned,
-                  let settings = settingsProvider(model.id),
+            guard !model.pinned else { continue }
+
+            if let prd = model.perRequestDeadline {
+                if prd > now { continue }
+                NovaMLXLog.info("[MemoryEnforcer] Per-request keep_alive expired for \(model.id)")
+                pool.evictLRU()
+                totalEvictions += 1
+                lastEvictedModel = model.id
+                lastEvictionTime = now
+                continue
+            }
+
+            guard let settings = settingsProvider(model.id),
                   let ttl = settings.ttlSeconds,
                   ttl > 0 else { continue }
 

@@ -10,6 +10,7 @@ public struct PooledModel: @unchecked Sendable {
     var lastAccessed: Date
     var isPinned: Bool
     let estimatedSizeMB: UInt64
+    var perRequestDeadline: Date?
 
     init(container: ModelContainer, pinned: Bool = false) {
         self.container = container
@@ -18,6 +19,7 @@ public struct PooledModel: @unchecked Sendable {
         self.isPinned = pinned
         // Use model weight size, not MLX.Memory.activeMemory which includes freed memory
         self.estimatedSizeMB = container.wiredReservationTicket.map { UInt64($0.size / 1_048_576) } ?? 0
+        self.perRequestDeadline = nil
     }
 }
 
@@ -105,9 +107,19 @@ public final class EnginePool: @unchecked Sendable {
         lock.withLock { pool.count }
     }
 
-    public func allModelInfo() -> [(id: String, pinned: Bool, lastAccessed: Date, sizeMB: UInt64)] {
+    public func applyKeepAlive(modelId: String, deadline: Date) {
         lock.withLock {
-            pool.map { (id: $0.key, pinned: $0.value.isPinned, lastAccessed: $0.value.lastAccessed, sizeMB: $0.value.estimatedSizeMB) }
+            guard pool[modelId] != nil else { return }
+            let existing = pool[modelId]?.perRequestDeadline
+            if existing == nil || deadline > existing! {
+                pool[modelId]?.perRequestDeadline = deadline
+            }
+        }
+    }
+
+    public func allModelInfo() -> [(id: String, pinned: Bool, lastAccessed: Date, sizeMB: UInt64, perRequestDeadline: Date?)] {
+        lock.withLock {
+            pool.map { (id: $0.key, pinned: $0.value.isPinned, lastAccessed: $0.value.lastAccessed, sizeMB: $0.value.estimatedSizeMB, perRequestDeadline: $0.value.perRequestDeadline) }
         }
     }
 }
