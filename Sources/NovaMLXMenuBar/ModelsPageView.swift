@@ -23,7 +23,6 @@ struct ModelsPageView: View {
         ScrollView {
             VStack(spacing: 20) {
                 loadedSection
-                cloudModelsSection
                 downloadedSection
             }
             .padding(24)
@@ -87,96 +86,6 @@ struct ModelsPageView: View {
             }
         }
         .sectionCard()
-    }
-
-    private var cloudModelsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(l10n.tr("models.cloudModels"), icon: "cloud.fill", count: appState.cloudModels.count)
-
-            if !appState.cloudLoggedIn {
-                cloudAuthGate
-            } else if appState.cloudModels.isEmpty {
-                emptyState(l10n.tr("models.noCloudModels"), subtitle: l10n.tr("models.noCloudModelsSub"))
-            } else {
-                ForEach(appState.cloudModels, id: \.self) { modelId in
-                    cloudModelRow(modelId)
-                }
-            }
-        }
-        .sectionCard()
-    }
-
-    /// Promotional card shown when user is not logged in — drives them to Settings > Cloud Account
-    private var cloudAuthGate: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "cloud.fill")
-                .font(.system(size: 28))
-                .foregroundColor(NovaTheme.Colors.accent.opacity(0.6))
-
-            VStack(spacing: 4) {
-                Text("Unlock Cloud AI Models")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(NovaTheme.Colors.textPrimary)
-                Text("Run powerful models like Qwen3.5-35B remotely — no local GPU memory needed. Fast inference, zero hardware limits.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(2)
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    appState.requestedPage = .settings
-                } label: {
-                    Label("Connect Cloud", systemImage: "arrow.right.circle")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-
-                if let url = URL(string: "\(AuthClient.defaultBaseURL)/cloud") {
-                    Button("Learn More") {
-                        NSWorkspace.shared.open(url)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(28)
-        .background(
-            LinearGradient(
-                colors: [NovaTheme.Colors.accent.opacity(0.06), NovaTheme.Colors.accent.opacity(0.02)],
-                startPoint: .top, endPoint: .bottom
-            )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.md))
-    }
-
-    private func cloudModelRow(_ modelId: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "cloud.fill")
-                .foregroundColor(NovaTheme.Colors.accent)
-                .font(.system(size: 14))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(modelId)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                    .foregroundColor(NovaTheme.Colors.accent)
-            }
-
-            Spacer()
-
-            Text("Cloud")
-                .font(.caption2)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(NovaTheme.Colors.accentDim)
-                .clipShape(Capsule())
-        }
-        .rowCard()
     }
 
     private var downloadedSection: some View {

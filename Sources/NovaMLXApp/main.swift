@@ -257,11 +257,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             appState.startStatsMonitoring(inferenceService: inferenceService)
 
-            // Discover cloud models from remote endpoint
+            // Provision managed providers: cloud (if subscribed) + local loaded models
             Task {
-                let _ = await CloudBackend.shared.fetchModels()
-                appState.cloudModels = await inferenceService.listCloudModels()
-                NovaMLXLog.info("Cloud models discovered: \(appState.cloudModels.count)")
+                // Cloud providers — validate subscription with network check
+                do {
+                    _ = try await CloudAuth.validate()
+                    let models = await CloudBackend.shared.fetchModels()
+                    let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
+                    try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
+                    NovaMLXLog.info("Cloud managed providers provisioned: \(remoteModels.count)")
+                } catch {
+                    NovaMLXLog.info("Not subscribed, skipping cloud provisioning")
+                }
+                // Local model providers
+                let loaded = inferenceService.listLoadedModels()
+                TokenhubManager.shared.provisionLocalProviders(loadedModels: loaded)
+                NovaMLXLog.info("Local managed providers synced: \(loaded.count) models")
             }
 
             let memHandler = MemoryPressureHandler(engine: engine, settingsManager: settingsManager)

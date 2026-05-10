@@ -1,16 +1,9 @@
 import Foundation
+import os.log
 
 // MARK: - Auth Client
 
-private func authLog(_ msg: String) {
-    // Write directly to novamlx.log for debugging
-    let line = "[\(Date().formatted(.iso8601))] [AUTH] \(msg)\n"
-    if let handle = try? FileHandle(forWritingTo: NovaMLXPaths.logFile) {
-        handle.seekToEndOfFile()
-        handle.write(Data(line.utf8))
-        handle.closeFile()
-    }
-}
+private let authLog = Logger(subsystem: "com.novamlx", category: "Auth")
 
 public struct AuthClient: Sendable {
     public let baseURL: String
@@ -23,7 +16,7 @@ public struct AuthClient: Sendable {
     public static let defaultBaseURL: String = {
         // 1. Environment variable (CLI or dev override)
         if let env = ProcessInfo.processInfo.environment["NOVA_AUTH_URL"], !env.isEmpty {
-            authLog("Auth URL from env: \(env)")
+            authLog.info("[Auth] URL from env: \(env)")
             return env
         }
         // 2. Config file (~/.nova/config.json → auth.authURL)
@@ -31,12 +24,12 @@ public struct AuthClient: Sendable {
             if let json = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
                let auth = json["auth"] as? [String: Any],
                let url = auth["authURL"] as? String, !url.isEmpty {
-                authLog("Auth URL from config: \(url)")
+                authLog.info("[Auth] URL from config: \(url)")
                 return url
             }
         }
         // 3. Production default
-        authLog("Using production default: https://novamlx.ai")
+        authLog.info("[Auth] Using production default: https://novamlx.ai")
         return "https://novamlx.ai"
     }()
 
@@ -223,6 +216,12 @@ public struct AuthCache: Codable, Sendable {
 // MARK: - Subscription Validation Gate
 
 public enum CloudAuth {
+    /// Synchronous subscription check (disk cache only, no network).
+    public static func isSubscribed() -> Bool {
+        guard let cache = AuthCache.load(), !cache.isExpired, cache.valid else { return false }
+        return true
+    }
+
     public static func validate() async throws -> AuthCache {
         guard let session = AuthCache.loadSession() else {
             throw AuthError.sessionExpired
@@ -235,7 +234,7 @@ public enum CloudAuth {
 
         // Slow path: call check API
         let client = AuthClient()
-        authLog("Checking session against \(client.baseURL)...")
+        authLog.info("[Auth] Checking session against \(client.baseURL)...")
         do {
             let response = try await client.checkSession(session)
 
@@ -256,10 +255,10 @@ public enum CloudAuth {
 
             return cache
         } catch let error as AuthError {
-            authLog("Check failed: \(error.localizedDescription)")
+            authLog.warning("[Auth] Check failed: \(error.localizedDescription)")
             throw error
         } catch {
-            authLog("Network error: \(error.localizedDescription)")
+            authLog.warning("[Auth] Network error: \(error.localizedDescription)")
             throw AuthError.networkError
         }
     }

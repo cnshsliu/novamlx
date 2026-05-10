@@ -31,6 +31,15 @@ final class GemmaProcessor: ChatTemplateProcessor, @unchecked Sendable {
 
         tokens.formUnion(SharedControlTokenLogic.generateCloseVariants(tokens))
         tokens.subtract(SharedControlTokenLogic.semanticTags)
+
+        // <|channel> / <channel|> are structural delimiters in Gemma4's
+        // channel-thinking output format. The model emits
+        // <|channel>thought...<channel|> as part of its thinking process —
+        // these must not trigger TurnStopProcessor (which would force EOS).
+        tokens.subtract(["<|channel>", "<|channel|>",
+                         "<|/channel>", "<|/channel|>",
+                         "<channel|>", "</channel|>"])
+
         tokens.remove("")
         return tokens.sorted()
     }

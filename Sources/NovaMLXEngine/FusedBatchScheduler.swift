@@ -983,7 +983,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             // Snapshot for logging
             let snapshot = lock.withLock { activeByModel.mapValues { $0.count } }
             if iteration <= 5 || iteration % 20 == 0 {
-                NovaMLXLog.info("[RunLoop] iteration=\(iteration), activeByModel=\(snapshot)")
+                NovaMLXLog.debug("[RunLoop] iteration=\(iteration), activeByModel=\(snapshot)")
             }
 
             // 2. Run fused decode step

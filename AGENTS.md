@@ -42,13 +42,31 @@ swift test --filter <TestName>             # single test or pattern
 
 Tests live under `Tests/NovaMLX*Tests/`.
 
+### E2E Model Tests
+
+```bash
+# Test all downloaded LLM models (load → 4 API tests → unload)
+Scripts/test-all-models.sh
+```
+
 ## Logs & Config
 
 - Runtime log: `~/.nova/novamlx.log`
 - Config: `~/.nova/config.json`
 
+### Runtime Log Level
+
+```bash
+# View current level
+curl http://127.0.0.1:6591/admin/api/log-level -H "Authorization: Bearer $KEY"
+
+# Enable debug logging
+curl -X PUT http://127.0.0.1:6591/admin/api/log-level \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"level": 0}'
+```
+Levels: 0=debug, 1=info, 2=warning, 3=error
+
 ## Project conventions
 
 - Source: `Sources/NovaMLX{Core,Engine,Inference,API,Utils,MenuBar,ModelManager,...}/`
 - Vendored deps: `vendors/mlx-swift/`, `vendors/mlx-swift-lm/` (treat as read-only — modifications go via `Scripts/patch-*.py`)
-- Active diagnostic todos: `todo.markdown`

@@ -85,7 +85,7 @@ Full vision-language model (VLM) pipeline for image understanding.
 
 ```bash
 # Describe an image via base64 data URI
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -101,7 +101,7 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 
 # Describe an image via HTTP URL
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -122,7 +122,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## API Compatibility
 
-### OpenAI-Compatible Endpoints (Port 8080)
+### OpenAI-Compatible Endpoints (Port 6590)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -134,6 +134,8 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST` | `/v1/responses` | OpenAI Responses API |
 | `GET` | `/v1/responses/{id}` | Retrieve stored response |
 | `DELETE` | `/v1/responses/{id}` | Delete stored response |
+| `POST` | `/v1/audio/transcriptions` | Speech-to-text (Qwen3-ASR) |
+| `POST` | `/v1/images/generations` | Image generation (SDXL-Turbo) |
 
 ### Anthropic-Compatible Endpoints
 
@@ -286,6 +288,33 @@ Pattern-based draft token generation built into `FusedBatchScheduler`:
 | **Verification** | Target model verifies all draft tokens in parallel |
 | **Overhead** | Zero secondary model — purely algorithmic |
 
+---
+
+## Audio Transcription
+
+Speech-to-text via Qwen3-ASR running locally through MLX.
+
+| Feature | Details |
+|---------|---------|
+| **Endpoint** | `POST /v1/audio/transcriptions` (OpenAI-compatible) |
+| **Model** | Qwen3-ASR (Swift/MLX) |
+| **Formats** | WAV, MP3, M4A, FLAC, CAF |
+| **Response** | `{"text": "transcribed text"}` |
+
+---
+
+## Image Generation
+
+Text-to-image via SDXL-Turbo running locally through MLX.
+
+| Feature | Details |
+|---------|---------|
+| **Endpoint** | `POST /v1/images/generations` (OpenAI-compatible) |
+| **Model** | SDXL-Turbo |
+| **Parameters** | `prompt`, `size` (default 1024×1024), `n` (default 1) |
+| **Output** | Base64-encoded PNG (`b64_json`) |
+| **Speed** | ~2 seconds per image on M-series GPU |
+
 ### Draft-Model Speculative Decoding
 
 Dedicated smaller draft model via `SpeculativeTokenIterator`:
@@ -366,7 +395,7 @@ Built-in support for external AI coding agents via auto-generated configuration.
 
 ## Model Management
 
-### Admin Endpoints (Port 8081, Bearer auth)
+### Admin Endpoints (Port 6591, Bearer auth)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -433,6 +462,7 @@ Every inference parameter can be overridden per model, persisted to `model_setti
 | `frequency_penalty` / `presence_penalty` / `repetition_penalty` | Repetition control |
 | `seed` | Deterministic generation |
 | `ttl_seconds` | Auto-unload after idle |
+| `keep_alive` | Per-request model TTL override (seconds, or `-1` for infinite) |
 | `model_alias` | Short alias for model ID |
 | `is_pinned` | Exempt from eviction |
 | `is_default` | Default model for API requests |
@@ -453,6 +483,19 @@ Browse, search, and download models directly from HuggingFace.
 | **Downloads** | Async file-by-file with progress tracking and cancellation |
 | **Dashboard UI** | Search box, results table, download progress with cancel buttons |
 | **Auto-register** | Downloaded models automatically discovered and registered |
+
+---
+
+## Modelfile System
+
+User-authored model recipes with system prompt, sampling overrides, and model selection.
+
+| Feature | Details |
+|---------|---------|
+| **Format** | `FROM <model_id>` + optional `SYSTEM`, `PARAMETER`, `TEMPLATE` directives |
+| **API** | `POST /admin/modelfiles/create`, `GET /admin/modelfiles`, `DELETE /admin/modelfiles/{name}` |
+| **Inference** | Modelfile models appear in `/v1/models`, accept chat completions with injected system prompt + sampling overrides |
+| **Storage** | `~/.nova/modelfiles/` — one `.json` per modelfile |
 
 ---
 
@@ -569,8 +612,8 @@ Full i18n system supporting 9 languages across all GUI views and web interfaces.
 
 | Layer | Implementation |
 |-------|---------------|
-| **API auth** | Bearer token on port 8080 (`APIKeyAuthMiddleware`) |
-| **Admin auth** | Bearer token or `X-Admin-Key` header on port 8081 (`AdminAuthMiddleware`) |
+| **API auth** | Bearer token on port 6590 (`APIKeyAuthMiddleware`) |
+| **Admin auth** | Bearer token or `X-Admin-Key` header on port 6591 (`AdminAuthMiddleware`) |
 | **CORS** | `Access-Control-Allow-Origin: *` with full method/header support |
 | **Request ID** | `x-request-id` header pass-through or auto-generation |
 | **Error handling** | OpenAI-compatible JSON error bodies with proper HTTP status codes |
@@ -603,8 +646,8 @@ brew install --cask novamlx
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `host` | `127.0.0.1` | Bind address |
-| `port` | `8080` | Inference API port |
-| `adminPort` | `8081` | Admin API port |
+| `port` | `6590` | Inference API port |
+| `adminPort` | `6591` | Admin API port |
 | `apiKeys` | `[]` | API keys (empty = auth disabled) |
 | `maxConcurrentRequests` | `16` | Max concurrent requests |
 | `requestTimeout` | `300s` | Request timeout |
@@ -638,7 +681,7 @@ brew install --cask novamlx
 │                   NovaMLX API Server                      │
 │  ┌─────────────────┐  ┌──────────────────────────────┐  │
 │  │  Inference API   │  │        Admin API              │  │
-│  │  (port 8080)     │  │        (port 8081)            │  │
+│  │  (port 6590)     │  │        (port 6591)            │  │
 │  │  • OpenAI        │  │  • Model Management           │  │
 │  │  • Anthropic     │  │  • Per-Model Settings         │  │
 │  │  • Embeddings    │  │  • Benchmarking               │  │
@@ -685,7 +728,7 @@ swift build -c release
 ./build/release/NovaMLX --api-key sk-your-key
 
 # Chat completion
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
   -d '{

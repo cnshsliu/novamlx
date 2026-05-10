@@ -9,6 +9,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
     case models = "Models"
     case downloads = "Downloads"
+    case tokenhub = "Tokenhub"
     case chat = "Playground"
     case agents = "Agents"
     case settings = "Settings"
@@ -20,6 +21,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
         case .models: return "cube.box"
         case .downloads: return "arrow.down.circle"
+        case .tokenhub: return "server.rack"
         case .chat: return "cpu"
         case .agents: return "app.badge.checkmark"
         case .settings: return "gearshape"
@@ -241,6 +243,9 @@ public struct NovaAppView: View {
             DownloadsPageView(appState: appState, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .downloads ? 1 : 0)
+            TokenhubPageView(appState: appState)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .tokenhub ? 1 : 0)
             ChatPageView(appState: appState, inferenceService: inferenceService)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
@@ -258,6 +263,7 @@ public struct NovaAppView: View {
         case .status: return l10n.tr("app.status")
         case .models: return l10n.tr("app.models")
         case .downloads: return l10n.tr("app.downloads")
+        case .tokenhub: return "Tokenhub"
         case .chat: return l10n.tr("app.chat")
         case .agents: return l10n.tr("app.agents")
         case .settings: return l10n.tr("app.settings")

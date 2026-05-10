@@ -210,7 +210,7 @@ public final class ModelDiscovery: Sendable {
         do {
             config = try JSONDecoder().decode(HFConfig.self, from: data)
         } catch {
-            NovaMLXLog.warning("Failed to parse config.json for \(id): \(error)")
+            NovaMLXLog.warning("[Discovery] Failed to parse config.json for \(id): \(error)")
             return nil
         }
 
@@ -219,7 +219,7 @@ public final class ModelDiscovery: Sendable {
         let size = estimateSize(at: path)
         let complete = Self.checkCompleteness(at: path, isAdapter: isAdapter)
 
-        NovaMLXLog.info("Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=\(config.architectures ?? []), size=\(size.bytesFormatted), complete=\(complete)")
+        NovaMLXLog.info("[Discovery] Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=\(config.architectures ?? []), size=\(size.bytesFormatted), complete=\(complete)")
 
         return DiscoveredModel(
             modelId: id,
@@ -241,7 +241,7 @@ public final class ModelDiscovery: Sendable {
         let modelType = detectModelType(config: HFConfig(architectures: nil, modelType: nil, visionConfig: nil), path: path)
         let family = detectFamily(config: HFConfig(architectures: nil, modelType: nil, visionConfig: nil), modelId: id)
 
-        NovaMLXLog.info("Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=[], size=\(size.bytesFormatted), complete=true (diffusers)")
+        NovaMLXLog.info("[Discovery] Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=[], size=\(size.bytesFormatted), complete=true (diffusers)")
 
         return DiscoveredModel(
             modelId: id,

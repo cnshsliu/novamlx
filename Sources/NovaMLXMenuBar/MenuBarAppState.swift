@@ -11,7 +11,6 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var adminPort: Int = 6591
     @Published public var apiKey: String? = nil
     @Published public var loadedModels: [String] = []
-    @Published public var cloudModels: [String] = []
     @Published public var systemStats: SystemStats = SystemStats()
     @Published public var inferenceStats: InferenceStats = InferenceStats()
     @Published public var totalTokensGenerated: UInt64 = 0
@@ -63,7 +62,8 @@ public final class MenuBarAppState: ObservableObject {
                 self.inferenceStats = currentStats
                 self.currentInferenceModel = CurrentInferenceModel.shared.modelID
                 self.loadedModels = inferenceService.listLoadedModels()
-                self.cloudModels = await inferenceService.listCloudModels()
+                // Sync local model providers in Token Hub
+                TokenhubManager.shared.provisionLocalProviders(loadedModels: self.loadedModels)
                 self.uptime = SystemMonitor.shared.uptime
                 self.totalTokensGenerated = currentStats.totalTokensGenerated
                 // Trim consecutive zeros: allow at most 1 zero data point (~2s) between

@@ -570,6 +570,14 @@ struct SettingsPageView: View {
             }
             // Refresh status in background
             Task { await refreshCloudStatus() }
+            // Re-provision managed providers if subscribed
+            if let cache = AuthCache.load(), !cache.isExpired, cache.valid {
+                Task {
+                    let models = await CloudBackend.shared.fetchModels()
+                    let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
+                    try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
+                }
+            }
         }
     }
 
@@ -643,6 +651,12 @@ struct SettingsPageView: View {
                     cloudLoggingIn = false
                     if check.valid {
                         cloudAuthMessage = "Signed in successfully!"
+                        // Auto-provision managed providers
+                        Task {
+                            let models = await CloudBackend.shared.fetchModels()
+                            let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
+                            try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
+                        }
                     } else {
                         cloudAuthMessage = "Signed in, but no active subscription."
                     }
@@ -671,6 +685,9 @@ struct SettingsPageView: View {
         appState.cloudLoggedIn = false
         appState.cloudEmail = ""
         appState.cloudPlan = ""
+        // Deprovision managed providers and enforce limits
+        TokenhubManager.shared.deprovisionManagedProviders()
+        TokenhubManager.shared.enforceProviderLimits()
     }
 
     // MARK: - Language

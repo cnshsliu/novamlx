@@ -16,10 +16,7 @@
 -#}
 {%- set ns = namespace(prev_message_type=None) -%}
 {%- set loop_messages = messages -%}
-{{ bos_token }}
-{#- A system turn is required whenever (a) the caller passes a system/developer
-    message, OR (b) enable_thinking=true (so we have somewhere to inject the
-    <|think|> trigger token). -#}
+{{- bos_token -}}
 {%- if (enable_thinking is defined and enable_thinking) or messages[0]['role'] in ['system', 'developer'] -%}
 {{- '<|turn>system\n' -}}
 {%- if enable_thinking is defined and enable_thinking -%}

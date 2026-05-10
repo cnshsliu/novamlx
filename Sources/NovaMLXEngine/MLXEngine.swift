@@ -55,7 +55,7 @@ public final class ModelContainer: @unchecked Sendable {
         if !controlTokens.isEmpty {
             NovaMLXLog.info("[ControlTokens] \(identifier.displayName): \(controlTokens)")
         }
-        NovaMLXLog.info("Model loaded: \(identifier.displayName)")
+        NovaMLXLog.info("[Engine] Model loaded: \(identifier.displayName)")
     }
 
     public func setWiredReservation(_ ticket: WiredMemoryTicket) {
@@ -68,7 +68,7 @@ public final class ModelContainer: @unchecked Sendable {
         isLoaded = false
         wiredReservationTicket = nil
         controlTokens = []
-        NovaMLXLog.info("Model unloaded: \(identifier.displayName)")
+        NovaMLXLog.info("[Engine] Model unloaded: \(identifier.displayName)")
     }
 
     // MARK: - Control Token Extraction
@@ -467,7 +467,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         self.totalTokensGenerated = 0
         self.totalInferenceTime = 0
         FusedSDPARegistration.register()
-        NovaMLXLog.info("MLX Engine initialized (maxMemory: \(maxMemoryMB)MB, mlxLimit: \(mlxLimitBytes / 1024 / 1024)MB)")
+        NovaMLXLog.info("[Engine] MLX Engine initialized (maxMemory: \(maxMemoryMB)MB, mlxLimit: \(mlxLimitBytes / 1024 / 1024)MB)")
     }
 
     static let tokenizerLoader = LocalTokenizerLoader()
@@ -654,7 +654,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public func loadModel(from url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws -> ModelContainer {
         await CustomModelRegistration.ensureRegistered()
         let container = ModelContainer(identifier: config.identifier, config: config)
-        NovaMLXLog.info("Loading model from: \(url.path)")
+        NovaMLXLog.info("[Engine] Loading model from: \(url.path)")
 
         // Ensure chat template exists — models without it will crash on inference.
         // Check tokenizer_config.json, chat_template.jinja, chat_template.json in order.
@@ -774,7 +774,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             // models (Phi-3.5=128K, Qwen=128K, Llama-3=128K, etc).
             if let maxPos = tc["max_position_embeddings"] as? Int, maxPos > 0 {
                 container.config.contextLength = maxPos
-                NovaMLXLog.info("Auto-detected context length: \(maxPos) tokens for \(config.identifier.displayName)")
+                NovaMLXLog.info("[Engine] Auto-detected context length: \(maxPos) tokens for \(config.identifier.displayName)")
             }
 
             // Detect hybrid linear attention models (e.g. Qwen3.5, bailing_hybrid).
@@ -783,10 +783,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if let layerTypes = tc["layer_types"] as? [String],
                layerTypes.contains("linear_attention") {
                 container.config.hasLinearAttention = true
-                NovaMLXLog.info("Detected hybrid linear attention model (\(layerTypes.filter { $0 == "linear_attention" }.count)/\(layerTypes.count) linear layers) — will use ContinuousBatcher")
+                NovaMLXLog.info("[Engine] Detected hybrid linear attention model (\(layerTypes.filter { $0 == "linear_attention" }.count)/\(layerTypes.count) linear layers) — will use ContinuousBatcher")
             } else if let mt = tc["model_type"] as? String, mt == "bailing_hybrid" {
                 container.config.hasLinearAttention = true
-                NovaMLXLog.info("Detected bailing_hybrid model (MLA+GLA) — will use ContinuousBatcher")
+                NovaMLXLog.info("[Engine] Detected bailing_hybrid model (MLA+GLA) — will use ContinuousBatcher")
             }
         }
 
@@ -804,7 +804,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if let f = gen.frequencyPenalty { container.config.frequencyPenalty = f }
             if let p = gen.presencePenalty { container.config.presencePenalty = p }
             if let m = gen.maxNewTokens { container.config.maxTokens = min(m, container.config.maxTokens) }
-            NovaMLXLog.info("generation_config.json: temp=\(gen.temperature?.description ?? "-"), topP=\(gen.topP?.description ?? "-"), topK=\(gen.topK?.description ?? "-")")
+            NovaMLXLog.info("[Engine] generation_config.json: temp=\(gen.temperature?.description ?? "-"), topP=\(gen.topP?.description ?? "-"), topK=\(gen.topK?.description ?? "-")")
         }
 
         // Apply per-family sampling defaults for fields NOT set by generation_config.
@@ -820,7 +820,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if genConfig?.repetitionPenalty == nil, let r = fs.repetitionPenalty { container.config.repeatPenalty = r }
             if let m = fs.maxTokens { container.config.maxTokens = min(m, container.config.maxTokens) }
             if fs.frequencyPenalty != nil || fs.topK != nil {
-                NovaMLXLog.info("Family sampling defaults applied for \(config.identifier.family.rawValue): freqPenalty=\(fs.frequencyPenalty?.description ?? "-"), topK=\(fs.topK?.description ?? "-")")
+                NovaMLXLog.info("[Engine] Family sampling defaults applied for \(config.identifier.family.rawValue): freqPenalty=\(fs.frequencyPenalty?.description ?? "-"), topK=\(fs.topK?.description ?? "-")")
             }
         }
 
@@ -830,7 +830,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             // KV cache per token = 2 (K+V) × sum(kvHeads per layer) × headDim × sizeof(Float16)
             let bytesPerToken = 2 * kvHeadsSum * headDim * MemoryLayout<Float16>.size
             container.config.kvMemoryBytesPerToken = bytesPerToken
-            NovaMLXLog.info("Auto-calculated KV memory: \(bytesPerToken / 1024)KB/token (\(numLayers) layers, \(kvHeadsSum) total kvHeads, headDim=\(headDim))")
+            NovaMLXLog.info("[Engine] Auto-calculated KV memory: \(bytesPerToken / 1024)KB/token (\(numLayers) layers, \(kvHeadsSum) total kvHeads, headDim=\(headDim))")
         }
 
         let weightsBytes = MLX.Memory.activeMemory
@@ -845,9 +845,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if availableMem > UInt64(weightsBytes) + headroom {
                 _ = await reservationTicket.start()
                 container.setWiredReservation(reservationTicket)
-                NovaMLXLog.info("Wired memory reservation: \(neededMB)MB for \(config.identifier.displayName)")
+                NovaMLXLog.info("[Engine] Wired memory reservation: \(neededMB)MB for \(config.identifier.displayName)")
             } else {
-                NovaMLXLog.warning("Skipping wired reservation for \(config.identifier.displayName): only \(availableMem / 1_048_576)MB free, need \(neededMB)MB + 1GB headroom. Model runs without wired memory guarantee.")
+                NovaMLXLog.info("[Engine] Skipping wired reservation for \(config.identifier.displayName): only \(availableMem / 1_048_576)MB free, need \(neededMB)MB + 1GB headroom. Model runs without wired memory guarantee.")
             }
         }
 
@@ -1025,12 +1025,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         if let container = pool.get(identifier.id),
            let ticket = container.wiredReservationTicket {
             Task { await ticket.end() }
-            NovaMLXLog.info("Wired memory reservation released for \(identifier.displayName)")
+            NovaMLXLog.info("[Engine] Wired memory reservation released for \(identifier.displayName)")
         }
         // Clear prefix cache for this model
         if let cacheManager = lock.withLock({ prefixCacheManagers.removeValue(forKey: identifier.id) }) {
             cacheManager.clear()
-            NovaMLXLog.info("Prefix cache cleared for \(identifier.displayName)")
+            NovaMLXLog.info("[PrefixCache] Prefix cache cleared for \(identifier.displayName)")
         }
         // Drop cached TokenMaskBuilder so its per-token vocabulary tables
         // (V × 3 arrays, 250k+ entries for Qwen3.6/Gemma-4) are released.
@@ -1040,7 +1040,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         _ = pool.remove(identifier.id)
         metricsStore.recordModelUnload()
         MLX.Memory.clearCache()
-        NovaMLXLog.info("GPU cache cleared after unloading \(identifier.displayName)")
+        NovaMLXLog.info("[Engine] GPU cache cleared after unloading \(identifier.displayName)")
     }
 
     public func getContainer(for modelId: String) -> ModelContainer? {
@@ -1092,7 +1092,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 prefixCacheManagers.removeAll()
             }
         }
-        NovaMLXLog.info("Prefix cache subsystem \(enabled ? "enabled" : "disabled")")
+        NovaMLXLog.info("[PrefixCache] Prefix cache subsystem \(enabled ? "enabled" : "disabled")")
     }
 
     public var isPrefixCacheEnabled: Bool {
@@ -1114,7 +1114,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
         }
         if cleaned > 0 {
-            NovaMLXLog.info("Cleaned \(cleaned) orphaned prefix cache directories")
+            NovaMLXLog.info("[PrefixCache] Cleaned \(cleaned) orphaned prefix cache directories")
         }
     }
 
@@ -1151,9 +1151,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Jinja `is defined` semantics, so pass-through is safe across
         // families (Qwen / Gemma / Bailing / etc.).
         var ctx: [String: any Sendable] = [:]
-        if let enableThinking = request.enableThinking {
-            ctx["enable_thinking"] = enableThinking
-        }
+        // Default to true when caller doesn't specify — most thinking-capable models
+        // (Gemma4, Qwen3.x) expect enable_thinking=true. Templates that don't reference
+        // the variable ignore it via Jinja `is defined` semantics.
+        ctx["enable_thinking"] = request.enableThinking ?? true
         if let preserveThinking = request.preserveThinking {
             ctx["preserve_thinking"] = preserveThinking
         }
@@ -1361,13 +1362,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         guard projectedTotal <= safeLimit else {
             let neededMB = projectedTotal / 1024 / 1024
             let limitMB = safeLimit / 1024 / 1024
-            NovaMLXLog.warning("Preflight REJECTED: model=\(modelId), estimated=\(neededMB)MB, limit=\(limitMB)MB, committed=\(currentCommitted / 1024 / 1024)MB, kvEstimate=\(estimatedKVBytes / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
+            NovaMLXLog.warning("[Engine] Preflight REJECTED: model=\(modelId), estimated=\(neededMB)MB, limit=\(limitMB)MB, committed=\(currentCommitted / 1024 / 1024)MB, kvEstimate=\(estimatedKVBytes / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
             throw NovaMLXError.inferenceFailed(
                 "Insufficient GPU memory: estimated \(neededMB)MB needed, limit \(limitMB)MB. Committed: \(currentCommitted / 1024 / 1024)MB"
             )
         }
 
-        NovaMLXLog.info("Preflight OK: model=\(modelId), projected=\(projectedTotal / 1024 / 1024)MB, limit=\(safeLimit / 1024 / 1024)MB, committed=\(currentCommitted / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
+        NovaMLXLog.info("[Engine] Preflight OK: model=\(modelId), projected=\(projectedTotal / 1024 / 1024)MB, limit=\(safeLimit / 1024 / 1024)MB, committed=\(currentCommitted / 1024 / 1024)MB, bytesPerToken=\(bytesPerToken)")
     }
 
     /// Compute effective bytesPerToken for a model, factoring in TurboQuant compression.
@@ -1564,7 +1565,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         tokenizer: Tokenizer,
         modelConfig: ModelConfiguration
     ) -> TurnStopProcessor? {
-        let patterns = Self.controlTokensForModel(modelId: modelId)
+        // Prefer container's processor-refined control tokens (which exclude
+        // structural tokens like <|channel> for channel-thinking models).
+        // Fall back to the static extraction if container isn't available.
+        let patterns = container?.controlTokens ?? Self.controlTokensForModel(modelId: modelId)
         guard !patterns.isEmpty else { return nil }
 
         var eosIds = Set<Int>()
@@ -1991,7 +1995,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         let promptTokenCount = input.text.tokens.size
-        NovaMLXLog.info("Encoded \(promptTokenCount) tokens via chat template")
+        NovaMLXLog.info("[Engine] Encoded \(promptTokenCount) tokens via chat template")
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Starting generation for \(request.model)")
 
         let maxTokens = request.maxTokens ?? container.config.maxTokens
@@ -2221,7 +2225,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     var generatedIds: [Int] = []
                     let tid = currentToken.item(Int.self)
+                    NovaMLXLog.info("[VLM] firstToken=\(tid) promptTokens=\(tokenIds.count)")
                     if tid == unknownTokenId || stopIdsBox.value.contains(tid) {
+                        NovaMLXLog.warning("[VLM] first token \(tid) is stop token — returning empty (promptTokens=\(tokenIds.count))")
                         return SendableBox(([Int](), stats, caches as [KVCache]))
                     }
                     generatedIds.append(tid)
@@ -2239,6 +2245,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         processorBox.value?.didSample(token: sampled)
                         let tokenId = sampled.item(Int.self)
                         if tokenId == unknownTokenId || stopIdsBox.value.contains(tokenId) {
+                            if count < 3 {
+                                NovaMLXLog.warning("[VLM] early stop at token=\(tokenId) after \(count) steps (promptTokens=\(tokenIds.count))")
+                            }
                             break
                         }
                         generatedIds.append(tokenId)
@@ -2325,7 +2334,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 completionTokens = info.generationTokenCount
                 genStopReason = String(describing: info.stopReason)
                 if case .length = info.stopReason { finishReason = .length }
-                NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
+                        NovaMLXLog.debug("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
             case .toolCall(let tc):
                 let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
                 let tcResult = ToolCallResult(
@@ -2338,7 +2347,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
         }
 
-        NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Done: completionTokens=\(completionTokens), stopReason=\(genStopReason)")
+        NovaMLXLog.debug("[GENERATE:\(request.id.uuidString.prefix(8))] Done: completionTokens=\(completionTokens), stopReason=\(genStopReason)")
 
         // Store KV cache in prefix cache for future requests with same prompt prefix
         if let tokenArray = allPromptTokens,
@@ -2360,8 +2369,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
-        NovaMLXLog.info("Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s)")
-        NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Completed: \(completionTokens) tokens, \(String(format: "%.1f", tps)) tok/s")
+        NovaMLXLog.info("[Engine] Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s) [\(request.model)]")
 
         let trimmedText = Self.scrubControlTokens(Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model)))
 
@@ -2515,6 +2523,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             var generatedIds: [Int] = []
                             let tid = currentToken.item(Int.self)
                             if tid == unknownTokenId || stopTokenIds.contains(tid) {
+                                NovaMLXLog.warning("[VLM-Stream] first token \(tid) is stop token — returning empty (promptTokens=\(tokenIds.count))")
                                 return SendableBox((generatedIds, caches as [KVCache]))
                             }
                             generatedIds.append(tid)
@@ -2533,6 +2542,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 processorBox.value?.didSample(token: sampled)
                                 let tokenId = sampled.item(Int.self)
                                 if tokenId == unknownTokenId || stopTokenIds.contains(tokenId) {
+                                    if count < 3 {
+                                        NovaMLXLog.warning("[VLM-Stream] early stop at token=\(tokenId) after \(count) steps (promptTokens=\(tokenIds.count))")
+                                    }
                                     break
                                 }
                                 generatedIds.append(tokenId)
@@ -2744,7 +2756,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             completionTokens = info.generationTokenCount
                             infoStopReason = String(describing: info.stopReason)
                             if case .length = info.stopReason { finishReason = .length }
-                            NovaMLXLog.info("[STREAM:\(reqTag)] Info: tokens=\(info.generationTokenCount), stopReason=\(infoStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
+                            NovaMLXLog.debug("[STREAM:\(reqTag)] Info: tokens=\(info.generationTokenCount), stopReason=\(infoStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
                         case .toolCall(let tc):
                 let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
                 let tcResult = ToolCallResult(
@@ -2756,7 +2768,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                     }
 
-                    NovaMLXLog.info("[STREAM:\(reqTag)] Loop ended: completionTokens=\(completionTokens), taskCancelled=\(Task.isCancelled), infoStopReason=\(infoStopReason)")
+                    NovaMLXLog.debug("[STREAM:\(reqTag)] Loop ended: completionTokens=\(completionTokens), taskCancelled=\(Task.isCancelled), infoStopReason=\(infoStopReason)")
 
                     // Store KV cache in prefix cache for future requests
                     if let tokenArray = allPromptTokens,
@@ -2798,7 +2810,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             activeTasks[requestId]?.cancel()
             activeTasks.removeValue(forKey: requestId)
         }
-        NovaMLXLog.info("Aborting request: \(requestId)")
+        NovaMLXLog.info("[Engine] Aborting request: \(requestId)")
     }
 
     public var currentActiveCount: Int { lock.withLock { activeCount } }

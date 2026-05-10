@@ -18,6 +18,7 @@ struct ChatPageView: View {
     @State private var messages: [ChatMessageRow] = []
     @State private var inputText = ""
     @State private var selectedModel = ""
+    @State private var selectedTag = ""
     @State private var isLoading = false
     @State private var displayMode: ChatDisplayMode = .pretty
 
@@ -57,7 +58,7 @@ struct ChatPageView: View {
                 VStack(spacing: 0) {
                     messageList
                     Divider()
-                    if inputText.isEmpty && messages.isEmpty {
+                    if inputText.isEmpty {
                         suggestionsBar
                             .padding(.horizontal, 16)
                             .padding(.vertical, 6)
@@ -78,25 +79,41 @@ struct ChatPageView: View {
     private var chatToolbar: some View {
         HStack(spacing: 12) {
             Picker(l10n.tr("chat.model"), selection: $selectedModel) {
-                if appState.loadedModels.isEmpty && appState.cloudModels.isEmpty {
+                if appState.loadedModels.isEmpty && tokenhubModels.isEmpty {
                     Text(l10n.tr("chat.noModels")).tag("")
                 }
                 ForEach(appState.loadedModels, id: \.self) { model in
                     Text(shortModelLabel(model)).tag(model)
                 }
-                if !appState.cloudModels.isEmpty {
+                if !tokenhubModels.isEmpty {
                     Divider()
-                    ForEach(appState.cloudModels, id: \.self) { model in
+                    HStack {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 10))
+                        Text("Tokenhub LB")
+                    }
+                    .tag("tknet")
+                    ForEach(tokenhubModels, id: \.self) { model in
                         HStack {
-                            Image(systemName: "cloud.fill")
+                            Image(systemName: "server.rack")
                                 .font(.system(size: 10))
-                            Text(model.components(separatedBy: ":cloud").first ?? model)
+                            Text(model)
                         }
-                        .tag(model)
+                        .tag("tknet:\(model)")
                     }
                 }
             }
             .frame(width: 200)
+
+            if selectedModel == "tknet" {
+                Picker("Tag", selection: $selectedTag) {
+                    Text("All").tag("")
+                    ForEach(availableTags, id: \.self) { tag in
+                        Text(tag).tag(tag)
+                    }
+                }
+                .frame(width: 120)
+            }
 
             Picker("", selection: $displayMode) {
                 ForEach(ChatDisplayMode.allCases, id: \.self) { mode in
@@ -181,23 +198,20 @@ struct ChatPageView: View {
                 if let first = appState.loadedModels.first {
                     selectedModel = first
                     loadDefaultsFromModel(first)
-                } else if let first = appState.cloudModels.first {
-                    selectedModel = first
                 }
             }
         }
         .onChange(of: appState.loadedModels) { _, newModels in
-            if !newModels.contains(selectedModel) && !appState.cloudModels.contains(selectedModel) {
+            let isTokenhub = selectedModel == "tknet" || selectedModel.hasPrefix("tknet:")
+            if !newModels.contains(selectedModel) && !isTokenhub {
                 if let first = newModels.first {
                     selectedModel = first
                     loadDefaultsFromModel(first)
-                } else if let first = appState.cloudModels.first {
-                    selectedModel = first
                 }
             }
         }
         .onChange(of: selectedModel) { _, newModel in
-            if !newModel.isEmpty && !CloudBackend.isCloudModel(newModel) {
+            if !newModel.isEmpty && newModel != "tknet" && !newModel.hasPrefix("tknet:") {
                 loadDefaultsFromModel(newModel)
             }
         }
@@ -485,20 +499,27 @@ struct ChatPageView: View {
         let assistantIdx = messages.count - 1
         isLoading = true
         let model = selectedModel
+        let tag = (model == "tknet" && !selectedTag.isEmpty) ? selectedTag : nil
 
         switch displayMode {
         case .pretty:
-            sendPretty(model: model, text: text, assistantIdx: assistantIdx)
+            sendPretty(model: model, text: text, assistantIdx: assistantIdx, tag: tag)
         case .rawJSON:
-            sendRawJSON(model: model, text: text, assistantIdx: assistantIdx)
+            sendRawJSON(model: model, text: text, assistantIdx: assistantIdx, tag: tag)
         case .rawStream:
-            sendRawStream(model: model, text: text, assistantIdx: assistantIdx)
+            sendRawStream(model: model, text: text, assistantIdx: assistantIdx, tag: tag)
         }
     }
 
     // MARK: Pretty mode (existing InferenceService streaming)
 
-    private func sendPretty(model: String, text: String, assistantIdx: Int) {
+    private func sendPretty(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
+        // Tokenhub models route through API server
+        if model == "tknet" || model.hasPrefix("tknet:") {
+            sendPrettyTokenhub(model: model, text: text, assistantIdx: assistantIdx, tag: tag)
+            return
+        }
+
         Task {
             guard inferenceService.isModelLoaded(model) else {
                 messages[assistantIdx].content = l10n.tr("chat.error", "Model '\(model.components(separatedBy: "/").last ?? model)' is not loaded. Load it from the Models page first.")
@@ -551,9 +572,9 @@ struct ChatPageView: View {
         }
     }
 
-    // MARK: Raw JSON mode (non-streaming HTTP)
+    // MARK: Pretty mode for Tokenhub (SSE via API server)
 
-    private func sendRawJSON(model: String, text: String, assistantIdx: Int) {
+    private func sendPrettyTokenhub(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
         Task {
             do {
                 guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
@@ -565,7 +586,57 @@ struct ChatPageView: View {
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 if let key = appState.apiKey { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
-                let body: [String: Any] = [
+                var body: [String: Any] = [
+                    "model": model,
+                    "messages": [["role": "user", "content": text]],
+                    "stream": true,
+                    "temperature": paramTemp,
+                    "max_tokens": Int(paramMaxTokens)
+                ]
+                if let tag { body["tag"] = tag }
+                req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (bytes, _) = try await URLSession.shared.bytes(for: req)
+                for try await line in bytes.lines {
+                    guard line.hasPrefix("data: ") else { continue }
+                    let payload = String(line.dropFirst(6))
+                    if payload == "[DONE]" { break }
+                    guard let data = payload.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let choices = json["choices"] as? [[String: Any]],
+                          let delta = choices.first?["delta"] as? [String: Any],
+                          let content = delta["content"] as? String
+                    else { continue }
+                    messages[assistantIdx].content += content
+                }
+                if messages[assistantIdx].content.isEmpty {
+                    messages[assistantIdx].content = "(no response)"
+                }
+            } catch {
+                if messages[assistantIdx].content.isEmpty {
+                    messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                }
+            }
+            lastResponse = messages[assistantIdx].content
+            isLoading = false
+        }
+    }
+
+    // MARK: Raw JSON mode (non-streaming HTTP)
+
+    private func sendRawJSON(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
+        Task {
+            do {
+                guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
+                    messages[assistantIdx].content = "Invalid URL"
+                    isLoading = false
+                    return
+                }
+                var req = URLRequest(url: url)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                if let key = appState.apiKey { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+                var body: [String: Any] = [
                     "model": model,
                     "messages": [["role": "user", "content": text]],
                     "stream": false,
@@ -576,6 +647,7 @@ struct ChatPageView: View {
                     "min_p": paramMinP,
                     "repetition_penalty": paramRepeatPenalty
                 ]
+                if let tag { body["tag"] = tag }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
                 if let prettyBody = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) {
                     lastPayload = String(data: prettyBody, encoding: .utf8)
@@ -594,7 +666,7 @@ struct ChatPageView: View {
 
     // MARK: Raw Stream mode (SSE)
 
-    private func sendRawStream(model: String, text: String, assistantIdx: Int) {
+    private func sendRawStream(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
         Task {
             do {
                 guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
@@ -606,7 +678,7 @@ struct ChatPageView: View {
                 req.httpMethod = "POST"
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 if let key = appState.apiKey { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
-                let body: [String: Any] = [
+                var body: [String: Any] = [
                     "model": model,
                     "messages": [["role": "user", "content": text]],
                     "stream": true,
@@ -617,6 +689,7 @@ struct ChatPageView: View {
                     "min_p": paramMinP,
                     "repetition_penalty": paramRepeatPenalty
                 ]
+                if let tag { body["tag"] = tag }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
                 if let prettyBody = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) {
                     lastPayload = String(data: prettyBody, encoding: .utf8)
@@ -677,6 +750,14 @@ struct ChatPageView: View {
         case .audio: return .orange.opacity(0.8)
         case .image: return .pink.opacity(0.8)
         }
+    }
+
+    private var tokenhubModels: [String] {
+        TokenhubManager.shared.list().filter { $0.isEnabled }.map(\.name)
+    }
+
+    private var availableTags: [String] {
+        TokenhubManager.shared.allTags()
     }
 }
 

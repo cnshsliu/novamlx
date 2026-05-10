@@ -117,12 +117,6 @@ public final class InferenceService: @unchecked Sendable {
             preserveThinking: finalRequest.preserveThinking
         )
 
-        // Cloud mode: proxy to remote inference engine
-        if CloudBackend.isCloudModel(resolvedId) {
-            NovaMLXLog.info("[Cloud] → proxy generate (model=\(resolvedId))")
-            return try await CloudBackend.shared.proxy(finalRequest)
-        }
-
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
             let result = try await worker.sendGenerate(finalRequest)
@@ -192,12 +186,6 @@ public final class InferenceService: @unchecked Sendable {
             enableThinking: finalRequest.enableThinking,
             preserveThinking: finalRequest.preserveThinking
         )
-
-        // Cloud mode: proxy stream to remote inference engine
-        if CloudBackend.isCloudModel(resolvedId) {
-            NovaMLXLog.info("[Cloud] → proxy stream (model=\(resolvedId))")
-            return CloudBackend.proxyStreamStatic(finalRequest)
-        }
 
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
@@ -295,9 +283,6 @@ public final class InferenceService: @unchecked Sendable {
 
     public func isModelLoaded(_ modelId: String) -> Bool {
         let resolvedId = settingsManager.resolveModelId(modelId)
-        if CloudBackend.isCloudModel(resolvedId) {
-            return true
-        }
         if workerMode {
             return workerLoadedModels.contains(resolvedId)
         }
@@ -335,11 +320,6 @@ public final class InferenceService: @unchecked Sendable {
         return models
     }
 
-    /// Return cloud model names (with ":cloud" suffix) from cached discovery
-    public func listCloudModels() async -> [String] {
-        await CloudBackend.shared.getModels()
-    }
-
     public func checkTTLExpirations() {
         let allInfo = engine.pool.allModelInfo()
         let now = Date()
@@ -350,7 +330,7 @@ public final class InferenceService: @unchecked Sendable {
                 if prd > now { continue }
                 let identifier = ModelIdentifier(id: info.id, family: .other)
                 engine.unloadModel(identifier)
-                NovaMLXLog.info("Per-request keep_alive expired for \(info.id), unloaded")
+                NovaMLXLog.debug("Per-request keep_alive expired for \(info.id), unloaded")
                 continue
             }
 
@@ -360,7 +340,7 @@ public final class InferenceService: @unchecked Sendable {
             if idleTime >= Double(ttl) {
                 let identifier = ModelIdentifier(id: info.id, family: .other)
                 engine.unloadModel(identifier)
-                NovaMLXLog.info("TTL expired for \(info.id), unloaded after \(ttl)s idle")
+                NovaMLXLog.debug("TTL expired for \(info.id), unloaded after \(ttl)s idle")
             }
         }
         saveLoadedModelsList()
@@ -383,10 +363,10 @@ public final class InferenceService: @unchecked Sendable {
     public func restoreModels(modelManager: ModelManager) async {
         let ids = loadLoadedModelsList()
         guard !ids.isEmpty else { return }
-        NovaMLXLog.info("Restoring \(ids.count) previously loaded model(s)...")
+        NovaMLXLog.info("[InferenceService] Restoring \(ids.count) previously loaded model(s)...")
         for modelId in ids {
             guard let record = modelManager.getRecord(modelId) else {
-                NovaMLXLog.warning("Skipping restore of '\(modelId)' — not found in registry")
+                NovaMLXLog.warning("[InferenceService] Skipping restore of '\(modelId)' — not found in registry")
                 continue
             }
             let config = ModelConfig(
@@ -395,9 +375,9 @@ public final class InferenceService: @unchecked Sendable {
             )
             do {
                 try await loadModel(at: record.localURL, config: config)
-                NovaMLXLog.info("Restored model: \(modelId)")
+                NovaMLXLog.info("[InferenceService] Restored model: \(modelId)")
             } catch {
-                NovaMLXLog.warning("Failed to restore model \(modelId): \(error)")
+                NovaMLXLog.warning("[InferenceService] Failed to restore model \(modelId): \(error)")
             }
         }
         saveLoadedModelsList()

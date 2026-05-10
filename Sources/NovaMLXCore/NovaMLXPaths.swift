@@ -2,7 +2,7 @@ import Foundation
 import os.log
 
 public enum NovaMLXPaths {
-    private static let log = Logger(subsystem: "com.novamlx", category: "paths")
+    private static let log = Logger(subsystem: "com.novamlx", category: "Paths")
 
     private static func readPathConfig(_ name: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -49,13 +49,13 @@ public enum NovaMLXPaths {
         // 1. Config file: ~/.config/novamlx/path
         if let path = readPathConfig("path") {
             let url = URL(fileURLWithPath: path, isDirectory: true)
-            log.info("NOVA_DIR from config: \(url.path)")
+            log.info("[Paths] NOVA_DIR from config: \(url.path)")
             return url
         }
         // 2. Env var: NOVA_DIR
         if let envPath = ProcessInfo.processInfo.environment["NOVA_DIR"] {
             let url = URL(fileURLWithPath: envPath, isDirectory: true)
-            log.info("NOVA_DIR from env: \(url.path)")
+            log.info("[Paths] NOVA_DIR from env: \(url.path)")
             return url
         }
         // 3. Default: ~/.nova
@@ -66,7 +66,7 @@ public enum NovaMLXPaths {
         // 1. Config file: ~/.config/novamlx/models-path
         if let path = readPathConfig("models-path") {
             let url = URL(fileURLWithPath: path, isDirectory: true)
-            log.info("modelsDir from config: \(url.path)")
+            log.info("[Paths] modelsDir from config: \(url.path)")
             return url
         }
         // 2. Fallback: <baseDir>/models
@@ -81,6 +81,8 @@ public enum NovaMLXPaths {
     public static var prefixCacheBaseDir: URL { baseDir.appendingPathComponent("prefix_cache") }
     public static var chatHistoryDir: URL { baseDir.appendingPathComponent("chat_history") }
     public static var modelfilesDir: URL { baseDir.appendingPathComponent("modelfiles") }
+    public static var tokenhubDir: URL { baseDir.appendingPathComponent("tokenhub") }
+    public static var tokenhubProvidersFile: URL { tokenhubDir.appendingPathComponent("providers.json") }
 
     // Auth & subscription
     public static var sessionFile: URL { baseDir.appendingPathComponent("session") }

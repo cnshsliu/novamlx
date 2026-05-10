@@ -110,7 +110,7 @@ swift test --filter NovaMLXCoreTests
 
 ## API Reference
 
-### Inference API (Port 8080)
+### Inference API (Port 6590)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -133,7 +133,7 @@ swift test --filter NovaMLXCoreTests
 | `/chat` | GET | Built-in web chat UI |
 | `/health` | GET | Health check |
 
-### Admin API (Port 8081, Bearer auth when apiKeys configured)
+### Admin API (Port 6591, Bearer auth when apiKeys configured)
 
 | Group | Endpoints |
 |-------|-----------|
@@ -146,6 +146,7 @@ swift test --filter NovaMLXCoreTests
 | Benchmarking | `POST/GET /admin/api/bench/*` |
 | Perplexity | `POST/GET /admin/api/ppl/*` |
 | Device Info | `GET /admin/api/device-info` |
+| Log Level | `GET/PUT /admin/api/log-level` |
 | Grammar | `POST /admin/api/grammar/validate` |
 | Dashboard | `GET /admin/dashboard` |
 
@@ -244,6 +245,23 @@ NovaMLX automatically detects thinking/reasoning models at load time by inspecti
 - **Explicit**: model generates both `<think...>` and `</think...>` tags. Standard parsing applies.
 
 **Web UI:** The built-in chat page shows a Neural Pulse animation during thinking (real-time token count, speed, ghost preview of latest tokens), collapsing to a "Thought for Xs · N words" badge after completion.
+
+### Logging
+
+All modules use `NovaMLXLog` (in NovaMLXUtils), which writes to both swift-log and a rotating log file at `~/.nova/novamlx.log`. The file keeps up to 5 rotated copies (`novamlx.log.1` through `.5`).
+
+**Runtime log level control** via admin API:
+```bash
+# View current level
+curl http://127.0.0.1:6591/admin/api/log-level -H "Authorization: Bearer $KEY"
+
+# Enable debug logging
+curl -X PUT http://127.0.0.1:6591/admin/api/log-level \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"level": 0}'
+```
+Levels: 0=debug, 1=info (default), 2=warning, 3=error.
+
+> Note: NovaMLXCore uses `os.Logger` directly (circular dependency prevents importing NovaMLXUtils).
 
 ### Security
 

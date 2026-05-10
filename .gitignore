@@ -20,6 +20,12 @@ vendors/*/xcuserdata/
 *.xcworkspace/
 DerivedData/
 xcuserdata/
+*.d
+*.dia
+*.o
+*.swiftdeps
+*.emit-module.d
+*.emit-module.dia
 
 # ==================== Python ====================
 __pycache__/
@@ -46,6 +52,10 @@ MEMORY.md
 
 # ==================== 外部仓库（本地参考，不入库） ====================
 mlx-swift-lm/
+vendors/
+
+# ==================== Grok 工具缓存 ====================
+.grok/
 
 # ==================== 其他常见忽略 ====================
 .env
@@ -53,4 +63,6 @@ mlx-swift-lm/
 .vscode/
 .idea/
 *.log
+*.tar.gz
 .aider*
+opencode.json

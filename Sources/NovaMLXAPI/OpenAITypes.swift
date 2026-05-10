@@ -183,9 +183,10 @@ public struct OpenAIRequest: Codable, Sendable {
     public let logprobs: Bool?
     public let topLogprobs: Int?
     public let keepAlive: KeepAliveValue?
+    public let tag: String?
 
     private enum CodingKeys: String, CodingKey {
-        case model, messages, temperature, stream, stop, n, seed, tools, logprobs
+        case model, messages, temperature, stream, stop, n, seed, tools, logprobs, tag
         case toolChoice = "tool_choice"
         case topP = "top_p"
         case topK = "top_k"
@@ -233,7 +234,8 @@ public struct OpenAIRequest: Codable, Sendable {
         reasoningEffort: String? = nil,
         logprobs: Bool? = nil,
         topLogprobs: Int? = nil,
-        keepAlive: KeepAliveValue? = nil
+        keepAlive: KeepAliveValue? = nil,
+        tag: String? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -262,6 +264,7 @@ public struct OpenAIRequest: Codable, Sendable {
         self.logprobs = logprobs
         self.topLogprobs = topLogprobs
         self.keepAlive = keepAlive
+        self.tag = tag
     }
 
     /// Resolve thinking toggle from multiple client formats:

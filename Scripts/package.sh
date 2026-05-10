@@ -60,8 +60,6 @@ cat >"$APP_CONTENTS/Info.plist" <<'PLIST'
     <true/>
     <key>NSSupportsSuddenTermination</key>
     <true/>
-    <key>NSRemovableVolumesUsageDescription</key>
-    <string>NovaMLX needs access to external drives to store and load AI models.</string>
 </dict>
 </plist>
 PLIST

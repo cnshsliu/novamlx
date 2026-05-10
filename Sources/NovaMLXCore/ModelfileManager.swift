@@ -3,7 +3,7 @@ import os.log
 
 /// Thread-safe CRUD manager for modelfiles stored as JSON in `~/.nova/modelfiles/`.
 public final class ModelfileManager: @unchecked Sendable {
-    private let log = Logger(subsystem: "com.novamlx", category: "modelfile")
+    private let log = Logger(subsystem: "com.novamlx", category: "Modelfile")
     private let lock = NSLock()
     private let baseDir: URL
     private let encoder: JSONEncoder = {
@@ -31,7 +31,7 @@ public final class ModelfileManager: @unchecked Sendable {
         }
         let data = try encoder.encode(modelfile)
         try data.write(to: fileURL, options: .atomic)
-        log.info("Created modelfile: \(modelfile.name) -> base=\(modelfile.baseModel)")
+        log.info("[Modelfile] Created: \(modelfile.name) -> base=\(modelfile.baseModel)")
         return modelfile
     }
 
@@ -70,7 +70,7 @@ public final class ModelfileManager: @unchecked Sendable {
         }
         let data = try encoder.encode(modelfile)
         try data.write(to: url, options: .atomic)
-        log.info("Updated modelfile: \(modelfile.name)")
+        log.info("[Modelfile] Updated: \(modelfile.name)")
         return modelfile
     }
 
@@ -84,7 +84,7 @@ public final class ModelfileManager: @unchecked Sendable {
             throw ModelfileError.notFound(name)
         }
         try FileManager.default.removeItem(at: url)
-        log.info("Deleted modelfile: \(name)")
+        log.info("[Modelfile] Deleted: \(name)")
     }
 
     // MARK: - Resolution

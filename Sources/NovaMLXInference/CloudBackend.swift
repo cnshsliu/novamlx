@@ -2,38 +2,21 @@ import Foundation
 import NovaMLXCore
 import NovaMLXUtils
 
-// MARK: - Cloud Model Discovery & Inference Proxy
+// MARK: - Cloud Model Discovery & Tokenhub Inference Proxy
 
 public actor CloudBackend {
     public static let shared = CloudBackend()
 
-    // Fixed endpoint — hardcoded, no user configuration needed
     static let cloudBaseURL = URL(string: "https://chat.baystoneai.com/v1")!
 
-    // Cached model list from remote
     private var cachedModels: [CloudModelInfo] = []
     private var lastFetchTime: Date = .distantPast
-
-    // Refresh interval: 10 minutes
     private let refreshInterval: TimeInterval = 600
 
     // MARK: - Model Discovery
 
-    /// Check if a model ID is a cloud model (ends with ":cloud")
-    public static func isCloudModel(_ modelId: String) -> Bool {
-        modelId.hasSuffix(":cloud")
-    }
-
-    /// Strip the ":cloud" suffix to get the remote model name
-    public static func stripCloudSuffix(_ modelId: String) -> String {
-        modelId.hasSuffix(":cloud")
-            ? String(modelId.dropLast(6))
-            : modelId
-    }
-
-    /// Fetch available models from remote endpoint. Returns models with ":cloud" suffix added.
+    /// Fetch available models from remote endpoint for auto-provisioning.
     public func fetchModels() async -> [CloudModelInfo] {
-        // Return cache if fresh
         if !cachedModels.isEmpty, Date().timeIntervalSince(lastFetchTime) < refreshInterval {
             return cachedModels
         }
@@ -41,6 +24,11 @@ public actor CloudBackend {
         let url = Self.cloudBaseURL.appendingPathComponent("models")
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
+
+        // Use session token for auth
+        if let session = AuthCache.loadSession(), !session.isEmpty {
+            request.setValue("Bearer \(session)", forHTTPHeaderField: "Authorization")
+        }
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -67,41 +55,40 @@ public actor CloudBackend {
         }
     }
 
-    /// Get cached model list (local names with ":cloud" suffix)
-    public func getModels() -> [String] {
-        cachedModels.map(\.localName)
-    }
+    // MARK: - Health Check (Cloud)
 
-    // MARK: - Subscription Validation
-
-    private func validateAccess() async throws {
+    public func healthCheck() async -> Bool {
+        let url = Self.cloudBaseURL.appendingPathComponent("models")
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
         do {
-            _ = try await CloudAuth.validate()
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode == 200
         } catch {
-            NovaMLXLog.error("[Cloud] Auth failed: \(error.localizedDescription)")
-            throw error
+            return false
         }
     }
 
-    // MARK: - OpenAI Proxy (Non-streaming)
+    // MARK: - Tokenhub Provider Proxy (OpenAI, Non-streaming)
 
-    public func proxy(_ request: InferenceRequest) async throws -> InferenceResult {
-        try await validateAccess()
-        let remoteModel = Self.stripCloudSuffix(request.model)
+    public func proxy(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
+        let remoteModel = provider.remoteModel
         let startTime = Date()
+        let baseURL = try Self.validatedURL(provider.endpoint)
 
-        var urlRequest = URLRequest(url: Self.cloudBaseURL.appendingPathComponent("chat/completions"))
+        var urlRequest = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !provider.apiKey.isEmpty {
+            urlRequest.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
+        }
         urlRequest.timeoutInterval = 120
 
         let body = buildOpenAIBody(request: request, remoteModel: remoteModel, stream: false)
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
-        guard let http = response as? HTTPURLResponse else {
-            throw CloudError.invalidResponse
-        }
+        guard let http = response as? HTTPURLResponse else { throw CloudError.invalidResponse }
         guard http.statusCode == 200 else {
             let body = String(data: data, encoding: .utf8) ?? "unknown"
             throw CloudError.remoteError(http.statusCode, body)
@@ -110,23 +97,26 @@ public actor CloudBackend {
         return try parseOpenAIResponse(data: data, request: request, startTime: startTime)
     }
 
-    // MARK: - OpenAI Proxy (Streaming)
+    // MARK: - Tokenhub Provider Proxy (OpenAI, Streaming)
 
-    public func proxyStream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
-        let remoteModel = Self.stripCloudSuffix(request.model)
+    public func proxyStream(_ request: InferenceRequest, provider: TokenhubProvider) -> AsyncThrowingStream<Token, Error> {
+        let remoteModel = provider.remoteModel
+        let endpoint = provider.endpoint
+        let apiKey = provider.apiKey
 
         return AsyncThrowingStream { continuation in
             Task {
                 do {
-                    // Validate auth before streaming
-                    _ = try await CloudAuth.validate()
-
-                    var urlRequest = URLRequest(url: Self.cloudBaseURL.appendingPathComponent("chat/completions"))
+                    let baseURL = try Self.validatedURL(endpoint)
+                    var urlRequest = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    if !apiKey.isEmpty {
+                        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    }
                     urlRequest.timeoutInterval = 120
 
-                    let body = buildOpenAIBody(request: request, remoteModel: remoteModel, stream: true)
+                    let body = Self.buildOpenAIBodyStatic(request: request, remoteModel: remoteModel, stream: true)
                     urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                     let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
@@ -140,11 +130,8 @@ public actor CloudBackend {
                         guard line.hasPrefix("data: ") else { continue }
                         let json = String(line.dropFirst(6))
                         if json == "[DONE]" { break }
-
                         if let tokens = parseOpenAISSEChunk(json, tokenIndex: &tokenIndex) {
-                            for token in tokens {
-                                continuation.yield(token)
-                            }
+                            for token in tokens { continuation.yield(token) }
                         }
                     }
                     continuation.finish()
@@ -155,47 +142,53 @@ public actor CloudBackend {
         }
     }
 
-    // MARK: - Anthropic Proxy (Non-streaming)
+    // MARK: - Tokenhub Provider Proxy (Anthropic, Non-streaming)
 
-    public func proxyAnthropic(_ request: InferenceRequest) async throws -> InferenceResult {
-        try await validateAccess()
-        let remoteModel = Self.stripCloudSuffix(request.model)
+    public func proxyAnthropic(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
+        let remoteModel = provider.remoteModel
         let startTime = Date()
+        let baseURL = try Self.validatedURL(provider.endpoint)
 
-        var urlRequest = URLRequest(url: Self.cloudBaseURL.appendingPathComponent("messages"))
+        var urlRequest = URLRequest(url: baseURL.appendingPathComponent("messages"))
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        if !provider.apiKey.isEmpty {
+            urlRequest.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
+        }
         urlRequest.timeoutInterval = 120
 
         let body = buildAnthropicBody(request: request, remoteModel: remoteModel, stream: false)
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard let http = response as? HTTPURLResponse else { throw CloudError.invalidResponse }
+        guard http.statusCode == 200 else {
             let body = String(data: data, encoding: .utf8) ?? "unknown"
-            throw CloudError.remoteError(statusCode, body)
+            throw CloudError.remoteError(http.statusCode, body)
         }
 
         return try parseAnthropicResponse(data: data, request: request, startTime: startTime)
     }
 
-    // MARK: - Anthropic Proxy (Streaming)
+    // MARK: - Tokenhub Provider Proxy (Anthropic, Streaming)
 
-    public func proxyAnthropicStream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
-        let remoteModel = Self.stripCloudSuffix(request.model)
+    public func proxyAnthropicStream(_ request: InferenceRequest, provider: TokenhubProvider) -> AsyncThrowingStream<Token, Error> {
+        let remoteModel = provider.remoteModel
+        let endpoint = provider.endpoint
+        let apiKey = provider.apiKey
 
         return AsyncThrowingStream { continuation in
             Task {
                 do {
-                    // Validate auth before streaming
-                    _ = try await CloudAuth.validate()
-
-                    var urlRequest = URLRequest(url: Self.cloudBaseURL.appendingPathComponent("messages"))
+                    let baseURL = try Self.validatedURL(endpoint)
+                    var urlRequest = URLRequest(url: baseURL.appendingPathComponent("messages"))
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                    if !apiKey.isEmpty {
+                        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    }
                     urlRequest.timeoutInterval = 120
 
                     let body = buildAnthropicBody(request: request, remoteModel: remoteModel, stream: true)
@@ -211,11 +204,8 @@ public actor CloudBackend {
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data: ") else { continue }
                         let json = String(line.dropFirst(6))
-
                         if let tokens = parseAnthropicSSEChunk(json, tokenIndex: &tokenIndex) {
-                            for token in tokens {
-                                continuation.yield(token)
-                            }
+                            for token in tokens { continuation.yield(token) }
                         }
                     }
                     continuation.finish()
@@ -226,12 +216,15 @@ public actor CloudBackend {
         }
     }
 
-    // MARK: - Health Check
+    // MARK: - Health Check (Provider)
 
-    public func healthCheck() async -> Bool {
-        let url = Self.cloudBaseURL.appendingPathComponent("models")
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 5
+    public func healthCheck(provider: TokenhubProvider) async -> Bool {
+        guard let baseURL = URL(string: provider.endpoint) else { return false }
+        var request = URLRequest(url: baseURL.appendingPathComponent("models"))
+        request.timeoutInterval = 10
+        if !provider.apiKey.isEmpty {
+            request.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
+        }
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             return (response as? HTTPURLResponse)?.statusCode == 200
@@ -240,105 +233,17 @@ public actor CloudBackend {
         }
     }
 
-    // MARK: - Static Stream Helper (for non-async contexts)
+    // MARK: - Private Helpers
 
-    /// Static proxyStream that can be called from synchronous contexts (like InferenceService.stream())
-    public static func proxyStreamStatic(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
-        let remoteModel = stripCloudSuffix(request.model)
-
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    // Validate auth before streaming
-                    _ = try await CloudAuth.validate()
-
-                    var urlRequest = URLRequest(url: cloudBaseURL.appendingPathComponent("chat/completions"))
-                    urlRequest.httpMethod = "POST"
-                    urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    urlRequest.timeoutInterval = 120
-
-                    var body: [String: Any] = ["model": remoteModel, "stream": true]
-                    var messages: [[String: Any]] = []
-                    for msg in request.messages {
-                        var m: [String: Any] = ["role": msg.role.rawValue]
-                        if let content = msg.content { m["content"] = content }
-                        messages.append(m)
-                    }
-                    body["messages"] = messages
-                    if let temp = request.temperature { body["temperature"] = temp }
-                    if let maxTokens = request.maxTokens { body["max_tokens"] = maxTokens }
-                    if let topP = request.topP { body["top_p"] = topP }
-                    body["stream_options"] = ["include_usage": true]
-
-                    urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-                    let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
-                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                        throw CloudError.remoteError(statusCode, "Stream request failed")
-                    }
-
-                    var tokenIndex = 0
-                    for try await line in bytes.lines {
-                        guard line.hasPrefix("data: ") else { continue }
-                        let json = String(line.dropFirst(6))
-                        if json == "[DONE]" { break }
-
-                        if let tokens = parseSSEChunkStatic(json, tokenIndex: &tokenIndex) {
-                            for token in tokens {
-                                continuation.yield(token)
-                            }
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
+    private static func validatedURL(_ endpoint: String) throws -> URL {
+        guard let url = URL(string: endpoint) else {
+            throw CloudError.remoteError(-1, "Invalid provider endpoint: \(endpoint)")
         }
+        return url
     }
 
-    private static func parseSSEChunkStatic(_ json: String, tokenIndex: inout Int) -> [Token]? {
-        guard let data = json.data(using: .utf8),
-              let chunk = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = chunk["choices"] as? [[String: Any]],
-              let first = choices.first
-        else { return nil }
-
-        let delta = first["delta"] as? [String: Any]
-        let content = delta?["content"] as? String
-        let reasoning = delta?["reasoning"] as? String
-        let finishStr = first["finish_reason"] as? String
-
-        var tokens: [Token] = []
-
-        if let reasoning, !reasoning.isEmpty {
-            tokens.append(Token(id: tokenIndex, text: reasoning))
-            tokenIndex += 1
-        }
-
-        if let content, !content.isEmpty {
-            tokens.append(Token(id: tokenIndex, text: content))
-            tokenIndex += 1
-        }
-
-        if let finishStr, finishStr != "null" {
-            let reason: FinishReason = finishStr == "length" ? .length : .stop
-            tokens.append(Token(id: tokenIndex, text: "", finishReason: reason))
-            tokenIndex += 1
-        }
-
-        return tokens.isEmpty ? nil : tokens
-    }
-
-    // MARK: - Private: Build Request Bodies
-
-    private func buildOpenAIBody(request: InferenceRequest, remoteModel: String, stream: Bool) -> [String: Any] {
-        var body: [String: Any] = [
-            "model": remoteModel,
-            "stream": stream,
-        ]
-
+    private static func buildOpenAIBodyStatic(request: InferenceRequest, remoteModel: String, stream: Bool) -> [String: Any] {
+        var body: [String: Any] = ["model": remoteModel, "stream": stream]
         var messages: [[String: Any]] = []
         for msg in request.messages {
             var m: [String: Any] = ["role": msg.role.rawValue]
@@ -346,7 +251,6 @@ public actor CloudBackend {
             messages.append(m)
         }
         body["messages"] = messages
-
         if let temp = request.temperature { body["temperature"] = temp }
         if let maxTokens = request.maxTokens { body["max_tokens"] = maxTokens }
         if let topP = request.topP { body["top_p"] = topP }
@@ -355,11 +259,28 @@ public actor CloudBackend {
         if let presPenalty = request.presencePenalty { body["presence_penalty"] = presPenalty }
         if let seed = request.seed { body["seed"] = seed }
         if let stop = request.stop, !stop.isEmpty { body["stop"] = stop }
+        if stream { body["stream_options"] = ["include_usage": true] }
+        return body
+    }
 
-        if stream {
-            body["stream_options"] = ["include_usage": true]
+    private func buildOpenAIBody(request: InferenceRequest, remoteModel: String, stream: Bool) -> [String: Any] {
+        var body: [String: Any] = ["model": remoteModel, "stream": stream]
+        var messages: [[String: Any]] = []
+        for msg in request.messages {
+            var m: [String: Any] = ["role": msg.role.rawValue]
+            if let content = msg.content { m["content"] = content }
+            messages.append(m)
         }
-
+        body["messages"] = messages
+        if let temp = request.temperature { body["temperature"] = temp }
+        if let maxTokens = request.maxTokens { body["max_tokens"] = maxTokens }
+        if let topP = request.topP { body["top_p"] = topP }
+        if let topK = request.topK { body["top_k"] = topK }
+        if let freqPenalty = request.frequencyPenalty { body["frequency_penalty"] = freqPenalty }
+        if let presPenalty = request.presencePenalty { body["presence_penalty"] = presPenalty }
+        if let seed = request.seed { body["seed"] = seed }
+        if let stop = request.stop, !stop.isEmpty { body["stop"] = stop }
+        if stream { body["stream_options"] = ["include_usage": true] }
         return body
     }
 
@@ -369,7 +290,6 @@ public actor CloudBackend {
             "max_tokens": request.maxTokens ?? 4096,
             "stream": stream,
         ]
-
         var messages: [[String: Any]] = []
         for msg in request.messages {
             if msg.role == .system {
@@ -381,12 +301,10 @@ public actor CloudBackend {
             }
         }
         body["messages"] = messages
-
         if let temp = request.temperature { body["temperature"] = temp }
         if let topP = request.topP { body["top_p"] = topP }
         if let topK = request.topK { body["top_k"] = topK }
         if let stop = request.stop, !stop.isEmpty { body["stop_sequences"] = stop }
-
         return body
     }
 
@@ -401,7 +319,6 @@ public actor CloudBackend {
             throw CloudError.parseError("Invalid OpenAI response format")
         }
 
-        // Content may be null when model uses thinking (reasoning) and hits token limit
         let content = message["content"] as? String ?? ""
         let reasoning = message["reasoning"] as? String ?? ""
         let text = reasoning.isEmpty ? content : (content.isEmpty ? reasoning : reasoning + "\n\n" + content)
@@ -483,8 +400,7 @@ public actor CloudBackend {
 
         if let finishStr, finishStr != "null" {
             let reason: FinishReason = finishStr == "length" ? .length : .stop
-            let token = Token(id: tokenIndex, text: "", logprob: nil, finishReason: reason)
-            tokens.append(token)
+            tokens.append(Token(id: tokenIndex, text: "", logprob: nil, finishReason: reason))
             tokenIndex += 1
         }
 
@@ -526,14 +442,10 @@ public actor CloudBackend {
 // MARK: - Types
 
 public struct CloudModelInfo: Sendable {
-    /// Remote model ID (e.g. "Qwen3-235B-4bit")
     public let remoteId: String
-    /// Local display name with ":cloud" suffix (e.g. "Qwen3-235B-4bit:cloud")
-    public let localName: String
 
     public init(remoteId: String) {
         self.remoteId = remoteId
-        self.localName = "\(remoteId):cloud"
     }
 }
 

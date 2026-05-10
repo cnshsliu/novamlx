@@ -85,7 +85,7 @@ NovaMLX 通过 MLX 在 Apple Silicon GPU 上直接运行 LLM 和 VLM 推理，�
 
 ```bash
 # 通过 base64 数据 URI 描述图像
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -101,7 +101,7 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 
 # 通过 HTTP URL 描述图像
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -122,7 +122,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## API 兼容性
 
-### OpenAI 兼容端点（端口 8080）
+### OpenAI 兼容端点（端口 6590）
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
@@ -134,6 +134,8 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST` | `/v1/responses` | OpenAI Responses API |
 | `GET` | `/v1/responses/{id}` | 获取已存储的响应 |
 | `DELETE` | `/v1/responses/{id}` | 删除已存储的响应 |
+| `POST` | `/v1/audio/transcriptions` | 语音转文字（Qwen3-ASR） |
+| `POST` | `/v1/images/generations` | 文生图（SDXL-Turbo） |
 
 ### Anthropic 兼容端点
 
@@ -286,6 +288,33 @@ curl http://localhost:8080/v1/chat/completions \
 | **验证** | 目标模型并行验证所有草稿 Token |
 | **开销** | 无需辅助模型——纯算法实现 |
 
+---
+
+## 语音转文字
+
+通过本地 MLX 运行 Qwen3-ASR 实现语音转文字。
+
+| 特性 | 详情 |
+|------|------|
+| **端点** | `POST /v1/audio/transcriptions`（兼容 OpenAI） |
+| **模型** | Qwen3-ASR（Swift/MLX） |
+| **格式** | WAV、MP3、M4A、FLAC、CAF |
+| **响应** | `{"text": "转录文本"}` |
+
+---
+
+## 文生图
+
+通过本地 MLX 运行 SDXL-Turbo 实现文本生成图片。
+
+| 特性 | 详情 |
+|------|------|
+| **端点** | `POST /v1/images/generations`（兼容 OpenAI） |
+| **模型** | SDXL-Turbo |
+| **参数** | `prompt`、`size`（默认 1024×1024）、`n`（默认 1） |
+| **输出** | Base64 编码的 PNG（`b64_json`） |
+| **速度** | M 系列 GPU 约 2 秒生成一张图 |
+
 ### 草稿模型推测解码
 
 通过 `SpeculativeTokenIterator` 使用专用小模型：
@@ -366,7 +395,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## 模型管理
 
-### 管理端点（端口 8081，Bearer 认证）
+### 管理端点（端口 6591，Bearer 认证）
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
@@ -433,6 +462,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `frequency_penalty` / `presence_penalty` / `repetition_penalty` | 重复控制 |
 | `seed` | 确定性生成种子 |
 | `ttl_seconds` | 空闲自动卸载超时 |
+| `keep_alive` | 按请求覆盖模型 TTL（秒，`-1` 为无限） |
 | `model_alias` | 模型 ID 别名 |
 | `is_pinned` | 免驱逐保护 |
 | `is_default` | 默认模型标记 |
@@ -453,6 +483,19 @@ curl http://localhost:8080/v1/chat/completions \
 | **下载** | 异步逐文件下载，带进度追踪和取消支持 |
 | **仪表盘 UI** | 搜索框、结果列表、下载进度与取消按钮 |
 | **自动注册** | 下载完成后自动发现并注册模型 |
+
+---
+
+## Modelfile 系统
+
+用户自定义模型配方，支持系统提示词、采样参数覆盖和模型选择。
+
+| 特性 | 详情 |
+|------|------|
+| **格式** | `FROM <model_id>` + 可选 `SYSTEM`、`PARAMETER`、`TEMPLATE` 指令 |
+| **API** | `POST /admin/modelfiles/create`、`GET /admin/modelfiles`、`DELETE /admin/modelfiles/{name}` |
+| **推理** | Modelfile 模型出现在 `/v1/models`，接受聊天补全请求并注入系统提示词 + 采样覆盖 |
+| **存储** | `~/.nova/modelfiles/` — 每个 Modelfile 一个 `.json` 文件 |
 
 ---
 
@@ -569,8 +612,8 @@ curl http://localhost:8080/v1/chat/completions \
 
 | 层级 | 实现 |
 |------|------|
-| **API 认证** | 端口 8080 的 Bearer Token 认证（`APIKeyAuthMiddleware`） |
-| **管理认证** | 端口 8081 的 Bearer Token 或 `X-Admin-Key` 头（`AdminAuthMiddleware`） |
+| **API 认证** | 端口 6590 的 Bearer Token 认证（`APIKeyAuthMiddleware`） |
+| **管理认证** | 端口 6591 的 Bearer Token 或 `X-Admin-Key` 头（`AdminAuthMiddleware`） |
 | **CORS** | `Access-Control-Allow-Origin: *`，完整方法和请求头支持 |
 | **请求 ID** | `x-request-id` 头透传或自动生成 |
 | **错误处理** | OpenAI 兼容的 JSON 错误体，正确的 HTTP 状态码 |
@@ -603,8 +646,8 @@ brew install --cask novamlx
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `host` | `127.0.0.1` | 绑定地址 |
-| `port` | `8080` | 推理 API 端口 |
-| `adminPort` | `8081` | 管理 API 端口 |
+| `port` | `6590` | 推理 API 端口 |
+| `adminPort` | `6591` | 管理 API 端口 |
 | `apiKeys` | `[]` | API 密钥（空 = 禁用认证） |
 | `maxConcurrentRequests` | `16` | 最大并发请求数 |
 | `requestTimeout` | `300s` | 请求超时 |
@@ -638,7 +681,7 @@ brew install --cask novamlx
 │                  NovaMLX API 服务器                        │
 │  ┌─────────────────┐  ┌──────────────────────────────┐  │
 │  │   推理 API       │  │         管理 API              │  │
-│  │  (端口 8080)     │  │        (端口 8081)            │  │
+│  │  (端口 6590)     │  │        (端口 6591)            │  │
 │  │  • OpenAI        │  │  • 模型管理                    │  │
 │  │  • Anthropic     │  │  • 逐模型配置                  │  │
 │  │  • 向量嵌入      │  │  • 基准测试                    │  │
@@ -685,7 +728,7 @@ swift build -c release
 ./build/release/NovaMLX --api-key sk-your-key
 
 # 对话补全
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer sk-your-key" \
   -H "Content-Type: application/json" \
   -d '{

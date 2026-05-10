@@ -399,8 +399,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         )
                     }
 
-                let cloudModelList = await inference.listCloudModels().map { OpenAIModel(id: $0) }
-                let response = OpenAIModelsResponse(data: modelList + cloudModelList)
+                let response = OpenAIModelsResponse(data: modelList)
                 return try Self.jsonResponse(response)
             }
             Post("/v1/chat/completions") { request, context in
@@ -461,6 +460,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 // OCR auto-optimization
                 if OCROptimizer.isOCRModel(openAIReq.model) {
                     messages = OCROptimizer.applyPrompt(messages: messages, modelName: openAIReq.model)
+                }
+
+                // Tokenhub routing: model name is "tknet" or "tknet:<provider>"
+                if TokenhubManager.shared.isTokenhubModel(openAIReq.model) {
+                    return try await Self.handleTokenhubPassthrough(
+                        modelName: openAIReq.model, rawBody: Data(buffer: body),
+                        path: "chat/completions", inference: inference,
+                        tag: openAIReq.tag
+                    )
                 }
 
                 let loadOutcome = try await Self.ensureModelReady(
@@ -524,13 +532,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let body = try await request.body.collect(upTo: .max)
                 var anthropicReq = try JSONDecoder().decode(AnthropicRequest.self, from: body)
 
-                // Anthropic clients send cloud model names without :cloud suffix — fix it
-                let cloudModels = await inference.listCloudModels()
-                if !cloudModels.contains(anthropicReq.model),
-                   cloudModels.contains(anthropicReq.model + ":cloud") {
-                    anthropicReq.model += ":cloud"
-                }
-
                 NovaMLXLog.info("[API] POST /v1/messages — model=\(anthropicReq.model), stream=\(anthropicReq.stream ?? false), maxTokens=\(anthropicReq.maxTokens), msgs=\(anthropicReq.messages.count)")
 
                 var messages: [ChatMessage]
@@ -538,6 +539,17 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     messages = try mapAnthropicMessages(anthropicReq.messages, system: anthropicReq.system)
                 } catch let err as AnthropicMappingError {
                     throw NovaMLXError.apiError(String(describing: err))
+                }
+
+                // Tokenhub routing for Anthropic requests
+                if TokenhubManager.shared.isTokenhubModel(anthropicReq.model) {
+                    let rawDict = try JSONSerialization.jsonObject(with: Data(buffer: body)) as? [String: Any]
+                    let tag = rawDict?["tag"] as? String
+                    return try await Self.handleTokenhubPassthrough(
+                        modelName: anthropicReq.model, rawBody: Data(buffer: body),
+                        path: "messages", inference: inference,
+                        tag: tag
+                    )
                 }
 
                 let anthropicLoadOutcome = try await Self.ensureModelReady(
@@ -1947,6 +1959,87 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try modelfileMgr.delete(name)
                 return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
             }
+
+            // MARK: - Tokenhub Provider CRUD
+            let tokenhubMgr = TokenhubManager.shared
+            Get("/admin/tokenhub/providers") { _, _ in
+                let providers = tokenhubMgr.list()
+                return try Self.jsonResponse(providers)
+            }
+            Post("/admin/tokenhub/providers") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
+                // Ensure id is derived from name
+                provider = TokenhubProvider(
+                    name: provider.name,
+                    endpoint: provider.endpoint,
+                    apiKey: provider.apiKey,
+                    remoteModel: provider.remoteModel,
+                    isEnabled: provider.isEnabled,
+                    includeInLoadBalance: provider.includeInLoadBalance,
+                    tags: provider.tags,
+                    isLocal: provider.isLocal,
+                    isFree: provider.isFree,
+                    isManaged: provider.isManaged
+                )
+                try tokenhubMgr.create(provider)
+                return try Self.jsonResponse(provider, httpStatus: .created)
+            }
+            Put("/admin/tokenhub/providers/{name}") { request, context in
+                let name = try context.parameters.require("name")
+                let body = try await request.body.collect(upTo: .max)
+                var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
+                provider = TokenhubProvider(
+                    name: name,
+                    endpoint: provider.endpoint,
+                    apiKey: provider.apiKey,
+                    remoteModel: provider.remoteModel,
+                    isEnabled: provider.isEnabled,
+                    includeInLoadBalance: provider.includeInLoadBalance,
+                    tags: provider.tags,
+                    isLocal: provider.isLocal,
+                    isFree: provider.isFree,
+                    isManaged: provider.isManaged
+                )
+                try tokenhubMgr.update(provider)
+                return try Self.jsonResponse(provider)
+            }
+            Delete("/admin/tokenhub/providers/{name}") { request, context in
+                let name = try context.parameters.require("name")
+                try tokenhubMgr.delete(name)
+                return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
+            }
+            Post("/admin/tokenhub/test") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
+                let backend = CloudBackend.shared
+                let ok = await backend.healthCheck(provider: provider)
+                if ok {
+                    provider.lastTestedAt = Date()
+                    provider.lastStatus = "ok"
+                    if let existing = tokenhubMgr.get(provider.name) {
+                        var updated = provider
+                        updated = TokenhubProvider(
+                            name: existing.name,
+                            endpoint: updated.endpoint,
+                            apiKey: updated.apiKey,
+                            remoteModel: updated.remoteModel,
+                            isEnabled: updated.isEnabled,
+                            includeInLoadBalance: updated.includeInLoadBalance
+                        )
+                        // Preserve test result timestamps
+                        try? tokenhubMgr.update(updated)
+                    }
+                }
+                struct TestResult: Encodable {
+                    let success: Bool
+                    let provider: String
+                    let endpoint: String
+                }
+                return try Self.jsonResponse(TestResult(
+                    success: ok, provider: provider.name, endpoint: provider.endpoint
+                ))
+            }
             Post("/admin/api/grammar/validate") { request, _ in
                 struct GrammarValidateRequest: Codable, Sendable {
                     let type: String
@@ -2131,6 +2224,21 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 return try Self.jsonResponse(["status": "ok", "message": "Config saved. Restart required."])
             }
 
+            Get("/admin/api/log-level") { _, _ in
+                try Self.jsonResponse(["level": "\(NovaMLXLog.fileLogLevel.rawValue)"] as [String: String])
+            }
+            Put("/admin/api/log-level") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      let level = json["level"] as? Int,
+                      let logLevel = NovaMLXLog.LogLevel(rawValue: level) else {
+                    return try Self.jsonResponse(["error": "Invalid level. Use 0=debug, 1=info, 2=warning, 3=error"], httpStatus: .badRequest)
+                }
+                NovaMLXLog.fileLogLevel = logLevel
+                NovaMLXLog.info("[Admin] Log level changed to \(logLevel)")
+                return try Self.jsonResponse(["level": logLevel.rawValue])
+            }
+
             Get("/admin/dashboard") { _, _ in
                 let html = Self.dashboardHTML()
                 return Response(
@@ -2178,6 +2286,142 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             try await group.next()
             group.cancelAll()
         }
+    }
+
+    // MARK: - Tokenhub Proxy
+
+    /// Raw passthrough proxy for tokenhub. Forwards the original request body to the provider
+    /// with the model name swapped to provider.remoteModel. No post-processing.
+    private static func handleTokenhubPassthrough(
+        modelName: String,
+        rawBody: Data,
+        path: String,
+        inference: InferenceService,
+        tag: String? = nil
+    ) async throws -> Response {
+        guard let provider = TokenhubManager.shared.resolve(modelName: modelName, tag: tag) else {
+            return try Self.jsonResponse(
+                ["error": ["message": "Unknown tokenhub provider: \(modelName)", "type": "invalid_request_error"]],
+                httpStatus: .badRequest
+            )
+        }
+
+        // Swap model name in the raw JSON body
+        var bodyDict = try JSONSerialization.jsonObject(with: rawBody) as? [String: Any] ?? [:]
+        bodyDict["model"] = provider.remoteModel
+        _ = try JSONSerialization.data(withJSONObject: bodyDict)
+        let isStreaming = (bodyDict["stream"] as? Bool) ?? false
+        let isLB = modelName.lowercased() == "tknet"
+        let maxRetries = isLB ? 2 : 0
+
+        var triedProviders = Set<String>()
+        var lastProvider = provider
+
+        // Resolve effective API key: managed providers use session token
+        func effectiveApiKey(_ p: TokenhubProvider) -> String {
+            if p.isManaged { return AuthCache.loadSession() ?? "" }
+            return p.apiKey
+        }
+
+        for attempt in 0...maxRetries {
+            triedProviders.insert(lastProvider.name)
+            NovaMLXLog.info("[Tokenhub] -> \(lastProvider.name) (\(lastProvider.endpoint)/\(path)) remoteModel=\(lastProvider.remoteModel) managed=\(lastProvider.isManaged)\(attempt > 0 ? " retry#\(attempt)" : "")")
+
+            // Build request for current provider
+            var bodyForThis = bodyDict
+            bodyForThis["model"] = lastProvider.remoteModel
+            let bodyData = try JSONSerialization.data(withJSONObject: bodyForThis)
+
+            let baseURL = URL(string: lastProvider.endpoint)!
+            var urlRequest = URLRequest(url: baseURL.appendingPathComponent(path))
+            urlRequest.httpMethod = "POST"
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if !effectiveApiKey(lastProvider).isEmpty {
+                urlRequest.setValue("Bearer \(effectiveApiKey(lastProvider))", forHTTPHeaderField: "Authorization")
+            }
+            urlRequest.timeoutInterval = 120
+            urlRequest.httpBody = bodyData
+
+            if isStreaming {
+                let start = ContinuousClock.now
+                let (bytes, urlResponse) = try await URLSession.shared.bytes(for: urlRequest)
+                guard let http = urlResponse as? HTTPURLResponse, http.statusCode == 200 else {
+                    let statusCode = (urlResponse as? HTTPURLResponse)?.statusCode ?? 502
+                    NovaMLXLog.warning("[Tokenhub] \(lastProvider.name) streaming failed HTTP \(statusCode)")
+                    let elapsed = ContinuousClock.now - start
+                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: durationToMs(elapsed))
+                    // Retry with different provider if possible
+                    if isLB, let next = pickRetryProvider(modelName: modelName, tag: tag, exclude: triedProviders) {
+                        lastProvider = next
+                        continue
+                    }
+                    return Response(status: .init(integerLiteral: statusCode))
+                }
+                let elapsed = ContinuousClock.now - start
+                let latencyMs = durationToMs(elapsed)
+                TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: true, latencyMs: latencyMs)
+
+                let responseBody = ResponseBody { writer in
+                    do {
+                        for try await line in bytes.lines {
+                            try await writer.write(ByteBuffer(string: line + "\n\n"))
+                        }
+                        try await writer.finish(nil)
+                    } catch {
+                        try? await writer.finish(nil)
+                    }
+                }
+
+                var headers = HTTPFields()
+                headers[.contentType] = "text/event-stream"
+                headers[.cacheControl] = "no-cache"
+                headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                return Response(status: .ok, headers: headers, body: responseBody)
+            } else {
+                let start = ContinuousClock.now
+                let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+                let elapsed = ContinuousClock.now - start
+                let latencyMs = durationToMs(elapsed)
+                guard let http = urlResponse as? HTTPURLResponse else {
+                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: latencyMs)
+                    if isLB, let next = pickRetryProvider(modelName: modelName, tag: tag, exclude: triedProviders) {
+                        lastProvider = next
+                        continue
+                    }
+                    return Response(status: .internalServerError)
+                }
+                let success = http.statusCode < 400
+                TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: success, latencyMs: latencyMs)
+                if http.statusCode >= 400 {
+                    let body = String(data: data, encoding: .utf8)?.prefix(300) ?? "nil"
+                    NovaMLXLog.warning("[Tokenhub] \(lastProvider.name) error HTTP \(http.statusCode): \(body)")
+                    // Retry with different provider if possible
+                    if isLB, let next = pickRetryProvider(modelName: modelName, tag: tag, exclude: triedProviders) {
+                        lastProvider = next
+                        continue
+                    }
+                }
+                var headers: HTTPFields = [.contentType: "application/json"]
+                headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                return Response(status: .init(integerLiteral: http.statusCode), headers: headers, body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+        }
+
+        // Should not reach here, but just in case
+        return Response(status: .badGateway)
+    }
+
+    private static func durationToMs(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
+    }
+
+    private static func pickRetryProvider(modelName: String, tag: String?, exclude: Set<String>) -> TokenhubProvider? {
+        let pool = TokenhubManager.shared.list().filter { $0.isEnabled && $0.includeInLoadBalance && !exclude.contains($0.name) }
+        var filtered = pool
+        if let tag, !tag.isEmpty {
+            filtered = filtered.filter { $0.tags.contains(tag) }
+        }
+        return filtered.randomElement()
     }
 
     // MARK: - Per-Request keep_alive
@@ -2787,13 +3031,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             let streamStart = Date()
             do {
                 try await writer.write(ByteBuffer(string: "event: ping\ndata: {\"type\":\"ping\"}\n\n"))
-                NovaMLXLog.info("[SSE:\(reqTag)] Sent initial headers + ping")
+                NovaMLXLog.debug("[SSE:\(reqTag)] Sent initial headers + ping")
 
                 let startEvent = AnthropicStreamEvent.messageStart(id: msgId, model: anthropicReq.model)
                 let startData = try JSONEncoder().encode(startEvent)
                 try await writer.write(ByteBuffer(string: "event: message_start\ndata: \(String(data: startData, encoding: .utf8) ?? "{}")\n\n"))
 
-                NovaMLXLog.info("[SSE:\(reqTag)] Waiting for first token from inference stream...")
+                NovaMLXLog.debug("[SSE:\(reqTag)] Waiting for first token from inference stream...")
 
                 let shouldParseThinking = anthropicReq.resolvedEnableThinking != false
                 let isAnthropicImplicitModel = ModelContainer.isImplicitThinkingModel(for: anthropicReq.model)
@@ -2941,9 +3185,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         }
                     case .keepAlive:
                         let elapsed = Date().timeIntervalSince(streamStart)
-                        NovaMLXLog.info("[SSE:\(reqTag)] Keep-alive ping sent (\(String(format: "%.0f", elapsed))s elapsed, \(tokenCount) tokens so far)")
+                        NovaMLXLog.debug("[SSE:\(reqTag)] Keep-alive ping sent (\(String(format: "%.0f", elapsed))s elapsed, \(tokenCount) tokens so far)")
                     case .done:
-                        NovaMLXLog.info("[SSE:\(reqTag)] Stream done signal")
+                        NovaMLXLog.debug("[SSE:\(reqTag)] Stream done signal")
                     }
                 }
                 Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
@@ -3189,13 +3433,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     continuation.yield(.keepAlive)
                     for try await token in stream {
                         if Task.isCancelled {
-                            NovaMLXLog.warning("[SSE:\(reqTag)] Inference stream consumer cancelled")
+                            NovaMLXLog.debug("[SSE:\(reqTag)] Inference stream consumer cancelled")
                             break
                         }
                         guard !guard_.isDone else { return }
                         continuation.yield(.token(token))
                     }
-                    NovaMLXLog.info("[SSE:\(reqTag)] Inference stream finished normally")
+                    NovaMLXLog.debug("[SSE:\(reqTag)] Inference stream finished normally")
                     if guard_.tryMarkFinished() {
                         continuation.finish()
                     }

@@ -28,7 +28,7 @@ public final class ModelSettingsManager: @unchecked Sendable {
             _settings[modelId] = settings
         }
         save()
-        NovaMLXLog.info("Updated settings for \(modelId)")
+        NovaMLXLog.info("[ModelSettings] Updated settings for \(modelId)")
     }
 
     public func updateSettings(_ modelId: String, _ update: (inout ModelSettings) -> Void) {
@@ -88,7 +88,7 @@ public final class ModelSettingsManager: @unchecked Sendable {
         guard let data = try? Data(contentsOf: settingsFile) else { return }
         guard let container = try? JSONDecoder().decode(SettingsContainer.self, from: data) else { return }
         lock.withLock { _settings = container.models }
-        NovaMLXLog.info("Loaded model settings for \(_settings.count) models")
+        NovaMLXLog.info("[ModelSettings] Loaded model settings for \(_settings.count) models")
     }
 
     private func save() {

@@ -154,7 +154,7 @@ public final class ModelManager: @unchecked Sendable {
         )
         lock.withLock { _registry[id] = record }
         saveRegistry()
-        NovaMLXLog.info("Registered model: \(id)")
+        NovaMLXLog.info("[ModelManager] Registered model: \(id)")
         return record
     }
 
@@ -183,15 +183,15 @@ public final class ModelManager: @unchecked Sendable {
         }
 
         Task { [hubApi] in
-            NovaMLXLog.info("Download task started for \(modelId)")
+            NovaMLXLog.info("[ModelManager] Download task started for \(modelId)")
             do {
                 let repo = Hub.Repo(id: modelId)
                 let destDir = hubApi.localRepoLocation(repo)
                 try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
 
-                NovaMLXLog.info("Fetching file list for \(modelId)...")
+                NovaMLXLog.info("[ModelManager] Fetching file list for \(modelId)...")
                 let allFilenames = try await hubApi.getFilenames(from: repo)
-                NovaMLXLog.info("Found \(allFilenames.count) files in \(modelId)")
+                NovaMLXLog.info("[ModelManager] Found \(allFilenames.count) files in \(modelId)")
 
                 let totalFiles = allFilenames.count
                 let completedCount = AtomicInt(0)
@@ -202,13 +202,13 @@ public final class ModelManager: @unchecked Sendable {
                     try FileManager.default.createDirectory(at: fileDir, withIntermediateDirectories: true)
 
                     if FileManager.default.fileExists(atPath: fileDest.path) {
-                        NovaMLXLog.info("Skip (exists): \(filename)")
+                        NovaMLXLog.info("[ModelManager] Skip (exists): \(filename)")
                         completedCount.withLock { $0 += 1 }
                         continue
                     }
 
                     let sourceURL = hubFileURL(repo: repo, filename: filename)
-                    NovaMLXLog.info("Downloading \(filename)...")
+                    NovaMLXLog.info("[ModelManager] Downloading \(filename)...")
 
                     let cc = completedCount.withLock { $0 }
                     self.lock.withLock {
@@ -235,7 +235,7 @@ public final class ModelManager: @unchecked Sendable {
                     }
 
                     let fileSize = fileSizeString(at: fileDest)
-                    NovaMLXLog.info("Done: \(filename) (\(fileSize))")
+                    NovaMLXLog.info("[ModelManager] Done: \(filename) (\(fileSize))")
                     completedCount.withLock { $0 += 1 }
                 }
 
@@ -255,7 +255,7 @@ public final class ModelManager: @unchecked Sendable {
                     _activeDownloads.remove(modelId)
                 }
                 saveRegistry()
-                NovaMLXLog.info("Download complete: \(modelId)")
+                NovaMLXLog.info("[ModelManager] Download complete: \(modelId)")
             } catch {
                 NovaMLXLog.error("Download failed for \(modelId): \(error)")
                 lock.withLock {
@@ -392,7 +392,7 @@ public final class ModelManager: @unchecked Sendable {
             }
         }
 
-        NovaMLXLog.info("Model discovery: \(allDiscovered.count) found, \(registered) registered, \(updated) updated")
+        NovaMLXLog.info("[ModelManager] Model discovery: \(allDiscovered.count) found, \(registered) registered, \(updated) updated")
         return allDiscovered
     }
 
@@ -410,7 +410,7 @@ public final class ModelManager: @unchecked Sendable {
 
             if isEffectivelyEmpty(dir) {
                 try? fm.removeItem(at: dir)
-                NovaMLXLog.info("Cleaned up empty directory: \(name)")
+                NovaMLXLog.info("[ModelManager] Cleaned up empty directory: \(name)")
             }
         }
     }
@@ -460,7 +460,7 @@ public final class ModelManager: @unchecked Sendable {
         let tmpDest = destination.deletingLastPathComponent()
             .appendingPathComponent(".\(destination.lastPathComponent).tmp")
 
-        NovaMLXLog.info("Downloading \(url.lastPathComponent) (\(totalBytes.bytesFormatted)) from HTTP \(httpResponse.statusCode)")
+        NovaMLXLog.info("[ModelManager] Downloading \(url.lastPathComponent) (\(totalBytes.bytesFormatted)) from HTTP \(httpResponse.statusCode)")
 
         try? FileManager.default.removeItem(at: tmpDest)
         FileManager.default.createFile(atPath: tmpDest.path, contents: nil)
