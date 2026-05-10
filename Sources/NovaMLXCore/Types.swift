@@ -662,6 +662,21 @@ public struct ServerConfig: Codable, Sendable {
     /// returns `nil` for every model.
     public let prefixCacheEnabled: Bool
     public let autoLoad: AutoLoadConfig
+    public let cluster: ClusterSettings?
+
+    public struct ClusterSettings: Codable, Sendable, Equatable {
+        public let role: String
+        public let coordinatorHost: String?
+        public let coordinatorPort: Int?
+        public let strategy: String?
+
+        public init(role: String, coordinatorHost: String? = nil, coordinatorPort: Int? = nil, strategy: String? = nil) {
+            self.role = role
+            self.coordinatorHost = coordinatorHost
+            self.coordinatorPort = coordinatorPort
+            self.strategy = strategy
+        }
+    }
 
     private enum CodingKeys: String, CodingKey {
         case host, port, adminPort, apiKeys, maxConcurrentRequests
@@ -670,6 +685,7 @@ public struct ServerConfig: Codable, Sendable {
         case maxProcessMemory
         case prefixCacheEnabled
         case autoLoad
+        case cluster
     }
 
     public init(
@@ -686,7 +702,8 @@ public struct ServerConfig: Codable, Sendable {
         maxRequestSizeMB: Double = 100,
         maxProcessMemory: String = "auto",
         prefixCacheEnabled: Bool = true,
-        autoLoad: AutoLoadConfig = .init()
+        autoLoad: AutoLoadConfig = .init(),
+        cluster: ClusterSettings? = nil
     ) {
         self.host = host
         self.port = port
@@ -702,6 +719,7 @@ public struct ServerConfig: Codable, Sendable {
         self.maxProcessMemory = maxProcessMemory
         self.prefixCacheEnabled = prefixCacheEnabled
         self.autoLoad = autoLoad
+        self.cluster = cluster
     }
 
     public var isTLSEnabled: Bool { tlsCertPath != nil }
@@ -722,6 +740,7 @@ public struct ServerConfig: Codable, Sendable {
         maxProcessMemory = try container.decodeIfPresent(String.self, forKey: .maxProcessMemory) ?? "auto"
         prefixCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .prefixCacheEnabled) ?? true
         autoLoad = try container.decodeIfPresent(AutoLoadConfig.self, forKey: .autoLoad) ?? .init()
+        cluster = try container.decodeIfPresent(ClusterSettings.self, forKey: .cluster)
     }
 
     public func scaleTokenCount(_ count: Int, modelContextWindow: Int) -> Int {
