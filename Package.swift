@@ -21,6 +21,7 @@ let package = Package(
         .library(name: "NovaMLXModelManager", targets: ["NovaMLXModelManager"]),
         .library(name: "NovaMLXAPI", targets: ["NovaMLXAPI"]),
         .library(name: "NovaMLXMCP", targets: ["NovaMLXMCP"]),
+        .library(name: "NovaMLXDistributed", targets: ["NovaMLXDistributed"]),
         .library(name: "NovaMLXMenuBar", targets: ["NovaMLXMenuBar"]),
     ],
     dependencies: [
@@ -130,6 +131,7 @@ let package = Package(
                 "NovaMLXInference",
                 "NovaMLXModelManager",
                 "NovaMLXMCP",
+                "NovaMLXDistributed",
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdRouter", package: "hummingbird"),
                 .product(name: "Logging", package: "swift-log"),
@@ -162,6 +164,15 @@ let package = Package(
                 "NovaMLXCore",
                 "NovaMLXUtils",
                 "NovaMLXEngine",
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .target(
+            name: "NovaMLXDistributed",
+            dependencies: [
+                "NovaMLXCore",
+                "NovaMLXUtils",
+                .product(name: "MLX", package: "mlx-swift"),
             ],
             swiftSettings: concurrencySettings
         ),
@@ -250,6 +261,11 @@ let package = Package(
         .testTarget(
             name: "NovaMLXE2ETests",
             dependencies: [],
+            swiftSettings: concurrencySettings
+        ),
+        .testTarget(
+            name: "NovaMLXDistributedTests",
+            dependencies: ["NovaMLXDistributed"],
             swiftSettings: concurrencySettings
         ),
     ]
