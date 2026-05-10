@@ -41,3 +41,49 @@ struct DistributedTypesTests {
         }
     }
 }
+
+@Suite("Distributed Group Wrappers")
+struct DistributedGroupTests {
+
+    @Test("Backend availability check does not crash")
+    func backendAvailabilityCheck() {
+        let ringAvailable = MLXDistributedWrapper.isBackendAvailable("ring")
+        #expect(type(of: ringAvailable) == Bool.self)
+    }
+
+    @Test("DistributedGroup wraps C handle")
+    func groupWrapsHandle() {
+        let group = DistributedGroup.uninitialized
+        #expect(group.rank == -1)
+        #expect(group.size == 0)
+        #expect(group.isValid == false)
+    }
+
+    @Test("Uninitialized group equality")
+    func uninitializedEquality() {
+        let a = DistributedGroup.uninitialized
+        let b = DistributedGroup.uninitialized
+        #expect(a == b)
+    }
+
+    @Test("Initialize returns uninitialized without backend")
+    func initializeWithoutBackend() {
+        // Without a compiled distributed backend, initialize should return uninitialized.
+        let group = MLXDistributedWrapper.initialize(strict: false, backend: nil)
+        #expect(group.isValid == false)
+        #expect(group.rank == -1)
+        #expect(group.size == 0)
+    }
+
+    @Test("bestAvailableBackend returns a non-empty string")
+    func bestAvailableBackendReturnsString() {
+        let backend = MLXDistributedWrapper.bestAvailableBackend()
+        #expect(!backend.isEmpty)
+    }
+
+    @Test("isCBBackendAvailable is Bool")
+    func isCBackendAvailableIsBool() {
+        let available = MLXDistributedWrapper.isCBBackendAvailable
+        #expect(type(of: available) == Bool.self)
+    }
+}
