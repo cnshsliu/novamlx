@@ -5,6 +5,7 @@ import HummingbirdRouter
 import ImageIO
 import Logging
 import NovaMLXCore
+import NovaMLXDistributed
 import NovaMLXEngine
 import NovaMLXInference
 import NovaMLXMCP
@@ -2237,6 +2238,24 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 NovaMLXLog.fileLogLevel = logLevel
                 NovaMLXLog.info("[Admin] Log level changed to \(logLevel)")
                 return try Self.jsonResponse(["level": logLevel.rawValue])
+            }
+
+            // MARK: - Cluster Admin
+            Get("/admin/api/cluster/status") { _, _ in
+                let body = ClusterAdminRoutes.shared.clusterStatus()
+                let data = try JSONSerialization.data(withJSONObject: body)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+            Get("/admin/api/cluster/discovery-debug") { _, _ in
+                let body = ClusterAdminRoutes.shared.discoveryDebug()
+                let data = try JSONSerialization.data(withJSONObject: body)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+            Get("/admin/api/models/{id}/cluster/sync-status") { _, context in
+                let modelId = try context.parameters.require("id")
+                let body = ClusterAdminRoutes.shared.modelSyncStatus(modelId: modelId)
+                let data = try JSONSerialization.data(withJSONObject: body)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
 
             Get("/admin/dashboard") { _, _ in
