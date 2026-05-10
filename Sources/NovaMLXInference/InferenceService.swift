@@ -48,7 +48,10 @@ public final class InferenceService: @unchecked Sendable {
     private let loadDedup = LoadDedup()
     private var ttlSweepTask: Task<Void, Never>?
 
-    public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil) {
+    // Cluster distributed inference mode
+    private let clusterMode: Bool
+
+    public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil, clusterMode: Bool = false) {
         self.engine = engine
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
         self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
@@ -57,6 +60,7 @@ public final class InferenceService: @unchecked Sendable {
         self.imageGenerationService = ImageGenerationService()
         self.loadedModelsFile = NovaMLXPaths.loadedModelsFile
         self.workerMode = workerMode
+        self.clusterMode = clusterMode
 
         if workerMode, let path = workerBinaryPath {
             self.worker = WorkerSupervisor(workerBinaryPath: path)
@@ -116,6 +120,13 @@ public final class InferenceService: @unchecked Sendable {
             enableThinking: finalRequest.enableThinking,
             preserveThinking: finalRequest.preserveThinking
         )
+
+        // Cluster mode: forward to distributed inference pipeline
+        if clusterMode {
+            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> DistributedShardEngine (model=\(resolvedId))")
+            // TODO: wire to actual ShardEngine when cluster pipeline is ready
+            // For now, fall through to normal worker path
+        }
 
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
@@ -186,6 +197,13 @@ public final class InferenceService: @unchecked Sendable {
             enableThinking: finalRequest.enableThinking,
             preserveThinking: finalRequest.preserveThinking
         )
+
+        // Cluster mode: forward to distributed inference pipeline
+        if clusterMode {
+            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> DistributedShardEngine stream (model=\(resolvedId))")
+            // TODO: wire to actual ShardEngine when cluster pipeline is ready
+            // For now, fall through to normal worker path
+        }
 
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
