@@ -7,6 +7,7 @@ import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXAPI
 import NovaMLXMenuBar
+import NovaMLXDistributed
 
 /// Early env-var setup: runs before any GPU work because the static
 /// initializer is triggered when the module is loaded.
@@ -283,6 +284,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await engine.startMemoryEnforcer()
             await engine.configureEnforcerSettings { [settingsManager] modelId in
                 settingsManager.getSettings(modelId)
+            }
+
+            // Distributed inference initialization
+            let clusterSettings = serverConfig.cluster
+            if let cluster = clusterSettings {
+                switch cluster.role {
+                case "coordinator":
+                    let clusterConfig = ClusterConfig(
+                        role: .coordinator,
+                        coordinatorHost: cluster.coordinatorHost ?? "0.0.0.0",
+                        coordinatorPort: cluster.coordinatorPort ?? 6591,
+                        strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes
+                    )
+                    try? ClusterManager.shared.startAsCoordinator(config: clusterConfig)
+                    NovaMLXLog.info("[Cluster] Started as coordinator on port \(clusterConfig.coordinatorPort)")
+                case "worker":
+                    if let host = cluster.coordinatorHost {
+                        let clusterConfig = ClusterConfig(
+                            role: .worker,
+                            coordinatorHost: host,
+                            coordinatorPort: cluster.coordinatorPort ?? 6591,
+                            strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes
+                        )
+                        WorkerService.shared.start(config: clusterConfig)
+                        NovaMLXLog.info("[Cluster] Started as worker, coordinator at \(host)")
+                    }
+                default:
+                    break
+                }
             }
         }
     }
