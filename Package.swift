@@ -107,6 +107,7 @@ let package = Package(
                 "NovaMLXCore",
                 "NovaMLXUtils",
                 "NovaMLXEngine",
+                "NovaMLXDistributed",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),

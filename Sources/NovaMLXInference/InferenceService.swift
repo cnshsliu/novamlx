@@ -4,6 +4,7 @@ import NovaMLXCore
 import NovaMLXUtils
 import NovaMLXEngine
 import NovaMLXModelManager
+import NovaMLXDistributed
 import AsyncAlgorithms
 
 /// Per-model load dedup. Concurrent callers for the same modelId await a
@@ -50,8 +51,9 @@ public final class InferenceService: @unchecked Sendable {
 
     // Cluster distributed inference mode
     private let clusterMode: Bool
+    private var distributedRunner: DistributedInferenceRunner?
 
-    public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil, clusterMode: Bool = false) {
+    public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil, clusterMode: Bool = false, clusterConfig: ClusterConfig? = nil) {
         self.engine = engine
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
         self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
@@ -64,6 +66,29 @@ public final class InferenceService: @unchecked Sendable {
 
         if workerMode, let path = workerBinaryPath {
             self.worker = WorkerSupervisor(workerBinaryPath: path)
+        }
+
+        if clusterMode, let config = clusterConfig {
+            self.distributedRunner = DistributedInferenceRunner(
+                clusterConfig: config,
+                tokenizerProvider: { [weak self] modelId in
+                    guard let self = self else { return nil }
+                    let container = self.engine.getContainer(for: modelId)
+                    guard let tokenizer = container?.tokenizer else { return nil }
+                    return DistributedTokenizer(
+                        encode: { text in tokenizer.encode(text) },
+                        decode: { tokens in tokenizer.decode(tokens) }
+                    )
+                },
+                modelPathProvider: { modelId in
+                    let path = NovaMLXPaths.modelsDir.appendingPathComponent(modelId).path
+                    var isDir: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+                        return nil
+                    }
+                    return path
+                }
+            )
         }
 
         engine.settingsProvider = { [settingsManager] modelId in
@@ -122,10 +147,9 @@ public final class InferenceService: @unchecked Sendable {
         )
 
         // Cluster mode: forward to distributed inference pipeline
-        if clusterMode {
-            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> DistributedShardEngine (model=\(resolvedId))")
-            // TODO: wire to actual ShardEngine when cluster pipeline is ready
-            // For now, fall through to normal worker path
+        if clusterMode, let runner = distributedRunner {
+            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed (model=\(resolvedId))")
+            return try await runner.generate(request: finalRequest)
         }
 
         // Worker mode: route through subprocess
@@ -198,11 +222,9 @@ public final class InferenceService: @unchecked Sendable {
             preserveThinking: finalRequest.preserveThinking
         )
 
-        // Cluster mode: forward to distributed inference pipeline
+        // Cluster mode: streaming distributed not yet supported — fall through to local
         if clusterMode {
-            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> DistributedShardEngine stream (model=\(resolvedId))")
-            // TODO: wire to actual ShardEngine when cluster pipeline is ready
-            // For now, fall through to normal worker path
+            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed stream fallback to local (model=\(resolvedId))")
         }
 
         // Worker mode: route through subprocess

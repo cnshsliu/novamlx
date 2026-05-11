@@ -72,7 +72,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 workerBinaryPath: workerPath
             )
         }
-        return InferenceService(engine: engine, settingsManager: settingsManager)
+        // Read cluster settings synchronously from config file (actor-isolated config requires async)
+        let (isCluster, clusterConfig) = Self.readClusterSettings()
+        return InferenceService(
+            engine: engine,
+            settingsManager: settingsManager,
+            clusterMode: isCluster,
+            clusterConfig: clusterConfig
+        )
     }()
     let modelManager: ModelManager
     var apiServer: NovaMLXAPIServer?
@@ -381,6 +388,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Delete the old directory
         try? fm.removeItem(at: legacyDir)
         NovaMLXLog.info("Cleaned up legacy Application Support directory")
+    }
+
+    // MARK: - Config helpers
+
+    /// Read cluster settings from config.json synchronously (avoids actor-isolated async access).
+    private static func readClusterSettings() -> (Bool, ClusterConfig?) {
+        let configFile = NovaMLXPaths.configFile
+        guard let data = try? Data(contentsOf: configFile),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let server = json["server"] as? [String: Any],
+              let cluster = server["cluster"] as? [String: Any],
+              let role = cluster["role"] as? String,
+              role == "coordinator"
+        else {
+            return (false, nil)
+        }
+        let config = ClusterConfig(
+            role: .coordinator,
+            coordinatorHost: cluster["coordinatorHost"] as? String ?? "0.0.0.0",
+            coordinatorPort: cluster["coordinatorPort"] as? Int ?? 6591,
+            strategy: ClusterStrategy(rawValue: cluster["strategy"] as? String ?? "minNodes") ?? .minNodes
+        )
+        return (true, config)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
