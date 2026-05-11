@@ -183,19 +183,24 @@ public final class ShardEngine: @unchecked Sendable {
         for i in 0..<nReal {
             let start = i * chunkSize
             let end = min(start + chunkSize, promptLen - 1)
-            let chunkTokens: MLXArray
+
+            // Shape template for recv. For non-first ranks, this provides the
+            // expected shape to recvLike. TODO: When real forward passes are wired,
+            // activation shapes may differ from token shapes — update to use
+            // the actual activation shape from the previous rank's output.
+            let chunkShape: MLXArray
             if promptLen == 1 {
-                chunkTokens = tokens
+                chunkShape = tokens
             } else {
-                chunkTokens = tokens[start..<end]
+                chunkShape = tokens[start..<end]
             }
 
             var activation: MLXArray
             if isFirstShard {
-                activation = chunkTokens
+                activation = chunkShape
             } else {
                 activation = MLXDistributedWrapper.recvLike(
-                    chunkTokens,
+                    chunkShape,
                     from: group.rank - 1,
                     group: group
                 )
@@ -218,9 +223,11 @@ public final class ShardEngine: @unchecked Sendable {
         // Trailing dummies — pure no-ops
         for _ in 0..<nTrailing {}
 
-        // Two final single-token passes
+        // Two final single-token passes (shared cache with chunk loop).
+        // Pass 1: complete prompt processing for the last token.
+        // Pass 2: generate first response token.
+        var lastActivation: MLXArray? = nil
         for _ in 0..<2 {
-            var finalCache: [Any] = []
             let lastToken: MLXArray
             if promptLen == 1 {
                 lastToken = tokens
@@ -239,7 +246,8 @@ public final class ShardEngine: @unchecked Sendable {
                 )
             }
 
-            activation = try policy.compute(input: activation, cache: &finalCache)
+            activation = try policy.compute(input: activation, cache: &cache)
+            lastActivation = activation
 
             if !isLastShard {
                 MLX.eval(activation)
@@ -254,12 +262,13 @@ public final class ShardEngine: @unchecked Sendable {
             MLX.eval(cacheArrays)
         }
 
-        // Return last token activation for sampling
-        if promptLen == 1 {
+        // Return the activation from the last final pass (logits on last shard).
+        // This is the computed result, not a re-slice of input tokens.
+        guard let result = lastActivation else {
+            // Fallback for empty prompt edge case
             return tokens
-        } else {
-            return tokens[(promptLen - 1)..<promptLen]
         }
+        return result
     }
 
     /// Run decode (single-token generation) through the assigned layers.
