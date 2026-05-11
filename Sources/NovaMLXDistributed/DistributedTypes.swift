@@ -26,17 +26,20 @@ public struct ClusterConfig: Codable, Sendable, Equatable {
     public let coordinatorHost: String
     public let coordinatorPort: Int
     public let strategy: ClusterStrategy
+    public var prefill: PrefillConfig
 
     public init(
         role: ClusterRole,
         coordinatorHost: String,
         coordinatorPort: Int = 6591,
-        strategy: ClusterStrategy = .minNodes
+        strategy: ClusterStrategy = .minNodes,
+        prefill: PrefillConfig = PrefillConfig()
     ) {
         self.role = role
         self.coordinatorHost = coordinatorHost
         self.coordinatorPort = coordinatorPort
         self.strategy = strategy
+        self.prefill = prefill
     }
 
     public init(from decoder: Decoder) throws {
@@ -45,6 +48,7 @@ public struct ClusterConfig: Codable, Sendable, Equatable {
         coordinatorHost = try container.decode(String.self, forKey: .coordinatorHost)
         coordinatorPort = try container.decodeIfPresent(Int.self, forKey: .coordinatorPort) ?? 6591
         strategy = try container.decodeIfPresent(ClusterStrategy.self, forKey: .strategy) ?? .minNodes
+        prefill = try container.decodeIfPresent(PrefillConfig.self, forKey: .prefill) ?? PrefillConfig()
     }
 }
 

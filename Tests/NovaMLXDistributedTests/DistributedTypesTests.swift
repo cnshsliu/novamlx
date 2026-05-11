@@ -85,6 +85,27 @@ struct DistributedTypesTests {
         #expect(stats.promptTokens == 8192)
         #expect(stats.prefillCommBytes == 65536)
     }
+
+    @Test("ClusterConfig with PrefillConfig decodes correctly")
+    func clusterConfigWithPrefill() throws {
+        let json = """
+        {"role": "coordinator", "coordinatorHost": "192.168.1.1", "coordinatorPort": 6591, "prefill": {"baseStepSize": 2048, "minChunkSize": 256, "minWavefrontTokens": 8192}}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(ClusterConfig.self, from: json)
+        #expect(config.prefill.baseStepSize == 2048)
+        #expect(config.prefill.minChunkSize == 256)
+        #expect(config.prefill.minWavefrontTokens == 8192)
+    }
+
+    @Test("ClusterConfig without PrefillConfig uses defaults")
+    func clusterConfigWithoutPrefill() throws {
+        let json = """
+        {"role": "coordinator", "coordinatorHost": "192.168.1.1", "coordinatorPort": 6591}
+        """.data(using: .utf8)!
+        let config = try JSONDecoder().decode(ClusterConfig.self, from: json)
+        #expect(config.prefill.baseStepSize == 4096)
+        #expect(config.prefill.minChunkSize == 512)
+    }
 }
 
 @Suite("Distributed Group Wrappers")

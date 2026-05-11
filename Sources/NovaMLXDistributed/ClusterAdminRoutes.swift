@@ -60,4 +60,9 @@ public final class ClusterAdminRoutes: @unchecked Sendable {
     public func currentShardPlan(modelId: String) -> [String: Any]? {
         return nil
     }
+
+    /// Wavefront prefill stats (placeholder until wired to live inference).
+    public func wavefrontStats() -> [String: Any] {
+        return ["status": "not_available"]
+    }
 }
