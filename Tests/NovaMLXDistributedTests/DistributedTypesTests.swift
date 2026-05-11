@@ -30,6 +30,8 @@ struct DistributedTypesTests {
         #expect(plan.assignments.count == 2)
         let totalCovered = plan.assignments.reduce(0) { $0 + ($1.endLayer - $1.startLayer) }
         #expect(totalCovered == 40)
+        let totalMemory = plan.assignments.reduce(UInt64(0)) { $0 + $1.memoryEstimate }
+        #expect(totalMemory == 40 * 4_000_000)
     }
 
     @Test("ClusterRole codable round-trip")
@@ -39,6 +41,49 @@ struct DistributedTypesTests {
             let decoded = try JSONDecoder().decode(ClusterRole.self, from: encoded)
             #expect(decoded == role)
         }
+    }
+
+    @Test("PrefillConfig has correct defaults")
+    func prefillConfigDefaults() {
+        let config = PrefillConfig()
+        #expect(config.baseStepSize == 4096)
+        #expect(config.minChunkSize == 512)
+        #expect(config.minWavefrontTokens == 4096)
+    }
+
+    @Test("PrefillConfig codable round-trip")
+    func prefillConfigCodable() throws {
+        let config = PrefillConfig(baseStepSize: 2048, minChunkSize: 256, minWavefrontTokens: 8192)
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(PrefillConfig.self, from: data)
+        #expect(decoded == config)
+    }
+
+    @Test("PrefillConfig decodes with missing fields using defaults")
+    func prefillConfigPartialDecode() throws {
+        let json = "{}".data(using: .utf8)!
+        let config = try JSONDecoder().decode(PrefillConfig.self, from: json)
+        #expect(config.baseStepSize == 4096)
+        #expect(config.minChunkSize == 512)
+        #expect(config.minWavefrontTokens == 4096)
+    }
+
+    @Test("WavefrontStats stores correct values")
+    func wavefrontStatsValues() {
+        let stats = WavefrontStats(
+            chunkSize: 2048,
+            nRealChunks: 4,
+            nLeadingDummies: 1,
+            nTrailingDummies: 0,
+            promptTokens: 8192,
+            prefillCommBytes: 65536
+        )
+        #expect(stats.chunkSize == 2048)
+        #expect(stats.nRealChunks == 4)
+        #expect(stats.nLeadingDummies == 1)
+        #expect(stats.nTrailingDummies == 0)
+        #expect(stats.promptTokens == 8192)
+        #expect(stats.prefillCommBytes == 65536)
     }
 }
 

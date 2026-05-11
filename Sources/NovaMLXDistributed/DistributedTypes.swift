@@ -158,10 +158,11 @@ public struct ShardPlan: Codable, Sendable, Equatable {
     /// gets all remaining layers to guarantee full coverage.
     public init(profiles: [LayerProfile], nodes: [NodeSpec], strategy: ClusterStrategy) {
         let totalLayers = profiles.count
+        precondition(
+            nodes.count <= totalLayers,
+            "Cannot distribute \(totalLayers) layers across \(nodes.count) nodes: each node needs at least 1 layer"
+        )
         let totalMemory = nodes.reduce(UInt64(0)) { $0 + $1.totalMemoryBytes }
-        let perLayerMemory = totalLayers > 0
-            ? profiles.reduce(UInt64(0)) { $0 + $1.estimatedMemoryBytes } / UInt64(totalLayers)
-            : UInt64(0)
 
         var assignments: [ShardAssignment] = []
         var currentLayer = 0
@@ -171,19 +172,17 @@ public struct ShardPlan: Codable, Sendable, Equatable {
             let layersForNode: Int
 
             if isLast {
-                // Last node gets all remaining layers to guarantee full coverage
                 layersForNode = totalLayers - currentLayer
             } else if totalMemory > 0 {
-                // Proportional allocation based on memory
                 let ratio = Double(node.totalMemoryBytes) / Double(totalMemory)
                 layersForNode = max(1, Int(ratio * Double(totalLayers)))
             } else {
-                // Equal split fallback
                 layersForNode = max(1, totalLayers / nodes.count)
             }
 
             let endLayer = min(currentLayer + layersForNode, totalLayers)
-            let memoryEstimate = UInt64(endLayer - currentLayer) * perLayerMemory
+            let memoryEstimate = profiles[currentLayer..<endLayer]
+                .reduce(UInt64(0)) { $0 + $1.estimatedMemoryBytes }
 
             assignments.append(ShardAssignment(
                 nodeId: node.nodeId,
@@ -197,5 +196,64 @@ public struct ShardPlan: Codable, Sendable, Equatable {
         self.assignments = assignments
         self.totalLayers = totalLayers
         self.strategy = strategy
+    }
+}
+
+// MARK: - PrefillConfig
+
+/// Configuration for overlapped wavefront prefill.
+public struct PrefillConfig: Codable, Sendable, Equatable {
+    /// Base step size in tokens. Divided by `worldSize` to get actual chunk size.
+    public var baseStepSize: Int
+
+    /// Minimum chunk size in tokens. Prevents pathological tiny chunks on large clusters.
+    public var minChunkSize: Int
+
+    /// Minimum prompt length to activate wavefront prefill.
+    public var minWavefrontTokens: Int
+
+    public init(
+        baseStepSize: Int = 4096,
+        minChunkSize: Int = 512,
+        minWavefrontTokens: Int = 4096
+    ) {
+        self.baseStepSize = baseStepSize
+        self.minChunkSize = minChunkSize
+        self.minWavefrontTokens = minWavefrontTokens
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        baseStepSize = try container.decodeIfPresent(Int.self, forKey: .baseStepSize) ?? 4096
+        minChunkSize = try container.decodeIfPresent(Int.self, forKey: .minChunkSize) ?? 512
+        minWavefrontTokens = try container.decodeIfPresent(Int.self, forKey: .minWavefrontTokens) ?? 4096
+    }
+}
+
+// MARK: - WavefrontStats
+
+/// Observability stats from a wavefront prefill execution.
+public struct WavefrontStats: Sendable, Equatable {
+    public let chunkSize: Int
+    public let nRealChunks: Int
+    public let nLeadingDummies: Int
+    public let nTrailingDummies: Int
+    public let promptTokens: Int
+    public let prefillCommBytes: UInt64
+
+    public init(
+        chunkSize: Int,
+        nRealChunks: Int,
+        nLeadingDummies: Int,
+        nTrailingDummies: Int,
+        promptTokens: Int,
+        prefillCommBytes: UInt64
+    ) {
+        self.chunkSize = chunkSize
+        self.nRealChunks = nRealChunks
+        self.nLeadingDummies = nLeadingDummies
+        self.nTrailingDummies = nTrailingDummies
+        self.promptTokens = promptTokens
+        self.prefillCommBytes = prefillCommBytes
     }
 }
