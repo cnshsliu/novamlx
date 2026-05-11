@@ -86,3 +86,83 @@ public func flushPrefillSends() {
 public func clearPrefillSends() {
     prefillSendQueue.clear()
 }
+
+// MARK: - PipelineFirstLayer
+
+/// Wraps the first layer of a shard to receive activations from the previous rank.
+///
+/// - Rank 0: passes input through (generates embeddings from token IDs).
+/// - Other ranks: `recv` activation from `rank - 1`.
+public final class PipelineFirstLayer: @unchecked Sendable {
+    public let rank: Int
+    public let group: DistributedGroup
+
+    public init(rank: Int, group: DistributedGroup) {
+        self.rank = rank
+        self.group = group
+    }
+
+    /// Receive activation from previous rank (if not rank 0) and return it.
+    public func forward(input: MLXArray) async throws -> MLXArray {
+        if rank == 0 {
+            return input
+        }
+        MLX.eval(input)
+        let received = MLXDistributedWrapper.recvLike(
+            input,
+            from: rank - 1,
+            group: group
+        )
+        MLX.eval(received)
+        return received
+    }
+}
+
+// MARK: - PipelineLastLayer
+
+/// Wraps the last layer of a shard to send activations to the next rank.
+///
+/// - Last rank: passes through (returns activation for sampling).
+/// - Other ranks during prefill (`queueSends = true`): queue send.
+/// - Other ranks during decode (`queueSends = false`): immediate send.
+public final class PipelineLastLayer: @unchecked Sendable {
+    public let rank: Int
+    public let worldSize: Int
+    public let group: DistributedGroup
+
+    public init(rank: Int, worldSize: Int, group: DistributedGroup) {
+        self.rank = rank
+        self.worldSize = worldSize
+        self.group = group
+    }
+
+    /// Whether this rank is the last in the pipeline.
+    public var isLastRank: Bool {
+        rank == worldSize - 1
+    }
+
+    /// Forward output through the send mechanism.
+    public func forward(input: MLXArray) async throws -> MLXArray {
+        if isLastRank {
+            return input
+        }
+
+        MLX.eval(input)
+
+        if pipelineQueueSends {
+            prefillSendQueue.enqueue(PendingSend(
+                output: input,
+                destination: rank + 1,
+                group: group
+            ))
+        } else {
+            _ = MLXDistributedWrapper.send(
+                input,
+                to: rank + 1,
+                group: group
+            )
+        }
+
+        return input
+    }
+}
