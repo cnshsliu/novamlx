@@ -22,6 +22,7 @@ public final class FaultRecoveryManager: @unchecked Sendable {
 
     /// Disconnect timestamps keyed by node identifier.
     private var disconnectTimes: [String: Date] = [:]
+    private let queue = DispatchQueue(label: "com.novamlx.fault-recovery")
 
     public init() {}
 
@@ -33,7 +34,7 @@ public final class FaultRecoveryManager: @unchecked Sendable {
     ///   - nodeId: Identifier of the disconnected node.
     ///   - at: Timestamp of the disconnect event.
     public func trackDisconnect(nodeId: String, at: Date) {
-        disconnectTimes[nodeId] = at
+        queue.sync { disconnectTimes[nodeId] = at }
     }
 
     /// Check whether a node is still within the grace period for transient disconnects.
@@ -43,17 +44,19 @@ public final class FaultRecoveryManager: @unchecked Sendable {
     ///   - at: The current time to evaluate against.
     /// - Returns: `true` if the node disconnected within the last ``gracePeriodSeconds`` seconds.
     public func isInGracePeriod(nodeId: String, at: Date) -> Bool {
-        guard let disconnectTime = disconnectTimes[nodeId] else {
-            return false
+        queue.sync {
+            guard let disconnectTime = disconnectTimes[nodeId] else {
+                return false
+            }
+            return at.timeIntervalSince(disconnectTime) <= Self.gracePeriodSeconds
         }
-        return at.timeIntervalSince(disconnectTime) <= Self.gracePeriodSeconds
     }
 
     /// Remove disconnect tracking for a node (e.g., after it reconnects or is replaced).
     ///
     /// - Parameter nodeId: Identifier of the node to clear.
     public func clearDisconnect(nodeId: String) {
-        disconnectTimes.removeValue(forKey: nodeId)
+        queue.sync { disconnectTimes.removeValue(forKey: nodeId) }
     }
 
     // MARK: - L2 Spare Node Swap

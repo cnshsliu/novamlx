@@ -35,13 +35,10 @@ private struct TensorDescriptor: Sendable {
     /// Bytes per element for the given dtype string.
     var bytesPerElement: Int {
         switch dtype {
-        case "F64": return 8
+        case "F64", "I64": return 8
         case "F32", "I32": return 4
-        case "F16", "BF16": return 2
-        case "I16", "F8_E4M3", "F8_E5M2": return 1
-        case "I8", "U8": return 1
-        case "I64": return 8
-        case "BOOL": return 1
+        case "F16", "BF16", "I16": return 2
+        case "F8_E4M3", "F8_E5M2", "I8", "U8", "BOOL": return 1
         default: return 2  // Assume F16 as default
     }
     }
@@ -285,13 +282,15 @@ public final class ModelAnalyzer: Sendable {
             || lower.contains("model.output")
     }
 
-    /// Compute total parameter count and estimated memory for a set of tensors.
+    /// Compute total parameter count and memory usage for a set of tensors.
+    /// Uses actual byte count from safetensors offsets (accurate for quantized types)
+    /// falling back to estimated size from shape+dtype when offsets are unavailable.
     private func computeProfileStats(for tensors: [TensorDescriptor]) -> (parameterCount: UInt64, memoryBytes: UInt64) {
         var totalParams: UInt64 = 0
         var totalMemory: UInt64 = 0
         for tensor in tensors {
             totalParams += tensor.elementCount
-            totalMemory += tensor.estimatedBytes
+            totalMemory += tensor.byteCount > 0 ? UInt64(tensor.byteCount) : tensor.estimatedBytes
         }
         return (totalParams, totalMemory)
     }

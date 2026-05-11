@@ -10,7 +10,7 @@ import MLX
 ///
 /// In single-process mode (no distributed backend compiled in), all operations return
 /// sensible identity values: rank is `-1`, size is `0`, collective operations are no-ops.
-public struct DistributedGroup: @unchecked Sendable, Equatable {
+public final class DistributedGroup: @unchecked Sendable, Equatable {
 
     /// Opaque pointer matching `mlx_distributed_group.ctx`. `nil` for the sentinel.
     fileprivate let ctx: UnsafeMutableRawPointer?
@@ -69,15 +69,10 @@ public enum MLXDistributedWrapper {
 
     // MARK: - Dynamic symbol resolution
 
-    /// Attempt to resolve a C symbol from the main executable or Cmlx.
+    /// Attempt to resolve a C symbol from all loaded images.
     private static func resolveSymbol(_ name: String) -> UnsafeMutableRawPointer? {
-        // Try RTLD_DEFAULT first (searches all loaded images)
-        if let handle = dlopen(nil, RTLD_NOW) {
-            if let sym = dlsym(handle, name) {
-                return sym
-            }
-        }
-        return nil
+        // RTLD_DEFAULT searches all loaded images without incrementing ref counts.
+        return dlsym(dlopen(nil, RTLD_LAZY), name)
     }
 
     // Resolved function pointer types matching the C signatures.
@@ -143,9 +138,9 @@ public enum MLXDistributedWrapper {
 
     /// Return the best available distributed backend name.
     ///
-    /// Tries `"nccl"` first, then `"ring"`, then falls back to `"ring"`.
+    /// Tries `"jaccl"` first (RDMA over Thunderbolt), then `"ring"` (TCP).
     public static func bestAvailableBackend() -> String {
-        if isBackendAvailable("nccl") { return "nccl" }
+        if isBackendAvailable("jaccl") { return "jaccl" }
         if isBackendAvailable("ring") { return "ring" }
         // Default fallback — may fail on `initialize`, but provides a name.
         return "ring"

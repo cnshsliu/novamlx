@@ -157,34 +157,39 @@ public final class ClusterManager: @unchecked Sendable {
 
     /// Shut down the coordinator: stops Bonjour, cancels timers, clears workers.
     public func stop() {
+        var removedIds: [String] = []
+        var netServiceRef: NetService?
+        var timerRef: Timer?
+
         queue.sync {
             guard isRunning else { return }
             isRunning = false
 
-            // Remove all workers (fires callbacks after queue exits).
-            let removedIds = Array(_workers.keys)
+            removedIds = Array(_workers.keys)
             _workers.removeAll()
 
-            // Retain references to clean up outside the queue.
-            let service = netService
-            let timer = heartbeatTimer
+            netServiceRef = netService
+            timerRef = heartbeatTimer
             netService = nil
             heartbeatTimer = nil
             config = nil
+        }
 
-            // Fire disconnect callbacks outside queue.sync to avoid deadlock.
-            // (Callbacks may call back into ClusterManager.)
-            for nodeId in removedIds {
-                onWorkerDisconnected?(nodeId)
-            }
+        // Fire disconnect callbacks outside queue.sync to avoid deadlock.
+        // (Callbacks may call back into ClusterManager.)
+        for nodeId in removedIds {
+            onWorkerDisconnected?(nodeId)
+        }
 
-            // Bonjour / Timer cleanup on main run-loop.
-            if let service {
-                DispatchQueue.main.async { service.stop() }
-            }
-            if let timer {
-                DispatchQueue.main.async { timer.invalidate() }
-            }
+        // Bonjour / Timer cleanup on main run-loop.
+        // NetService.stop() and Timer.invalidate() must run on the main run-loop.
+        if let svc = netServiceRef {
+            nonisolated(unsafe) let s = svc
+            DispatchQueue.main.async { s.stop() }
+        }
+        if let t = timerRef {
+            nonisolated(unsafe) let timer = t
+            DispatchQueue.main.async { timer.invalidate() }
         }
 
         logger.info("ClusterManager stopped")
