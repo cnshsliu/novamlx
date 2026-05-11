@@ -110,22 +110,22 @@ public final class ShardEngine: @unchecked Sendable {
         self.isFirstShard = size > 0 && group.rank == 0
     }
 
-    /// Run prefill (prompt processing) through the assigned layers.
-    ///
-    /// Pipeline logic:
-    /// 1. If not the first shard, receive activations from the previous rank.
-    /// 2. Forward through assigned layers via ``ComputePolicy/compute(input:cache:)``.
-    /// 3. If not the last shard, send activations to the next rank.
-    /// 4. Last shard returns the activation for sampling.
-    ///
-    /// - Parameter tokens: Input token IDs (shape `[seq_len]` or `[batch, seq_len]`).
-    /// - Returns: Output activation from the last shard in the pipeline.
-    public func prefill(tokens: MLXArray) async throws -> MLXArray {
+    /// Run prefill — selects sequential or wavefront based on config and cluster state.
+    public func prefill(tokens: MLXArray, config: PrefillConfig? = nil) async throws -> MLXArray {
+        let cfg = config ?? PrefillConfig()
+        let tokenCount = tokens.shape.reduce(1, *)
+        if group.size > 1 && tokenCount >= cfg.minWavefrontTokens {
+            return try await wavefrontPrefill(tokens: tokens, config: cfg)
+        }
+        return try await sequentialPrefill(tokens: tokens)
+    }
+
+    /// Sequential prefill: receive → compute → send.
+    public func sequentialPrefill(tokens: MLXArray) async throws -> MLXArray {
         guard policy.isReady else {
             throw ShardEngineError.notReady
         }
 
-        // Step 1: Receive from previous shard if not first.
         var activation: MLXArray
         if isFirstShard {
             activation = tokens
@@ -137,11 +137,9 @@ public final class ShardEngine: @unchecked Sendable {
             )
         }
 
-        // Step 2: Forward through assigned layers.
         var cache: [Any] = []
         activation = try policy.compute(input: activation, cache: &cache)
 
-        // Step 3: Send to next shard if not last.
         if !isLastShard {
             _ = MLXDistributedWrapper.send(
                 activation,
@@ -150,8 +148,118 @@ public final class ShardEngine: @unchecked Sendable {
             )
         }
 
-        // Step 4: Last shard returns activation for sampling.
         return activation
+    }
+
+    /// Overlapped wavefront prefill for long prompts on multi-node clusters.
+    private func wavefrontPrefill(
+        tokens: MLXArray,
+        config: PrefillConfig
+    ) async throws -> MLXArray {
+        guard policy.isReady else {
+            throw ShardEngineError.notReady
+        }
+
+        let promptLen = tokens.shape.reduce(1, *)
+        let worldSize = group.size
+        let chunkSize = max(config.baseStepSize / worldSize, config.minChunkSize)
+        let nReal = (promptLen - 1 + chunkSize - 1) / chunkSize
+        let nLeading = group.rank
+        let nTrailing = worldSize - 1 - group.rank
+
+        // Activate send batching
+        pipelineQueueSends = true
+        clearPrefillSends()
+        defer {
+            pipelineQueueSends = false
+            clearPrefillSends()
+        }
+
+        // Leading dummies — pure no-ops
+        for _ in 0..<nLeading {}
+
+        // Real chunks
+        var cache: [Any] = []
+        for i in 0..<nReal {
+            let start = i * chunkSize
+            let end = min(start + chunkSize, promptLen - 1)
+            let chunkTokens: MLXArray
+            if promptLen == 1 {
+                chunkTokens = tokens
+            } else {
+                chunkTokens = tokens[start..<end]
+            }
+
+            var activation: MLXArray
+            if isFirstShard {
+                activation = chunkTokens
+            } else {
+                activation = MLXDistributedWrapper.recvLike(
+                    chunkTokens,
+                    from: group.rank - 1,
+                    group: group
+                )
+            }
+
+            activation = try policy.compute(input: activation, cache: &cache)
+
+            if !isLastShard {
+                MLX.eval(activation)
+                prefillSendQueue.enqueue(PendingSend(
+                    output: activation,
+                    destination: group.rank + 1,
+                    group: group
+                ))
+            }
+
+            flushPrefillSends()
+        }
+
+        // Trailing dummies — pure no-ops
+        for _ in 0..<nTrailing {}
+
+        // Two final single-token passes
+        for _ in 0..<2 {
+            var finalCache: [Any] = []
+            let lastToken: MLXArray
+            if promptLen == 1 {
+                lastToken = tokens
+            } else {
+                lastToken = tokens[(promptLen - 1)..<promptLen]
+            }
+
+            var activation: MLXArray
+            if isFirstShard {
+                activation = lastToken
+            } else {
+                activation = MLXDistributedWrapper.recvLike(
+                    lastToken,
+                    from: group.rank - 1,
+                    group: group
+                )
+            }
+
+            activation = try policy.compute(input: activation, cache: &finalCache)
+
+            if !isLastShard {
+                MLX.eval(activation)
+                _ = MLXDistributedWrapper.send(activation, to: group.rank + 1, group: group)
+            }
+            flushPrefillSends()
+        }
+
+        // Final eval on cache state
+        let cacheArrays = cache.compactMap { $0 as? MLXArray }
+        if !cacheArrays.isEmpty {
+            MLX.eval(cacheArrays)
+        }
+
+        // Return last token activation for sampling
+        if promptLen == 1 {
+            return tokens
+        } else {
+            return tokens[(promptLen - 1)..<promptLen]
+        }
     }
 
     /// Run decode (single-token generation) through the assigned layers.

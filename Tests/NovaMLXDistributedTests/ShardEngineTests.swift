@@ -207,4 +207,68 @@ struct ShardEngineTests {
         // Placeholder policy returns input unchanged.
         #expect(output.shape == token.shape)
     }
+
+    // MARK: - Wavefront Prefill
+
+    @Test("wavefrontPrefill falls back to sequential for short prompts")
+    func wavefrontFallbackShortPrompt() async throws {
+        let assignment = ShardAssignment(nodeId: "test", startLayer: 0, endLayer: 10, memoryEstimate: 0)
+        let policy = FitInMemoryPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
+        try await policy.bindWeights()
+
+        let tokens = MLXArray(0..<3)
+        let config = PrefillConfig(minWavefrontTokens: 4096)
+        let output = try await engine.prefill(tokens: tokens, config: config)
+        #expect(output.shape == tokens.shape)
+    }
+
+    @Test("wavefrontPrefill falls back for single-node group")
+    func wavefrontFallbackSingleNode() async throws {
+        let assignment = ShardAssignment(nodeId: "test", startLayer: 0, endLayer: 10, memoryEstimate: 0)
+        let policy = FitInMemoryPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
+        try await policy.bindWeights()
+
+        let tokens = MLXArray(0..<8192)
+        let config = PrefillConfig(minWavefrontTokens: 4096)
+        let output = try await engine.prefill(tokens: tokens, config: config)
+        // Uninitialized group (size 0) => falls back to sequential
+        #expect(output.shape == tokens.shape)
+    }
+
+    @Test("wavefrontPrefill computes correct chunk plan")
+    func wavefrontChunkPlan() {
+        let config = PrefillConfig(baseStepSize: 4096, minChunkSize: 512)
+        let worldSize = 2
+        let promptLen = 8192
+
+        let chunkSize = max(config.baseStepSize / worldSize, config.minChunkSize)
+        let nReal = (promptLen - 1 + chunkSize - 1) / chunkSize
+
+        #expect(chunkSize == 2048)
+        #expect(nReal == 4)
+    }
+
+    @Test("wavefrontPrefill chunk plan with 3 nodes")
+    func wavefrontChunkPlan3Nodes() {
+        let config = PrefillConfig(baseStepSize: 4096, minChunkSize: 512)
+        let worldSize = 3
+        let promptLen = 12288
+
+        let chunkSize = max(config.baseStepSize / worldSize, config.minChunkSize)
+        let nReal = (promptLen - 1 + chunkSize - 1) / chunkSize
+
+        #expect(chunkSize == 1365)
+        #expect(nReal == 10)
+    }
+
+    @Test("wavefrontPrefill minChunkSize floor prevents tiny chunks")
+    func wavefrontMinChunkFloor() {
+        let config = PrefillConfig(baseStepSize: 4096, minChunkSize: 1024)
+        let worldSize = 8
+
+        let chunkSize = max(config.baseStepSize / worldSize, config.minChunkSize)
+        #expect(chunkSize == 1024)
+    }
 }
