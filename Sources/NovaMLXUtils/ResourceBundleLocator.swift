@@ -1,5 +1,12 @@
 import Foundation
 
+/// Replacement for deprecated `String(cString:)`.
+/// Creates a String from a null-terminated C string pointer.
+public func CString(_ ptr: UnsafePointer<CChar>) -> String {
+    let len = strlen(ptr)
+    return String(decoding: UnsafeBufferPointer(start: UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self), count: len), as: UTF8.self)
+}
+
 /// Safely locates SPM resource bundles without crashing.
 ///
 /// SPM's generated `Bundle.module` accessor hardcodes the build directory

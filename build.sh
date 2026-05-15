@@ -3,6 +3,45 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
+# ─────────────────────────────────────────────────────────────────────────
+# ./build.sh test — run tests with metallib fix
+# SwiftPM's test runner puts the binary inside a .xctest bundle, but MLX
+# expects mlx.metallib colocated with the binary. This copies it in.
+# ─────────────────────────────────────────────────────────────────────────
+if [ "${1:-}" = "test" ]; then
+	shift
+	BUILD_DIR=".build/$(uname -m)-apple-macosx/debug"
+	TEST_BUNDLE="${BUILD_DIR}/NovaMLXPackageTests.xctest"
+	METALLIB="${BUILD_DIR}/mlx.metallib"
+
+	if [ ! -d "$TEST_BUNDLE" ] || [ ! -f "$METALLIB" ]; then
+		echo "→ Building test target and metallib..."
+		swift build --build-tests 2>&1
+	fi
+
+	# Compile metallib if missing
+	if [ ! -f "$METALLIB" ] && [ -d "vendors/mlx-swift/Source/Cmlx/mlx-generated/metal" ]; then
+		echo "→ Compiling MLX Metal shaders for tests..."
+		TMPDIR_BUILD=$(mktemp -d)
+		trap "rm -rf $TMPDIR_BUILD" EXIT
+		( cd "vendors/mlx-swift/Source/Cmlx/mlx-generated/metal" && \
+		  find . -name "*.metal" | while read f; do
+			  base=$(basename "$f" .metal)
+			  xcrun -sdk macosx metal -target air64-apple-macos14.0 -fno-fast-math \
+				  -c "$f" -I . -o "$TMPDIR_BUILD/${base}.air" 2>/dev/null
+		  done )
+		mkdir -p "$(dirname "$METALLIB")"
+		xcrun -sdk macosx metallib "$TMPDIR_BUILD"/*.air -o "$METALLIB" 2>/dev/null
+	fi
+
+	if [ -f "$METALLIB" ] && [ -d "$TEST_BUNDLE/Contents/MacOS" ]; then
+		cp "$METALLIB" "$TEST_BUNDLE/Contents/MacOS/mlx.metallib"
+		echo "→ Copied mlx.metallib into test bundle"
+	fi
+
+	exec swift test "$@"
+fi
+
 # Resolve first (no compilation)
 swift package resolve 2>/dev/null || true
 
@@ -156,7 +195,7 @@ for bundle_src in "$BUILD_BIN_DIR"/*.bundle; do
 	bname=$(basename "$bundle_src")
 	bundle_dst="$APP_RESOURCES/$bname"
 	if [ ! -d "$bundle_dst" ] || [ "$bundle_src" -nt "$bundle_dst" ]; then
-		cp -R "$bundle_src" "$bundle_dst"
+		chmod -R u+w "$bundle_dst" 2>/dev/null || true; cp -R "$bundle_src" "$bundle_dst"
 		UPDATED+=("$bname")
 	fi
 done

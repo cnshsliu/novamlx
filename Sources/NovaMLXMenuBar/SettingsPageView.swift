@@ -49,6 +49,7 @@ struct SettingsPageView: View {
     @State private var clusterPort = 6591
     @State private var clusterStrategy = "minNodes"
     @State private var clusterMinLayers = 32
+    @State private var clusterTransport = "tcp"
     @State private var clusterWorkers: [[String: Any]] = []
 
     // Cloud auth state
@@ -421,6 +422,7 @@ struct SettingsPageView: View {
                 clusterPort = cluster["coordinatorPort"] as? Int ?? 6591
                 clusterStrategy = cluster["strategy"] as? String ?? "minNodes"
                 clusterMinLayers = cluster["minLayersPerShard"] as? Int ?? 32
+                clusterTransport = cluster["transport"] as? String ?? "tcp"
             } else {
                 clusterEnabled = false
             }
@@ -483,6 +485,9 @@ struct SettingsPageView: View {
             }
             if clusterMinLayers != 32 {
                 clusterDict["minLayersPerShard"] = clusterMinLayers
+            }
+            if clusterTransport != "tcp" {
+                clusterDict["transport"] = clusterTransport
             }
             serverDict["cluster"] = clusterDict
         }
@@ -588,6 +593,21 @@ struct SettingsPageView: View {
                     .pickerStyle(.segmented)
                     .frame(width: 180)
                     .onChange(of: clusterStrategy) { cfgHasUnsavedChanges = true }
+                }
+
+                // Transport backend
+                HStack(spacing: 12) {
+                    Text("Transport")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                        .frame(width: 80, alignment: .trailing)
+                    Picker("", selection: $clusterTransport) {
+                        Text("TCP").tag("tcp")
+                        Text("Ring (TCP)").tag("ring")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                    .onChange(of: clusterTransport) { cfgHasUnsavedChanges = true }
                 }
 
                 // Min layers per shard

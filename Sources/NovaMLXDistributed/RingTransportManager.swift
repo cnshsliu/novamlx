@@ -191,7 +191,9 @@ public final class RingTransportManager: @unchecked Sendable {
                 lock.withLock { _group = group }
                 return group
             }
-            NovaMLXLog.warning("[RingTransport] JACCL init returned size=\(group.size), falling back to Ring")
+            NovaMLXLog.warning("[RingTransport] JACCL init returned size=\(group.size) — RDMA may not be enabled. Run 'sudo rdma_ctl enable' on all nodes, then restart.")
+        } else {
+            NovaMLXLog.info("[RingTransport] JACCL backend not available — install mlx-rdma-gpu or enable RDMA. Falling back to Ring (TCP).")
         }
 
         // Fallback: Ring backend with hostfile (TCP, properly discovers peers)

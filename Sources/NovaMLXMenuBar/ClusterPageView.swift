@@ -158,7 +158,7 @@ struct ClusterPageView: View {
         sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
         var buf = [CChar](repeating: 0, count: size)
         sysctlbyname("machdep.cpu.brand_string", &buf, &size, nil, 0)
-        return String(cString: buf).trimmingCharacters(in: .whitespacesAndNewlines)
+        return CString( buf).trimmingCharacters(in: .whitespacesAndNewlines)
     }()
 
     // Worker deployment
@@ -175,6 +175,9 @@ struct ClusterPageView: View {
     @State private var modelReadiness: [ModelNodeReadiness] = []
     @State private var isActivating: Bool = false
     @State private var activationError: String?
+    @State private var distributedTPS: Double?
+    @State private var distributedSpecAccuracy: Double?
+    @State private var distributedLastAgo: String?
 
     private let maxEvents = 50
 
@@ -337,7 +340,7 @@ struct ClusterPageView: View {
                     .font(.headline)
                     .foregroundColor(NovaTheme.Colors.textPrimary)
                 Spacer()
-                if let model = activeModel {
+                if activeModel != nil {
                     StatusBadge(text: clusterModelState.uppercased(), color: modelStateColor)
                 }
             }
@@ -399,6 +402,26 @@ struct ClusterPageView: View {
                         Text(error)
                             .font(.caption)
                             .foregroundColor(NovaTheme.Colors.statusError)
+                    }
+
+                    // Distributed inference metrics
+                    if let tps = distributedTPS, tps > 0 {
+                        HStack(spacing: 12) {
+                            MetricCard(
+                                icon: "gauge.with.dots.needle.bottom.50percent",
+                                title: "Distributed TPS",
+                                value: String(format: "%.1f", tps),
+                                subtitle: distributedLastAgo.map { "\($0) ago" }
+                            )
+                            if let acc = distributedSpecAccuracy, acc > 0 {
+                                MetricCard(
+                                    icon: "bolt.horizontal",
+                                    title: "Spec Accuracy",
+                                    value: String(format: "%.0f%%", acc * 100),
+                                    subtitle: nil
+                                )
+                            }
+                        }
                     }
                 }
                 .padding(12)
@@ -989,13 +1012,13 @@ struct ClusterPageView: View {
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return addrs }
 
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let name = String(cString: ptr.pointee.ifa_name)
+            let name = CString( ptr.pointee.ifa_name)
             guard isThunderboltInterface(name) else { continue }
             guard let sa = ptr.pointee.ifa_addr else { continue }
             guard sa.pointee.sa_family == UInt8(AF_INET) else { continue }
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
-            let ip = String(cString: host)
+            let ip = CString( host)
             guard !ip.isEmpty && ip != "0.0.0.0" && ip != "127.0.0.1" else { continue }
             let parts = ip.split(separator: ".")
             guard parts.count >= 3 else { continue }
@@ -1014,13 +1037,13 @@ struct ClusterPageView: View {
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return addrs }
 
         for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-            let name = String(cString: ptr.pointee.ifa_name)
+            let name = CString( ptr.pointee.ifa_name)
             guard !isWiFiInterface(name) && name != "lo0" else { continue }
             guard let sa = ptr.pointee.ifa_addr else { continue }
             guard sa.pointee.sa_family == UInt8(AF_INET) else { continue }
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
-            let ip = String(cString: host)
+            let ip = CString( host)
             guard !ip.isEmpty && ip != "0.0.0.0" && ip != "127.0.0.1" else { continue }
             // For link-local (169.254.x.x), match on /16 prefix; otherwise /24
             let prefix: String
@@ -1103,13 +1126,15 @@ struct ClusterPageView: View {
         guard let port = appState.apiKey != nil ? appState.adminPort : nil,
               let key = appState.apiKey else { return }
 
-        // Use the first loaded model
-        guard !workers.isEmpty else { return }
+        // Pick the first loaded model that's not a draft/ASR/embedding model
+        let excludedSuffixes = ["0.6B", "ASR", "bge-", "whisper"]
+        let candidate = appState.loadedModels.first { id in
+            !excludedSuffixes.contains(where: { id.contains($0) })
+        }
+        guard let modelId = candidate ?? appState.loadedModels.first else { return }
 
         isActivating = true
         activationError = nil
-
-        let modelId = "mlx-community/Qwen3.6-27B-4bit"
         let url = URL(string: "http://127.0.0.1:\(port)/admin/api/cluster/activate-model")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1174,6 +1199,12 @@ struct ClusterPageView: View {
                             errorMessage: node["errorMessage"] as? String
                         )
                     }
+                }
+
+                if let stats = json["inferenceStats"] as? [String: Any] {
+                    self.distributedTPS = stats["tokensPerSecond"] as? Double
+                    self.distributedSpecAccuracy = stats["speculationAccuracy"] as? Double
+                    self.distributedLastAgo = stats["timestampAgo"] as? String
                 }
             }
         }.resume()

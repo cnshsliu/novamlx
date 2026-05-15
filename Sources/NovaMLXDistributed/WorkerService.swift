@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import NovaMLXCore
+import NovaMLXUtils
 
 // MARK: - DiscoveredService
 
@@ -117,7 +118,7 @@ public final class WorkerService: @unchecked Sendable {
         sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
         var buf = [CChar](repeating: 0, count: size)
         sysctlbyname("machdep.cpu.brand_string", &buf, &size, nil, 0)
-        return String(cString: buf).trimmingCharacters(in: .whitespacesAndNewlines)
+        return CString( buf).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Read first apiKey from config.json for admin API auth.

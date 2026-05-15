@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import NovaMLXCore
 import NovaMLXUtils
+import NovaMLXUtils
 
 // MARK: - Wire Format
 
@@ -436,7 +437,7 @@ final class TCPConnection: @unchecked Sendable {
             defer { freeaddrinfo(ai) }
             var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             if getnameinfo(ai.pointee.ai_addr, ai.pointee.ai_addrlen, &hostBuf, socklen_t(hostBuf.count), nil, 0, NI_NUMERICHOST) == 0 {
-                return String(cString: hostBuf)
+                return CString( hostBuf)
             }
         }
         // Fallback: use system hostname command for mDNS .local resolution
@@ -458,7 +459,7 @@ final class TCPConnection: @unchecked Sendable {
         let resolvedHost = resolveHost(host) ?? host
         let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         guard sock >= 0 else {
-            throw TransportError.connectionFailed("socket() failed: \(String(cString: strerror(errno)))")
+            throw TransportError.connectionFailed("socket() failed: \(CString( strerror(errno)))")
         }
 
         // TCP_NODELAY — disable Nagle's algorithm for minimum latency
@@ -489,7 +490,7 @@ final class TCPConnection: @unchecked Sendable {
         }
 
         guard connectResult == 0 else {
-            let err = String(cString: strerror(errno))
+            let err = CString( strerror(errno))
             Darwin.close(sock)
             throw TransportError.connectionFailed("connect() to \(targetHost):\(port) failed: \(err)")
         }
@@ -505,7 +506,7 @@ final class TCPConnection: @unchecked Sendable {
             while sent < total {
                 let n = Darwin.write(socket, ptr.baseAddress! + sent, total - sent)
                 if n < 0 {
-                    throw TransportError.sendFailed("write() error: \(String(cString: strerror(errno)))")
+                    throw TransportError.sendFailed("write() error: \(CString( strerror(errno)))")
                 }
                 if n == 0 {
                     throw TransportError.sendFailed("connection closed")
@@ -525,7 +526,7 @@ final class TCPConnection: @unchecked Sendable {
                 let chunkSize = min(count - totalRead, 1 << 20)
                 let n = Darwin.recv(socket, ptr.baseAddress! + totalRead, chunkSize, 0)
                 if n < 0 {
-                    throw TransportError.recvFailed("recv() error: \(String(cString: strerror(errno)))")
+                    throw TransportError.recvFailed("recv() error: \(CString( strerror(errno)))")
                 }
                 if n == 0 {
                     throw TransportError.recvFailed("connection closed (expected \(count - totalRead) more bytes)")
@@ -555,7 +556,7 @@ final class TCPListener: @unchecked Sendable {
 
         let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         guard sock >= 0 else {
-            throw TransportError.connectionFailed("socket() failed: \(String(cString: strerror(errno)))")
+            throw TransportError.connectionFailed("socket() failed: \(CString( strerror(errno)))")
         }
 
         // Allow address reuse (restart without TIME_WAIT issues)
@@ -573,13 +574,13 @@ final class TCPListener: @unchecked Sendable {
             }
         }
         guard bindResult == 0 else {
-            let err = String(cString: strerror(errno))
+            let err = CString( strerror(errno))
             Darwin.close(sock)
             throw TransportError.connectionFailed("bind() failed: \(err)")
         }
 
         guard Darwin.listen(sock, 16) == 0 else {
-            let err = String(cString: strerror(errno))
+            let err = CString( strerror(errno))
             Darwin.close(sock)
             throw TransportError.connectionFailed("listen() failed: \(err)")
         }
@@ -614,7 +615,7 @@ final class TCPListener: @unchecked Sendable {
             // Convert client address to string for nodeId
             var addrBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
             inet_ntop(AF_INET, &clientAddr.sin_addr, &addrBuf, socklen_t(INET_ADDRSTRLEN))
-            let clientHost = String(cString: addrBuf)
+            let clientHost = CString( addrBuf)
             let nodeId = "\(clientHost):\(Int(clientAddr.sin_port.byteSwapped))"
 
             let conn = TCPConnection(acceptedSocket: clientSock, nodeId: nodeId)

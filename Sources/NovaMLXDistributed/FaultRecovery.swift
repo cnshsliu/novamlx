@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXUtils
 
 // MARK: - FaultRecoveryManager
 
@@ -126,7 +127,21 @@ public final class FaultRecoveryManager: @unchecked Sendable {
     ///   - modelId: Identifier of the model that failed.
     ///   - reason: Human-readable description of the failure.
     public func handleHardFail(modelId: String, reason: String) {
-        // Placeholder: in production this would send an admin notification,
-        // log to a monitoring system, etc.
+        NovaMLXLog.error("[FaultRecovery] L3b Hard Fail: model=\(modelId), reason=\(reason)")
+
+        // Transition cluster model state to failed
+        let status = ClusterModelManager.shared.getStatus()
+        if status.activeModel == modelId {
+            // Release local shard engines
+            for shard in ClusterModelManager.shared.getShardEngines(for: modelId) ?? [] {
+                shard.policy.releaseWeights()
+            }
+            NovaMLXLog.warning("[FaultRecovery] Released shard engines for failed model \(modelId)")
+        }
+
+        // Clear disconnect tracking — no point tracking a dead node
+        queue.sync { disconnectTimes.removeAll() }
+
+        NovaMLXLog.error("[FaultRecovery] Cluster in hard fail state. Admin intervention required.")
     }
 }
