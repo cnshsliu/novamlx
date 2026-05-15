@@ -53,6 +53,18 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
         NovaMLXLog.info("[RemoteShardPolicy] Ring/JACCL transport ENABLED for data plane")
     }
 
+    /// Quantize activation to bfloat16 for transport (~2x compression).
+    private func quantizeForTransport(_ array: MLXArray) -> MLXArray {
+        if array.dtype == .bfloat16 { return array }
+        return array.asType(.bfloat16)
+    }
+
+    /// Dequantize bfloat16 back to float32 for head computation.
+    private func dequantizeFromTransport(_ array: MLXArray) -> MLXArray {
+        if array.dtype == .float32 { return array }
+        return array.asType(.float32)
+    }
+
     public func bindWeights() async throws {
         let conn = try TCPConnection(to: workerEndpoint)
         lock.withLock {
@@ -142,12 +154,18 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
                 let result = RingTransportManager.shared.recv(shape: shape, dtype: dtype, from: workerRank)
                 return result
             }
+            // Defensive fallback: worker used TCP instead of Ring (payloadSize=0, hasTensor=true)
+            if header.hasTensor {
+                NovaMLXLog.warning("[RemoteShardPolicy] Worker sent TCP response in Ring mode, falling back to TCP recv")
+                useRingTransport = false
+                return try conn.recvTensor()
+            }
             throw ShardServiceError.invalidMessage("Ring compute: no shape info in response")
         } else {
-            // Original TCP transport path
+            // Original TCP transport path (bfloat16 quantized for ~2x compression)
             let computeMsg = ShardWireFormat.encode(msgType: .compute, hasTensor: true)
             try conn.sendData(computeMsg)
-            try conn.sendTensor(input)
+            try conn.sendTensor(quantizeForTransport(input))
 
             let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
             guard let header = ShardWireFormat.decodeHeader(headerData) else {
@@ -159,7 +177,8 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
                 guard header.hasTensor else {
                     throw ShardServiceError.invalidMessage("computeResult missing tensor")
                 }
-                return try conn.recvTensor()
+                let raw = try conn.recvTensor()
+                return dequantizeFromTransport(raw)
 
             case .error:
                 var errorMsg = "unknown error"
@@ -241,7 +260,7 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
         } else {
             let computeMsg = ShardWireFormat.encode(msgType: .compute, hasTensor: true)
             try conn.sendData(computeMsg)
-            try conn.sendTensor(input)
+            try conn.sendTensor(quantizeForTransport(input))
         }
     }
 
@@ -279,7 +298,12 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
                 let result = RingTransportManager.shared.recv(shape: shape, dtype: dtype, from: workerRank)
                 return result
             }
-            // Fallback: no shape info, shouldn't happen
+            // Defensive fallback: worker used TCP instead of Ring
+            if header.hasTensor {
+                NovaMLXLog.warning("[RemoteShardPolicy] Worker sent TCP recvResult in Ring mode, falling back")
+                useRingTransport = false
+                return try conn.recvTensor()
+            }
             throw ShardServiceError.invalidMessage("Ring recvResult: no shape info in header")
         } else {
             let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
@@ -291,7 +315,7 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
                 guard header.hasTensor else {
                     throw ShardServiceError.invalidMessage("computeResult missing tensor")
                 }
-                return try conn.recvTensor()
+                return dequantizeFromTransport(try conn.recvTensor())
             case .error:
                 var errorMsg = "unknown error"
                 if header.payloadSize > 0 {

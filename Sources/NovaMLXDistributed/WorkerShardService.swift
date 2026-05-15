@@ -379,7 +379,8 @@ public final class WorkerShardService: @unchecked Sendable {
             } else {
                 let resultHeader = ShardWireFormat.encode(msgType: .computeResult, hasTensor: true)
                 try conn.sendData(resultHeader)
-                try conn.sendTensor(output)
+                let outputToSend = output.dtype != .bfloat16 ? output.asType(.bfloat16) : output
+                try conn.sendTensor(outputToSend)
             }
         } catch {
             let errorPayload = error.localizedDescription.data(using: .utf8) ?? Data()
