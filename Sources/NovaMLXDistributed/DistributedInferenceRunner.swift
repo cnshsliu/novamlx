@@ -356,7 +356,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                 generatedTokenIds.append(firstToken)
             }
             // Compute coord activation for first token (embedding + coord layers → hidden for worker)
-            activation = try await coordPolicy.compute(input: MLXArray(Int32(firstToken)))
+            activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(firstToken)))
             currentPosition += 1
 
             // Continuous async pipeline decode loop
@@ -422,7 +422,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                     speculatedCount: draft.count - i,
                                     mambaSnapshot: draft.mambaSnapshot
                                 )
-                                activation = try await coordPolicy.compute(input: MLXArray(Int32(verifyToken)))
+                                activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(verifyToken)))
                                 currentPosition += 1
 
                                 if eosTokenIds.contains(verifyToken) { break }
@@ -440,7 +440,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                 mambaSnapshot: draft.mambaSnapshot
                             )
                         }
-                        activation = try await coordPolicy.compute(input: MLXArray(Int32(actualToken)))
+                        activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
                         currentPosition += 1
 
                         if eosTokenIds.contains(actualToken) { break }
@@ -481,7 +481,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                     generatedTokenIds.append(sampledId)
                     let fullText = tokenizer.decode(generatedTokenIds)
                     if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
-                    activation = try await coordPolicy.compute(input: MLXArray(Int32(sampledId)))
+                    activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(sampledId)))
                     currentPosition += 1
                 }
             }
@@ -811,7 +811,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                             return
                         }
                         // Compute coord activation for first token (embedding + coord layers → hidden for worker)
-                        activation = try await coordPolicy.compute(input: MLXArray(Int32(firstToken)))
+                        activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(firstToken)))
                         currentPosition += 1
 
                         // Continuous async pipeline decode loop
@@ -867,7 +867,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                                 speculatedCount: draft.count - i,
                                                 mambaSnapshot: draft.mambaSnapshot
                                             )
-                                            activation = try await coordPolicy.compute(input: MLXArray(Int32(verifyToken)))
+                                            activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(verifyToken)))
                                             currentPosition += 1
 
                                             if eosTokenIds.contains(verifyToken) { break }
@@ -885,7 +885,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                             mambaSnapshot: draft.mambaSnapshot
                                         )
                                     }
-                                    activation = try await coordPolicy.compute(input: MLXArray(Int32(actualToken)))
+                                    activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
                                     currentPosition += 1
 
                                     if eosTokenIds.contains(actualToken) { break }
@@ -906,7 +906,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                 let sampledId = headResult.tokenId
                                 if eosTokenIds.contains(sampledId) { break }
                                 if yieldToken(sampledId) { break }
-                                activation = try await coordPolicy.compute(input: MLXArray(Int32(sampledId)))
+                                activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(sampledId)))
                                 currentPosition += 1
                             }
                         }
@@ -1005,8 +1005,8 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                 let _ = try workerPolicy.recvResult()
             }
 
-            // Coordinator processes this chunk (embedding + assigned layers)
-            let coordOutput = try await coordPolicy.compute(input: chunk)
+            // Coordinator processes this chunk (embedding + layers, skip head so we send hidden state to worker)
+            let coordOutput = try await coordPolicy.computeLayersOnly(input: chunk)
 
             // Send to Worker (fire-and-forget until next iteration)
             try workerPolicy.sendCompute(input: coordOutput)

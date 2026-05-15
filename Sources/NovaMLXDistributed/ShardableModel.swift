@@ -320,6 +320,16 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
     }
 
     public func compute(input: MLXArray) async throws -> MLXArray {
+        return try await computeInternal(input: input, runHead: isLast)
+    }
+
+    /// Compute embedding + layers only, skipping norm+head.
+    /// Used during prefill when coordinator owns head but needs to send hidden state to worker.
+    func computeLayersOnly(input: MLXArray) async throws -> MLXArray {
+        return try await computeInternal(input: input, runHead: false)
+    }
+
+    private func computeInternal(input: MLXArray, runHead: Bool) async throws -> MLXArray {
         guard isReady, let shardable = shardableModel else {
             throw ShardEngineError.notReady
         }
@@ -332,7 +342,6 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
         let cacheBox = KVCacheBox(kvCaches)
         let range = self.layerRange
         let isFirst = self.isFirst
-        let isLast = self.isLast
 
         let resultBox = await mlxContainer.perform { context in
             var h = inputBox.value
@@ -360,8 +369,8 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
             let layerCaches = cacheBox.caches
             h = shardable.forwardLayers(range, input: h, caches: layerCaches)
 
-            // Step 3: Norm + Head (last shard only)
-            if isLast {
+            // Step 3: Norm + Head (only when runHead=true)
+            if runHead {
                 if let output = shardable.head(h) {
                     h = output
                 }
