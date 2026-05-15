@@ -1,138 +1,72 @@
 import Foundation
 import MLX
+import Cmlx
 
 // MARK: - DistributedGroup
 
 /// Wrapper around an MLX distributed communication group.
 ///
 /// Use ``uninitialized`` as a sentinel value when no distributed backend is available.
-/// A valid group is obtained via ``MLXDistributedWrapper/initialize(strict:backend:)``.
+/// A valid group is obtained via ``MLXDistributedWrapper/initialize(strict:backend:hostfile:rank:)``.
 ///
 /// In single-process mode (no distributed backend compiled in), all operations return
 /// sensible identity values: rank is `-1`, size is `0`, collective operations are no-ops.
 public final class DistributedGroup: @unchecked Sendable, Equatable {
 
-    /// Opaque pointer matching `mlx_distributed_group.ctx`. `nil` for the sentinel.
-    fileprivate let ctx: UnsafeMutableRawPointer?
+    /// The underlying C distributed group handle.
+    fileprivate var cGroup: mlx_distributed_group
 
     /// Sentinel group representing an uninitialized / unavailable distributed group.
-    public static let uninitialized = DistributedGroup(ctx: nil)
+    public static let uninitialized = DistributedGroup(cGroup: .init())
 
-    init(ctx: UnsafeMutableRawPointer?) {
-        self.ctx = ctx
+    init(cGroup: mlx_distributed_group) {
+        self.cGroup = cGroup
     }
 
     /// Rank of this process in the group. `-1` if the group is not valid.
     public var rank: Int {
-        guard ctx != nil else { return -1 }
-        // When the C backend is available, this returns the real rank.
-        // Fallback: single-process implies rank 0 for a valid group.
-        return 0
+        guard cGroup.ctx != nil else { return -1 }
+        return Int(mlx_distributed_group_rank(cGroup))
     }
 
     /// Size (number of processes) in the group. `0` if the group is not valid.
     public var size: Int {
-        guard ctx != nil else { return 0 }
-        // When the C backend is available, this returns the real size.
-        // Fallback: single-process implies size 1 for a valid group.
-        return 1
+        guard cGroup.ctx != nil else { return 0 }
+        return Int(mlx_distributed_group_size(cGroup))
     }
 
     /// Whether this group represents a valid, initialized distributed group.
     public var isValid: Bool {
-        ctx != nil
+        cGroup.ctx != nil
     }
 
     // -- Equatable (compare by identity) --
 
     public static func == (_ lhs: DistributedGroup, _ rhs: DistributedGroup) -> Bool {
-        lhs.ctx == rhs.ctx
+        lhs.cGroup.ctx == rhs.cGroup.ctx
     }
 }
 
 // MARK: - MLXDistributedWrapper
 
-/// Thin wrappers around MLX distributed collective operations.
+/// Direct Swift wrappers around MLX distributed collective C operations.
 ///
-/// The API mirrors the C `mlx_distributed_*` functions. When the distributed
-/// backend is not compiled into the build (the default for macOS mlx-swift),
-/// collective operations degrade gracefully:
-/// - ``isBackendAvailable(_:)`` returns `false`
-/// - ``initialize(strict:backend:)`` returns ``DistributedGroup/uninitialized``
-/// - ``send(_:to:group:stream:)`` passes through the input
-/// - ``allGather(_:group:stream:)`` returns the input unchanged
-/// - ``allSum(_:group:stream:)`` returns the input unchanged
-///
-/// When the C distributed symbols are linked (future: after enabling backends),
-/// these wrappers call through to the real C implementations.
+/// Uses the Cmlx C API directly instead of dlsym — the Ring backend (TCP-based)
+/// is always compiled in and provides proper send/recv/all_reduce operations.
 public enum MLXDistributedWrapper {
 
-    // MARK: - Dynamic symbol resolution
-
-    /// Attempt to resolve a C symbol from all loaded images.
-    private static func resolveSymbol(_ name: String) -> UnsafeMutableRawPointer? {
-        // RTLD_DEFAULT searches all loaded images without incrementing ref counts.
-        return dlsym(dlopen(nil, RTLD_LAZY), name)
-    }
-
-    // Resolved function pointer types matching the C signatures.
-
-    private typealias FnIsAvailable = @convention(c) (UnsafePointer<CChar>?) -> Bool
-    private typealias FnInit = @convention(c) (Bool, UnsafePointer<CChar>?) -> (UnsafeMutableRawPointer?)
-    private typealias FnGroupRank = @convention(c) (UnsafeMutableRawPointer?) -> Int32
-    private typealias FnGroupSize = @convention(c) (UnsafeMutableRawPointer?) -> Int32
-    private typealias FnSend = @convention(c) (
-        UnsafeMutablePointer<UnsafeMutableRawPointer?>?, UnsafeMutableRawPointer?, Int32,
-        UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32
-    private typealias FnRecv = @convention(c) (
-        UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
-        UnsafePointer<Int32>?, Int, UInt32,
-        Int32, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32
-    private typealias FnRecvLike = @convention(c) (
-        UnsafeMutablePointer<UnsafeMutableRawPointer?>?, UnsafeMutableRawPointer?,
-        Int32, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32
-    private typealias FnAllGather = @convention(c) (
-        UnsafeMutablePointer<UnsafeMutableRawPointer?>?, UnsafeMutableRawPointer?,
-        UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32
-    private typealias FnAllSum = @convention(c) (
-        UnsafeMutablePointer<UnsafeMutableRawPointer?>?, UnsafeMutableRawPointer?,
-        UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32
-
-    /// Lazily resolved C function pointers. `nil` means the symbol is not available.
-    private static let _isAvailable: FnIsAvailable? = resolveSymbol("mlx_distributed_is_available")
-        .map { unsafeBitCast($0, to: FnIsAvailable.self) }
-    private static let _init: FnInit? = resolveSymbol("mlx_distributed_init")
-        .map { unsafeBitCast($0, to: FnInit.self) }
-    private static let _groupRank: FnGroupRank? = resolveSymbol("mlx_distributed_group_rank")
-        .map { unsafeBitCast($0, to: FnGroupRank.self) }
-    private static let _groupSize: FnGroupSize? = resolveSymbol("mlx_distributed_group_size")
-        .map { unsafeBitCast($0, to: FnGroupSize.self) }
-    private static let _send: FnSend? = resolveSymbol("mlx_distributed_send")
-        .map { unsafeBitCast($0, to: FnSend.self) }
-    private static let _recv: FnRecv? = resolveSymbol("mlx_distributed_recv")
-        .map { unsafeBitCast($0, to: FnRecv.self) }
-    private static let _recvLike: FnRecvLike? = resolveSymbol("mlx_distributed_recv_like")
-        .map { unsafeBitCast($0, to: FnRecvLike.self) }
-    private static let _allGather: FnAllGather? = resolveSymbol("mlx_distributed_all_gather")
-        .map { unsafeBitCast($0, to: FnAllGather.self) }
-    private static let _allSum: FnAllSum? = resolveSymbol("mlx_distributed_all_sum")
-        .map { unsafeBitCast($0, to: FnAllSum.self) }
+    // MARK: - Backend queries
 
     /// Whether the distributed C backend symbols are available at runtime.
     public static var isCBBackendAvailable: Bool {
-        _isAvailable != nil
+        // Ring backend is always compiled in, so distributed is available
+        true
     }
 
-    // MARK: - Public API
-
     /// Check whether a distributed backend is available.
-    ///
-    /// - Parameter backend: Name of the backend, e.g. `"ring"` or `"nccl"`.
-    /// - Returns: `true` if the backend is compiled in and usable.
     public static func isBackendAvailable(_ backend: String) -> Bool {
-        guard let fn = _isAvailable else { return false }
         return backend.withCString { ptr in
-            fn(ptr)
+            mlx_distributed_is_available(ptr)
         }
     }
 
@@ -142,9 +76,10 @@ public enum MLXDistributedWrapper {
     public static func bestAvailableBackend() -> String {
         if isBackendAvailable("jaccl") { return "jaccl" }
         if isBackendAvailable("ring") { return "ring" }
-        // Default fallback — may fail on `initialize`, but provides a name.
         return "ring"
     }
+
+    // MARK: - Group lifecycle
 
     /// Initialize a new distributed group.
     ///
@@ -154,61 +89,44 @@ public enum MLXDistributedWrapper {
     /// - Returns: A ``DistributedGroup``. Will be ``DistributedGroup/uninitialized``
     ///   if no backend is available and `strict` is `false`.
     public static func initialize(strict: Bool = false, backend: String? = nil) -> DistributedGroup {
-        guard let fn = _init else {
-            // No C backend compiled in — return sentinel (unless strict).
-            if strict {
-                fatalError("MLXDistributedWrapper.initialize: no distributed backend available (strict=true)")
-            }
-            return .uninitialized
-        }
-
-        let ctx: UnsafeMutableRawPointer?
+        let cGroup: mlx_distributed_group
         if let bk = backend {
-            ctx = bk.withCString { ptr in
-                fn(strict, ptr)
+            cGroup = bk.withCString { ptr in
+                mlx_distributed_init(strict, ptr)
             }
         } else {
-            ctx = fn(strict, nil)
+            cGroup = mlx_distributed_init(strict, nil)
         }
 
-        guard ctx != nil else {
+        guard cGroup.ctx != nil else {
             return .uninitialized
         }
 
-        return DistributedGroup(ctx: ctx)
+        return DistributedGroup(cGroup: cGroup)
     }
 
+    // MARK: - Point-to-point
+
     /// Send an array to rank `dst`.
-    ///
-    /// - Parameters:
-    ///   - array: The data to send.
-    ///   - dst: Destination rank.
-    ///   - group: The communication group.
-    ///   - stream: Stream or device for the operation.
-    /// - Returns: The sent array (passthrough).
     public static func send(
         _ array: MLXArray,
         to dst: Int,
         group: DistributedGroup,
         stream: StreamOrDevice = .default
     ) -> MLXArray {
-        // Without a real distributed backend, send is a passthrough.
-        guard let _ = _send, group.isValid else {
-            return array
+        guard group.isValid else { return array }
+
+        var result = mlx_array_new()
+        let rc = mlx_distributed_send(&result, array.ctx, Int32(dst), group.cGroup, stream.ctx)
+
+        if rc == 0 {
+            return MLXArray(result)
         }
-        // TODO: When C backend is linked, call mlx_distributed_send
+        mlx_array_free(result)
         return array
     }
 
     /// Receive an array from rank `src`.
-    ///
-    /// - Parameters:
-    ///   - shape: Shape of the array to receive.
-    ///   - dtype: Data type of the array.
-    ///   - src: Source rank.
-    ///   - group: The communication group.
-    ///   - stream: Stream or device for the operation.
-    /// - Returns: The received array.
     public static func recv(
         shape: [Int],
         dtype: DType = .float32,
@@ -216,72 +134,111 @@ public enum MLXDistributedWrapper {
         group: DistributedGroup,
         stream: StreamOrDevice = .default
     ) -> MLXArray {
-        // Without a real distributed backend, recv creates a zero array of the requested shape.
-        guard let _ = _recv, group.isValid else {
+        guard group.isValid else {
             return MLXArray.zeros(shape, dtype: dtype)
         }
-        // TODO: When C backend is linked, call mlx_distributed_recv
+
+        let cShape = shape.map { Int32($0) }
+        var result = mlx_array_new()
+
+        let rc = cShape.withUnsafeBufferPointer { shapePtr in
+            mlx_distributed_recv(
+                &result,
+                shapePtr.baseAddress,
+                cShape.count,
+                dtype.cmlxDtype,
+                Int32(src),
+                group.cGroup,
+                stream.ctx
+            )
+        }
+
+        if rc == 0 {
+            return MLXArray(result)
+        }
+        mlx_array_free(result)
         return MLXArray.zeros(shape, dtype: dtype)
     }
 
     /// Receive an array with the same shape and dtype as `reference`.
-    ///
-    /// - Parameters:
-    ///   - reference: Template array whose shape and dtype are used.
-    ///   - src: Source rank.
-    ///   - group: The communication group.
-    ///   - stream: Stream or device for the operation.
-    /// - Returns: The received array.
     public static func recvLike(
         _ reference: MLXArray,
         from src: Int,
         group: DistributedGroup,
         stream: StreamOrDevice = .default
     ) -> MLXArray {
-        guard let _ = _recvLike, group.isValid else {
-            return MLXArray.zeros(like: reference)
+        guard group.isValid else {
+            return MLXArray.zeros(reference.shape)
         }
-        // TODO: When C backend is linked, call mlx_distributed_recv_like
-        return MLXArray.zeros(like: reference)
+
+        var result = mlx_array_new()
+        let rc = mlx_distributed_recv_like(&result, reference.ctx, Int32(src), group.cGroup, stream.ctx)
+
+        if rc == 0 {
+            return MLXArray(result)
+        }
+        mlx_array_free(result)
+        return MLXArray.zeros(reference.shape)
     }
 
+    // MARK: - Collectives
+
     /// Gather arrays from all ranks into a single array along axis 0.
-    ///
-    /// - Parameters:
-    ///   - array: The local contribution.
-    ///   - group: The communication group.
-    ///   - stream: Stream or device for the operation.
-    /// - Returns: Concatenated array from all ranks. Single-process fallback: the input unchanged.
     public static func allGather(
         _ array: MLXArray,
         group: DistributedGroup,
         stream: StreamOrDevice = .default
     ) -> MLXArray {
-        // Without a real distributed backend, allGather returns the input (size-1 gather).
-        guard let _ = _allGather, group.isValid else {
-            return array
+        guard group.isValid else { return array }
+
+        var result = mlx_array_new()
+        let rc = mlx_distributed_all_gather(&result, array.ctx, group.cGroup, stream.ctx)
+
+        if rc == 0 {
+            return MLXArray(result)
         }
-        // TODO: When C backend is linked, call mlx_distributed_all_gather
+        mlx_array_free(result)
         return array
     }
 
     /// Element-wise sum across all ranks.
-    ///
-    /// - Parameters:
-    ///   - array: The local contribution.
-    ///   - group: The communication group.
-    ///   - stream: Stream or device for the operation.
-    /// - Returns: The summed array. Single-process fallback: the input unchanged.
     public static func allSum(
         _ array: MLXArray,
         group: DistributedGroup,
         stream: StreamOrDevice = .default
     ) -> MLXArray {
-        // Without a real distributed backend, allSum returns the input (size-1 sum).
-        guard let _ = _allSum, group.isValid else {
-            return array
+        guard group.isValid else { return array }
+
+        var result = mlx_array_new()
+        let rc = mlx_distributed_all_sum(&result, array.ctx, group.cGroup, stream.ctx)
+
+        if rc == 0 {
+            return MLXArray(result)
         }
-        // TODO: When C backend is linked, call mlx_distributed_all_sum
+        mlx_array_free(result)
         return array
+    }
+}
+
+// MARK: - DType → mlx_dtype conversion
+
+extension DType {
+    var cmlxDtype: mlx_dtype {
+        switch self {
+        case .bool: return MLX_BOOL
+        case .uint8: return MLX_UINT8
+        case .uint16: return MLX_UINT16
+        case .uint32: return MLX_UINT32
+        case .uint64: return MLX_UINT64
+        case .int8: return MLX_INT8
+        case .int16: return MLX_INT16
+        case .int32: return MLX_INT32
+        case .int64: return MLX_INT64
+        case .float16: return MLX_FLOAT16
+        case .float32: return MLX_FLOAT32
+        case .float64: return MLX_FLOAT64
+        case .bfloat16: return MLX_BFLOAT16
+        case .complex64: return MLX_COMPLEX64
+        }
     }
 }

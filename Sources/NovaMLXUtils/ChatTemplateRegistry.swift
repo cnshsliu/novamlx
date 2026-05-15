@@ -92,8 +92,13 @@ public final class ChatTemplateRegistry: @unchecked Sendable {
 
     private static func loadBundled() -> Document {
         // Bundled at Sources/NovaMLXUtils/Resources/template-registry.json
-        if let url = Bundle.module.url(forResource: "template-registry", withExtension: "json"),
-           let data = try? Data(contentsOf: url) {
+        // Use ResourceBundleLocator instead of Bundle.module to avoid fatalError
+        // on machines where the SPM hardcoded build path doesn't exist
+        if let url = ResourceBundleLocator.url(
+            forResource: "template-registry",
+            withExtension: "json",
+            inBundle: "NovaMLX_NovaMLXUtils"
+        ), let data = try? Data(contentsOf: url) {
             return Document.parse(data, source: "bundle") ?? .empty
         }
         // Dev fallback (when SRCROOT is set, e.g. xcodebuild / Xcode tests)

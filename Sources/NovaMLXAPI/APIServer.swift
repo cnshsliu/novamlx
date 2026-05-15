@@ -2258,6 +2258,111 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
 
+            // Shard plan: GET /admin/api/cluster/shard-plan?model=<modelId>
+            Get("/admin/api/cluster/shard-plan") { request, context in
+                let modelId = request.uri.query?.split(separator: "&")
+                    .compactMap { param -> String? in
+                        let parts = param.split(separator: "=", maxSplits: 1)
+                        guard parts.count == 2, parts[0] == "model" else { return nil }
+                        return String(parts[1])
+                    }.first ?? ""
+                guard !modelId.isEmpty else {
+                    let err = ["error": "missing ?model= parameter"]
+                    let data = try JSONSerialization.data(withJSONObject: err)
+                    return Response(status: .badRequest, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                if let plan = ClusterAdminRoutes.shared.currentShardPlan(modelId: modelId) {
+                    let data = try JSONSerialization.data(withJSONObject: plan)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                } else {
+                    let data = try JSONSerialization.data(withJSONObject: ["status": "no_plan"])
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+            }
+
+            // Worker registration: POST /admin/api/cluster/workers/register
+            Post("/admin/api/cluster/workers/register") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                let spec = try JSONDecoder().decode(NodeSpec.self, from: body)
+                let info = ClusterManager.shared.registerWorker(spec: spec)
+                let data = try JSONEncoder().encode(["nodeId": info.nodeId, "status": info.status.rawValue])
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+
+            // Worker heartbeat: POST /admin/api/cluster/workers/heartbeat
+            Post("/admin/api/cluster/workers/heartbeat") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                struct HeartbeatPayload: Codable { let nodeId: String }
+                let payload = try JSONDecoder().decode(HeartbeatPayload.self, from: body)
+                ClusterManager.shared.updateHeartbeat(nodeId: payload.nodeId)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(string: "{\"ok\":true}")))
+            }
+
+            // Model download for workers: GET /admin/api/cluster/models/{id}/download
+            Get("/admin/api/cluster/models/{id}/download") { _, context in
+                let modelId = try context.parameters.require("id")
+                guard let record = models.getRecord(modelId) else {
+                    return Response(status: .notFound)
+                }
+                let modelDir = record.localURL.path
+                let fm = FileManager.default
+                guard fm.fileExists(atPath: modelDir) else {
+                    return Response(status: .notFound)
+                }
+                // Stream the entire model directory as a tar.gz
+                let process = Process()
+                let pipe = Pipe()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+                process.arguments = ["-czf", "-", "-C", modelDir, "."]
+                process.standardOutput = pipe
+                try process.run()
+                process.waitUntilExit()
+                guard let data = try pipe.fileHandleForReading.readToEnd() else {
+                    return Response(status: .internalServerError)
+                }
+                return Response(
+                    status: .ok,
+                    headers: [
+                        .contentType: "application/gzip",
+                        .contentDisposition: "attachment; filename=\"\(modelId.replacingOccurrences(of:"/",with:"-")).tar.gz\"",
+                    ],
+                    body: .init(byteBuffer: ByteBuffer(data: data))
+                )
+            }
+
+            // Cluster model activation: POST /admin/api/cluster/activate-model
+            Post("/admin/api/cluster/activate-model") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                guard let json = try? JSONSerialization.jsonObject(with: Data(buffer: body)) as? [String: String],
+                      let modelId = json["modelId"] else {
+                    return Response(status: .badRequest, headers: [.contentType: "application/json"],
+                                    body: .init(byteBuffer: ByteBuffer(string: "{\"error\":true,\"message\":\"modelId required\"}")))
+                }
+                let result = await ClusterAdminRoutes.shared.activateModel(modelId: modelId)
+                let data = try? JSONSerialization.data(withJSONObject: result)
+                let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                return Response(status: .ok, headers: [.contentType: "application/json"],
+                                body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
+            }
+
+            // Cluster model deactivation: POST /admin/api/cluster/deactivate-model
+            Post("/admin/api/cluster/deactivate-model") { _, _ in
+                let result = await ClusterAdminRoutes.shared.deactivateModel()
+                let data = try? JSONSerialization.data(withJSONObject: result)
+                let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                return Response(status: .ok, headers: [.contentType: "application/json"],
+                                body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
+            }
+
+            // Cluster model status: GET /admin/api/cluster/model-status
+            Get("/admin/api/cluster/model-status") { _, _ in
+                let result = ClusterAdminRoutes.shared.modelStatus()
+                let data = try? JSONSerialization.data(withJSONObject: result)
+                let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                return Response(status: .ok, headers: [.contentType: "application/json"],
+                                body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
+            }
+
             Get("/admin/dashboard") { _, _ in
                 let html = Self.dashboardHTML()
                 return Response(
@@ -2290,14 +2395,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             logger: Logger(label: "NovaMLX.API")
         )
 
+        // Workers bind admin API to all interfaces so Coordinator can reach them
+        let adminHost = (cfg.cluster?.role == "worker") ? "0.0.0.0" : cfg.host
         let adminApp = Application(
             router: adminRouter,
-            configuration: .init(address: .hostname(cfg.host, port: cfg.adminPort)),
+            configuration: .init(address: .hostname(adminHost, port: cfg.adminPort)),
             logger: Logger(label: "NovaMLX.Admin")
         )
 
         NovaMLXLog.info("NovaMLX API server starting on \(cfg.host):\(cfg.port)\(cfg.isTLSEnabled ? " (TLS)" : "")")
-        NovaMLXLog.info("NovaMLX Admin API starting on \(cfg.host):\(cfg.adminPort)")
+        NovaMLXLog.info("NovaMLX Admin API starting on \(adminHost):\(cfg.adminPort)")
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { try await mainApp.run() }

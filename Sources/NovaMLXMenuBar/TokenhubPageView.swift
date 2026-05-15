@@ -69,6 +69,10 @@ struct TokenhubPageView: View {
     @State private var bulkTestRunning = false
     @State private var bulkTestProgress: [String: String] = [:] // name -> "OK" / "FAIL"
 
+    // Alert
+    @State private var alertMessage = ""
+    @State private var showAlert = false
+
     private let manager = TokenhubManager.shared
 
     private var isFormActive: Bool {
@@ -96,6 +100,11 @@ struct TokenhubPageView: View {
         .onChange(of: formEndpoint) { resetVerification() }
         .onChange(of: formApiKey) { resetVerification() }
         .onChange(of: formRemoteModel) { resetVerification() }
+        .alert("Tokenhub", isPresented: $showAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(alertMessage)
+        }
     }
 
     // MARK: - Left Panel (My Providers only)
@@ -580,7 +589,8 @@ struct TokenhubPageView: View {
     private func startCreating() {
         // Check free-tier limit
         if !CloudAuth.isSubscribed() && manager.userProviderCount() >= TokenhubManager.freeProviderLimit {
-            saveError = "Free tier: max \(TokenhubManager.freeProviderLimit) providers. Subscribe for unlimited."
+            alertMessage = "Free tier: max \(TokenhubManager.freeProviderLimit) providers. Subscribe for unlimited."
+            showAlert = true
             return
         }
         isCreatingNew = true

@@ -1,5 +1,22 @@
 import Foundation
 import MLX
+import MLXLMCommon
+import NovaMLXEngine
+
+// MARK: - Sendability helpers
+
+/// Wraps non-Sendable values for capture in @Sendable closures.
+/// Safe because `mlxContainer.perform` guarantees serial access.
+final class SendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
+/// Wraps non-Sendable `[KVCache]` for capture in `perform` closures.
+final class KVCacheBox: @unchecked Sendable {
+    let caches: [KVCache]
+    init(_ caches: [KVCache]) { self.caches = caches }
+}
 
 // MARK: - ShardEngineError
 
@@ -7,6 +24,8 @@ import MLX
 public enum ShardEngineError: Error, Sendable {
     /// The compute policy is not ready (weights not bound).
     case notReady
+    /// The model container could not be found.
+    case modelNotAvailable(String)
 }
 
 // MARK: - ComputePolicy
@@ -22,23 +41,85 @@ public protocol ComputePolicy: Sendable {
 
     /// Run forward computation through the assigned layers.
     ///
-    /// - Parameters:
-    ///   - input: Input activation tensor.
-    ///   - cache: In-out KV cache (or other per-layer state).
-    /// - Returns: Output activation tensor.
-    func compute(input: MLXArray, cache: inout [Any]) throws -> MLXArray
+    /// - Parameter input: Input activation tensor (token IDs or hidden state).
+    /// - Returns: Output activation tensor (hidden state or logits).
+    func compute(input: MLXArray) async throws -> MLXArray
+
+    /// Run forward computation + argmax sampling remotely.
+    ///
+    /// Default implementation: compute then argmax locally.
+    /// RemoteShardPolicy overrides to send computeAndSample wire message
+    /// and receive a 4-byte token ID instead of the full logits tensor.
+    ///
+    /// This is the key optimization for decode: the worker returns a single
+    /// token ID (4 bytes) instead of the full logits tensor (~970KB).
+    func computeAndSample(input: MLXArray) async throws -> Int
 
     /// Release weights from GPU memory.
     func releaseWeights()
+
+    /// Run forward + per-position argmax for speculative verification.
+    /// Input: [1, K+1, hidden_size] → Output: K+1 token IDs.
+    /// Default: compute then argmax each position.
+    func speculativeVerify(input: MLXArray) async throws -> [Int]
+
+    /// Trim KV cache to keep only entries up to the given position.
+    func rollbackCache(position: Int) async throws
+}
+
+// MARK: - ComputePolicy Default Implementations
+
+extension ComputePolicy {
+    public func computeAndSample(input: MLXArray) async throws -> Int {
+        let logits = try await compute(input: input)
+        return argmaxToken(logits)
+    }
+
+    public func speculativeVerify(input: MLXArray) async throws -> [Int] {
+        let logits = try await compute(input: input)
+        let seqLen = logits.ndim >= 2 ? logits.dim(logits.ndim - 2) : 1
+        var ids: [Int] = []
+        ids.reserveCapacity(seqLen)
+        for pos in 0..<seqLen {
+            let posLogits: MLXArray
+            if logits.ndim == 3 {
+                posLogits = logits[0..., pos, 0...]
+            } else if logits.ndim == 2 {
+                posLogits = logits[pos, 0...]
+            } else {
+                posLogits = logits
+            }
+            ids.append(MLX.argMax(posLogits.flattened()).item(Int.self))
+        }
+        return ids
+    }
+
+    public func rollbackCache(position: Int) async throws {
+        // Default: no-op (FitInMemoryPolicy doesn't support rollback)
+    }
+}
+
+/// Argmax: pick the token with highest logit score.
+/// Shared by coordinator (decode loop) and worker (computeAndSample handler).
+public func argmaxToken(_ logits: MLXArray) -> Int {
+    let lastLogits: MLXArray
+    if logits.ndim == 3 {
+        lastLogits = logits[0..., -1, 0...]
+    } else if logits.ndim == 2 {
+        lastLogits = logits[-1, 0...]
+    } else {
+        lastLogits = logits
+    }
+    return MLX.argMax(lastLogits.flattened()).item(Int.self)
 }
 
 // MARK: - FitInMemoryPolicy
 
-/// A ``ComputePolicy`` that assumes all assigned layers fit in local memory.
+/// A ``ComputePolicy`` that runs the full model forward pass on the coordinator.
 ///
-/// This is the baseline policy: weights are loaded on ``bindWeights()`` and
-/// ``compute(input:cache:)`` is a placeholder that passes input through unchanged
-/// (real forward pass wiring comes in a later task).
+/// In Phase 1 (single-node), the coordinator loads the entire model and this policy
+/// runs all layers in sequence via ``MLXLMCommon/ModelContainer/perform``.
+/// KV caches are persisted across decode steps for correct autoregressive generation.
 public final class FitInMemoryPolicy: ComputePolicy, @unchecked Sendable {
 
     /// The shard assignment this policy manages.
@@ -47,24 +128,49 @@ public final class FitInMemoryPolicy: ComputePolicy, @unchecked Sendable {
     /// Whether weights are currently bound and ready for computation.
     public private(set) var isReady: Bool = false
 
-    public init(assignment: ShardAssignment) {
+    private weak var engine: MLXEngine?
+    private let modelId: String
+    private var kvCaches: [KVCache] = []
+
+    public init(assignment: ShardAssignment, engine: MLXEngine, modelId: String) {
         self.assignment = assignment
+        self.engine = engine
+        self.modelId = modelId
     }
 
     public func bindWeights() async throws {
-        // Placeholder: in production, this loads safetensors shard into GPU memory.
+        guard let container = engine?.getContainer(for: modelId),
+              let mlxContainer = container.mlxContainer else {
+            throw ShardEngineError.modelNotAvailable(modelId)
+        }
+        // Create fresh KV caches for this inference session
+        let cacheBox = await mlxContainer.perform { context in
+            return KVCacheBox(context.model.newCache(parameters: nil))
+        }
+        self.kvCaches = cacheBox.caches
         isReady = true
     }
 
-    public func compute(input: MLXArray, cache: inout [Any]) throws -> MLXArray {
+    public func compute(input: MLXArray) async throws -> MLXArray {
         guard isReady else {
             throw ShardEngineError.notReady
         }
-        // Placeholder: real forward pass through assigned layers comes later.
-        return input
+        guard let container = engine?.getContainer(for: modelId),
+              let mlxContainer = container.mlxContainer else {
+            throw ShardEngineError.modelNotAvailable(modelId)
+        }
+        let inputBox = SendableBox(input)
+        let cacheBox = KVCacheBox(kvCaches)
+        let resultBox = await mlxContainer.perform { context in
+            let logits = context.model(inputBox.value, cache: cacheBox.caches)
+            MLX.eval(logits)
+            return SendableBox(logits)
+        }
+        return resultBox.value
     }
 
     public func releaseWeights() {
+        kvCaches = []
         isReady = false
     }
 }
@@ -137,8 +243,7 @@ public final class ShardEngine: @unchecked Sendable {
             )
         }
 
-        var cache: [Any] = []
-        activation = try policy.compute(input: activation, cache: &cache)
+        activation = try await policy.compute(input: activation)
 
         if !isLastShard {
             _ = MLXDistributedWrapper.send(
@@ -179,7 +284,6 @@ public final class ShardEngine: @unchecked Sendable {
         for _ in 0..<nLeading {}
 
         // Real chunks
-        var cache: [Any] = []
         for i in 0..<nReal {
             let start = i * chunkSize
             let end = min(start + chunkSize, promptLen - 1)
@@ -206,7 +310,7 @@ public final class ShardEngine: @unchecked Sendable {
                 )
             }
 
-            activation = try policy.compute(input: activation, cache: &cache)
+            activation = try await policy.compute(input: activation)
 
             if !isLastShard {
                 MLX.eval(activation)
@@ -246,7 +350,7 @@ public final class ShardEngine: @unchecked Sendable {
                 )
             }
 
-            activation = try policy.compute(input: activation, cache: &cache)
+            activation = try await policy.compute(input: activation)
             lastActivation = activation
 
             if !isLastShard {
@@ -254,12 +358,6 @@ public final class ShardEngine: @unchecked Sendable {
                 _ = MLXDistributedWrapper.send(activation, to: group.rank + 1, group: group)
             }
             flushPrefillSends()
-        }
-
-        // Final eval on cache state
-        let cacheArrays = cache.compactMap { $0 as? MLXArray }
-        if !cacheArrays.isEmpty {
-            MLX.eval(cacheArrays)
         }
 
         // Return the activation from the last final pass (logits on last shard).
@@ -295,8 +393,7 @@ public final class ShardEngine: @unchecked Sendable {
         }
 
         // Step 2: Forward through assigned layers.
-        var cache: [Any] = []
-        activation = try policy.compute(input: activation, cache: &cache)
+        activation = try await policy.compute(input: activation)
 
         // Step 3: Send to next shard if not last.
         if !isLastShard {

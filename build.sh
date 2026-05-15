@@ -146,6 +146,21 @@ if [ -f "$METALLIB_SRC" ]; then
 	fi
 fi
 
+# Sync SPM resource bundles (.bundle) into Contents/Resources/.
+# SPM's generated Bundle.module accessor hardcodes the build dir path,
+# which doesn't exist on deployed machines. ResourceBundleLocator searches
+# Contents/Resources/ as the primary location.
+APP_RESOURCES="dist/NovaMLX.app/Contents/Resources"
+for bundle_src in "$BUILD_BIN_DIR"/*.bundle; do
+	[ -d "$bundle_src" ] || continue
+	bname=$(basename "$bundle_src")
+	bundle_dst="$APP_RESOURCES/$bname"
+	if [ ! -d "$bundle_dst" ] || [ "$bundle_src" -nt "$bundle_dst" ]; then
+		cp -R "$bundle_src" "$bundle_dst"
+		UPDATED+=("$bname")
+	fi
+done
+
 # Re-sign the bundle as a whole if any contained binary changed, so the
 # bundle's CodeResources stays consistent with the new mach-o hashes.
 if [ ${#UPDATED[@]} -gt 0 ]; then

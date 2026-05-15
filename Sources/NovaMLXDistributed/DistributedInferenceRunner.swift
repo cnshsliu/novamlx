@@ -2,6 +2,8 @@ import Foundation
 import MLX
 import NovaMLXCore
 import NovaMLXUtils
+import NovaMLXEngine
+import Tokenizers
 
 // MARK: - DistributedInferenceError
 
@@ -32,7 +34,6 @@ public enum DistributedInferenceError: Error, LocalizedError {
 // MARK: - DistributedTokenizer
 
 /// Minimal tokenizer interface needed by the distributed runner.
-/// ``MLXEngine.Tokenizer`` already conforms via its encode/decode closures.
 public struct DistributedTokenizer: Sendable {
     public let encode: @Sendable (String) -> [Int]
     public let decode: @Sendable ([Int]) -> String
@@ -48,136 +49,206 @@ public struct DistributedTokenizer: Sendable {
 
 // MARK: - DistributedInferenceRunner
 
-/// Orchestrates distributed inference across cluster workers using pipeline-parallel sharding.
+/// Orchestrates distributed inference across cluster nodes using pipeline-parallel sharding.
 ///
 /// On the coordinator node, this runner:
 /// 1. Profiles the model via ``ModelAnalyzer`` to get layer memory estimates.
-/// 2. Retrieves active workers from ``ClusterManager``.
-/// 3. Computes a ``ShardPlan`` proportional to worker memory.
-/// 4. Creates a ``ShardEngine`` per shard with ``FitInMemoryPolicy``.
-/// 5. Initializes the ``DistributedGroup`` for inter-node communication.
-/// 6. Runs prefill then a decode loop through the ShardEngine pipeline.
-/// 7. Returns an ``InferenceResult``.
-///
-/// The current implementation wires the complete code path. Since ``FitInMemoryPolicy``
-/// passes tensors through unchanged, actual distributed compute will produce placeholder
-/// results until real forward-pass wiring is added.
+/// 2. Builds a node list: Coordinator (rank 0) + available workers.
+/// 3. Computes a ``ShardPlan`` proportional to node memory.
+/// 4. Creates a ``ShardEngine`` per shard with the right policy:
+///    - Coordinator shards → ``SlicedForwardPolicy`` (runs assigned layers locally)
+///    - Remote worker shards → ``RemoteShardPolicy`` (TCP delegate to worker)
+/// 5. Runs prefill then a decode loop through the shard pipeline.
 public final class DistributedInferenceRunner: @unchecked Sendable {
 
     private let clusterConfig: ClusterConfig
 
-    /// Called to obtain a tokenizer for the given model ID. Returns nil if model is not loaded.
-    /// Injected by InferenceService to avoid a direct dependency on NovaMLXEngine.
     private let tokenizerProvider: @Sendable (String) -> DistributedTokenizer?
-
-    /// Called to check whether a model is loaded and get its path.
-    /// Returns the model directory path, or nil if the model is not loaded.
     private let modelPathProvider: @Sendable (String) -> String?
+    private weak var engine: MLXEngine?
+
+    /// Cache of the last computed shard plan for observability.
+    public private(set) var lastShardPlan: (modelId: String, plan: ShardPlan)?
 
     public init(
         clusterConfig: ClusterConfig,
         tokenizerProvider: @Sendable @escaping (String) -> DistributedTokenizer?,
-        modelPathProvider: @Sendable @escaping (String) -> String?
+        modelPathProvider: @Sendable @escaping (String) -> String?,
+        engine: MLXEngine
     ) {
         self.clusterConfig = clusterConfig
         self.tokenizerProvider = tokenizerProvider
         self.modelPathProvider = modelPathProvider
+        self.engine = engine
     }
 
     // MARK: - Public API
 
-    /// Run distributed inference for a single request.
-    ///
-    /// - Parameter request: The inference request to process.
-    /// - Returns: An ``InferenceResult`` with the generated text.
     public func generate(request: InferenceRequest) async throws -> InferenceResult {
         let modelId = request.model
         let startTime = Date()
 
-        // 1. Get tokenizer (confirms model is loaded)
-        guard let tokenizer = tokenizerProvider(modelId) else {
-            throw DistributedInferenceError.modelNotLoaded(modelId: modelId)
-        }
-
-        // 2. Get model path for profiling
+        // 1. Get model path (needed for both profiling and tokenizer fallback)
         guard let modelPath = modelPathProvider(modelId) else {
             throw DistributedInferenceError.modelNotLoaded(modelId: modelId)
         }
 
-        // 3. Profile model layers
-        let profiles: [LayerProfile]
-        do {
-            profiles = try await ModelAnalyzer.shared.analyze(modelPath: modelPath)
-        } catch {
-            throw DistributedInferenceError.shardPlanFailed("Model analysis failed: \(error)")
+        // 2. Get tokenizer — try provider first (engine container), then load from disk
+        var tokenizer = tokenizerProvider(modelId)
+        if tokenizer == nil {
+            NovaMLXLog.info("[Distributed] Tokenizer not in engine, loading from disk: \(modelPath)")
+            let modelDir = URL(fileURLWithPath: modelPath)
+            let loaded = try await AutoTokenizer.from(modelFolder: modelDir)
+            tokenizer = DistributedTokenizer(
+                encode: { text in loaded.encode(text: text, addSpecialTokens: true) },
+                decode: { tokens in loaded.decode(tokens: tokens, skipSpecialTokens: true) }
+            )
+        }
+        guard let tokenizer = tokenizer else {
+            throw DistributedInferenceError.modelNotLoaded(modelId: modelId)
         }
 
-        guard !profiles.isEmpty else {
-            throw DistributedInferenceError.shardPlanFailed("No layer profiles produced")
-        }
+        // Check for pre-loaded shard engines from ClusterModelManager (fast path)
+        var shardEngines: [ShardEngine]
+        let shouldReleaseWeights: Bool
 
-        // 4. Get active workers from cluster
-        let workers = ClusterManager.shared.activeWorkers
-        let nodeSpecs = workers.map { $0.spec }
+        if let preloaded = ClusterModelManager.shared.getShardEngines(for: modelId) {
+            shardEngines = preloaded
+            shouldReleaseWeights = false
+            if let plan = ClusterModelManager.shared.shardPlan {
+                lastShardPlan = (modelId, plan)
+                DistributedInferenceRunnerCache.shared.setPlan(modelId: modelId, plan: plan)
+            }
+            NovaMLXLog.info("[Distributed] Using pre-loaded shard engines (\(preloaded.count) shards)")
+        } else {
+            shouldReleaseWeights = true
 
-        // If no remote workers, create a local-only node spec for single-node fallback
-        let effectiveNodes: [NodeSpec]
-        if nodeSpecs.isEmpty {
-            let localMemory = MLX.GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? 0
-            effectiveNodes = [NodeSpec(
+            // 3. Profile model layers
+            let profiles: [LayerProfile]
+            do {
+                profiles = try await ModelAnalyzer.shared.analyze(modelPath: modelPath)
+            } catch {
+                throw DistributedInferenceError.shardPlanFailed("Model analysis failed: \(error)")
+            }
+
+            guard !profiles.isEmpty else {
+                throw DistributedInferenceError.shardPlanFailed("No layer profiles produced")
+            }
+
+            // 3.5 Ensure model is loaded in main engine for SlicedForwardPolicy
+            if let engine = engine, engine.getContainer(for: modelId) == nil {
+                NovaMLXLog.info("[Distributed] Loading model \(modelId) into main engine for local shard...")
+                let modelDir = URL(fileURLWithPath: modelPath)
+                let config = ModelConfig(
+                    identifier: ModelIdentifier(id: modelId, family: .qwen)
+                )
+                _ = try await engine.loadModel(from: modelDir, config: config)
+                NovaMLXLog.info("[Distributed] Model \(modelId) loaded in main engine")
+            }
+
+            // 4. Build node list: Coordinator (rank 0) + available workers
+            let availableWorkers = ClusterManager.shared.workers.values
+                .filter { $0.status == .ready || $0.status == .active }
+
+            let localMemory = MLX.GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? ProcessInfo.processInfo.physicalMemory
+            let coordinatorSpec = NodeSpec(
                 nodeId: "local-coordinator",
                 totalMemoryBytes: localMemory,
                 computeCapability: 1.0,
                 hostname: "127.0.0.1",
                 port: clusterConfig.coordinatorPort
-            )]
-            NovaMLXLog.info("[Distributed] No remote workers — using local-only fallback")
-        } else {
-            effectiveNodes = nodeSpecs
-        }
-
-        // 5. Compute shard plan
-        let plan = ShardPlan(
-            profiles: profiles,
-            nodes: effectiveNodes,
-            strategy: clusterConfig.strategy
-        )
-
-        NovaMLXLog.info("[Distributed] Shard plan: \(plan.assignments.count) shards, \(plan.totalLayers) layers, strategy=\(plan.strategy.rawValue)")
-
-        // 6. Initialize distributed group
-        let group: DistributedGroup
-        if MLXDistributedWrapper.isCBBackendAvailable {
-            let backend = MLXDistributedWrapper.bestAvailableBackend()
-            group = MLXDistributedWrapper.initialize(strict: false, backend: backend)
-        } else {
-            // Without a real distributed backend, use the sentinel group.
-            // The ShardEngine will degrade to single-node passthrough.
-            group = .uninitialized
-        }
-
-        // 7. Create shard engines
-        var shardEngines: [ShardEngine] = []
-        for assignment in plan.assignments {
-            let policy = FitInMemoryPolicy(assignment: assignment)
-            let shardEngine = ShardEngine(
-                group: group,
-                assignment: assignment,
-                policy: policy
             )
-            shardEngines.append(shardEngine)
+            let effectiveNodes = [coordinatorSpec] + availableWorkers.map(\.spec)
+
+            NovaMLXLog.info("[Distributed] Nodes: \(effectiveNodes.count) (coordinator=\(bytesFormatted(localMemory)), workers=\(availableWorkers.count))")
+
+            // 5. Compute shard plan
+            let plan = ShardPlan(
+                profiles: profiles,
+                nodes: effectiveNodes,
+                strategy: clusterConfig.strategy,
+                minLayersPerShard: clusterConfig.minLayersPerShard
+            )
+
+            lastShardPlan = (modelId, plan)
+            DistributedInferenceRunnerCache.shared.setPlan(modelId: modelId, plan: plan)
+
+            for (i, a) in plan.assignments.enumerated() {
+                NovaMLXLog.info("[Distributed] Shard \(i): \(a.nodeId) layers \(a.startLayer)..<\(a.endLayer) (\(a.layerCount) layers, \(bytesFormatted(a.memoryEstimate)))")
+            }
+
+            // 6. Initialize distributed group
+            // Only init if Ring transport is actually being used (RemoteShardPolicy.useRingTransport).
+            // JACCL/Ring groups interfere with TCP transport — send/recv calls are NOT no-ops
+            // when the group is valid but has no peer nodes.
+            let group: DistributedGroup = .uninitialized
+
+            // 7. Create shard engines with proper policies
+            shardEngines = []
+            for (index, assignment) in plan.assignments.enumerated() {
+                let isFirst = index == 0
+                let isLast = index == plan.assignments.count - 1
+                let policy: ComputePolicy
+
+                if assignment.nodeId == "local-coordinator" {
+                    policy = SlicedForwardPolicy(
+                        assignment: assignment,
+                        engine: engine!,
+                        modelId: modelId,
+                        isFirst: isFirst,
+                        isLast: isLast
+                    )
+                    NovaMLXLog.info("[Distributed] Shard \(index): local SlicedForward layers \(assignment.startLayer)..<\(assignment.endLayer)")
+                } else {
+                    let worker = availableWorkers.first { $0.spec.nodeId == assignment.nodeId }
+                    let host = worker?.spec.networkHost ?? worker?.spec.hostname ?? assignment.nodeId
+                    let endpoint = NodeEndpoint(
+                        nodeId: assignment.nodeId,
+                        host: host,
+                        port: 7010
+                    )
+                    policy = RemoteShardPolicy(assignment: assignment, workerEndpoint: endpoint, modelId: modelId, modelPath: modelPath, isFirst: isFirst, isLast: isLast)
+                    NovaMLXLog.info("[Distributed] Shard \(index): remote \(host):7010 layers \(assignment.startLayer)..<\(assignment.endLayer)")
+                }
+
+                shardEngines.append(ShardEngine(
+                    group: group,
+                    assignment: assignment,
+                    policy: policy
+                ))
+            }
+
+            // Bind weights on all shards (creates KV caches, connects to remote workers)
+            for (i, shardEngine) in shardEngines.enumerated() {
+                do {
+                    try await shardEngine.policy.bindWeights()
+                    NovaMLXLog.info("[Distributed] Shard \(i) weights bound")
+                } catch {
+                    NovaMLXLog.error("[Distributed] Shard \(i) bindWeights failed: \(error)")
+                    throw DistributedInferenceError.shardPlanFailed("Shard \(i) bindWeights failed: \(error)")
+                }
+            }
         }
 
-        // Bind weights on all shards
-        for shardEngine in shardEngines {
-            try await shardEngine.policy.bindWeights()
-        }
-
-        // 8. Tokenize input
+        // 8. Tokenize input — apply chat template via MLXLMCommon tokenizer
         var promptTokens: [Int] = []
-        for msg in request.messages {
-            if let content = msg.content {
-                promptTokens.append(contentsOf: tokenizer.encode(content))
+        if let container = engine?.getContainer(for: modelId),
+           let mlxTokenizer = await container.mlxContainer?.tokenizer {
+            let messageDicts: [[String: any Sendable]] = request.messages.compactMap { msg in
+                guard let content = msg.content else { return nil }
+                return ["role": msg.role.rawValue, "content": content] as [String: any Sendable]
+            }
+            if let rendered = try? mlxTokenizer.applyChatTemplate(messages: messageDicts, tools: nil, additionalContext: nil) {
+                promptTokens = rendered
+                NovaMLXLog.info("[Distributed] Chat template applied: \(promptTokens.count) tokens")
+            }
+        }
+        // Fallback: raw encode if chat template not available
+        if promptTokens.isEmpty {
+            for msg in request.messages {
+                if let content = msg.content {
+                    promptTokens.append(contentsOf: tokenizer.encode(content))
+                }
             }
         }
 
@@ -195,41 +266,167 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
 
         let promptArray = MLXArray(promptTokens.map { Int32($0) })
 
-        // 9. Prefill through the first shard engine (coordinator owns rank 0)
-        guard let firstShard = shardEngines.first else {
+        // 9. Prefill through the shard pipeline
+        guard !shardEngines.isEmpty else {
             throw DistributedInferenceError.shardPlanFailed("No shards created")
         }
 
-        let prefillOutput = try await firstShard.prefill(
-            tokens: promptArray,
-            config: clusterConfig.prefill
-        )
+        var activation: MLXArray
 
-        // 10. Decode loop
+        // Bypass ShardEngine for prefill — call policy.compute() directly.
+        // ShardEngine's MLX distributed recv/send interfere with TCP transport.
+        if shardEngines.count == 2,
+           let coordPolicy = shardEngines[0].policy as? SlicedForwardPolicy,
+           let workerPolicy = shardEngines[1].policy as? RemoteShardPolicy,
+           promptTokens.count > 256 {
+            activation = try await pipelinedPrefill(
+                tokens: promptArray,
+                coordPolicy: coordPolicy,
+                workerPolicy: workerPolicy
+            )
+        } else {
+            // Direct pipeline: coordinator → worker
+            activation = promptArray
+            for shard in shardEngines {
+                activation = try await shard.policy.compute(input: activation)
+            }
+        }
+
+        // 10. Decode loop — speculative decoding with N-gram speculation
         let maxTokens = request.maxTokens ?? 512
-        var currentToken = prefillOutput
         var generatedTokenIds: [Int] = []
         var stopTokens: Set<String> = []
         if let stop = request.stop {
             stopTokens = Set(stop)
         }
 
-        for _ in 0..<maxTokens {
-            let decoded = try await firstShard.decode(token: currentToken)
+        // EOS detection: use tokenizer + fallback canonical IDs
+        var eosTokenIds: Set<Int> = [151645, 151643] // Qwen3.5/3.6 canonical: <|im_end|>,
+        if let container = engine?.getContainer(for: modelId),
+           let eosId = container.tokenizer?.eosTokenId {
+            eosTokenIds.insert(eosId)
+        }
 
-            // Sample: argmax for now (greedy). Real sampling comes with forward-pass wiring.
-            let sampledId = argmax(decoded)
+        // Detect remote sampling: last shard is remote → worker does argmax
+        let remoteSamplingEnabled = shardEngines.count > 1 && shardEngines.last?.policy is RemoteShardPolicy
+        let canSpeculate = remoteSamplingEnabled && shardEngines.count == 2
+        // Extra prediction layers: run N worker layers on coord for better token prediction.
+        // More layers = better accuracy but less overlap. 5 is a reasonable default.
+        let extraPredictionLayers = 5
+        NovaMLXLog.info("[Distributed] Remote sampling: \(remoteSamplingEnabled), speculative: \(canSpeculate) (shards: \(shardEngines.count)), extraPredLayers: \(extraPredictionLayers)")
 
-            generatedTokenIds.append(sampledId)
+        if canSpeculate {
+            // Double-buffered decode: overlap coord GPU pre-compute with worker GPU compute
+            let coordPolicy = shardEngines[0].policy
+            guard let slicedCoord = coordPolicy as? SlicedForwardPolicy else {
+                throw DistributedInferenceError.shardPlanFailed("Coord policy is not SlicedForwardPolicy")
+            }
+            let workerPolicy = shardEngines[1].policy as! RemoteShardPolicy
+            var currentPosition = promptTokens.count
+            var correctPredictions = 0
+            var totalPredictions = 0
 
-            // Check stop sequences
-            let fullText = tokenizer.decode(generatedTokenIds)
-            if stopTokens.contains(where: { fullText.hasSuffix($0) }) {
-                break
+            // First token: sample from prefill logits (local argmax)
+            let firstToken = argmax(activation)
+            if !eosTokenIds.contains(firstToken) {
+                generatedTokenIds.append(firstToken)
             }
 
-            // Feed sampled token back for next step
-            currentToken = MLXArray(Int32(sampledId))
+            // Compute activation for first token (coord GPU)
+            activation = try await coordPolicy.compute(input: MLXArray(Int32(firstToken)))
+            currentPosition += 1
+
+            // Double-buffered decode loop
+            var timingLogInterval = 0
+            while generatedTokenIds.count < maxTokens {
+                let t0 = CFAbsoluteTimeGetCurrent()
+
+                // Step 1: Start worker compute async (TCP send + worker GPU + TCP recv)
+                let activationBox = SendableBox(activation)
+                let workerTask = Task {
+                    try await workerPolicy.computeAndSample(input: activationBox.value)
+                }
+
+                // Step 2: Predict next token from coord's hidden state + pre-compute in one shot
+                // Uses partial model (norm + head on layers 0-52 output) to predict, then
+                // runs embed + layers 0-52 for the predicted token — all while worker is busy.
+                let prediction = try? await slicedCoord.predictAndPrecompute(hiddenState: activation, extraPredictionLayers: extraPredictionLayers)
+
+                let tPrecompute = CFAbsoluteTimeGetCurrent()
+
+                // Step 3: Get actual token from worker
+                let actualToken = try await workerTask.value
+
+                let tWorkerDone = CFAbsoluteTimeGetCurrent()
+
+                // Step 4: Check prediction — use pre-computed or re-compute
+                if let pred = prediction,
+                   pred.predicted == actualToken {
+                    // Correct prediction! Coord compute was overlapped with worker — free.
+                    activation = pred.precomputed
+                    correctPredictions += 1
+                    totalPredictions += 1
+                    currentPosition += 1
+                } else {
+                    // Wrong (or no prediction). Rollback pre-compute if any, then re-compute.
+                    totalPredictions += 1
+                    if prediction != nil {
+                        try? await coordPolicy.rollbackCache(position: currentPosition)
+                    }
+                    activation = try await coordPolicy.compute(
+                        input: MLXArray(Int32(actualToken))
+                    )
+                    currentPosition += 1
+                }
+
+                let t5 = CFAbsoluteTimeGetCurrent()
+
+                // Log timing every 50 tokens
+                timingLogInterval += 1
+                if timingLogInterval % 50 == 1 {
+                    let precomputeMs = (tPrecompute - t0) * 1000
+                    let workerWaitMs = (tWorkerDone - tPrecompute) * 1000
+                    let totalMs = (t5 - t0) * 1000
+                    NovaMLXLog.info("[Distributed] DB-timing[\(generatedTokenIds.count)]: total=\(String(format: "%.1f", totalMs))ms predict+precompute=\(String(format: "%.1f", precomputeMs))ms workerWait=\(String(format: "%.1f", workerWaitMs))ms predicted=\(prediction?.predicted ?? -1) actual=\(actualToken) correct=\(prediction?.predicted == actualToken)")
+                }
+
+                // Step 5: EOS / stop check
+                if eosTokenIds.contains(actualToken) { break }
+                generatedTokenIds.append(actualToken)
+                let fullText = tokenizer.decode(generatedTokenIds)
+                if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
+            }
+
+            let rate = totalPredictions > 0
+                ? Double(correctPredictions) / Double(totalPredictions) : 0
+            NovaMLXLog.info("[Distributed] Double-buffer: \(correctPredictions)/\(totalPredictions) correct (\(String(format: "%.0f%%", rate * 100))), \(generatedTokenIds.count) tokens")
+        } else {
+            // Original non-speculative decode loop
+            for i in 0..<maxTokens {
+                let sampledId: Int
+                if i == 0 {
+                    sampledId = argmax(activation)
+                } else if remoteSamplingEnabled {
+                    sampledId = try await (shardEngines.last!.policy as! RemoteShardPolicy).computeAndSample(input: activation)
+                } else {
+                    sampledId = argmax(activation)
+                }
+
+                if eosTokenIds.contains(sampledId) { break }
+                generatedTokenIds.append(sampledId)
+                let fullText = tokenizer.decode(generatedTokenIds)
+                if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
+
+                if remoteSamplingEnabled {
+                    activation = try await shardEngines[0].policy.compute(input: MLXArray(Int32(sampledId)))
+                } else {
+                    var decodeActivation = MLXArray(Int32(sampledId))
+                    for shard in shardEngines {
+                        decodeActivation = try await shard.policy.compute(input: decodeActivation)
+                    }
+                    activation = decodeActivation
+                }
+            }
         }
 
         let text = tokenizer.decode(generatedTokenIds)
@@ -237,6 +434,13 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
         let tps = elapsed > 0 ? Double(generatedTokenIds.count) / elapsed : 0
 
         NovaMLXLog.info("[Distributed] Completed: \(generatedTokenIds.count) tokens in \(String(format: "%.2f", elapsed))s (\(String(format: "%.1f", tps)) tok/s)")
+
+        // Release weights only if we created them in this request
+        if shouldReleaseWeights {
+            for shardEngine in shardEngines {
+                shardEngine.policy.releaseWeights()
+            }
+        }
 
         return InferenceResult(
             id: request.id,
@@ -251,11 +455,72 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
 
     // MARK: - Private helpers
 
-    /// Extract the argmax token ID from a logits tensor.
-    private func argmax(_ logits: MLXArray) -> Int {
-        // logits shape varies; flatten and take argmax
-        let flat = logits.flattened()
-        let index = MLX.argMax(flat).item(Int.self)
-        return index
+    /// Pipelined prefill: overlaps Coordinator compute (chunk N+1) with Worker compute (chunk N).
+    private func pipelinedPrefill(
+        tokens: MLXArray,
+        coordPolicy: SlicedForwardPolicy,
+        workerPolicy: RemoteShardPolicy
+    ) async throws -> MLXArray {
+        let tokenCount = tokens.dim(0)
+        let chunkSize = min(512, tokenCount)
+        let numChunks = (tokenCount + chunkSize - 1) / chunkSize
+
+        NovaMLXLog.info("[Distributed] Pipelined prefill: \(tokenCount) tokens, \(numChunks) chunks of \(chunkSize)")
+
+        var hasPendingResult = false
+        let startTime = Date()
+
+        for i in 0..<numChunks {
+            let start = i * chunkSize
+            let end = min(start + chunkSize, tokenCount)
+            let chunk = tokens[start..<end]
+
+            // Collect previous Worker result (overlapped with Coordinator compute)
+            if hasPendingResult {
+                let _ = try workerPolicy.recvResult()
+            }
+
+            // Coordinator processes this chunk (embedding + assigned layers)
+            let coordOutput = try await coordPolicy.compute(input: chunk)
+
+            // Send to Worker (fire-and-forget until next iteration)
+            try workerPolicy.sendCompute(input: coordOutput)
+            hasPendingResult = true
+        }
+
+        // Collect final Worker result (includes norm + head on last shard)
+        let result = try workerPolicy.recvResult()
+
+        let elapsed = Date().timeIntervalSince(startTime)
+        NovaMLXLog.info("[Distributed] Pipelined prefill done: \(numChunks) chunks in \(String(format: "%.2f", elapsed))s")
+
+        return result
     }
+
+    private func argmax(_ logits: MLXArray) -> Int {
+        argmaxToken(logits)
+    }
+
+    private func bytesFormatted(_ bytes: UInt64) -> String {
+        String(format: "%.1fGB", Double(bytes) / 1e9)
+    }
+}
+
+// MARK: - DistributedInferenceRunnerCache
+
+/// Thread-safe cache for the last computed shard plan, readable by admin API.
+public final class DistributedInferenceRunnerCache: @unchecked Sendable {
+    public static let shared = DistributedInferenceRunnerCache()
+    private let lock = NSLock()
+    private var _lastPlan: (modelId: String, plan: ShardPlan)?
+
+    public var lastPlan: (modelId: String, plan: ShardPlan)? {
+        lock.withLock { _lastPlan }
+    }
+
+    public func setPlan(modelId: String, plan: ShardPlan) {
+        lock.withLock { _lastPlan = (modelId, plan) }
+    }
+
+    private init() {}
 }

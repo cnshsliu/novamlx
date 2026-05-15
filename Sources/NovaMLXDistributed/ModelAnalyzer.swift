@@ -84,16 +84,35 @@ public final class ModelAnalyzer: Sendable {
         }
 
         // Find all .safetensors files
-        let enumerator = FileManager.default.enumerator(
-            at: dirURL,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-        )
+        // Try multiple methods — FileManager can silently fail on external volumes
         var safetensorURLs: [URL] = []
-        while let item = enumerator?.nextObject() as? URL {
-            if item.pathExtension == "safetensors" {
-                safetensorURLs.append(item)
+
+        // Method 1: contentsOfDirectory
+        if let contents = try? FileManager.default.contentsOfDirectory(
+            at: dirURL,
+            includingPropertiesForKeys: nil,
+            options: .skipsHiddenFiles
+        ) {
+            safetensorURLs = contents.filter { $0.pathExtension == "safetensors" }
+        }
+
+        // Method 2: enumerator
+        if safetensorURLs.isEmpty {
+            let enumerator = FileManager.default.enumerator(
+                at: dirURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+            )
+            while let item = enumerator?.nextObject() as? URL {
+                if item.pathExtension == "safetensors" {
+                    safetensorURLs.append(item)
+                }
             }
+        }
+
+        // Method 3: POSIX readdir (bypasses FileManager entirely for external volumes)
+        if safetensorURLs.isEmpty {
+            safetensorURLs = posixListDirectory(modelPath).filter { $0.pathExtension == "safetensors" }
         }
 
         guard !safetensorURLs.isEmpty else {
@@ -294,4 +313,26 @@ public final class ModelAnalyzer: Sendable {
         }
         return (totalParams, totalMemory)
     }
+}
+
+// MARK: - POSIX Directory Listing
+
+/// Bypass FileManager to list directory contents using POSIX readdir.
+/// Needed because FileManager silently returns empty on some external volumes.
+private func posixListDirectory(_ path: String) -> [URL] {
+    guard let dir = opendir(path) else { return [] }
+    defer { closedir(dir) }
+    var urls: [URL] = []
+    let baseURL = URL(fileURLWithPath: path, isDirectory: true)
+    while let entry = readdir(dir) {
+        let name = entry.pointee.d_name
+        let nameStr = withUnsafePointer(to: name) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(PATH_MAX)) {
+                String(cString: $0)
+            }
+        }
+        guard !nameStr.isEmpty, nameStr != ".", nameStr != "..", !nameStr.hasPrefix(".") else { continue }
+        urls.append(baseURL.appendingPathComponent(nameStr))
+    }
+    return urls
 }

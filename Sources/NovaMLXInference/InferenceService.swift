@@ -87,7 +87,8 @@ public final class InferenceService: @unchecked Sendable {
                         return nil
                     }
                     return path
-                }
+                },
+                engine: engine
             )
         }
 
@@ -146,10 +147,28 @@ public final class InferenceService: @unchecked Sendable {
             preserveThinking: finalRequest.preserveThinking
         )
 
-        // Cluster mode: forward to distributed inference pipeline
+        // Cluster mode: check readiness, then route to distributed inference
         if clusterMode, let runner = distributedRunner {
-            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed (model=\(resolvedId))")
-            return try await runner.generate(request: finalRequest)
+            let modelManager = ClusterModelManager.shared
+            let clusterState = modelManager.getStatus()
+
+            switch clusterState.state {
+            case .idle:
+                NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Rejected: no model activated for distributed inference")
+                throw DistributedInferenceError.shardPlanFailed("No model activated for distributed inference. Activate a model first via POST /admin/api/cluster/activate-model")
+            case .activating:
+                let (ready, total) = clusterState.readinessFraction
+                NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Rejected: cluster preparing (\(ready)/\(total) nodes ready)")
+                throw DistributedInferenceError.shardPlanFailed("Cluster is preparing model '\(clusterState.activeModel ?? "?")' (\(ready)/\(total) nodes ready). Please wait.")
+            case ClusterModelState.failed:
+                let failedNodes = clusterState.nodes.filter { $0.status == .failed }
+                let errors = failedNodes.compactMap { $0.errorMessage }.joined(separator: "; ")
+                NovaMLXLog.error("[Route:\(finalRequest.id.uuidString.prefix(8))] Cluster activation failed: \(errors)")
+                throw DistributedInferenceError.shardPlanFailed("Cluster activation failed: \(errors)")
+            case .ready:
+                NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed (model=\(resolvedId))")
+                return try await runner.generate(request: finalRequest)
+            }
         }
 
         // Worker mode: route through subprocess

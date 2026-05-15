@@ -47,7 +47,8 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
             ],
             resources: [.copy("Resources")],
-            swiftSettings: concurrencySettings
+            swiftSettings: concurrencySettings,
+            linkerSettings: [.linkedFramework("Security")]
         ),
         .target(
             name: "NovaMLXPrefixCache",
@@ -155,6 +156,7 @@ let package = Package(
                 "NovaMLXInference",
                 "NovaMLXModelManager",
                 "NovaMLXAPI",
+                "NovaMLXDistributed",
             ],
             resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
@@ -173,7 +175,11 @@ let package = Package(
             dependencies: [
                 "NovaMLXCore",
                 "NovaMLXUtils",
+                "NovaMLXEngine",
                 .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "Cmlx", package: "mlx-swift"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             swiftSettings: concurrencySettings
         ),

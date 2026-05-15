@@ -7,6 +7,7 @@ import NovaMLXUtils
 
 public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
+    case cluster = "Cluster"
     case models = "Models"
     case downloads = "Downloads"
     case tokenhub = "Tokenhub"
@@ -19,6 +20,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     public var icon: String {
         switch self {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
+        case .cluster: return "xserve"
         case .models: return "cube.box"
         case .downloads: return "arrow.down.circle"
         case .tokenhub: return "server.rack"
@@ -71,7 +73,9 @@ public struct NovaAppView: View {
 
             VStack(spacing: 2) {
                 ForEach(AppPage.allCases) { page in
-                    sidebarItem(page)
+                    if page != .cluster || appState.clusterEnabled {
+                        sidebarItem(page)
+                    }
                 }
             }
             .padding(.horizontal, 8)
@@ -130,7 +134,7 @@ public struct NovaAppView: View {
     private var sidebarHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                if let logo = NSImage(named: "AppIcon") ?? Bundle.module.image(forResource: "AppIcon") {
+                if let logo = NSImage(named: "AppIcon") ?? (ResourceBundleLocator.find(bundleName: "NovaMLX_NovaMLXMenuBar")?.image(forResource: "AppIcon")) {
                     Image(nsImage: logo)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
@@ -237,6 +241,9 @@ public struct NovaAppView: View {
             StatusPageView(appState: appState, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .status ? 1 : 0)
+            ClusterPageView(appState: appState)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .cluster ? 1 : 0)
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .models ? 1 : 0)
@@ -261,6 +268,7 @@ public struct NovaAppView: View {
     private func localizedName(_ page: AppPage) -> String {
         switch page {
         case .status: return l10n.tr("app.status")
+        case .cluster: return l10n.tr("app.cluster")
         case .models: return l10n.tr("app.models")
         case .downloads: return l10n.tr("app.downloads")
         case .tokenhub: return "Tokenhub"

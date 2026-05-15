@@ -42,6 +42,15 @@ struct SettingsPageView: View {
     @State private var cfgSaveMessage: String? = nil
     @State private var cfgHasUnsavedChanges = false
 
+    // Cluster
+    @State private var clusterEnabled = false
+    @State private var clusterRole = "coordinator"
+    @State private var clusterHost = ""
+    @State private var clusterPort = 6591
+    @State private var clusterStrategy = "minNodes"
+    @State private var clusterMinLayers = 32
+    @State private var clusterWorkers: [[String: Any]] = []
+
     // Cloud auth state
     @State private var cloudEmail = ""
     @State private var cloudPassword = ""
@@ -56,6 +65,7 @@ struct SettingsPageView: View {
         ScrollView {
             VStack(spacing: 20) {
                 serverConfigSection
+                clusterSection
                 cloudAccountSection
                 cliSection
                 languageSection
@@ -114,6 +124,13 @@ struct SettingsPageView: View {
                             isEditing = false
                         }
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("Save & Restart") {
+                        saveConfig()
+                        restartApp()
+                    }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                 } else {
@@ -141,6 +158,13 @@ struct SettingsPageView: View {
                         loadCurrentConfig()
                         cfgSaveMessage = nil
                         withAnimation(.easeInOut(duration: 0.15)) { isEditing = true }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("Restart") {
+                        if cfgHasUnsavedChanges { saveConfig() }
+                        restartApp()
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -347,6 +371,29 @@ struct SettingsPageView: View {
         }
     }
 
+    private func restartApp() {
+        guard let bundleURL = Bundle.main.executableURL?.deletingLastPathComponent().deletingLastPathComponent() else {
+            // Fallback: just open the app bundle
+            if let appURL = Bundle.main.bundleURL.path.hasSuffix(".app") ? URL(fileURLWithPath: Bundle.main.bundleURL.path) : nil {
+                NSWorkspace.shared.open(appURL)
+            }
+            exit(0)
+        }
+        // Launch new instance from the app bundle
+        let appPath: String
+        if Bundle.main.bundleURL.path.hasSuffix(".app") {
+            appPath = Bundle.main.bundleURL.path
+        } else {
+            // Running from CLI, just re-exec
+            appPath = bundleURL.path
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [appPath]
+        try? process.run()
+        exit(0)
+    }
+
     private func loadCurrentConfig() {
         let configPath = NovaMLXPaths.configFile
 
@@ -365,12 +412,25 @@ struct SettingsPageView: View {
             if let keys = server["apiKeys"] as? [String] {
                 cfgApiKeys = keys.joined(separator: "\n")
             }
+
+            // Cluster settings — nested inside server dict
+            if let cluster = server["cluster"] as? [String: Any] {
+                clusterEnabled = true
+                clusterRole = cluster["role"] as? String ?? "coordinator"
+                clusterHost = cluster["coordinatorHost"] as? String ?? ""
+                clusterPort = cluster["coordinatorPort"] as? Int ?? 6591
+                clusterStrategy = cluster["strategy"] as? String ?? "minNodes"
+                clusterMinLayers = cluster["minLayersPerShard"] as? Int ?? 32
+            } else {
+                clusterEnabled = false
+            }
         }
         cfgDefaultModel = json["defaultModel"] as? String ?? ""
         if let rootKeys = json["apiKeys"] as? [String], !rootKeys.isEmpty {
         } else if let rootKeys = json["apiKeys"] as? [String] {
             cfgApiKeys = rootKeys.joined(separator: "\n")
         }
+
         cfgSaveMessage = nil
         cfgHasUnsavedChanges = false
     }
@@ -411,6 +471,22 @@ struct SettingsPageView: View {
             serverDict["apiKeys"] = apiKeysArray
         }
 
+        // Cluster settings — nested inside server dict so ServerConfig.Codable can decode it
+        if clusterEnabled {
+            var clusterDict: [String: Any] = ["role": clusterRole]
+            if clusterRole == "worker" && !clusterHost.isEmpty {
+                clusterDict["coordinatorHost"] = clusterHost
+            }
+            clusterDict["coordinatorPort"] = clusterPort
+            if clusterStrategy != "minNodes" {
+                clusterDict["strategy"] = clusterStrategy
+            }
+            if clusterMinLayers != 32 {
+                clusterDict["minLayersPerShard"] = clusterMinLayers
+            }
+            serverDict["cluster"] = clusterDict
+        }
+
         var configDict: [String: Any] = ["server": serverDict]
         if !cfgDefaultModel.isEmpty {
             configDict["defaultModel"] = cfgDefaultModel
@@ -426,6 +502,15 @@ struct SettingsPageView: View {
 
             Task {
                 let config = NovaMLXConfiguration.shared
+                let clusterSettings: ServerConfig.ClusterSettings? = clusterEnabled
+                    ? ServerConfig.ClusterSettings(
+                        role: clusterRole,
+                        coordinatorHost: clusterRole == "worker" ? clusterHost : nil,
+                        coordinatorPort: clusterPort,
+                        strategy: clusterStrategy,
+                        minLayersPerShard: clusterMinLayers
+                    )
+                    : nil
                 let newServerConfig = ServerConfig(
                     host: cfgHost,
                     port: cfgPort,
@@ -434,7 +519,8 @@ struct SettingsPageView: View {
                     maxConcurrentRequests: cfgMaxConcurrent,
                     requestTimeout: TimeInterval(cfgTimeout),
                     maxRequestSizeMB: cfgMaxBodyMB,
-                    maxProcessMemory: buildMemoryLimitString()
+                    maxProcessMemory: buildMemoryLimitString(),
+                    cluster: clusterSettings
                 )
                 await config.setServerConfig(newServerConfig)
                 await config.setDefaultModel(cfgDefaultModel.isEmpty ? nil : cfgDefaultModel)
@@ -442,6 +528,125 @@ struct SettingsPageView: View {
         } catch {
             cfgSaveMessage = "Error: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Cluster Config
+
+    private var clusterSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("Distributed Inference", icon: "network")
+
+            Toggle(isOn: $clusterEnabled) {
+                Text("Enable cluster mode")
+                    .font(.system(size: 12))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .onChange(of: clusterEnabled) { cfgHasUnsavedChanges = true }
+
+            if clusterEnabled {
+                // Role picker
+                HStack(spacing: 12) {
+                    Text("Role")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                        .frame(width: 80, alignment: .trailing)
+                    Picker("", selection: $clusterRole) {
+                        Text("Coordinator").tag("coordinator")
+                        Text("Worker").tag("worker")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                    .onChange(of: clusterRole) { cfgHasUnsavedChanges = true }
+                }
+
+                if clusterRole == "worker" {
+                    // Coordinator host (worker needs to know where to connect)
+                    HStack(spacing: 12) {
+                        Text("Coordinator")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(NovaTheme.Colors.textSecondary)
+                            .frame(width: 80, alignment: .trailing)
+                        TextField("192.168.1.x", text: $clusterHost)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .frame(width: 160)
+                            .onChange(of: clusterHost) { cfgHasUnsavedChanges = true }
+                    }
+                }
+
+                // Strategy
+                HStack(spacing: 12) {
+                    Text("Strategy")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                        .frame(width: 80, alignment: .trailing)
+                    Picker("", selection: $clusterStrategy) {
+                        Text("Min Nodes").tag("minNodes")
+                        Text("Proportional").tag("spread")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                    .onChange(of: clusterStrategy) { cfgHasUnsavedChanges = true }
+                }
+
+                // Min layers per shard
+                HStack(spacing: 12) {
+                    Text("Min Layers")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                        .frame(width: 80, alignment: .trailing)
+                    TextField("32", value: $clusterMinLayers, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                        .frame(width: 60)
+                        .onChange(of: clusterMinLayers) { cfgHasUnsavedChanges = true }
+                    Text("layers per shard (prevents over-splitting)")
+                        .font(.system(size: 10))
+                        .foregroundColor(NovaTheme.Colors.textTertiary)
+                }
+
+                // Worker list (coordinator only)
+                if clusterRole == "coordinator" && !clusterWorkers.isEmpty {
+                    Divider()
+                    Text("Connected Workers")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                    ForEach(clusterWorkers.map { $0["nodeId"] as? String ?? "unknown" }, id: \.self) { nodeId in
+                        HStack {
+                            Circle()
+                                .fill(NovaTheme.Colors.statusOK)
+                                .frame(width: 6, height: 6)
+                            Text(nodeId)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(NovaTheme.Colors.textPrimary)
+                            Spacer()
+                        }
+                    }
+                }
+
+                Text("Changes require restart to take effect.")
+                    .font(.system(size: 10))
+                    .foregroundColor(NovaTheme.Colors.textTertiary)
+            }
+        }
+        .padding(16)
+        .sectionCard()
+        .task { refreshClusterWorkers() }
+    }
+
+    private func refreshClusterWorkers() {
+        let adminPort = appState.adminPort
+        guard let url = URL(string: "http://127.0.0.1:\(adminPort)/admin/api/cluster/status") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(appState.apiKey ?? "abcd1234")", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 3
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let workers = json["workers"] as? [[String: Any]] else { return }
+            DispatchQueue.main.async { clusterWorkers = workers }
+        }.resume()
     }
 
     // MARK: - Cloud Account

@@ -26,6 +26,9 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var cloudEmail: String = ""
     @Published public var cloudPlan: String = ""
 
+    // Cluster state — read from config, drives sidebar visibility
+    @Published public var clusterEnabled: Bool = false
+
     private var statsTimer: Timer?
     private let maxTpsHistory = 90
 
@@ -87,8 +90,18 @@ public final class MenuBarAppState: ObservableObject {
                 }
                 await self.pollDownloadStatus()
                 self.refreshCloudAuthState()
+                self.syncClusterEnabled()
             }
         }
+    }
+
+    private func syncClusterEnabled() {
+        let configPath = NovaMLXPaths.configFile
+        guard let data = try? Data(contentsOf: configPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let server = json["server"] as? [String: Any] else { return }
+        let enabled = server["cluster"] != nil
+        if enabled != clusterEnabled { clusterEnabled = enabled }
     }
 
     public func stopStatsMonitoring() {

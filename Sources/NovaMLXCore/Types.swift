@@ -669,12 +669,14 @@ public struct ServerConfig: Codable, Sendable {
         public let coordinatorHost: String?
         public let coordinatorPort: Int?
         public let strategy: String?
+        public let minLayersPerShard: Int?
 
-        public init(role: String, coordinatorHost: String? = nil, coordinatorPort: Int? = nil, strategy: String? = nil) {
+        public init(role: String, coordinatorHost: String? = nil, coordinatorPort: Int? = nil, strategy: String? = nil, minLayersPerShard: Int? = nil) {
             self.role = role
             self.coordinatorHost = coordinatorHost
             self.coordinatorPort = coordinatorPort
             self.strategy = strategy
+            self.minLayersPerShard = minLayersPerShard
         }
     }
 

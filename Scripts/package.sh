@@ -27,6 +27,13 @@ if [ -f "docs/AppIcon.icns" ]; then
 	cp "docs/AppIcon.icns" "$APP_CONTENTS/Resources/AppIcon.icns"
 fi
 
+# Copy SPM resource bundles into Contents/Resources/
+# Required by ResourceBundleLocator for cross-machine deployment
+for bundle in "$BUILD_DIR"/*.bundle; do
+	[ -d "$bundle" ] || continue
+	cp -R "$bundle" "$APP_CONTENTS/Resources/"
+done
+
 cat >"$APP_CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

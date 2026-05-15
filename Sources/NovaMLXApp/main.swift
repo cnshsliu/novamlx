@@ -60,6 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let settingsManager: ModelSettingsManager
     let workerMode: Bool
     lazy var inferenceService: InferenceService = {
+        // Read cluster settings (needed for both workerMode and non-workerMode paths)
+        let (isCluster, clusterConfig) = Self.readClusterSettings()
+
         if workerMode {
             let workerPath = Bundle.main.executableURL!
                 .deletingLastPathComponent()
@@ -69,11 +72,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 engine: engine,
                 settingsManager: settingsManager,
                 workerMode: true,
-                workerBinaryPath: workerPath
+                workerBinaryPath: workerPath,
+                clusterMode: isCluster,
+                clusterConfig: clusterConfig
             )
         }
-        // Read cluster settings synchronously from config file (actor-isolated config requires async)
-        let (isCluster, clusterConfig) = Self.readClusterSettings()
         return InferenceService(
             engine: engine,
             settingsManager: settingsManager,
@@ -294,6 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             // Distributed inference initialization
+            NovaMLXLog.info("[Cluster] Distributed backend check: ring=\(MLXDistributedWrapper.isBackendAvailable("ring")), jaccl=\(MLXDistributedWrapper.isBackendAvailable("jaccl")), best=\(MLXDistributedWrapper.bestAvailableBackend())")
             let clusterSettings = serverConfig.cluster
             if let cluster = clusterSettings {
                 switch cluster.role {
@@ -302,9 +306,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         role: .coordinator,
                         coordinatorHost: cluster.coordinatorHost ?? "0.0.0.0",
                         coordinatorPort: cluster.coordinatorPort ?? 6591,
-                        strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes
+                        strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
+                        minLayersPerShard: cluster.minLayersPerShard ?? 32
                     )
                     try? ClusterManager.shared.startAsCoordinator(config: clusterConfig)
+
+                    // Configure ClusterModelManager for distributed model lifecycle
+                    ClusterModelManager.shared.configure(
+                        engine: engine,
+                        tokenizerProvider: { [engine] modelId in
+                            guard let tokenizer = engine.getContainer(for: modelId)?.tokenizer else { return nil }
+                            return DistributedTokenizer(
+                                encode: { text in tokenizer.encode(text) },
+                                decode: { tokens in tokenizer.decode(tokens) }
+                            )
+                        },
+                        modelPathProvider: { modelId in
+                            let path = NovaMLXPaths.modelsDir.appendingPathComponent(modelId).path
+                            var isDir: ObjCBool = false
+                            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+                                return nil
+                            }
+                            return path
+                        }
+                    )
+
                     NovaMLXLog.info("[Cluster] Started as coordinator on port \(clusterConfig.coordinatorPort)")
                 case "worker":
                     if let host = cluster.coordinatorHost {
@@ -312,8 +338,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             role: .worker,
                             coordinatorHost: host,
                             coordinatorPort: cluster.coordinatorPort ?? 6591,
-                            strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes
+                            strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
+                            minLayersPerShard: cluster.minLayersPerShard ?? 32
                         )
+                        WorkerShardService.shared.setEngine(engine)
                         WorkerService.shared.start(config: clusterConfig)
                         NovaMLXLog.info("[Cluster] Started as worker, coordinator at \(host)")
                     }
@@ -355,6 +383,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.apiKey = serverConfig.apiKeys.first
 
             NovaMLXLog.info("Server restarted (apiKeys: \(serverConfig.apiKeys.count))")
+
+            // Re-initialize cluster on config change
+            if let cluster = serverConfig.cluster {
+                switch cluster.role {
+                case "coordinator":
+                    let clusterConfig = ClusterConfig(
+                        role: .coordinator,
+                        coordinatorHost: cluster.coordinatorHost ?? "0.0.0.0",
+                        coordinatorPort: cluster.coordinatorPort ?? 6591,
+                        strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
+                        minLayersPerShard: cluster.minLayersPerShard ?? 32
+                    )
+                    try? ClusterManager.shared.startAsCoordinator(config: clusterConfig)
+                    NovaMLXLog.info("[Cluster] Restarted as coordinator on port \(clusterConfig.coordinatorPort)")
+                case "worker":
+                    if let host = cluster.coordinatorHost {
+                        let clusterConfig = ClusterConfig(
+                            role: .worker,
+                            coordinatorHost: host,
+                            coordinatorPort: cluster.coordinatorPort ?? 6591,
+                            strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
+                            minLayersPerShard: cluster.minLayersPerShard ?? 32
+                        )
+                        WorkerShardService.shared.setEngine(engine)
+                        WorkerService.shared.start(config: clusterConfig)
+                        NovaMLXLog.info("[Cluster] Restarted as worker, coordinator at \(host)")
+                    }
+                default:
+                    break
+                }
+            }
 
             if let apiServer = apiServer {
                 serverTask = Task {
@@ -408,7 +467,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             role: .coordinator,
             coordinatorHost: cluster["coordinatorHost"] as? String ?? "0.0.0.0",
             coordinatorPort: cluster["coordinatorPort"] as? Int ?? 6591,
-            strategy: ClusterStrategy(rawValue: cluster["strategy"] as? String ?? "minNodes") ?? .minNodes
+            strategy: ClusterStrategy(rawValue: cluster["strategy"] as? String ?? "minNodes") ?? .minNodes,
+            minLayersPerShard: cluster["minLayersPerShard"] as? Int ?? 32
         )
         return (true, config)
     }

@@ -17,21 +17,53 @@ struct DistributedTypesTests {
         #expect(config.strategy == .minNodes)
     }
 
-    @Test("ShardPlan computes correct layer ranges for 2 nodes")
+    @Test("ShardPlan with 2 nodes covers all layers")
     func shardPlanTwoNodes() {
-        let profiles = (0..<40).map { i in
+        let profiles = (0..<80).map { i in
             LayerProfile(layerIndex: i, parameterCount: 1_000_000, estimatedMemoryBytes: 4_000_000, layerType: .transformer)
         }
         let nodes = [
             NodeSpec(nodeId: "mac-a", totalMemoryBytes: 128 * 1024 * 1024 * 1024, computeCapability: 1.0, hostname: "mac-a.local", port: 6591),
             NodeSpec(nodeId: "mac-b", totalMemoryBytes: 64 * 1024 * 1024 * 1024, computeCapability: 0.6, hostname: "mac-b.local", port: 6591),
         ]
-        let plan = ShardPlan(profiles: profiles, nodes: nodes, strategy: .minNodes)
-        #expect(plan.assignments.count == 2)
+        let plan = ShardPlan(profiles: profiles, nodes: nodes, strategy: .spread, minLayersPerShard: 4)
         let totalCovered = plan.assignments.reduce(0) { $0 + ($1.endLayer - $1.startLayer) }
-        #expect(totalCovered == 40)
+        #expect(totalCovered == 80)
         let totalMemory = plan.assignments.reduce(UInt64(0)) { $0 + $1.memoryEstimate }
-        #expect(totalMemory == 40 * 4_000_000)
+        #expect(totalMemory == 80 * 4_000_000)
+    }
+
+    @Test("ShardPlan enforces minLayersPerShard — caps active nodes")
+    func shardPlanMinLayers() {
+        // 100 layers, 100 nodes, min 32 per shard → max 3 active nodes
+        let profiles = (0..<100).map { i in
+            LayerProfile(layerIndex: i, parameterCount: 1_000_000, estimatedMemoryBytes: 4_000_000, layerType: .transformer)
+        }
+        let nodes = (0..<100).map { i in
+            NodeSpec(nodeId: "node-\(i)", totalMemoryBytes: 64 * 1024 * 1024 * 1024, computeCapability: 1.0, hostname: "node-\(i)", port: 6591)
+        }
+        let plan = ShardPlan(profiles: profiles, nodes: nodes, strategy: .spread, minLayersPerShard: 32)
+        #expect(plan.assignments.count <= 3) // 100/32 = 3 max
+        let totalCovered = plan.assignments.reduce(0) { $0 + ($1.endLayer - $1.startLayer) }
+        #expect(totalCovered == 100)
+        // Every shard has at least 32 layers (except possibly the last)
+        for a in plan.assignments.dropLast() {
+            #expect(a.endLayer - a.startLayer >= 32)
+        }
+    }
+
+    @Test("ShardPlan minNodes packs into 1 node when model fits")
+    func shardPlanMinNodesPacksOne() {
+        // 64 layers × 4MB = 256MB fits in any 64GB node → 1 node
+        let profiles = (0..<64).map { i in
+            LayerProfile(layerIndex: i, parameterCount: 1_000_000, estimatedMemoryBytes: 4_000_000, layerType: .transformer)
+        }
+        let nodes = (0..<10).map { i in
+            NodeSpec(nodeId: "node-\(i)", totalMemoryBytes: 64 * 1024 * 1024 * 1024, computeCapability: 1.0, hostname: "node-\(i)", port: 6591)
+        }
+        let plan = ShardPlan(profiles: profiles, nodes: nodes, strategy: .minNodes, minLayersPerShard: 32)
+        #expect(plan.assignments.count == 1)
+        #expect(plan.assignments[0].endLayer - plan.assignments[0].startLayer == 64)
     }
 
     @Test("ClusterRole codable round-trip")
@@ -132,13 +164,13 @@ struct DistributedGroupTests {
         #expect(a == b)
     }
 
-    @Test("Initialize returns uninitialized without backend")
-    func initializeWithoutBackend() {
-        // Without a compiled distributed backend, initialize should return uninitialized.
+    @Test("Initialize without strict returns a valid single-node group")
+    func initializeWithoutStrict() {
         let group = MLXDistributedWrapper.initialize(strict: false, backend: nil)
-        #expect(group.isValid == false)
-        #expect(group.rank == -1)
-        #expect(group.size == 0)
+        // With distributed backend compiled in, non-strict returns a valid single-node group.
+        #expect(group.isValid == true)
+        #expect(group.rank == 0)
+        #expect(group.size == 1)
     }
 
     @Test("bestAvailableBackend returns a non-empty string")

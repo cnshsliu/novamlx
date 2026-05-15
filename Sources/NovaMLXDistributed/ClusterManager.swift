@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import NovaMLXCore
 
 // MARK: - ClusterError
 
@@ -38,7 +39,7 @@ public enum WorkerStatus: String, Codable, Sendable, Equatable {
     case active
     /// Worker is syncing model weights.
     case syncing
-    /// Worker missed heartbeat threshold — considered offline.
+    /// Coordinator couldn't reach worker — considered offline.
     case disconnected
     /// Worker reported an unrecoverable error.
     case failed
@@ -46,7 +47,7 @@ public enum WorkerStatus: String, Codable, Sendable, Equatable {
 
 // MARK: - WorkerInfo
 
-/// Tracks registration and health state for a single worker node.
+/// Tracks registration and health state for a single worker.
 public struct WorkerInfo: Codable, Sendable, Equatable {
     public let nodeId: String
     public let spec: NodeSpec
@@ -71,11 +72,14 @@ public struct WorkerInfo: Codable, Sendable, Equatable {
 
 // MARK: - ClusterManager
 
-/// Coordinator-side manager that discovers workers via Bonjour, tracks registration
-/// and heartbeats, and exposes the active/spare worker pools for the shard engine.
+/// Coordinator-side manager that polls Workers' admin APIs, tracks their state,
+/// and exposes the active/spare worker pools for the shard engine.
 ///
-/// Thread safety: all mutable state is guarded by ``queue``. The class is marked
-/// `@unchecked Sendable` because the serial queue serialises access.
+/// **Polling model**: The Coordinator actively polls each known Worker's admin API
+/// every 5 seconds. No SSH tunnels or worker→coordinator registration needed.
+/// Workers simply expose their admin API on `0.0.0.0`.
+///
+/// Thread safety: all mutable state is guarded by ``queue``.
 public final class ClusterManager: @unchecked Sendable {
 
     /// Shared singleton.
@@ -83,10 +87,7 @@ public final class ClusterManager: @unchecked Sendable {
 
     // MARK: - Public properties
 
-    /// The cluster configuration supplied at startup. `nil` before ``startAsCoordinator(config:)``.
     public private(set) var config: ClusterConfig?
-
-    /// Whether the coordinator loop is active.
     public private(set) var isRunning: Bool = false
 
     /// Callback fired when a worker transitions to ``WorkerStatus/disconnected``.
@@ -113,28 +114,23 @@ public final class ClusterManager: @unchecked Sendable {
 
     // MARK: - Private state
 
-    /// All mutable state is accessed exclusively on this serial queue.
     private let queue = DispatchQueue(label: "com.novamlx.cluster-manager", qos: .userInitiated)
-
-    /// Underlying worker storage — access only via ``queue``.
     private var _workers: [String: WorkerInfo] = [:]
-
-    /// Bonjour service published by the coordinator.
     private var netService: NetService?
-
-    /// Repeating timer that checks worker health.
-    private var heartbeatTimer: Timer?
-
-    /// Logger instance.
+    private var pollTimer: Timer?
     private let logger = Logger(label: "NovaMLXDistributed.ClusterManager")
+
+    /// Consecutive poll failures per worker nodeId — triggers disconnect after 3.
+    private var pollFailCount: [String: Int] = [:]
+
+    /// API key for authenticating with Worker admin APIs.
+    private var apiKey: String?
 
     // MARK: - Lifecycle
 
     private init() {}
 
-    /// Start the coordinator: stores config, advertises via Bonjour, begins heartbeat monitoring.
-    ///
-    /// - Parameter config: Cluster configuration (must have ``ClusterRole/coordinator``).
+    /// Start the coordinator: stores config, begins polling known workers.
     public func startAsCoordinator(config: ClusterConfig) throws {
         try queue.sync {
             guard !isRunning else {
@@ -147,15 +143,21 @@ public final class ClusterManager: @unchecked Sendable {
             self.config = config
             self.isRunning = true
             self._workers = [:]
+            self.pollFailCount = [:]
+            self.apiKey = Self.readAPIKey()
         }
 
-        logger.info("ClusterManager starting as coordinator on \(config.coordinatorHost):\(config.coordinatorPort)")
+        logger.info("ClusterManager starting as coordinator — polling mode")
+
+        // Load persisted worker deployments so we know which IPs to poll
+        WorkerDeployer.shared.loadDeployments()
 
         advertiseBonjour(port: config.coordinatorPort)
-        startHeartbeatMonitoring()
+        startPolling()
+        pollKnownWorkers()
     }
 
-    /// Shut down the coordinator: stops Bonjour, cancels timers, clears workers.
+    /// Shut down the coordinator.
     public func stop() {
         var removedIds: [String] = []
         var netServiceRef: NetService?
@@ -169,20 +171,16 @@ public final class ClusterManager: @unchecked Sendable {
             _workers.removeAll()
 
             netServiceRef = netService
-            timerRef = heartbeatTimer
+            timerRef = pollTimer
             netService = nil
-            heartbeatTimer = nil
+            pollTimer = nil
             config = nil
         }
 
-        // Fire disconnect callbacks outside queue.sync to avoid deadlock.
-        // (Callbacks may call back into ClusterManager.)
         for nodeId in removedIds {
             onWorkerDisconnected?(nodeId)
         }
 
-        // Bonjour / Timer cleanup on main run-loop.
-        // NetService.stop() and Timer.invalidate() must run on the main run-loop.
         if let svc = netServiceRef {
             nonisolated(unsafe) let s = svc
             DispatchQueue.main.async { s.stop() }
@@ -195,12 +193,8 @@ public final class ClusterManager: @unchecked Sendable {
         logger.info("ClusterManager stopped")
     }
 
-    // MARK: - Worker registration
+    // MARK: - Worker management
 
-    /// Register a new worker node.
-    ///
-    /// - Parameter spec: Hardware specification of the joining worker.
-    /// - Returns: The ``WorkerInfo`` record created for the worker.
     @discardableResult
     public func registerWorker(spec: NodeSpec) -> WorkerInfo {
         let info = WorkerInfo(
@@ -213,14 +207,10 @@ public final class ClusterManager: @unchecked Sendable {
             _workers[spec.nodeId] = info
         }
 
-        logger.info("Worker registered: \(spec.nodeId) (\(spec.hostname):\(spec.port), memory=\(spec.totalMemoryBytes))")
+        logger.info("Worker registered: \(spec.nodeId) (\(spec.hostname), memory=\(spec.totalMemoryBytes))")
         return info
     }
 
-    /// Refresh the heartbeat timestamp for a known worker.
-    ///
-    /// If the worker was ``WorkerStatus/disconnected``, it is promoted back to
-    /// ``WorkerStatus/registering`` so the coordinator can re-evaluate it.
     public func updateHeartbeat(nodeId: String) {
         queue.sync {
             guard var worker = _workers[nodeId] else { return }
@@ -233,11 +223,10 @@ public final class ClusterManager: @unchecked Sendable {
         }
     }
 
-    /// Remove a worker from the cluster.
     public func removeWorker(nodeId: String) {
-        let existed: Bool
-        existed = queue.sync {
+        let existed = queue.sync {
             let removed = _workers.removeValue(forKey: nodeId) != nil
+            pollFailCount.removeValue(forKey: nodeId)
             return removed
         }
 
@@ -247,7 +236,6 @@ public final class ClusterManager: @unchecked Sendable {
         }
     }
 
-    /// Update the status of a specific worker.
     public func setWorkerStatus(nodeId: String, status: WorkerStatus) throws {
         try queue.sync {
             guard var worker = _workers[nodeId] else {
@@ -262,7 +250,6 @@ public final class ClusterManager: @unchecked Sendable {
 
     // MARK: - Bonjour discovery
 
-    /// Advertise the coordinator via Bonjour on `_novamlx._tcp.`.
     private func advertiseBonjour(port: Int) {
         DispatchQueue.main.async { [self] in
             let service = NetService(
@@ -277,50 +264,183 @@ public final class ClusterManager: @unchecked Sendable {
         }
     }
 
-    // MARK: - Heartbeat monitoring
+    // MARK: - Worker polling
 
-    /// Start a repeating timer (5-second interval) that checks worker health.
-    ///
-    /// Workers that have not sent a heartbeat within the timeout (30 seconds)
-    /// are marked ``WorkerStatus/disconnected`` and the ``onWorkerDisconnected``
-    /// callback is fired.
-    private func startHeartbeatMonitoring() {
+    /// Start a 5-second repeating poll of all known worker endpoints.
+    private func startPolling() {
         DispatchQueue.main.async { [self] in
             let timer = Timer.scheduledTimer(
                 withTimeInterval: 5.0,
                 repeats: true
             ) { [weak self] _ in
-                self?.checkWorkerHealth()
+                self?.pollKnownWorkers()
             }
-            self.heartbeatTimer = timer
+            self.pollTimer = timer
             RunLoop.main.add(timer, forMode: .common)
         }
     }
 
-    /// Check all workers and mark stale ones as disconnected.
-    private func checkWorkerHealth() {
-        let timeout: TimeInterval = 30.0
-        let now = Date()
-        var disconnectedIds: [String] = []
+    /// Poll every known Worker's admin API — discovered via deployments or manual registration.
+    func pollKnownWorkers() {
+        let endpoints = collectWorkerEndpoints()
+        let key = queue.sync { apiKey }
 
-        queue.sync {
-            for (nodeId, worker) in _workers where worker.status != .disconnected && worker.status != .failed {
-                if now.timeIntervalSince(worker.lastHeartbeat) > timeout {
-                    _workers[nodeId]?.status = .disconnected
-                    disconnectedIds.append(nodeId)
-                }
+        for (host, port) in endpoints {
+            pollWorker(host: host, port: port, apiKey: key)
+        }
+    }
+
+    /// Gather (host, port) pairs from WorkerDeployer deployments + existing workers.
+    private func collectWorkerEndpoints() -> [(host: String, port: Int)] {
+        var endpoints: [(String, Int)] = []
+
+        // From deployments — WorkerDeployer records
+        for (_, deployment) in WorkerDeployer.shared.deployments {
+            guard deployment.phase == .running || deployment.phase == .idle else { continue }
+            endpoints.append((deployment.host, 6591))
+        }
+
+        // From existing workers — use their stored hostname/IP
+        let workerSnapshot = queue.sync { _workers }
+        for (_, worker) in workerSnapshot {
+            let host = worker.spec.hostname
+            let port = worker.spec.port
+            // Avoid duplicates
+            if !endpoints.contains(where: { $0.0 == host && $0.1 == port }) {
+                endpoints.append((host, port))
             }
         }
 
-        for nodeId in disconnectedIds {
-            logger.warning("Worker \(nodeId) heartbeat timeout — marking disconnected")
-            onWorkerDisconnected?(nodeId)
+        return endpoints
+    }
+
+    /// Poll a single Worker's admin API for cluster status.
+    private func pollWorker(host: String, port: Int, apiKey: String?) {
+        guard let url = URL(string: "http://\(host):\(port)/admin/api/cluster/status") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 5.0
+        if let apiKey {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+
+            if let error {
+                self.handlePollFailure(host: host, port: port, error: error)
+                return
+            }
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200...299).contains(httpResponse.statusCode),
+                  let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                self.handlePollFailure(host: host, port: port, error: nil)
+                return
+            }
+
+            self.handlePollSuccess(host: host, port: port, json: json)
+        }
+        task.resume()
+    }
+
+    /// Process a successful poll — update or register the worker.
+    private func handlePollSuccess(host: String, port: Int, json: [String: Any]) {
+        guard let localSpec = json["localSpec"] as? [String: Any] else {
+            logger.warning("Worker \(host):\(port) responded but missing localSpec")
+            return
+        }
+
+        let nodeId = localSpec["nodeId"] as? String ?? "\(host)-\(port)"
+        let hostname = localSpec["hostname"] as? String ?? host
+        let memory = localSpec["memory"] as? UInt64 ?? 0
+        let cpuModel = localSpec["cpuModel"] as? String ?? ""
+
+        let spec = NodeSpec(
+            nodeId: nodeId,
+            totalMemoryBytes: memory,
+            computeCapability: 1.0,
+            hostname: hostname,
+            port: port,
+            cpuModel: cpuModel,
+            networkHost: host  // Store the actual IP for TCP connections
+        )
+
+        queue.sync {
+            pollFailCount[nodeId] = 0
+            if var existing = _workers[nodeId] {
+                // Update heartbeat, promote to ready on successful poll
+                existing.lastHeartbeat = Date()
+                // spec updated on next full discovery
+                if existing.status == .disconnected || existing.status == .registering {
+                    existing.status = .ready
+                    logger.info("Worker \(nodeId) \(existing.status == .disconnected ? "back online" : "registered → ready")")
+                }
+                _workers[nodeId] = existing
+            } else {
+                // New worker discovered via poll
+                let info = WorkerInfo(
+                    nodeId: nodeId,
+                    spec: spec,
+                    status: .ready,
+                    registeredAt: Date(),
+                    lastHeartbeat: Date()
+                )
+                _workers[nodeId] = info
+                logger.info("Worker discovered via poll: \(nodeId) (\(hostname), \(cpuModel), \(memory) bytes)")
+            }
+        }
+    }
+
+    /// Handle poll failure — increment fail count, disconnect after 3 misses.
+    private func handlePollFailure(host: String, port: Int, error: Error?) {
+        let nodeId = queue.sync {
+            // Find worker by hostname or host
+            for (_, worker) in _workers {
+                if worker.spec.hostname == host || worker.spec.hostname.contains(host) {
+                    return worker.nodeId
+                }
+            }
+            return "\(host)-\(port)"
+        }
+
+        let failCount = queue.sync {
+            pollFailCount[nodeId, default: 0] + 1
+        }
+
+        if failCount >= 3 {
+            var wasActive = false
+            queue.sync {
+                pollFailCount[nodeId] = failCount
+                if var worker = _workers[nodeId] {
+                    wasActive = worker.status != .disconnected
+                    worker.status = .disconnected
+                    worker.lastHeartbeat = Date()
+                    _workers[nodeId] = worker
+                }
+            }
+
+            if wasActive {
+                if let error {
+                    logger.warning("Worker \(nodeId) unreachable after \(failCount) polls: \(error.localizedDescription)")
+                } else {
+                    logger.warning("Worker \(nodeId) unreachable after \(failCount) polls")
+                }
+                onWorkerDisconnected?(nodeId)
+            }
+        } else {
+            queue.sync { pollFailCount[nodeId] = failCount }
+            if let error {
+                logger.debug("Worker \(host):\(port) poll failed (\(failCount)/3): \(error.localizedDescription)")
+            }
         }
     }
 
     // MARK: - Debug introspection
 
-    /// Returns a dictionary summarising cluster state for the admin API debug endpoint.
     public func discoveryDebugInfo() -> [String: Any] {
         queue.sync {
             var workersArray: [[String: Any]] = []
@@ -331,7 +451,7 @@ public final class ClusterManager: @unchecked Sendable {
                     "port": worker.spec.port,
                     "status": worker.status.rawValue,
                     "totalMemoryBytes": worker.spec.totalMemoryBytes,
-                    "computeCapability": worker.spec.computeCapability,
+                    "cpuModel": worker.spec.cpuModel,
                     "registeredAt": ISO8601DateFormatter().string(from: worker.registeredAt),
                     "lastHeartbeat": ISO8601DateFormatter().string(from: worker.lastHeartbeat),
                 ])
@@ -349,5 +469,18 @@ public final class ClusterManager: @unchecked Sendable {
                 "workers": workersArray,
             ]
         }
+    }
+
+    // MARK: - Helpers
+
+    /// Read first apiKey from config.json for authenticating with Worker admin APIs.
+    private static func readAPIKey() -> String? {
+        let configPath = NovaMLXPaths.configFile
+        guard let data = try? Data(contentsOf: configPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let server = json["server"] as? [String: Any],
+              let keys = server["apiKeys"] as? [String],
+              let first = keys.first else { return nil }
+        return first
     }
 }

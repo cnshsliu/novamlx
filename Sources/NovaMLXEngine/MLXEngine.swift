@@ -651,7 +651,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
     }
 
-    public func loadModel(from url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws -> ModelContainer {
+    public func loadModel(from url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil, skipMemoryGate: Bool = false) async throws -> ModelContainer {
         await CustomModelRegistration.ensureRegistered()
         let container = ModelContainer(identifier: config.identifier, config: config)
         NovaMLXLog.info("[Engine] Loading model from: \(url.path)")
@@ -665,6 +665,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         // --- Pre-load memory gate ---
         progress?(.feasibilityChecking)
+        // Distributed inference Workers may intentionally exceed the recommended working set
+        // since they only use a subset of layers. Skip the gate when explicitly requested.
+        if !skipMemoryGate {
         // Check ProcessMemoryEnforcer soft limit BEFORE loading weights.
         // If we can't fit the new model under the soft limit, evict LRU unpinned
         // models to make room. If that's not enough, fail fast with a clear error
@@ -706,6 +709,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
             }
         }
+        } // end if !skipMemoryGate
         // --- End pre-load memory gate ---
 
         progress?(.loadingWeights)

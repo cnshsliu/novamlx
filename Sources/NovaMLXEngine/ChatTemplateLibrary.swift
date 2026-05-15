@@ -54,12 +54,22 @@ enum ChatTemplateLibrary {
 
     private static func loadBundleTemplate(name: String) -> String? {
         // Templates are in Sources/NovaMLXEngine/ChatTemplates/{name}.jinja
-        // SPM copies ChatTemplates/ as resources when declared in Package.swift
-        if let url = Bundle.module.url(forResource: name, withExtension: "jinja", subdirectory: "ChatTemplates") {
+        // Use ResourceBundleLocator instead of Bundle.module to avoid fatalError
+        // on machines where the SPM hardcoded build path doesn't exist
+        if let url = ResourceBundleLocator.url(
+            forResource: name,
+            withExtension: "jinja",
+            subdirectory: "ChatTemplates",
+            inBundle: "NovaMLX_NovaMLXEngine"
+        ) {
             return try? String(contentsOf: url, encoding: .utf8)
         }
         // Fallback: flat layout
-        if let url = Bundle.module.url(forResource: name, withExtension: "jinja") {
+        if let url = ResourceBundleLocator.url(
+            forResource: name,
+            withExtension: "jinja",
+            inBundle: "NovaMLX_NovaMLXEngine"
+        ) {
             return try? String(contentsOf: url, encoding: .utf8)
         }
         // Fallback: try reading from source tree (dev mode)

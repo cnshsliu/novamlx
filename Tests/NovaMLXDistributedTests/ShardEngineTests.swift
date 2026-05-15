@@ -3,136 +3,66 @@ import Testing
 import MLX
 @testable import NovaMLXDistributed
 
+// MARK: - Test helper: passthrough policy
+
+/// A lightweight ``ComputePolicy`` that passes tensors through unchanged.
+/// Used for unit-testing ``ShardEngine`` mechanics without a real model.
+private final class PassthroughPolicy: ComputePolicy, @unchecked Sendable {
+    let assignment: ShardAssignment
+    private(set) var isReady: Bool = false
+
+    init(assignment: ShardAssignment) {
+        self.assignment = assignment
+    }
+
+    func bindWeights() async throws {
+        isReady = true
+    }
+
+    func compute(input: MLXArray) async throws -> MLXArray {
+        guard isReady else { throw ShardEngineError.notReady }
+        return input
+    }
+
+    func releaseWeights() {
+        isReady = false
+    }
+}
+
+// MARK: - ShardEngine tests
+
 @Suite("ShardEngine")
 struct ShardEngineTests {
 
-    // MARK: - FitInMemoryPolicy
-
-    @Test("FitInMemoryPolicy starts not ready")
-    func fitInMemoryPolicyStartsNotReady() {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        #expect(policy.isReady == false)
-    }
-
-    @Test("FitInMemoryPolicy bindWeights sets isReady")
-    func fitInMemoryPolicyBindWeights() async throws {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        #expect(policy.isReady == false)
-        try await policy.bindWeights()
-        #expect(policy.isReady == true)
-    }
-
-    @Test("FitInMemoryPolicy releaseWeights clears isReady")
-    func fitInMemoryPolicyReleaseWeights() async throws {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        try await policy.bindWeights()
-        #expect(policy.isReady == true)
-        policy.releaseWeights()
-        #expect(policy.isReady == false)
-    }
-
-    @Test("FitInMemoryPolicy compute returns input unchanged when ready")
-    func fitInMemoryPolicyComputePassthrough() async throws {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        try await policy.bindWeights()
-
-        let input = MLXArray([1.0, 2.0, 3.0])
-        var cache: [Any] = []
-        let output = try policy.compute(input: input, cache: &cache)
-        // Placeholder: output should equal input
-        #expect(output.shape == input.shape)
-    }
-
-    @Test("FitInMemoryPolicy compute throws when not ready")
-    func fitInMemoryPolicyComputeThrowsWhenNotReady() {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        var cache: [Any] = []
-        #expect(throws: ShardEngineError.self) {
-            let input = MLXArray([1.0])
-            _ = try policy.compute(input: input, cache: &cache)
-        }
+    private func makeAssignment(
+        startLayer: Int = 0, endLayer: Int = 10
+    ) -> ShardAssignment {
+        ShardAssignment(nodeId: "test", startLayer: startLayer, endLayer: endLayer, memoryEstimate: 0)
     }
 
     // MARK: - ShardEngine (uninitialized group)
 
     @Test("ShardEngine with uninitialized group: isFirstShard is false")
     func shardEngineUninitializedIsFirstShard() {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        let engine = ShardEngine(
-            group: .uninitialized,
-            assignment: assignment,
-            policy: policy
-        )
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         #expect(engine.isFirstShard == false)
     }
 
     @Test("ShardEngine with uninitialized group: isLastShard is false")
     func shardEngineUninitializedIsLastShard() {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        let engine = ShardEngine(
-            group: .uninitialized,
-            assignment: assignment,
-            policy: policy
-        )
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         #expect(engine.isLastShard == false)
     }
 
     @Test("ShardEngine prefill throws when policy not ready")
     func shardEnginePrefillThrowsWhenNotReady() async {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        let engine = ShardEngine(
-            group: .uninitialized,
-            assignment: assignment,
-            policy: policy
-        )
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         do {
             let tokens = MLXArray([1, 2, 3])
             _ = try await engine.prefill(tokens: tokens)
@@ -144,18 +74,9 @@ struct ShardEngineTests {
 
     @Test("ShardEngine decode throws when policy not ready")
     func shardEngineDecodeThrowsWhenNotReady() async {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        let engine = ShardEngine(
-            group: .uninitialized,
-            assignment: assignment,
-            policy: policy
-        )
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         do {
             let token = MLXArray(42)
             _ = try await engine.decode(token: token)
@@ -167,44 +88,23 @@ struct ShardEngineTests {
 
     @Test("ShardEngine prefill succeeds after bindWeights")
     func shardEnginePrefillAfterBind() async throws {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        let engine = ShardEngine(
-            group: .uninitialized,
-            assignment: assignment,
-            policy: policy
-        )
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         try await policy.bindWeights()
         let tokens = MLXArray([1, 2, 3])
         let output = try await engine.prefill(tokens: tokens)
-        // Placeholder policy returns input unchanged.
         #expect(output.shape == tokens.shape)
     }
 
     @Test("ShardEngine decode succeeds after bindWeights")
     func shardEngineDecodeAfterBind() async throws {
-        let assignment = ShardAssignment(
-            nodeId: "test",
-            startLayer: 0,
-            endLayer: 10,
-            memoryEstimate: 0
-        )
-        let policy = FitInMemoryPolicy(assignment: assignment)
-        let engine = ShardEngine(
-            group: .uninitialized,
-            assignment: assignment,
-            policy: policy
-        )
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
+        let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         try await policy.bindWeights()
-        // Use a 1D array so shape is non-empty (scalar MLXArray has shape=[]).
         let token = MLXArray([42])
         let output = try await engine.decode(token: token)
-        // Placeholder policy returns input unchanged.
         #expect(output.shape == token.shape)
     }
 
@@ -212,8 +112,8 @@ struct ShardEngineTests {
 
     @Test("wavefrontPrefill falls back to sequential for short prompts")
     func wavefrontFallbackShortPrompt() async throws {
-        let assignment = ShardAssignment(nodeId: "test", startLayer: 0, endLayer: 10, memoryEstimate: 0)
-        let policy = FitInMemoryPolicy(assignment: assignment)
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
         let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         try await policy.bindWeights()
 
@@ -225,15 +125,14 @@ struct ShardEngineTests {
 
     @Test("wavefrontPrefill falls back for single-node group")
     func wavefrontFallbackSingleNode() async throws {
-        let assignment = ShardAssignment(nodeId: "test", startLayer: 0, endLayer: 10, memoryEstimate: 0)
-        let policy = FitInMemoryPolicy(assignment: assignment)
+        let assignment = makeAssignment()
+        let policy = PassthroughPolicy(assignment: assignment)
         let engine = ShardEngine(group: .uninitialized, assignment: assignment, policy: policy)
         try await policy.bindWeights()
 
         let tokens = MLXArray(0..<8192)
         let config = PrefillConfig(minWavefrontTokens: 4096)
         let output = try await engine.prefill(tokens: tokens, config: config)
-        // Uninitialized group (size 0) => falls back to sequential
         #expect(output.shape == tokens.shape)
     }
 
