@@ -346,41 +346,50 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
             let workerPolicy = shardEngines[1].policy as! RemoteShardPolicy
             var currentPosition = promptTokens.count
 
-            // First token: sample from prefill logits (local argmax)
-            let firstToken = argmax(activation)
+            // First token: run head on prefill hidden state (coord has isLast=true)
+            let firstHeadResult = await slicedCoord.computeHeadOnly(activation)
+            guard let firstResult = firstHeadResult else {
+                throw DistributedInferenceError.shardPlanFailed("computeHeadOnly returned nil on prefill output")
+            }
+            let firstToken = firstResult.tokenId
             if !eosTokenIds.contains(firstToken) {
                 generatedTokenIds.append(firstToken)
             }
+            // Compute coord activation for first token (embedding + coord layers → hidden for worker)
             activation = try await coordPolicy.compute(input: MLXArray(Int32(firstToken)))
             currentPosition += 1
 
-            // Adaptive double-buffered decode loop
+            // Continuous async pipeline decode loop
             var timingLogInterval = 0
             while generatedTokenIds.count < maxTokens {
                 if speculationEnabled {
-                    // === SPECULATIVE PATH ===
+                    // === SPECULATIVE PATH — coord+worker compute simultaneously ===
                     let t0 = CFAbsoluteTimeGetCurrent()
 
-                    // Step 1: Start worker compute async
+                    // Step 1: Fire worker compute async (returns hidden state, not token ID)
                     let activationBox = SendableBox(activation)
                     let workerTask = Task {
-                        try await workerPolicy.computeAndSample(input: activationBox.value)
+                        SendableBox(try await workerPolicy.compute(input: activationBox.value))
                     }
 
-                    // Step 2: Draft K tokens (predict + precompute each)
+                    // Step 2: Draft token N+1 while worker is busy
                     let draft = try? await slicedCoord.draftTokens(
                         from: activation, count: draftLength, extraPredictionLayers: extraPredictionLayers
                     )
 
                     let tPrecompute = CFAbsoluteTimeGetCurrent()
 
-                    // Step 3: Get actual token from worker
-                    let actualToken = try await workerTask.value
+                    // Step 3: Await worker hidden state, run head locally
+                    let workerHidden = try await workerTask.value.value
                     let tWorkerDone = CFAbsoluteTimeGetCurrent()
+                    guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else {
+                        break
+                    }
+                    let actualToken = headResult.tokenId
 
-                    // Step 4: Verify draft — check predicted tokens against actual
+                    // Step 4: Verify draft against actual token
                     if let draft = draft, draft.count > 0, draft.predictedTokens[0] == actualToken {
-                        // First draft correct! Use precomputed activation.
+                        // HIT — use precomputed activation (zero idle time)
                         activation = draft.precomputedStates[0]
                         recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
                         currentPosition += 1
@@ -388,13 +397,15 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                         if eosTokenIds.contains(actualToken) { break }
                         generatedTokenIds.append(actualToken)
 
-                        // Verify subsequent draft tokens (sequential worker calls)
+                        // Verify subsequent draft tokens
                         for i in 1..<draft.count {
                             let verifyActivation = SendableBox(activation)
                             let verifyTask = Task {
-                                try await workerPolicy.computeAndSample(input: verifyActivation.value)
+                                SendableBox(try await workerPolicy.compute(input: verifyActivation.value))
                             }
-                            let verifyToken = try await verifyTask.value
+                            let verifyHidden = try await verifyTask.value.value
+                            guard let verifyHead = await slicedCoord.computeHeadOnly(verifyHidden) else { break }
+                            let verifyToken = verifyHead.tokenId
 
                             if draft.predictedTokens[i] == verifyToken {
                                 activation = draft.precomputedStates[i]
@@ -420,7 +431,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                             }
                         }
                     } else {
-                        // First draft wrong: full rollback, recompute
+                        // MISS — rollback draft cache and recompute
                         recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
                         if let draft = draft {
                             try? await slicedCoord.rollbackCache(
@@ -445,7 +456,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                         let precomputeMs = (tPrecompute - t0) * 1000
                         let workerWaitMs = (tWorkerDone - tPrecompute) * 1000
                         let accuracy = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : 0
-                        NovaMLXLog.info("[Distributed] DB[\(generatedTokenIds.count)]: \(String(format: "%.1f", totalMs))ms draft=\(String(format: "%.1f", precomputeMs))ms wait=\(String(format: "%.1f", workerWaitMs))ms acc=\(String(format: "%.0f%%", accuracy * 100))(\(correctPredictions)/\(totalPredictions))")
+                        NovaMLXLog.info("[Distributed] Pipeline[\(generatedTokenIds.count)]: \(String(format: "%.1f", totalMs))ms draft=\(String(format: "%.1f", precomputeMs))ms wait=\(String(format: "%.1f", workerWaitMs))ms acc=\(String(format: "%.0f%%", accuracy * 100))(\(correctPredictions)/\(totalPredictions))")
                     }
 
                     // Adaptive check: disable speculation if accuracy too low
@@ -462,7 +473,10 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                     if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
                 } else {
                     // === SEQUENTIAL PATH (speculation disabled) ===
-                    let sampledId = try await workerPolicy.computeAndSample(input: activation)
+                    // Worker returns hidden state → coord runs head → token
+                    let workerHidden = try await workerPolicy.compute(input: activation)
+                    guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else { break }
+                    let sampledId = headResult.tokenId
                     if eosTokenIds.contains(sampledId) { break }
                     generatedTokenIds.append(sampledId)
                     let fullText = tokenizer.decode(generatedTokenIds)
@@ -473,15 +487,29 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
             }
 
             let rate = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : 0
-            NovaMLXLog.info("[Distributed] Double-buffer: \(correctPredictions)/\(totalPredictions) correct (\(String(format: "%.0f%%", rate * 100))), \(generatedTokenIds.count) tokens, speculative=\(speculationEnabled)")
+            NovaMLXLog.info("[Distributed] Pipeline: \(correctPredictions)/\(totalPredictions) correct (\(String(format: "%.0f%%", rate * 100))), \(generatedTokenIds.count) tokens, speculative=\(speculationEnabled)")
         } else {
             // Original non-speculative decode loop
             for i in 0..<maxTokens {
                 let sampledId: Int
                 if i == 0 {
-                    sampledId = argmax(activation)
+                    // First token from prefill output (coord has head)
+                    if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
+                       let headResult = await slicedCoord.computeHeadOnly(activation) {
+                        sampledId = headResult.tokenId
+                    } else {
+                        sampledId = argmax(activation)
+                    }
                 } else if remoteSamplingEnabled {
-                    sampledId = try await (shardEngines.last!.policy as! RemoteShardPolicy).computeAndSample(input: activation)
+                    // Worker returns hidden state → coord runs head
+                    let workerPolicy = shardEngines.last!.policy as! RemoteShardPolicy
+                    let workerHidden = try await workerPolicy.compute(input: activation)
+                    if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
+                       let headResult = await slicedCoord.computeHeadOnly(workerHidden) {
+                        sampledId = headResult.tokenId
+                    } else {
+                        sampledId = argmax(workerHidden)
+                    }
                 } else {
                     sampledId = argmax(activation)
                 }
@@ -765,8 +793,12 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                         let workerPolicy = shardEngines[1].policy as! RemoteShardPolicy
                         var currentPosition = promptTokens.count
 
-                        // First token from prefill
-                        let firstToken = argmax(activation)
+                        // First token: run head on prefill hidden state (coord has isLast=true)
+                        let firstHeadResult = await slicedCoord.computeHeadOnly(activation)
+                        guard let firstResult = firstHeadResult else {
+                            throw DistributedInferenceError.shardPlanFailed("computeHeadOnly returned nil on prefill output")
+                        }
+                        let firstToken = firstResult.tokenId
                         if !eosTokenIds.contains(firstToken) {
                             if yieldToken(firstToken) {
                                 if shouldReleaseWeights { for s in shardEngines { s.policy.releaseWeights() } }
@@ -778,23 +810,32 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                             continuation.finish()
                             return
                         }
+                        // Compute coord activation for first token (embedding + coord layers → hidden for worker)
                         activation = try await coordPolicy.compute(input: MLXArray(Int32(firstToken)))
                         currentPosition += 1
 
+                        // Continuous async pipeline decode loop
                         while generatedCount < maxTokens {
                             if speculationEnabled {
+                                // Step 1: Fire worker compute async (returns hidden state)
                                 let activationBox = SendableBox(activation)
                                 let workerTask = Task {
-                                    try await workerPolicy.computeAndSample(input: activationBox.value)
+                                    SendableBox(try await workerPolicy.compute(input: activationBox.value))
                                 }
 
+                                // Step 2: Draft token N+1 while worker is busy
                                 let draft = try? await slicedCoord.draftTokens(
                                     from: activation, count: draftLength, extraPredictionLayers: extraPredictionLayers
                                 )
 
-                                let actualToken = try await workerTask.value
+                                // Step 3: Await worker hidden state, run head locally
+                                let workerHidden = try await workerTask.value.value
+                                guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else { break }
+                                let actualToken = headResult.tokenId
 
+                                // Step 4: Verify draft against actual token
                                 if let draft = draft, draft.count > 0, draft.predictedTokens[0] == actualToken {
+                                    // HIT — use precomputed activation (zero idle time)
                                     activation = draft.precomputedStates[0]
                                     recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
                                     currentPosition += 1
@@ -802,12 +843,15 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                     if eosTokenIds.contains(actualToken) { break }
                                     if yieldToken(actualToken) { break }
 
+                                    // Verify subsequent draft tokens
                                     for i in 1..<draft.count {
                                         let verifyActivation = SendableBox(activation)
                                         let verifyTask = Task {
-                                            try await workerPolicy.computeAndSample(input: verifyActivation.value)
+                                            SendableBox(try await workerPolicy.compute(input: verifyActivation.value))
                                         }
-                                        let verifyToken = try await verifyTask.value
+                                        let verifyHidden = try await verifyTask.value.value
+                                        guard let verifyHead = await slicedCoord.computeHeadOnly(verifyHidden) else { break }
+                                        let verifyToken = verifyHead.tokenId
 
                                         if draft.predictedTokens[i] == verifyToken {
                                             activation = draft.precomputedStates[i]
@@ -832,6 +876,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                         }
                                     }
                                 } else {
+                                    // MISS — rollback draft cache and recompute
                                     recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
                                     if let draft = draft {
                                         try? await slicedCoord.rollbackCache(
@@ -855,8 +900,10 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                                     }
                                 }
                             } else {
-                                // Sequential path
-                                let sampledId = try await workerPolicy.computeAndSample(input: activation)
+                                // Sequential path — worker returns hidden state → coord runs head
+                                let workerHidden = try await workerPolicy.compute(input: activation)
+                                guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else { break }
+                                let sampledId = headResult.tokenId
                                 if eosTokenIds.contains(sampledId) { break }
                                 if yieldToken(sampledId) { break }
                                 activation = try await coordPolicy.compute(input: MLXArray(Int32(sampledId)))
@@ -868,9 +915,23 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                         for i in 0..<maxTokens {
                             let sampledId: Int
                             if i == 0 {
-                                sampledId = argmax(activation)
+                                // First token from prefill output (coord has head)
+                                if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
+                                   let headResult = await slicedCoord.computeHeadOnly(activation) {
+                                    sampledId = headResult.tokenId
+                                } else {
+                                    sampledId = argmax(activation)
+                                }
                             } else if remoteSamplingEnabled {
-                                sampledId = try await (shardEngines.last!.policy as! RemoteShardPolicy).computeAndSample(input: activation)
+                                // Worker returns hidden state → coord runs head
+                                let workerPolicy = shardEngines.last!.policy as! RemoteShardPolicy
+                                let workerHidden = try await workerPolicy.compute(input: activation)
+                                if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
+                                   let headResult = await slicedCoord.computeHeadOnly(workerHidden) {
+                                    sampledId = headResult.tokenId
+                                } else {
+                                    sampledId = argmax(workerHidden)
+                                }
                             } else {
                                 sampledId = argmax(activation)
                             }
