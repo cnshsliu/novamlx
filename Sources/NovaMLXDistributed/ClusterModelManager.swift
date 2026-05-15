@@ -315,7 +315,9 @@ public final class ClusterModelManager: @unchecked Sendable {
             // In 2-node pipeline, coordinator owns head (isLast=true) so worker
             // is a pure transformer-layer node. This cuts worker compute in half.
             let isFirst = index == 0
-            let isLast = plan.assignments.count <= 2 || index == plan.assignments.count - 1
+            // In 2-node pipeline, coordinator (index 0) owns head so worker is
+            // a pure transformer-layer node. In 3+ nodes, last node owns head.
+            let isLast = plan.assignments.count <= 2 ? (index == 0) : (index == plan.assignments.count - 1)
             let policy: ComputePolicy
 
             if assignment.nodeId == "local-coordinator" {

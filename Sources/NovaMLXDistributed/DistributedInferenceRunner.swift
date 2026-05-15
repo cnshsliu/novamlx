@@ -195,7 +195,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
             shardEngines = []
             for (index, assignment) in plan.assignments.enumerated() {
                 let isFirst = index == 0
-                let isLast = index == plan.assignments.count - 1
+                let isLast = plan.assignments.count <= 2 ? (index == 0) : (index == plan.assignments.count - 1)
                 let policy: ComputePolicy
 
                 if assignment.nodeId == "local-coordinator" {
@@ -627,7 +627,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                         shardEngines = []
                         for (index, assignment) in plan.assignments.enumerated() {
                             let isFirst = index == 0
-                            let isLast = index == plan.assignments.count - 1
+                            let isLast = plan.assignments.count <= 2 ? (index == 0) : (index == plan.assignments.count - 1)
                             let policy: ComputePolicy
 
                             if assignment.nodeId == "local-coordinator" {
