@@ -293,10 +293,14 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                 workerPolicy: workerPolicy
             )
         } else {
-            // Direct pipeline: coordinator → worker
+            // Direct pipeline: coordinator (layers only) → worker (layers only)
             activation = promptArray
             for shard in shardEngines {
-                activation = try await shard.policy.compute(input: activation)
+                if let sliced = shard.policy as? SlicedForwardPolicy {
+                    activation = try await sliced.computeLayersOnly(input: activation)
+                } else {
+                    activation = try await shard.policy.compute(input: activation)
+                }
             }
         }
 
@@ -733,7 +737,11 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                     } else {
                         activation = promptArray
                         for shard in shardEngines {
-                            activation = try await shard.policy.compute(input: activation)
+                            if let sliced = shard.policy as? SlicedForwardPolicy {
+                                activation = try await sliced.computeLayersOnly(input: activation)
+                            } else {
+                                activation = try await shard.policy.compute(input: activation)
+                            }
                         }
                     }
 
@@ -1002,14 +1010,18 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
 
             // Collect previous Worker result (overlapped with Coordinator compute)
             if hasPendingResult {
+                NovaMLXLog.info("[Distributed] Prefill chunk \(i): collecting previous worker result...")
                 let _ = try workerPolicy.recvResult()
+                NovaMLXLog.info("[Distributed] Prefill chunk \(i): previous result received")
             }
 
             // Coordinator processes this chunk (embedding + layers, skip head so we send hidden state to worker)
             let coordOutput = try await coordPolicy.computeLayersOnly(input: chunk)
+            NovaMLXLog.info("[Distributed] Prefill chunk \(i): coord output shape=\(coordOutput.shape) dtype=\(coordOutput.dtype)")
 
             // Send to Worker (fire-and-forget until next iteration)
             try workerPolicy.sendCompute(input: coordOutput)
+            NovaMLXLog.info("[Distributed] Prefill chunk \(i): sent to worker")
             hasPendingResult = true
         }
 
