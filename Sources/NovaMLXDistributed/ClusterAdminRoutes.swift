@@ -178,6 +178,9 @@ public final class ClusterAdminRoutes: @unchecked Sendable {
                 "completionTokens": stats.completionTokens,
                 "elapsedSeconds": stats.elapsedSeconds,
                 "speculationAccuracy": stats.speculationAccuracy as Any,
+                "coordComputeMs": stats.coordComputeMs as Any,
+                "workerComputeMs": stats.workerComputeMs as Any,
+                "headMs": stats.headMs as Any,
                 "timestampAgo": String(format: "%.0fs", Date().timeIntervalSince(stats.timestamp)),
             ] as [String: Any]
         }

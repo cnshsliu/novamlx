@@ -1056,13 +1056,25 @@ public struct DistributedInferenceStats: Codable, Sendable {
     public let speculationAccuracy: Double?
     public let timestamp: Date
 
+    // Per-component timing breakdown (optional — recorded when profiling is active)
+    public let coordComputeMs: Double?
+    public let workerComputeMs: Double?
+    public let transportMs: Double?
+    public let headMs: Double?
+
     public init(tokensPerSecond: Double, promptTokens: Int, completionTokens: Int,
-                elapsedSeconds: Double, speculationAccuracy: Double? = nil) {
+                elapsedSeconds: Double, speculationAccuracy: Double? = nil,
+                coordComputeMs: Double? = nil, workerComputeMs: Double? = nil,
+                transportMs: Double? = nil, headMs: Double? = nil) {
         self.tokensPerSecond = tokensPerSecond
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.elapsedSeconds = elapsedSeconds
         self.speculationAccuracy = speculationAccuracy
+        self.coordComputeMs = coordComputeMs
+        self.workerComputeMs = workerComputeMs
+        self.transportMs = transportMs
+        self.headMs = headMs
         self.timestamp = Date()
     }
 }
