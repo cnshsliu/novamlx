@@ -509,6 +509,15 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
 
         NovaMLXLog.info("[Distributed] Completed: \(generatedTokenIds.count) tokens in \(String(format: "%.2f", elapsed))s (\(String(format: "%.1f", tps)) tok/s)")
 
+        let accuracy = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : nil
+        DistributedInferenceRunnerCache.shared.recordStats(DistributedInferenceStats(
+            tokensPerSecond: tps,
+            promptTokens: promptTokens.count,
+            completionTokens: generatedTokenIds.count,
+            elapsedSeconds: elapsed,
+            speculationAccuracy: accuracy
+        ))
+
         // Release weights only if we created them in this request
         if shouldReleaseWeights {
             for shardEngine in shardEngines {
@@ -525,6 +534,387 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
             completionTokens: generatedTokenIds.count,
             finishReason: .stop
         )
+    }
+
+    /// Streaming distributed inference — yields tokens as they're decoded.
+    public func stream(request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { @Sendable in
+                do {
+                    let modelId = request.model
+                    let startTime = Date()
+
+                    // Setup: same as generate() — tokenize + prefill
+                    guard let modelPath = modelPathProvider(modelId) else {
+                        throw DistributedInferenceError.modelNotLoaded(modelId: modelId)
+                    }
+
+                    var tokenizer = tokenizerProvider(modelId)
+                    if tokenizer == nil {
+                        let modelDir = URL(fileURLWithPath: modelPath)
+                        let loaded = try await AutoTokenizer.from(modelFolder: modelDir)
+                        tokenizer = DistributedTokenizer(
+                            encode: { text in loaded.encode(text: text, addSpecialTokens: true) },
+                            decode: { tokens in loaded.decode(tokens: tokens, skipSpecialTokens: true) }
+                        )
+                    }
+                    guard let tokenizer = tokenizer else {
+                        throw DistributedInferenceError.modelNotLoaded(modelId: modelId)
+                    }
+
+                    var shardEngines: [ShardEngine]
+                    let shouldReleaseWeights: Bool
+
+                    if let preloaded = ClusterModelManager.shared.getShardEngines(for: modelId) {
+                        shardEngines = preloaded
+                        shouldReleaseWeights = false
+                        if let plan = ClusterModelManager.shared.shardPlan {
+                            lastShardPlan = (modelId, plan)
+                            DistributedInferenceRunnerCache.shared.setPlan(modelId: modelId, plan: plan)
+                        }
+                        for shard in shardEngines {
+                            if let slicedPolicy = shard.policy as? SlicedForwardPolicy {
+                                try? await slicedPolicy.resetCaches()
+                            }
+                        }
+                        NovaMLXLog.info("[Distributed-Stream] Using pre-loaded shard engines (\(preloaded.count) shards, caches reset)")
+                    } else {
+                        shouldReleaseWeights = true
+
+                        let profiles: [LayerProfile]
+                        do {
+                            profiles = try await ModelAnalyzer.shared.analyze(modelPath: modelPath)
+                        } catch {
+                            throw DistributedInferenceError.shardPlanFailed("Model analysis failed: \(error)")
+                        }
+                        guard !profiles.isEmpty else {
+                            throw DistributedInferenceError.shardPlanFailed("No layer profiles produced")
+                        }
+
+                        if let engine = engine, engine.getContainer(for: modelId) == nil {
+                            NovaMLXLog.info("[Distributed-Stream] Loading model \(modelId) into main engine for local shard...")
+                            let modelDir = URL(fileURLWithPath: modelPath)
+                            let config = ModelConfig(
+                                identifier: ModelIdentifier(id: modelId, family: .qwen)
+                            )
+                            _ = try await engine.loadModel(from: modelDir, config: config)
+                        }
+
+                        let availableWorkers = ClusterManager.shared.workers.values
+                            .filter { $0.status == .ready || $0.status == .active }
+
+                        let localMemory = MLX.GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? ProcessInfo.processInfo.physicalMemory
+                        let coordinatorSpec = NodeSpec(
+                            nodeId: "local-coordinator",
+                            totalMemoryBytes: localMemory,
+                            computeCapability: 1.0,
+                            hostname: "127.0.0.1",
+                            port: clusterConfig.coordinatorPort
+                        )
+                        let effectiveNodes = [coordinatorSpec] + availableWorkers.map(\.spec)
+
+                        let plan = ShardPlan(
+                            profiles: profiles,
+                            nodes: effectiveNodes,
+                            strategy: clusterConfig.strategy,
+                            minLayersPerShard: clusterConfig.minLayersPerShard
+                        )
+
+                        lastShardPlan = (modelId, plan)
+                        DistributedInferenceRunnerCache.shared.setPlan(modelId: modelId, plan: plan)
+
+                        let group: DistributedGroup = .uninitialized
+                        shardEngines = []
+                        for (index, assignment) in plan.assignments.enumerated() {
+                            let isFirst = index == 0
+                            let isLast = index == plan.assignments.count - 1
+                            let policy: ComputePolicy
+
+                            if assignment.nodeId == "local-coordinator" {
+                                policy = SlicedForwardPolicy(
+                                    assignment: assignment,
+                                    engine: engine!,
+                                    modelId: modelId,
+                                    isFirst: isFirst,
+                                    isLast: isLast
+                                )
+                            } else {
+                                let worker = availableWorkers.first { $0.spec.nodeId == assignment.nodeId }
+                                let host = worker?.spec.networkHost ?? worker?.spec.hostname ?? assignment.nodeId
+                                let endpoint = NodeEndpoint(
+                                    nodeId: assignment.nodeId,
+                                    host: host,
+                                    port: 7010
+                                )
+                                policy = RemoteShardPolicy(assignment: assignment, workerEndpoint: endpoint, modelId: modelId, modelPath: modelPath, isFirst: isFirst, isLast: isLast)
+                            }
+                            shardEngines.append(ShardEngine(group: group, assignment: assignment, policy: policy))
+                        }
+
+                        for (i, shardEngine) in shardEngines.enumerated() {
+                            do {
+                                try await shardEngine.policy.bindWeights()
+                            } catch {
+                                throw DistributedInferenceError.shardPlanFailed("Shard \(i) bindWeights failed: \(error)")
+                            }
+                        }
+                    }
+
+                    // Tokenize input
+                    var promptTokens: [Int] = []
+                    if let container = engine?.getContainer(for: modelId),
+                       let mlxTokenizer = await container.mlxContainer?.tokenizer {
+                        let messageDicts: [[String: any Sendable]] = request.messages.compactMap { msg in
+                            guard let content = msg.content else { return nil }
+                            return ["role": msg.role.rawValue, "content": content] as [String: any Sendable]
+                        }
+                        if let rendered = try? mlxTokenizer.applyChatTemplate(messages: messageDicts, tools: nil, additionalContext: nil) {
+                            promptTokens = rendered
+                        }
+                    }
+                    if promptTokens.isEmpty {
+                        for msg in request.messages {
+                            if let content = msg.content {
+                                promptTokens.append(contentsOf: tokenizer.encode(content))
+                            }
+                        }
+                    }
+
+                    guard !promptTokens.isEmpty else {
+                        continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokens.count))
+                        continuation.finish()
+                        return
+                    }
+
+                    let promptArray = MLXArray(promptTokens.map { Int32($0) })
+                    guard !shardEngines.isEmpty else {
+                        throw DistributedInferenceError.shardPlanFailed("No shards created")
+                    }
+
+                    // Prefill
+                    var activation: MLXArray
+                    if shardEngines.count == 2,
+                       let coordPolicy = shardEngines[0].policy as? SlicedForwardPolicy,
+                       let workerPolicy = shardEngines[1].policy as? RemoteShardPolicy,
+                       promptTokens.count > 256 {
+                        activation = try await pipelinedPrefill(
+                            tokens: promptArray,
+                            coordPolicy: coordPolicy,
+                            workerPolicy: workerPolicy
+                        )
+                    } else {
+                        activation = promptArray
+                        for shard in shardEngines {
+                            activation = try await shard.policy.compute(input: activation)
+                        }
+                    }
+
+                    // Streaming decode loop
+                    let maxTokens = request.maxTokens ?? 512
+                    var generatedCount = 0
+                    var stopTokens: Set<String> = []
+                    if let stop = request.stop { stopTokens = Set(stop) }
+
+                    var eosTokenIds: Set<Int> = [151645, 151643]
+                    if let container = engine?.getContainer(for: modelId),
+                       let eosId = container.tokenizer?.eosTokenId {
+                        eosTokenIds.insert(eosId)
+                    }
+
+                    let remoteSamplingEnabled = shardEngines.count > 1 && shardEngines.last?.policy is RemoteShardPolicy
+                    let extraPredictionLayers = 5
+
+                    let speculationCapable = remoteSamplingEnabled && shardEngines.count == 2
+                    var speculationEnabled = speculationCapable
+                    let adaptiveWindow = 20
+                    let disableThreshold = 0.30
+                    var recentPredictions: [Bool] = []
+                    var correctPredictions = 0
+                    var totalPredictions = 0
+                    let draftLength = 1
+
+                    // Running text buffer for stop token suffix check
+                    var textBuffer = ""
+
+                    /// Yield a single decoded token, return true if should stop
+                    func yieldToken(_ tokenId: Int) -> Bool {
+                        let tokenText = tokenizer.decode([tokenId])
+                        textBuffer += tokenText
+                        generatedCount += 1
+
+                        let isEos = eosTokenIds.contains(tokenId)
+                        let hitStop = stopTokens.contains(where: { textBuffer.hasSuffix($0) })
+                        let atLimit = generatedCount >= maxTokens
+                        let shouldStop = isEos || hitStop || atLimit
+
+                        let finishReason: FinishReason? = shouldStop ? (atLimit && !isEos && !hitStop ? .length : .stop) : nil
+                        continuation.yield(Token(
+                            id: tokenId,
+                            text: tokenText,
+                            finishReason: finishReason,
+                            promptTokens: promptTokens.count
+                        ))
+                        return shouldStop
+                    }
+
+                    if speculationCapable {
+                        let coordPolicy = shardEngines[0].policy
+                        guard let slicedCoord = coordPolicy as? SlicedForwardPolicy else {
+                            throw DistributedInferenceError.shardPlanFailed("Coord policy is not SlicedForwardPolicy")
+                        }
+                        let workerPolicy = shardEngines[1].policy as! RemoteShardPolicy
+                        var currentPosition = promptTokens.count
+
+                        // First token from prefill
+                        let firstToken = argmax(activation)
+                        if !eosTokenIds.contains(firstToken) {
+                            if yieldToken(firstToken) {
+                                if shouldReleaseWeights { for s in shardEngines { s.policy.releaseWeights() } }
+                                continuation.finish()
+                                return
+                            }
+                        } else {
+                            if shouldReleaseWeights { for s in shardEngines { s.policy.releaseWeights() } }
+                            continuation.finish()
+                            return
+                        }
+                        activation = try await coordPolicy.compute(input: MLXArray(Int32(firstToken)))
+                        currentPosition += 1
+
+                        while generatedCount < maxTokens {
+                            if speculationEnabled {
+                                let activationBox = SendableBox(activation)
+                                let workerTask = Task {
+                                    try await workerPolicy.computeAndSample(input: activationBox.value)
+                                }
+
+                                let draft = try? await slicedCoord.draftTokens(
+                                    from: activation, count: draftLength, extraPredictionLayers: extraPredictionLayers
+                                )
+
+                                let actualToken = try await workerTask.value
+
+                                if let draft = draft, draft.count > 0, draft.predictedTokens[0] == actualToken {
+                                    activation = draft.precomputedStates[0]
+                                    recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
+                                    currentPosition += 1
+
+                                    if eosTokenIds.contains(actualToken) { break }
+                                    if yieldToken(actualToken) { break }
+
+                                    for i in 1..<draft.count {
+                                        let verifyActivation = SendableBox(activation)
+                                        let verifyTask = Task {
+                                            try await workerPolicy.computeAndSample(input: verifyActivation.value)
+                                        }
+                                        let verifyToken = try await verifyTask.value
+
+                                        if draft.predictedTokens[i] == verifyToken {
+                                            activation = draft.precomputedStates[i]
+                                            recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
+                                            currentPosition += 1
+
+                                            if eosTokenIds.contains(verifyToken) { break }
+                                            if yieldToken(verifyToken) { break }
+                                        } else {
+                                            recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
+                                            try? await slicedCoord.rollbackCache(
+                                                position: currentPosition,
+                                                speculatedCount: draft.count - i,
+                                                mambaSnapshot: draft.mambaSnapshot
+                                            )
+                                            activation = try await coordPolicy.compute(input: MLXArray(Int32(verifyToken)))
+                                            currentPosition += 1
+
+                                            if eosTokenIds.contains(verifyToken) { break }
+                                            if yieldToken(verifyToken) { break }
+                                            break
+                                        }
+                                    }
+                                } else {
+                                    recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
+                                    if let draft = draft {
+                                        try? await slicedCoord.rollbackCache(
+                                            position: currentPosition,
+                                            speculatedCount: draft.count,
+                                            mambaSnapshot: draft.mambaSnapshot
+                                        )
+                                    }
+                                    activation = try await coordPolicy.compute(input: MLXArray(Int32(actualToken)))
+                                    currentPosition += 1
+
+                                    if eosTokenIds.contains(actualToken) { break }
+                                    if yieldToken(actualToken) { break }
+                                }
+
+                                // Adaptive accuracy check
+                                if recentPredictions.count >= adaptiveWindow {
+                                    let rolling = Double(recentPredictions.filter { $0 }.count) / Double(recentPredictions.count)
+                                    if rolling < disableThreshold {
+                                        speculationEnabled = false
+                                    }
+                                }
+                            } else {
+                                // Sequential path
+                                let sampledId = try await workerPolicy.computeAndSample(input: activation)
+                                if eosTokenIds.contains(sampledId) { break }
+                                if yieldToken(sampledId) { break }
+                                activation = try await coordPolicy.compute(input: MLXArray(Int32(sampledId)))
+                                currentPosition += 1
+                            }
+                        }
+                    } else {
+                        // Non-speculative decode
+                        for i in 0..<maxTokens {
+                            let sampledId: Int
+                            if i == 0 {
+                                sampledId = argmax(activation)
+                            } else if remoteSamplingEnabled {
+                                sampledId = try await (shardEngines.last!.policy as! RemoteShardPolicy).computeAndSample(input: activation)
+                            } else {
+                                sampledId = argmax(activation)
+                            }
+
+                            if eosTokenIds.contains(sampledId) { break }
+                            if yieldToken(sampledId) { break }
+
+                            if remoteSamplingEnabled {
+                                activation = try await shardEngines[0].policy.compute(input: MLXArray(Int32(sampledId)))
+                            } else {
+                                var decodeActivation = MLXArray(Int32(sampledId))
+                                for shard in shardEngines {
+                                    decodeActivation = try await shard.policy.compute(input: decodeActivation)
+                                }
+                                activation = decodeActivation
+                            }
+                        }
+                    }
+
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    let tps = generatedCount > 0 && elapsed > 0 ? Double(generatedCount) / elapsed : 0
+                    NovaMLXLog.info("[Distributed] Stream completed: \(generatedCount) tokens in \(String(format: "%.2f", elapsed))s (\(String(format: "%.1f", tps)) tok/s)")
+
+                    let accuracy = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : nil
+                    DistributedInferenceRunnerCache.shared.recordStats(DistributedInferenceStats(
+                        tokensPerSecond: tps,
+                        promptTokens: promptTokens.count,
+                        completionTokens: generatedCount,
+                        elapsedSeconds: elapsed,
+                        speculationAccuracy: accuracy
+                    ))
+
+                    if shouldReleaseWeights {
+                        for shardEngine in shardEngines {
+                            shardEngine.policy.releaseWeights()
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     // MARK: - Private helpers
@@ -597,17 +987,45 @@ private func recordPrediction(
 // MARK: - DistributedInferenceRunnerCache
 
 /// Thread-safe cache for the last computed shard plan, readable by admin API.
+public struct DistributedInferenceStats: Codable, Sendable {
+    public let tokensPerSecond: Double
+    public let promptTokens: Int
+    public let completionTokens: Int
+    public let elapsedSeconds: Double
+    public let speculationAccuracy: Double?
+    public let timestamp: Date
+
+    public init(tokensPerSecond: Double, promptTokens: Int, completionTokens: Int,
+                elapsedSeconds: Double, speculationAccuracy: Double? = nil) {
+        self.tokensPerSecond = tokensPerSecond
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.elapsedSeconds = elapsedSeconds
+        self.speculationAccuracy = speculationAccuracy
+        self.timestamp = Date()
+    }
+}
+
 public final class DistributedInferenceRunnerCache: @unchecked Sendable {
     public static let shared = DistributedInferenceRunnerCache()
     private let lock = NSLock()
     private var _lastPlan: (modelId: String, plan: ShardPlan)?
+    private var _lastStats: DistributedInferenceStats?
 
     public var lastPlan: (modelId: String, plan: ShardPlan)? {
         lock.withLock { _lastPlan }
     }
 
+    public var lastStats: DistributedInferenceStats? {
+        lock.withLock { _lastStats }
+    }
+
     public func setPlan(modelId: String, plan: ShardPlan) {
         lock.withLock { _lastPlan = (modelId, plan) }
+    }
+
+    public func recordStats(_ stats: DistributedInferenceStats) {
+        lock.withLock { _lastStats = stats }
     }
 
     private init() {}

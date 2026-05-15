@@ -45,10 +45,12 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
     /// Enable Ring/JACCL transport after the distributed group is initialized.
     /// Called by ClusterModelManager after both sides have initialized transport.
     func enableRingTransport() {
-        // Ring transport disabled: MLX distributed group interferes with eval() calls.
-        // Ring group init works (size=2) but data transfer causes eval crashes.
-        // Re-enable once MLX supports isolated distributed eval contexts.
-        NovaMLXLog.info("[RemoteShardPolicy] Ring transport available but disabled (MLX eval interference)")
+        guard RingTransportManager.shared.isReady else {
+            NovaMLXLog.warning("[RemoteShardPolicy] Cannot enable Ring transport: group not ready")
+            return
+        }
+        useRingTransport = true
+        NovaMLXLog.info("[RemoteShardPolicy] Ring/JACCL transport ENABLED for data plane")
     }
 
     public func bindWeights() async throws {
@@ -317,7 +319,10 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
 
     /// Send initTransport to worker so it initializes Ring/JACCL distributed transport.
     /// Called after bindWeights. Worker responds with transportReady or error.
-    func sendInitTransport(backend: String = "ring", rank: Int = 1, hostfileJSON: String? = nil) throws {
+    /// Returns true if worker acknowledged (not necessarily if transport succeeded —
+    /// the actual JACCL init happens asynchronously while coord also inits).
+    @discardableResult
+    func sendInitTransport(backend: String = "ring", rank: Int = 1, hostfileJSON: String? = nil) throws -> Bool {
         guard let conn = lock.withLock({ connection }) else {
             throw ShardEngineError.notReady
         }
@@ -332,13 +337,15 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
         let msg = ShardWireFormat.encode(msgType: .initTransport, payload: data)
         try conn.sendData(msg)
 
-        // Wait for transportReady ack
+        // Wait for transportReady ack (worker sends this BEFORE blocking on JACCL init)
         let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
         guard let header = ShardWireFormat.decodeHeader(headerData) else {
-            throw ShardServiceError.invalidMessage("bad initTransport response")
+            NovaMLXLog.warning("[RemoteShardPolicy] Bad initTransport response, using TCP fallback")
+            return false
         }
         if header.msgType == .transportReady {
-            NovaMLXLog.info("[RemoteShardPolicy] Worker transport ready (backend=\(backend))")
+            NovaMLXLog.info("[RemoteShardPolicy] Worker acknowledged initTransport (backend=\(backend))")
+            return true
         } else if header.msgType == .error {
             var errorMsg = "transport init failed"
             if header.payloadSize > 0 {
@@ -346,8 +353,10 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
                 errorMsg = String(data: errorData, encoding: .utf8) ?? errorMsg
             }
             NovaMLXLog.warning("[RemoteShardPolicy] Worker transport init failed: \(errorMsg), using TCP fallback")
+            return false
         } else {
             NovaMLXLog.warning("[RemoteShardPolicy] Unexpected initTransport response: \(header.msgType)")
+            return false
         }
     }
 

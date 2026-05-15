@@ -70,6 +70,7 @@ struct ModelsPageView: View {
                         subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
                         isLoaded: true,
                         actions: {
+                            specBoostBadge(for: modelId)
                             Button(l10n.tr("models.unload")) {
                                 Task {
                                     if let record = modelManager.getRecord(modelId) {
@@ -86,6 +87,57 @@ struct ModelsPageView: View {
             }
         }
         .sectionCard()
+    }
+
+    @ViewBuilder
+    private func specBoostBadge(for modelId: String) -> some View {
+        if let boost = appState.specBoostStatus[modelId], boost.draftModelId != modelId {
+            switch boost.status {
+            case "active":
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.fill")
+                        .font(.caption2)
+                        .foregroundColor(.green)
+                    Text(boost.draftDisplayName ?? "Boost")
+                        .font(.caption2)
+                        .foregroundColor(.green)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.green.opacity(0.15))
+                .cornerRadius(4)
+            case "eligible":
+                if boost.draftDownloaded == true {
+                    Button {
+                        Task { await appState.boostLoad(modelId: modelId) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bolt.horizontal")
+                                .font(.caption2)
+                            Text(boost.draftDisplayName ?? "Boost")
+                                .font(.caption2)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await appState.boostDownload(modelId: modelId) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle")
+                                .font(.caption2)
+                            Text(boost.draftDisplayName ?? "Boost")
+                                .font(.caption2)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            default:
+                EmptyView()
+            }
+        }
     }
 
     private var downloadedSection: some View {

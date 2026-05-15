@@ -46,6 +46,7 @@ public final class InferenceService: @unchecked Sendable {
     private var worker: WorkerSupervisor?
     private var workerLoadedModels: Set<String> = []
     private var workerModelTypes: [String: ModelType] = [:]
+    private var workerHybridModels: Set<String> = []
     private let loadDedup = LoadDedup()
     private var ttlSweepTask: Task<Void, Never>?
 
@@ -115,6 +116,7 @@ public final class InferenceService: @unchecked Sendable {
             NovaMLXLog.warning("[InferenceService] Worker crashed — clearing loaded models state")
             self.workerLoadedModels.removeAll()
             self.workerModelTypes.removeAll()
+            self.workerHybridModels.removeAll()
             self.saveLoadedModelsList()
         }
         try worker.start()
@@ -144,8 +146,11 @@ public final class InferenceService: @unchecked Sendable {
             gbnfGrammar: finalRequest.gbnfGrammar,
             thinkingBudget: finalRequest.thinkingBudget,
             enableThinking: finalRequest.enableThinking,
-            preserveThinking: finalRequest.preserveThinking
+            preserveThinking: finalRequest.preserveThinking,
+            draftModel: finalRequest.draftModel,
+            numDraftTokens: finalRequest.numDraftTokens
         )
+        finalRequest = autoInjectDraftModel(finalRequest)
 
         // Cluster mode: check readiness, then route to distributed inference
         if clusterMode, let runner = distributedRunner {
@@ -154,17 +159,15 @@ public final class InferenceService: @unchecked Sendable {
 
             switch clusterState.state {
             case .idle:
-                NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Rejected: no model activated for distributed inference")
-                throw DistributedInferenceError.shardPlanFailed("No model activated for distributed inference. Activate a model first via POST /admin/api/cluster/activate-model")
+                // No model activated for distributed — fall through to local inference
+                NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] Cluster idle, using local inference")
             case .activating:
                 let (ready, total) = clusterState.readinessFraction
                 NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Rejected: cluster preparing (\(ready)/\(total) nodes ready)")
                 throw DistributedInferenceError.shardPlanFailed("Cluster is preparing model '\(clusterState.activeModel ?? "?")' (\(ready)/\(total) nodes ready). Please wait.")
             case ClusterModelState.failed:
-                let failedNodes = clusterState.nodes.filter { $0.status == .failed }
-                let errors = failedNodes.compactMap { $0.errorMessage }.joined(separator: "; ")
-                NovaMLXLog.error("[Route:\(finalRequest.id.uuidString.prefix(8))] Cluster activation failed: \(errors)")
-                throw DistributedInferenceError.shardPlanFailed("Cluster activation failed: \(errors)")
+                // Failed — fall through to local inference
+                NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Cluster failed, using local inference")
             case .ready:
                 NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed (model=\(resolvedId))")
                 return try await runner.generate(request: finalRequest)
@@ -199,17 +202,19 @@ public final class InferenceService: @unchecked Sendable {
         // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
         let hasLinearAttention = container?.config.hasLinearAttention == true
 
-        // Session, grammar, and VLM paths use engine directly (specialized execution)
+        // Session, grammar, VLM, hybrid, and draft-model paths use engine directly (specialized execution)
+        let hasDraftModel = finalRequest.draftModel != nil
         let needsSpecialized = finalRequest.sessionId != nil ||
             finalRequest.jsonSchemaDef != nil ||
             finalRequest.responseFormat == .jsonObject ||
             finalRequest.regexPattern != nil ||
             finalRequest.gbnfGrammar != nil ||
             isVLM ||
-            hasLinearAttention
+            hasLinearAttention ||
+            hasDraftModel
 
         if needsSpecialized {
-            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (finalRequest.sessionId != nil ? "session" : "grammar"))
+            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (finalRequest.sessionId != nil ? "session" : "grammar")))
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher (reason=\(reason), model=\(resolvedId))")
             return try await batcher.submit(finalRequest)
         }
@@ -238,12 +243,30 @@ public final class InferenceService: @unchecked Sendable {
             gbnfGrammar: finalRequest.gbnfGrammar,
             thinkingBudget: finalRequest.thinkingBudget,
             enableThinking: finalRequest.enableThinking,
-            preserveThinking: finalRequest.preserveThinking
+            preserveThinking: finalRequest.preserveThinking,
+            draftModel: finalRequest.draftModel,
+            numDraftTokens: finalRequest.numDraftTokens
         )
+        finalRequest = autoInjectDraftModel(finalRequest)
 
-        // Cluster mode: streaming distributed not yet supported — fall through to local
-        if clusterMode {
-            NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed stream fallback to local (model=\(resolvedId))")
+        // Cluster mode: route to distributed streaming when cluster is ready
+        if clusterMode, let runner = distributedRunner {
+            let modelManager = ClusterModelManager.shared
+            let clusterState = modelManager.getStatus()
+
+            switch clusterState.state {
+            case .idle:
+                NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] Cluster idle, using local inference for stream")
+            case .activating:
+                let (ready, total) = clusterState.readinessFraction
+                NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Rejected: cluster preparing (\(ready)/\(total) nodes ready)")
+                return AsyncThrowingStream { $0.finish(throwing: DistributedInferenceError.shardPlanFailed("Cluster is preparing model '\(clusterState.activeModel ?? "?")' (\(ready)/\(total) nodes ready). Please wait.")) }
+            case .failed:
+                NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Cluster failed, using local inference for stream")
+            case .ready:
+                NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed stream (model=\(resolvedId))")
+                return runner.stream(request: finalRequest)
+            }
         }
 
         // Worker mode: route through subprocess
@@ -282,17 +305,19 @@ public final class InferenceService: @unchecked Sendable {
         // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
         let hasLinearAttention = container?.config.hasLinearAttention == true
 
-        // Session, grammar, and VLM paths use engine directly (specialized execution)
+        // Session, grammar, VLM, hybrid, and draft-model paths use engine directly (specialized execution)
+        let hasDraftModel = finalRequest.draftModel != nil
         let needsSpecialized = finalRequest.sessionId != nil ||
             finalRequest.jsonSchemaDef != nil ||
             finalRequest.responseFormat == .jsonObject ||
             finalRequest.regexPattern != nil ||
             finalRequest.gbnfGrammar != nil ||
             isVLM ||
-            hasLinearAttention
+            hasLinearAttention ||
+            hasDraftModel
 
         if needsSpecialized {
-            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (finalRequest.sessionId != nil ? "session" : "grammar"))
+            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (finalRequest.sessionId != nil ? "session" : "grammar")))
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher stream (reason=\(reason), model=\(resolvedId))")
             return batcher.submitStream(finalRequest)
         }
@@ -310,14 +335,94 @@ public final class InferenceService: @unchecked Sendable {
         }
     }
 
+    // MARK: - Auto Speculative Decoding (Speed Boost)
+
+    /// Automatically inject draft model for speculative decoding when a compatible
+    /// draft model is loaded. Skipped if user explicitly sets draftModel, or for
+    /// hybrid/distributed/cluster requests.
+    private func autoInjectDraftModel(_ request: InferenceRequest) -> InferenceRequest {
+        // User explicitly specified — respect their choice
+        guard request.draftModel == nil else { return request }
+
+        // Skip when model is actively served by distributed runner.
+        // When cluster is idle (no model activated), requests fall through to
+        // local inference where speculative decoding works fine.
+        if clusterMode, let runner = distributedRunner {
+            let clusterState = ClusterModelManager.shared.getStatus()
+            if clusterState.state == .ready, clusterState.activeModel == settingsManager.resolveModelId(request.model) {
+                return request
+            }
+        }
+
+        guard isModelLoaded(request.model) else { return request }
+        guard !isHybridModel(request.model) else { return request }
+
+        // Look up recommendation from registry
+        let family: ModelFamily
+        if let container = engine.getContainer(for: request.model) {
+            family = container.identifier.family
+        } else {
+            // Worker mode: engine pool is empty, infer family from model ID
+            let id = settingsManager.resolveModelId(request.model).lowercased()
+            if id.contains("qwen") { family = .qwen }
+            else if id.contains("llama") { family = .llama }
+            else if id.contains("gemma") { family = .gemma }
+            else if id.contains("mistral") { family = .mistral }
+            else if id.contains("phi") { family = .phi }
+            else { return request }
+        }
+
+        guard let candidate = DraftModelRegistry.shared.recommendation(
+            family: family,
+            isHybrid: false
+        ) else { return request }
+
+        guard isModelLoaded(candidate.draftModelId) else { return request }
+
+        // Validate vocab_size match from config.json on disk
+        let mainId = settingsManager.resolveModelId(request.model)
+        let mainDir = NovaMLXPaths.modelsDir.appendingPathComponent(mainId)
+        let draftDir = NovaMLXPaths.modelsDir.appendingPathComponent(candidate.draftModelId)
+        guard let mainVocab = DraftModelRegistry.readVocabSize(from: mainDir),
+              let draftVocab = DraftModelRegistry.readVocabSize(from: draftDir),
+              mainVocab == draftVocab else {
+            NovaMLXLog.warning("[SpecBoost] Vocab mismatch for \(request.model), skipping auto-injection")
+            return request
+        }
+
+        NovaMLXLog.info("[SpecBoost] Auto-injecting draft '\(candidate.draftModelId)' for '\(request.model)'")
+        return InferenceRequest(
+            id: request.id, model: request.model, messages: request.messages,
+            tools: request.tools,
+            temperature: request.temperature, maxTokens: request.maxTokens,
+            topP: request.topP, topK: request.topK, minP: request.minP,
+            frequencyPenalty: request.frequencyPenalty, presencePenalty: request.presencePenalty,
+            repetitionPenalty: request.repetitionPenalty, seed: request.seed,
+            stream: request.stream, stop: request.stop,
+            sessionId: request.sessionId,
+            responseFormat: request.responseFormat,
+            jsonSchemaDef: request.jsonSchemaDef,
+            regexPattern: request.regexPattern,
+            gbnfGrammar: request.gbnfGrammar,
+            thinkingBudget: request.thinkingBudget,
+            enableThinking: request.enableThinking,
+            preserveThinking: request.preserveThinking,
+            draftModel: candidate.draftModelId,
+            numDraftTokens: request.numDraftTokens ?? 4
+        )
+    }
+
     public func loadModel(at url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws {
         let modelId = config.identifier.id
 
         try await loadDedup.ensureSingle(modelId: modelId) { [self] in
             if self.workerMode, let worker = self.worker {
-                try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
+                let isHybrid = try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
                 self.workerLoadedModels.insert(modelId)
                 self.workerModelTypes[modelId] = config.modelType
+                if isHybrid {
+                    self.workerHybridModels.insert(modelId)
+                }
             } else {
                 _ = try await self.engine.loadModel(from: url, config: config, progress: progress)
                 let settings = self.settingsManager.getSettings(modelId)
@@ -334,6 +439,7 @@ public final class InferenceService: @unchecked Sendable {
             try? await worker.sendUnload(modelId: identifier.id)
             workerLoadedModels.remove(identifier.id)
             workerModelTypes.removeValue(forKey: identifier.id)
+            workerHybridModels.remove(identifier.id)
         } else {
             engine.unloadModel(identifier)
         }
@@ -347,6 +453,14 @@ public final class InferenceService: @unchecked Sendable {
         }
         guard let container = engine.getContainer(for: resolvedId) else { return false }
         return container.isLoaded
+    }
+
+    public func isHybridModel(_ modelId: String) -> Bool {
+        let resolvedId = settingsManager.resolveModelId(modelId)
+        if workerMode {
+            return workerHybridModels.contains(resolvedId)
+        }
+        return engine.getContainer(for: resolvedId)?.config.hasLinearAttention ?? false
     }
 
     /// Check if a model can be loaded given current memory constraints.

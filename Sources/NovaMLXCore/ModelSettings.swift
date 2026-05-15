@@ -113,7 +113,11 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             gbnfGrammar: request.gbnfGrammar,
             thinkingBudget: request.thinkingBudget ?? thinkingBudget,
             enableThinking: request.enableThinking,
-            preserveThinking: request.preserveThinking
+            preserveThinking: request.preserveThinking,
+            draftModel: request.draftModel,
+            numDraftTokens: request.numDraftTokens,
+            includeLogprobs: request.includeLogprobs,
+            topLogprobsCount: request.topLogprobsCount
         )
     }
 }

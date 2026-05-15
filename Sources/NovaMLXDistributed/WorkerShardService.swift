@@ -519,11 +519,12 @@ public final class WorkerShardService: @unchecked Sendable {
         let hostfileJSON = json["hostfileJSON"] as? String
         NovaMLXLog.info("[WorkerShardService] Initializing transport: backend=\(backend), rank=\(rank)")
 
-        // Send ack BEFORE Ring init (which blocks the connection waiting for coord)
+        // Send ack BEFORE transport init (which blocks until coord also inits).
+        // Coordinator reads this ack, then inits on its side — both sides meet in init.
         let ack = ShardWireFormat.encode(msgType: .transportReady)
         try conn.sendData(ack)
 
-        // Now init Ring transport (blocks until coord also inits)
+        // Now init transport (blocks until coord also inits)
         let group: DistributedGroup
         if let hostfile = hostfileJSON {
             group = RingTransportManager.shared.initializeFromHostfileJSON(hostfile, rank: rank)
@@ -533,13 +534,8 @@ public final class WorkerShardService: @unchecked Sendable {
 
         if group.isValid {
             NovaMLXLog.info("[WorkerShardService] Transport ready: rank=\(group.rank), size=\(group.size)")
-            let ack = ShardWireFormat.encode(msgType: .transportReady)
-            try conn.sendData(ack)
         } else {
-            NovaMLXLog.error("[WorkerShardService] Transport init failed, continuing with TCP fallback")
-            let errorPayload = "Transport initialization failed".data(using: .utf8) ?? Data()
-            let msg = ShardWireFormat.encode(msgType: .error, payload: errorPayload)
-            try conn.sendData(msg)
+            NovaMLXLog.warning("[WorkerShardService] Transport init failed (backend=\(backend)), using TCP fallback")
         }
     }
 }

@@ -1,8 +1,18 @@
 import SwiftUI
+import NovaMLXAPI
 import NovaMLXCore
 import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
+
+public struct SpecBoostState: Sendable {
+    public let status: String
+    public let reason: String?
+    public let draftModelId: String?
+    public let draftDisplayName: String?
+    public let draftDownloaded: Bool?
+    public let draftLoaded: Bool?
+}
 
 @MainActor
 public final class MenuBarAppState: ObservableObject {
@@ -29,7 +39,11 @@ public final class MenuBarAppState: ObservableObject {
     // Cluster state — read from config, drives sidebar visibility
     @Published public var clusterEnabled: Bool = false
 
+    // Speed Boost state per model
+    @Published public var specBoostStatus: [String: SpecBoostState] = [:]
+
     private var statsTimer: Timer?
+    private var specBoostPollCounter = 0
     private let maxTpsHistory = 90
 
     /// Cap for realistic token generation speed on Apple Silicon (any value above is a measurement bug)
@@ -89,6 +103,10 @@ public final class MenuBarAppState: ObservableObject {
                     self.peakTokensPerSecond = displayTps
                 }
                 await self.pollDownloadStatus()
+                if self.specBoostPollCounter % 5 == 0 {
+                    await self.pollSpecBoostStatus()
+                }
+                self.specBoostPollCounter += 1
                 self.refreshCloudAuthState()
                 self.syncClusterEnabled()
             }
@@ -304,6 +322,64 @@ public final class MenuBarAppState: ObservableObject {
             }
         } catch {
             // Silent — polling errors are non-critical
+        }
+    }
+
+    private func pollSpecBoostStatus() async {
+        guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/models") else { return }
+        do {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+            if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+            let (data, _) = try await URLSession.shared.data(for: request)
+            guard let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            var updated: [String: SpecBoostState] = [:]
+            for item in array {
+                guard let id = item["id"] as? String,
+                      let boost = item["specBoost"] as? [String: Any] else { continue }
+                updated[id] = SpecBoostState(
+                    status: boost["status"] as? String ?? "",
+                    reason: boost["reason"] as? String,
+                    draftModelId: boost["draftModelId"] as? String,
+                    draftDisplayName: boost["draftDisplayName"] as? String,
+                    draftDownloaded: boost["draftDownloaded"] as? Bool,
+                    draftLoaded: boost["draftLoaded"] as? Bool
+                )
+            }
+            self.specBoostStatus = updated
+        } catch {
+            // Silent
+        }
+    }
+
+    func boostDownload(modelId: String) async {
+        guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/models/boost/download") else { return }
+        do {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+            request.httpBody = try JSONEncoder().encode(AdminLoadRequest(modelId: modelId))
+            _ = try await URLSession.shared.data(for: request)
+            // Immediately re-poll to get updated status
+            await pollSpecBoostStatus()
+        } catch {
+            NovaMLXLog.error("[SpecBoost] Download failed: \(error)")
+        }
+    }
+
+    func boostLoad(modelId: String) async {
+        guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/models/boost/load") else { return }
+        do {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+            request.httpBody = try JSONEncoder().encode(AdminLoadRequest(modelId: modelId))
+            _ = try await URLSession.shared.data(for: request)
+            await pollSpecBoostStatus()
+        } catch {
+            NovaMLXLog.error("[SpecBoost] Load failed: \(error)")
         }
     }
 }

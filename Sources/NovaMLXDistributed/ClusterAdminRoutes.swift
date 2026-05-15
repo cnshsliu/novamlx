@@ -170,6 +170,17 @@ public final class ClusterAdminRoutes: @unchecked Sendable {
             "memoryUsedBytes": $0.memoryUsedBytes,
             "errorMessage": $0.errorMessage as Any,
         ] as [String: Any] }
+
+        if let stats = DistributedInferenceRunnerCache.shared.lastStats {
+            result["inferenceStats"] = [
+                "tokensPerSecond": stats.tokensPerSecond,
+                "promptTokens": stats.promptTokens,
+                "completionTokens": stats.completionTokens,
+                "elapsedSeconds": stats.elapsedSeconds,
+                "speculationAccuracy": stats.speculationAccuracy as Any,
+                "timestampAgo": String(format: "%.0fs", Date().timeIntervalSince(stats.timestamp)),
+            ] as [String: Any]
+        }
         return result
     }
 }

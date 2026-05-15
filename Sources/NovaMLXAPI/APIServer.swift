@@ -478,6 +478,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     coordinator: coordinator, request: request
                 )
 
+                // Also ensure draft model is loaded if specified (speculative decoding)
+                if let draftModelId = openAIReq.draftModel, !draftModelId.isEmpty {
+                    _ = try await Self.ensureModelReady(
+                        modelId: draftModelId, isStreaming: openAIReq.stream ?? false,
+                        cfg: cfg, inference: inference, embeddings: embeddings,
+                        coordinator: coordinator, request: request
+                    )
+                }
+
                 let sessionId = Self.extractSessionId(request: request, body: openAIReq.sessionId)
                 let responseFormat: ResponseFormat?
                 var jsonSchemaDef: [String: Any]? = nil
@@ -531,7 +540,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             }
             Post("/v1/messages") { request, context in
                 let body = try await request.body.collect(upTo: .max)
-                var anthropicReq = try JSONDecoder().decode(AnthropicRequest.self, from: body)
+                let anthropicReq = try JSONDecoder().decode(AnthropicRequest.self, from: body)
 
                 NovaMLXLog.info("[API] POST /v1/messages — model=\(anthropicReq.model), stream=\(anthropicReq.stream ?? false), maxTokens=\(anthropicReq.maxTokens), msgs=\(anthropicReq.messages.count)")
 
@@ -1402,6 +1411,43 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             modelId: record.id, sizeBytes: record.sizeBytes, localURL: record.localURL
                         )
                     }
+
+                    // SpecBoost status
+                    var specBoost: SpecBoostInfo? = nil
+                    if record.modelType == .llm {
+                        let isHybrid: Bool
+                        if isLoaded {
+                            isHybrid = inference.isHybridModel(record.id)
+                        } else {
+                            isHybrid = false
+                        }
+                        let status = DraftModelRegistry.shared.boostStatus(
+                            family: record.family,
+                            isHybrid: isHybrid,
+                            modelType: record.modelType,
+                            draftModelLoaded: { id in inference.isModelLoaded(id) },
+                            draftModelOnDisk: { id in models.isDownloaded(id) }
+                        )
+                        switch status {
+                        case .ineligible(let reason):
+                            specBoost = SpecBoostInfo(status: "ineligible", reason: reason)
+                        case .eligible(let candidate):
+                            specBoost = SpecBoostInfo(
+                                status: "eligible",
+                                draftModelId: candidate.draftModelId,
+                                draftDisplayName: candidate.displayName,
+                                draftDownloaded: models.isDownloaded(candidate.draftModelId),
+                                draftLoaded: inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true
+                            )
+                        case .active(let draftModelId):
+                            specBoost = SpecBoostInfo(
+                                status: "active",
+                                draftModelId: draftModelId,
+                                draftLoaded: true
+                            )
+                        }
+                    }
+
                     statuses.append(AdminModelStatus(
                         id: record.id,
                         family: record.family.rawValue,
@@ -1409,7 +1455,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         loaded: isLoaded,
                         sizeBytes: record.sizeBytes,
                         downloadedAt: record.downloadedAt,
-                        memoryFeasibility: feasibility
+                        memoryFeasibility: feasibility,
+                        specBoost: specBoost
                     ))
                 }
                 return try Self.jsonResponse(statuses)
@@ -1540,6 +1587,93 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try models.deleteModel(modelId)
 
                 return Response(status: .noContent)
+            }
+            // MARK: - Speed Boost (Draft Model)
+            Post("/admin/models/boost/download") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+                let modelId = req.modelId
+                guard let record = models.getRecord(modelId) else {
+                    throw NovaMLXError.modelNotFound(modelId)
+                }
+                let isHybrid = inference.isModelLoaded(modelId) && inference.isHybridModel(modelId)
+                guard let candidate = DraftModelRegistry.shared.recommendation(
+                    family: record.family, isHybrid: isHybrid
+                ) else {
+                    throw NovaMLXError.apiError("No compatible draft model for \(modelId)")
+                }
+                if models.getRecord(candidate.draftModelId) == nil {
+                    models.register(
+                        id: candidate.draftModelId,
+                        family: candidate.family,
+                        modelType: .llm,
+                        remoteURL: "https://huggingface.co/\(candidate.downloadRepo)",
+                        sizeBytes: UInt64(candidate.estimatedSizeMB) * 1_000_000
+                    )
+                }
+                if models.isDownloaded(candidate.draftModelId) {
+                    return try Self.jsonResponse(SpecBoostInfo(
+                        status: "eligible",
+                        draftModelId: candidate.draftModelId,
+                        draftDisplayName: candidate.displayName,
+                        draftDownloaded: true,
+                        draftLoaded: inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true
+                    ))
+                }
+                if let status = models.getDownloadStatus(candidate.draftModelId), status.state == .downloading {
+                    return try Self.jsonResponse(status, httpStatus: .accepted)
+                }
+                try models.startDownload(candidate.draftModelId)
+                let status = models.getDownloadStatus(candidate.draftModelId)
+                    ?? DownloadStatus(modelId: candidate.draftModelId, state: .downloading)
+                return try Self.jsonResponse(status, httpStatus: .accepted)
+            }
+            Post("/admin/models/boost/load") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+                let modelId = req.modelId
+                guard let record = models.getRecord(modelId) else {
+                    throw NovaMLXError.modelNotFound(modelId)
+                }
+                let isHybrid = inference.isModelLoaded(modelId) && inference.isHybridModel(modelId)
+                guard let candidate = DraftModelRegistry.shared.recommendation(
+                    family: record.family, isHybrid: isHybrid
+                ) else {
+                    throw NovaMLXError.apiError("No compatible draft model for \(modelId)")
+                }
+                guard models.isDownloaded(candidate.draftModelId) else {
+                    throw NovaMLXError.apiError("Draft model \(candidate.draftModelId) not downloaded yet")
+                }
+                if inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true {
+                    return try Self.jsonResponse(SpecBoostInfo(
+                        status: "active",
+                        draftModelId: candidate.draftModelId,
+                        draftLoaded: true
+                    ))
+                }
+                if models.getRecord(candidate.draftModelId) == nil {
+                    models.register(
+                        id: candidate.draftModelId,
+                        family: candidate.family,
+                        modelType: .llm,
+                        remoteURL: "https://huggingface.co/\(candidate.downloadRepo)",
+                        sizeBytes: UInt64(candidate.estimatedSizeMB) * 1_000_000
+                    )
+                }
+                guard let draftRecord = models.getRecord(candidate.draftModelId) else {
+                    throw NovaMLXError.modelNotFound(candidate.draftModelId)
+                }
+                let config = ModelConfig(
+                    identifier: ModelIdentifier(id: candidate.draftModelId, family: candidate.family),
+                    modelType: .llm
+                )
+                try await inference.loadModel(at: draftRecord.localURL, config: config)
+                return try Self.jsonResponse(SpecBoostInfo(
+                    status: "active",
+                    draftModelId: candidate.draftModelId,
+                    draftDisplayName: candidate.displayName,
+                    draftLoaded: true
+                ))
             }
             Post("/admin/models/discover") { request, context in
                 let discovered = models.discoverModels()
@@ -2751,6 +2885,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             thinkingBudget: openAIReq.resolvedThinkingBudget,
             enableThinking: openAIReq.resolvedEnableThinking,
             preserveThinking: openAIReq.resolvedPreserveThinking,
+            draftModel: openAIReq.draftModel,
+            numDraftTokens: openAIReq.numDraftTokens,
             includeLogprobs: openAIReq.logprobs == true,
             topLogprobsCount: openAIReq.topLogprobs
         )
@@ -2894,6 +3030,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             thinkingBudget: openAIReq.resolvedThinkingBudget,
             enableThinking: openAIReq.resolvedEnableThinking,
             preserveThinking: openAIReq.resolvedPreserveThinking,
+            draftModel: openAIReq.draftModel,
+            numDraftTokens: openAIReq.numDraftTokens,
             includeLogprobs: openAIReq.logprobs == true,
             topLogprobsCount: openAIReq.topLogprobs
         )

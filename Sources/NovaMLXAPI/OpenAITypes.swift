@@ -184,6 +184,8 @@ public struct OpenAIRequest: Codable, Sendable {
     public let topLogprobs: Int?
     public let keepAlive: KeepAliveValue?
     public let tag: String?
+    public let draftModel: String?
+    public let numDraftTokens: Int?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools, logprobs, tag
@@ -205,6 +207,8 @@ public struct OpenAIRequest: Codable, Sendable {
         case reasoningEffort = "reasoning_effort"
         case topLogprobs = "top_logprobs"
         case keepAlive = "keep_alive"
+        case draftModel = "draft_model"
+        case numDraftTokens = "num_draft_tokens"
     }
 
     public init(
@@ -235,7 +239,9 @@ public struct OpenAIRequest: Codable, Sendable {
         logprobs: Bool? = nil,
         topLogprobs: Int? = nil,
         keepAlive: KeepAliveValue? = nil,
-        tag: String? = nil
+        tag: String? = nil,
+        draftModel: String? = nil,
+        numDraftTokens: Int? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -265,6 +271,8 @@ public struct OpenAIRequest: Codable, Sendable {
         self.topLogprobs = topLogprobs
         self.keepAlive = keepAlive
         self.tag = tag
+        self.draftModel = draftModel
+        self.numDraftTokens = numDraftTokens
     }
 
     /// Resolve thinking toggle from multiple client formats:
@@ -736,6 +744,7 @@ public struct AdminModelStatus: Codable, Sendable {
     public let sizeBytes: UInt64
     public let downloadedAt: String?
     public let memoryFeasibility: MemoryFeasibility?
+    public let specBoost: SpecBoostInfo?
 
     public init(
         id: String,
@@ -744,7 +753,8 @@ public struct AdminModelStatus: Codable, Sendable {
         loaded: Bool,
         sizeBytes: UInt64,
         downloadedAt: Date?,
-        memoryFeasibility: MemoryFeasibility? = nil
+        memoryFeasibility: MemoryFeasibility? = nil,
+        specBoost: SpecBoostInfo? = nil
     ) {
         self.id = id
         self.family = family
@@ -752,6 +762,7 @@ public struct AdminModelStatus: Codable, Sendable {
         self.loaded = loaded
         self.sizeBytes = sizeBytes
         self.memoryFeasibility = memoryFeasibility
+        self.specBoost = specBoost
         if let date = downloadedAt {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -759,6 +770,31 @@ public struct AdminModelStatus: Codable, Sendable {
         } else {
             self.downloadedAt = nil
         }
+    }
+}
+
+public struct SpecBoostInfo: Codable, Sendable {
+    public let status: String
+    public let reason: String?
+    public let draftModelId: String?
+    public let draftDisplayName: String?
+    public let draftDownloaded: Bool?
+    public let draftLoaded: Bool?
+
+    public init(
+        status: String,
+        reason: String? = nil,
+        draftModelId: String? = nil,
+        draftDisplayName: String? = nil,
+        draftDownloaded: Bool? = nil,
+        draftLoaded: Bool? = nil
+    ) {
+        self.status = status
+        self.reason = reason
+        self.draftModelId = draftModelId
+        self.draftDisplayName = draftDisplayName
+        self.draftDownloaded = draftDownloaded
+        self.draftLoaded = draftLoaded
     }
 }
 

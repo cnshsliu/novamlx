@@ -118,7 +118,8 @@ struct NovaMLXWorker {
             let url = URL(fileURLWithPath: path)
             NovaMLXLog.info("[Worker] Loading \(modelId), MLX active=\(MLX.Memory.activeMemory / 1_048_576)MB, peak=\(MLX.Memory.peakMemory / 1_048_576)MB")
             _ = try await engine.loadModel(from: url, config: config)
-            writer.write(WorkerMessage(type: WorkerMessageType.loaded, modelId: modelId))
+            let isHybrid = engine.getContainer(for: modelId)?.config.hasLinearAttention ?? false
+            writer.write(WorkerMessage(type: WorkerMessageType.loaded, modelId: modelId, hasLinearAttention: isHybrid))
             NovaMLXLog.info("[Worker] Loaded model: \(modelId), MLX active=\(MLX.Memory.activeMemory / 1_048_576)MB, peak=\(MLX.Memory.peakMemory / 1_048_576)MB")
         } catch {
             writer.write(WorkerMessage(type: WorkerMessageType.error, modelId: modelId, errorMessage: error.localizedDescription))
@@ -239,6 +240,7 @@ struct NovaMLXWorker {
 
         let isVLM = container?.config.modelType == .vlm
         let hasLinearAttention = container?.config.hasLinearAttention == true
+        let hasDraftModel = request.draftModel != nil
 
         let needsSpecialized = request.sessionId != nil ||
             request.jsonSchemaDef != nil ||
@@ -246,7 +248,8 @@ struct NovaMLXWorker {
             request.regexPattern != nil ||
             request.gbnfGrammar != nil ||
             isVLM ||
-            hasLinearAttention
+            hasLinearAttention ||
+            hasDraftModel
 
         return needsSpecialized ? .batcher : .fused
     }
