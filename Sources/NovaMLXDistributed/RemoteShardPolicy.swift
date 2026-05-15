@@ -26,13 +26,13 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
     private var connection: TCPConnection?
     private let lock = NSLock()
 
-    /// Whether to use MLX Ring transport for tensor data (falls back to TCP).
-    private let useRingTransport: Bool
+    /// Whether to use MLX Ring/JACCL transport for tensor data (falls back to TCP).
+    private var useRingTransport: Bool
 
     /// Worker rank for Ring transport (always 1 for 2-node setup).
     private let workerRank: Int = 1
 
-    public init(assignment: ShardAssignment, workerEndpoint: NodeEndpoint, modelId: String, modelPath: String? = nil, isFirst: Bool = false, isLast: Bool = false, useRingTransport: Bool = true) {
+    public init(assignment: ShardAssignment, workerEndpoint: NodeEndpoint, modelId: String, modelPath: String? = nil, isFirst: Bool = false, isLast: Bool = false, useRingTransport: Bool = false) {
         self.assignment = assignment
         self.isFirst = isFirst
         self.isLast = isLast
@@ -40,6 +40,15 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
         self.modelId = modelId
         self.modelPath = modelPath
         self.useRingTransport = useRingTransport && RingTransportManager.shared.isReady
+    }
+
+    /// Enable Ring/JACCL transport after the distributed group is initialized.
+    /// Called by ClusterModelManager after both sides have initialized transport.
+    func enableRingTransport() {
+        // Ring transport disabled: MLX distributed group interferes with eval() calls.
+        // Ring group init works (size=2) but data transfer causes eval crashes.
+        // Re-enable once MLX supports isolated distributed eval contexts.
+        NovaMLXLog.info("[RemoteShardPolicy] Ring transport available but disabled (MLX eval interference)")
     }
 
     public func bindWeights() async throws {
@@ -90,8 +99,13 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
         NovaMLXLog.debug("[RemoteShardPolicy] compute: sending to worker (input shape: \(input.shape), useRing: \(useRingTransport))")
 
         if useRingTransport {
-            // Send compute command via TCP (control plane)
-            let computeMsg = ShardWireFormat.encode(msgType: .compute, hasTensor: false)
+            // Send shape + dtype in payload so worker can Ring recv with correct params
+            var shapePayload = Data(capacity: input.shape.count * 4 + 4)
+            for dim in input.shape {
+                shapePayload.append(contentsOf: withUnsafeBytes(of: UInt32(dim).bigEndian) { Data($0) })
+            }
+            shapePayload.append(contentsOf: withUnsafeBytes(of: DTypeToRaw(input.dtype).bigEndian) { Data($0) })
+            let computeMsg = ShardWireFormat.encode(msgType: .compute, payload: shapePayload, hasTensor: false)
             try conn.sendData(computeMsg)
 
             // Send input tensor via Ring transport (data plane)
@@ -99,7 +113,6 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
             _ = RingTransportManager.shared.send(input, to: workerRank)
 
             // Receive result tensor via Ring transport
-            // We know the output shape matches input's batch/seq dims but with vocab size
             let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
             guard let header = ShardWireFormat.decodeHeader(headerData) else {
                 throw ShardServiceError.invalidMessage("bad response header")
@@ -113,9 +126,21 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
                 throw ShardServiceError.computeFailed(errorMsg)
             }
 
-            // Worker sends result shape info via TCP, actual tensor via Ring
-            let result = RingTransportManager.shared.recvLike(input, from: workerRank)
-            return result
+            // Worker sends result shape + dtype via TCP payload, actual tensor via Ring
+            if header.payloadSize > 0 {
+                let shapeData = try conn.recvData(count: header.payloadSize)
+                let ndim = (shapeData.count - 4) / 4
+                var shape = [Int]()
+                for i in 0..<ndim {
+                    let dim = shapeData[i*4..<(i*4+4)].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                    shape.append(Int(dim))
+                }
+                let dtypeRaw = shapeData[shapeData.count-4..<shapeData.count].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                let dtype = DTypeFromRaw(dtypeRaw) ?? .float32
+                let result = RingTransportManager.shared.recv(shape: shape, dtype: dtype, from: workerRank)
+                return result
+            }
+            throw ShardServiceError.invalidMessage("Ring compute: no shape info in response")
         } else {
             // Original TCP transport path
             let computeMsg = ShardWireFormat.encode(msgType: .compute, hasTensor: true)
@@ -201,7 +226,13 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
             throw ShardEngineError.notReady
         }
         if useRingTransport {
-            let computeMsg = ShardWireFormat.encode(msgType: .compute, hasTensor: false)
+            // Send shape + dtype in payload so worker can Ring recv with correct params
+            var shapePayload = Data(capacity: input.shape.count * 4 + 4)
+            for dim in input.shape {
+                shapePayload.append(contentsOf: withUnsafeBytes(of: UInt32(dim).bigEndian) { Data($0) })
+            }
+            shapePayload.append(contentsOf: withUnsafeBytes(of: DTypeToRaw(input.dtype).bigEndian) { Data($0) })
+            let computeMsg = ShardWireFormat.encode(msgType: .compute, payload: shapePayload, hasTensor: false)
             try conn.sendData(computeMsg)
             eval(input)
             _ = RingTransportManager.shared.send(input, to: workerRank)
@@ -218,7 +249,7 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
             throw ShardEngineError.notReady
         }
         if useRingTransport {
-            // Read control header (worker sends ack/error via TCP)
+            // Read control header (worker sends ack/error via TCP, may include shape info)
             let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
             guard let header = ShardWireFormat.decodeHeader(headerData) else {
                 throw ShardServiceError.invalidMessage("bad response header")
@@ -231,10 +262,23 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
                 }
                 throw ShardServiceError.computeFailed(errorMsg)
             }
-            // Receive actual tensor via Ring — we need shape info from somewhere
-            // For now, create a dummy template and use recvLike
-            // TODO: pass actual shape info through TCP control header
-            fatalError("Ring transport recvResult requires shape info — use compute() instead for now")
+            // Worker sends output shape + dtype via TCP payload
+            // Then actual tensor via JACCL/Ring
+            if header.payloadSize > 0 {
+                let shapeData = try conn.recvData(count: header.payloadSize)
+                let ndim = (shapeData.count - 4) / 4  // Last 4 bytes = dtype
+                var shape = [Int]()
+                for i in 0..<ndim {
+                    let dim = shapeData[i*4..<(i*4+4)].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                    shape.append(Int(dim))
+                }
+                let dtypeRaw = shapeData[shapeData.count-4..<shapeData.count].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                let dtype = DTypeFromRaw(dtypeRaw) ?? .float32
+                let result = RingTransportManager.shared.recv(shape: shape, dtype: dtype, from: workerRank)
+                return result
+            }
+            // Fallback: no shape info, shouldn't happen
+            throw ShardServiceError.invalidMessage("Ring recvResult: no shape info in header")
         } else {
             let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
             guard let header = ShardWireFormat.decodeHeader(headerData) else {
@@ -267,6 +311,44 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
         }
         lock.withLock { connection = nil }
         isReady = false
+    }
+
+    // MARK: - Transport Init
+
+    /// Send initTransport to worker so it initializes Ring/JACCL distributed transport.
+    /// Called after bindWeights. Worker responds with transportReady or error.
+    func sendInitTransport(backend: String = "ring", rank: Int = 1, hostfileJSON: String? = nil) throws {
+        guard let conn = lock.withLock({ connection }) else {
+            throw ShardEngineError.notReady
+        }
+        var payload: [String: Any] = [
+            "backend": backend,
+            "rank": rank
+        ]
+        if let json = hostfileJSON {
+            payload["hostfileJSON"] = json
+        }
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let msg = ShardWireFormat.encode(msgType: .initTransport, payload: data)
+        try conn.sendData(msg)
+
+        // Wait for transportReady ack
+        let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
+        guard let header = ShardWireFormat.decodeHeader(headerData) else {
+            throw ShardServiceError.invalidMessage("bad initTransport response")
+        }
+        if header.msgType == .transportReady {
+            NovaMLXLog.info("[RemoteShardPolicy] Worker transport ready (backend=\(backend))")
+        } else if header.msgType == .error {
+            var errorMsg = "transport init failed"
+            if header.payloadSize > 0 {
+                let errorData = try conn.recvData(count: header.payloadSize)
+                errorMsg = String(data: errorData, encoding: .utf8) ?? errorMsg
+            }
+            NovaMLXLog.warning("[RemoteShardPolicy] Worker transport init failed: \(errorMsg), using TCP fallback")
+        } else {
+            NovaMLXLog.warning("[RemoteShardPolicy] Unexpected initTransport response: \(header.msgType)")
+        }
     }
 
     // MARK: - Speculative Verification

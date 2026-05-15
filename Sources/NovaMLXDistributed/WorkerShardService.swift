@@ -21,6 +21,8 @@ enum ShardServiceMessage: UInt32 {
     case verifiedTokens = 11    // Worker → Coord: array of verified token IDs (K+1 × 4 bytes)
     case rollbackCache = 12     // Coord → Worker: trim KV cache to position N
     case cacheRolledBack = 13   // Worker → Coord: ack
+    case initTransport = 14     // Coord → Worker: initialize JACCL/Ring transport (rank, backend)
+    case transportReady = 15    // Worker → Coord: transport initialized and ready
 }
 
 // MARK: - Shard Service Wire Format
@@ -217,7 +219,7 @@ public final class WorkerShardService: @unchecked Sendable {
                         }
 
                     case .compute:
-                        try await handleCompute(conn: conn, hasTensor: header.hasTensor)
+                        try await handleCompute(conn: conn, hasTensor: header.hasTensor, payload: payload)
 
                     case .computeAndSample:
                         try await handleComputeAndSample(conn: conn, hasTensor: header.hasTensor)
@@ -235,7 +237,10 @@ public final class WorkerShardService: @unchecked Sendable {
                     case .rollbackCache:
                         try await handleRollbackCache(conn: conn, payload: payload)
 
-                    case .computeResult, .error, .sampledToken, .verifiedTokens, .cacheRolledBack:
+                    case .initTransport:
+                        try await handleInitTransport(conn: conn, payload: payload)
+
+                    case .computeResult, .error, .sampledToken, .verifiedTokens, .cacheRolledBack, .transportReady:
                         NovaMLXLog.warning("[WorkerShardService] Unexpected message from coordinator: \(header.msgType)")
                     }
                 }
@@ -309,7 +314,7 @@ public final class WorkerShardService: @unchecked Sendable {
         NovaMLXLog.info("[WorkerShardService] Weights bound for layers \(assignment.startLayer)..<\(assignment.endLayer)")
     }
 
-    private func handleCompute(conn: TCPConnection, hasTensor: Bool) async throws {
+    private func handleCompute(conn: TCPConnection, hasTensor: Bool, payload: Data) async throws {
         guard let policy = lock.withLock({ policy }) else {
             let errorPayload = "No policy assigned".data(using: .utf8) ?? Data()
             let msg = ShardWireFormat.encode(msgType: .error, payload: errorPayload)
@@ -320,35 +325,55 @@ public final class WorkerShardService: @unchecked Sendable {
         let inputTensor: MLXArray
         let useRing = RingTransportManager.shared.isReady
 
+        // Detect prefill (seq_len > 1) and reset caches for new conversation.
+        // Without this, the worker's caches carry over from previous requests,
+        // causing the model to continue the old conversation.
+        let needsCacheReset: Bool
+
         if useRing && !hasTensor {
-            // Ring transport: receive tensor via MLX Ring
-            // We need to know the shape — for now, use a large enough buffer
-            // The coordinator sends first, so we block on recv
-            // For hidden states: shape is [1, seq_len, hidden_size]
-            // For decode tokens: shape is [1] or scalar
-            // Use recvLike with a template — but we don't have one yet
-            // Alternative: receive with a maximum expected shape
-            // For now, fall through to TCP if we can't determine shape
-            NovaMLXLog.warning("[WorkerShardService] Ring transport compute: shape negotiation needed, using TCP fallback")
-            guard hasTensor else {
-                throw ShardServiceError.invalidMessage("compute message requires tensor (Ring shape negotiation not implemented)")
+            // Ring/JACCL transport: coordinator sent shape in TCP payload, tensor via Ring
+            guard payload.count >= 8 else {
+                throw ShardServiceError.invalidMessage("Ring compute requires shape payload")
             }
-            inputTensor = try conn.recvTensor()
+            let ndim = (payload.count - 4) / 4  // Last 4 bytes = dtype raw value
+            var shape = [Int]()
+            for i in 0..<ndim {
+                let dim = payload[i*4..<(i*4+4)].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                shape.append(Int(dim))
+            }
+            // dtype encoded as last 4 bytes (DType raw value)
+            let dtypeRaw = payload[payload.count-4..<payload.count].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            let dtype = DTypeFromRaw(dtypeRaw) ?? .float32
+            inputTensor = RingTransportManager.shared.recv(shape: shape, dtype: dtype, from: 0)
+            needsCacheReset = shape.count >= 2 && shape[1] > 1
         } else {
             guard hasTensor else {
                 throw ShardServiceError.invalidMessage("compute message requires tensor")
             }
             inputTensor = try conn.recvTensor()
+            needsCacheReset = inputTensor.ndim >= 2 && inputTensor.dim(1) > 1
+        }
+
+        if needsCacheReset {
+            if let slicedPolicy = policy as? SlicedForwardPolicy {
+                try? await slicedPolicy.resetCaches()
+            }
         }
 
         do {
             let output = try await policy.compute(input: inputTensor)
 
             if useRing {
-                // Send result header via TCP (control plane)
-                let resultHeader = ShardWireFormat.encode(msgType: .computeResult, hasTensor: false)
+                // Send output shape + dtype via TCP payload (so coord can recv with correct params)
+                let shape = output.shape
+                var shapePayload = Data(capacity: shape.count * 4 + 4)
+                for dim in shape {
+                    shapePayload.append(contentsOf: withUnsafeBytes(of: UInt32(dim).bigEndian) { Data($0) })
+                }
+                shapePayload.append(contentsOf: withUnsafeBytes(of: DTypeToRaw(output.dtype).bigEndian) { Data($0) })
+                let resultHeader = ShardWireFormat.encode(msgType: .computeResult, payload: shapePayload)
                 try conn.sendData(resultHeader)
-                // Send tensor via Ring transport
+                // Send tensor via Ring/JACCL transport
                 eval(output)
                 _ = RingTransportManager.shared.send(output, to: 0)
             } else {
@@ -474,6 +499,45 @@ public final class WorkerShardService: @unchecked Sendable {
             try conn.sendData(ack)
         } catch {
             let errorPayload = error.localizedDescription.data(using: .utf8) ?? Data()
+            let msg = ShardWireFormat.encode(msgType: .error, payload: errorPayload)
+            try conn.sendData(msg)
+        }
+    }
+
+    /// Handle initTransport: initialize Ring/JACCL distributed transport on worker.
+    private func handleInitTransport(conn: TCPConnection, payload: Data) async throws {
+        guard !payload.isEmpty,
+              let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let rank = json["rank"] as? Int else {
+            let errorPayload = "Invalid initTransport payload".data(using: .utf8) ?? Data()
+            let msg = ShardWireFormat.encode(msgType: .error, payload: errorPayload)
+            try conn.sendData(msg)
+            return
+        }
+
+        let backend = json["backend"] as? String ?? "ring"
+        let hostfileJSON = json["hostfileJSON"] as? String
+        NovaMLXLog.info("[WorkerShardService] Initializing transport: backend=\(backend), rank=\(rank)")
+
+        // Send ack BEFORE Ring init (which blocks the connection waiting for coord)
+        let ack = ShardWireFormat.encode(msgType: .transportReady)
+        try conn.sendData(ack)
+
+        // Now init Ring transport (blocks until coord also inits)
+        let group: DistributedGroup
+        if let hostfile = hostfileJSON {
+            group = RingTransportManager.shared.initializeFromHostfileJSON(hostfile, rank: rank)
+        } else {
+            group = RingTransportManager.shared.initializeJACCL(rank: rank)
+        }
+
+        if group.isValid {
+            NovaMLXLog.info("[WorkerShardService] Transport ready: rank=\(group.rank), size=\(group.size)")
+            let ack = ShardWireFormat.encode(msgType: .transportReady)
+            try conn.sendData(ack)
+        } else {
+            NovaMLXLog.error("[WorkerShardService] Transport init failed, continuing with TCP fallback")
+            let errorPayload = "Transport initialization failed".data(using: .utf8) ?? Data()
             let msg = ShardWireFormat.encode(msgType: .error, payload: errorPayload)
             try conn.sendData(msg)
         }

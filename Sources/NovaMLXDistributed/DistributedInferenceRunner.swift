@@ -119,7 +119,15 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                 lastShardPlan = (modelId, plan)
                 DistributedInferenceRunnerCache.shared.setPlan(modelId: modelId, plan: plan)
             }
-            NovaMLXLog.info("[Distributed] Using pre-loaded shard engines (\(preloaded.count) shards)")
+            // Reset KV caches on all local shards for fresh conversation context.
+            // Pre-loaded shard engines persist across requests — without reset,
+            // the model continues the previous conversation instead of starting fresh.
+            for shard in shardEngines {
+                if let slicedPolicy = shard.policy as? SlicedForwardPolicy {
+                    try? await slicedPolicy.resetCaches()
+                }
+            }
+            NovaMLXLog.info("[Distributed] Using pre-loaded shard engines (\(preloaded.count) shards, caches reset)")
         } else {
             shouldReleaseWeights = true
 
@@ -309,97 +317,163 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
 
         // Detect remote sampling: last shard is remote → worker does argmax
         let remoteSamplingEnabled = shardEngines.count > 1 && shardEngines.last?.policy is RemoteShardPolicy
-        let canSpeculate = remoteSamplingEnabled && shardEngines.count == 2
-        // Extra prediction layers: run N worker layers on coord for better token prediction.
-        // More layers = better accuracy but less overlap. 5 is a reasonable default.
+        let coordHasMamba = (shardEngines.first?.policy as? SlicedForwardPolicy)?.hasMambaCache ?? false
         let extraPredictionLayers = 5
-        NovaMLXLog.info("[Distributed] Remote sampling: \(remoteSamplingEnabled), speculative: \(canSpeculate) (shards: \(shardEngines.count)), extraPredLayers: \(extraPredictionLayers)")
 
-        if canSpeculate {
-            // Double-buffered decode: overlap coord GPU pre-compute with worker GPU compute
+        // Adaptive speculation: start enabled for 2-shard setups with remote sampling.
+        // Runtime accuracy tracking auto-disables if prediction accuracy < 30%.
+        let speculationCapable = remoteSamplingEnabled && shardEngines.count == 2
+        var speculationEnabled = speculationCapable
+
+        // Adaptive accuracy tracking
+        let adaptiveWindow = 20
+        let disableThreshold = 0.30
+        var recentPredictions: [Bool] = []  // rolling window of last N results
+        var correctPredictions = 0
+        var totalPredictions = 0
+        // Draft length: number of tokens to speculatively predict per iteration.
+        // K=1 (single-token) is optimal for 2-node setups where coord ≈ worker speed.
+        // K>1 is beneficial when coord is much faster than worker (3+ nodes).
+        let draftLength = 1
+
+        NovaMLXLog.info("[Distributed] Remote sampling: \(remoteSamplingEnabled), speculation: \(speculationCapable) (mamba: \(coordHasMamba)), draft: \(draftLength), extraPredLayers: \(extraPredictionLayers)")
+
+        if speculationCapable {
             let coordPolicy = shardEngines[0].policy
             guard let slicedCoord = coordPolicy as? SlicedForwardPolicy else {
                 throw DistributedInferenceError.shardPlanFailed("Coord policy is not SlicedForwardPolicy")
             }
             let workerPolicy = shardEngines[1].policy as! RemoteShardPolicy
             var currentPosition = promptTokens.count
-            var correctPredictions = 0
-            var totalPredictions = 0
 
             // First token: sample from prefill logits (local argmax)
             let firstToken = argmax(activation)
             if !eosTokenIds.contains(firstToken) {
                 generatedTokenIds.append(firstToken)
             }
-
-            // Compute activation for first token (coord GPU)
             activation = try await coordPolicy.compute(input: MLXArray(Int32(firstToken)))
             currentPosition += 1
 
-            // Double-buffered decode loop
+            // Adaptive double-buffered decode loop
             var timingLogInterval = 0
             while generatedTokenIds.count < maxTokens {
-                let t0 = CFAbsoluteTimeGetCurrent()
+                if speculationEnabled {
+                    // === SPECULATIVE PATH ===
+                    let t0 = CFAbsoluteTimeGetCurrent()
 
-                // Step 1: Start worker compute async (TCP send + worker GPU + TCP recv)
-                let activationBox = SendableBox(activation)
-                let workerTask = Task {
-                    try await workerPolicy.computeAndSample(input: activationBox.value)
-                }
-
-                // Step 2: Predict next token from coord's hidden state + pre-compute in one shot
-                // Uses partial model (norm + head on layers 0-52 output) to predict, then
-                // runs embed + layers 0-52 for the predicted token — all while worker is busy.
-                let prediction = try? await slicedCoord.predictAndPrecompute(hiddenState: activation, extraPredictionLayers: extraPredictionLayers)
-
-                let tPrecompute = CFAbsoluteTimeGetCurrent()
-
-                // Step 3: Get actual token from worker
-                let actualToken = try await workerTask.value
-
-                let tWorkerDone = CFAbsoluteTimeGetCurrent()
-
-                // Step 4: Check prediction — use pre-computed or re-compute
-                if let pred = prediction,
-                   pred.predicted == actualToken {
-                    // Correct prediction! Coord compute was overlapped with worker — free.
-                    activation = pred.precomputed
-                    correctPredictions += 1
-                    totalPredictions += 1
-                    currentPosition += 1
-                } else {
-                    // Wrong (or no prediction). Rollback pre-compute if any, then re-compute.
-                    totalPredictions += 1
-                    if prediction != nil {
-                        try? await coordPolicy.rollbackCache(position: currentPosition)
+                    // Step 1: Start worker compute async
+                    let activationBox = SendableBox(activation)
+                    let workerTask = Task {
+                        try await workerPolicy.computeAndSample(input: activationBox.value)
                     }
-                    activation = try await coordPolicy.compute(
-                        input: MLXArray(Int32(actualToken))
+
+                    // Step 2: Draft K tokens (predict + precompute each)
+                    let draft = try? await slicedCoord.draftTokens(
+                        from: activation, count: draftLength, extraPredictionLayers: extraPredictionLayers
                     )
+
+                    let tPrecompute = CFAbsoluteTimeGetCurrent()
+
+                    // Step 3: Get actual token from worker
+                    let actualToken = try await workerTask.value
+                    let tWorkerDone = CFAbsoluteTimeGetCurrent()
+
+                    // Step 4: Verify draft — check predicted tokens against actual
+                    if let draft = draft, draft.count > 0, draft.predictedTokens[0] == actualToken {
+                        // First draft correct! Use precomputed activation.
+                        activation = draft.precomputedStates[0]
+                        recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
+                        currentPosition += 1
+
+                        if eosTokenIds.contains(actualToken) { break }
+                        generatedTokenIds.append(actualToken)
+
+                        // Verify subsequent draft tokens (sequential worker calls)
+                        for i in 1..<draft.count {
+                            let verifyActivation = SendableBox(activation)
+                            let verifyTask = Task {
+                                try await workerPolicy.computeAndSample(input: verifyActivation.value)
+                            }
+                            let verifyToken = try await verifyTask.value
+
+                            if draft.predictedTokens[i] == verifyToken {
+                                activation = draft.precomputedStates[i]
+                                recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
+                                currentPosition += 1
+
+                                if eosTokenIds.contains(verifyToken) { break }
+                                generatedTokenIds.append(verifyToken)
+                            } else {
+                                // Mismatch at draft[i]: rollback remaining, recompute
+                                recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
+                                try? await slicedCoord.rollbackCache(
+                                    position: currentPosition,
+                                    speculatedCount: draft.count - i,
+                                    mambaSnapshot: draft.mambaSnapshot
+                                )
+                                activation = try await coordPolicy.compute(input: MLXArray(Int32(verifyToken)))
+                                currentPosition += 1
+
+                                if eosTokenIds.contains(verifyToken) { break }
+                                generatedTokenIds.append(verifyToken)
+                                break
+                            }
+                        }
+                    } else {
+                        // First draft wrong: full rollback, recompute
+                        recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
+                        if let draft = draft {
+                            try? await slicedCoord.rollbackCache(
+                                position: currentPosition,
+                                speculatedCount: draft.count,
+                                mambaSnapshot: draft.mambaSnapshot
+                            )
+                        }
+                        activation = try await coordPolicy.compute(input: MLXArray(Int32(actualToken)))
+                        currentPosition += 1
+
+                        if eosTokenIds.contains(actualToken) { break }
+                        generatedTokenIds.append(actualToken)
+                    }
+
+                    let t5 = CFAbsoluteTimeGetCurrent()
+
+                    // Timing log every 50 tokens
+                    timingLogInterval += 1
+                    if timingLogInterval % 50 == 1 {
+                        let totalMs = (t5 - t0) * 1000
+                        let precomputeMs = (tPrecompute - t0) * 1000
+                        let workerWaitMs = (tWorkerDone - tPrecompute) * 1000
+                        let accuracy = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : 0
+                        NovaMLXLog.info("[Distributed] DB[\(generatedTokenIds.count)]: \(String(format: "%.1f", totalMs))ms draft=\(String(format: "%.1f", precomputeMs))ms wait=\(String(format: "%.1f", workerWaitMs))ms acc=\(String(format: "%.0f%%", accuracy * 100))(\(correctPredictions)/\(totalPredictions))")
+                    }
+
+                    // Adaptive check: disable speculation if accuracy too low
+                    if recentPredictions.count >= adaptiveWindow {
+                        let rolling = Double(recentPredictions.filter { $0 }.count) / Double(recentPredictions.count)
+                        if rolling < disableThreshold {
+                            speculationEnabled = false
+                            NovaMLXLog.info("[Distributed] Speculation disabled: rolling accuracy \(String(format: "%.0f%%", rolling * 100)) < \(String(format: "%.0f%%", disableThreshold * 100)) threshold")
+                        }
+                    }
+
+                    // Stop check for text suffix
+                    let fullText = tokenizer.decode(generatedTokenIds)
+                    if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
+                } else {
+                    // === SEQUENTIAL PATH (speculation disabled) ===
+                    let sampledId = try await workerPolicy.computeAndSample(input: activation)
+                    if eosTokenIds.contains(sampledId) { break }
+                    generatedTokenIds.append(sampledId)
+                    let fullText = tokenizer.decode(generatedTokenIds)
+                    if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
+                    activation = try await coordPolicy.compute(input: MLXArray(Int32(sampledId)))
                     currentPosition += 1
                 }
-
-                let t5 = CFAbsoluteTimeGetCurrent()
-
-                // Log timing every 50 tokens
-                timingLogInterval += 1
-                if timingLogInterval % 50 == 1 {
-                    let precomputeMs = (tPrecompute - t0) * 1000
-                    let workerWaitMs = (tWorkerDone - tPrecompute) * 1000
-                    let totalMs = (t5 - t0) * 1000
-                    NovaMLXLog.info("[Distributed] DB-timing[\(generatedTokenIds.count)]: total=\(String(format: "%.1f", totalMs))ms predict+precompute=\(String(format: "%.1f", precomputeMs))ms workerWait=\(String(format: "%.1f", workerWaitMs))ms predicted=\(prediction?.predicted ?? -1) actual=\(actualToken) correct=\(prediction?.predicted == actualToken)")
-                }
-
-                // Step 5: EOS / stop check
-                if eosTokenIds.contains(actualToken) { break }
-                generatedTokenIds.append(actualToken)
-                let fullText = tokenizer.decode(generatedTokenIds)
-                if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
             }
 
-            let rate = totalPredictions > 0
-                ? Double(correctPredictions) / Double(totalPredictions) : 0
-            NovaMLXLog.info("[Distributed] Double-buffer: \(correctPredictions)/\(totalPredictions) correct (\(String(format: "%.0f%%", rate * 100))), \(generatedTokenIds.count) tokens")
+            let rate = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : 0
+            NovaMLXLog.info("[Distributed] Double-buffer: \(correctPredictions)/\(totalPredictions) correct (\(String(format: "%.0f%%", rate * 100))), \(generatedTokenIds.count) tokens, speculative=\(speculationEnabled)")
         } else {
             // Original non-speculative decode loop
             for i in 0..<maxTokens {
@@ -504,6 +578,20 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
     private func bytesFormatted(_ bytes: UInt64) -> String {
         String(format: "%.1fGB", Double(bytes) / 1e9)
     }
+}
+
+// MARK: - Adaptive Speculation Helpers
+
+private func recordPrediction(
+    _ correct: Bool,
+    _ recent: inout [Bool],
+    _ correctCount: inout Int,
+    _ totalCount: inout Int
+) {
+    recent.append(correct)
+    if recent.count > 20 { recent.removeFirst() }
+    correctCount += correct ? 1 : 0
+    totalCount += 1
 }
 
 // MARK: - DistributedInferenceRunnerCache

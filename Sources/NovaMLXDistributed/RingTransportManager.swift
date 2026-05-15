@@ -130,7 +130,7 @@ public final class RingTransportManager: @unchecked Sendable {
 
         NovaMLXLog.info("[RingTransport] Initializing Ring backend from hostfile JSON (rank=\(rank))...")
 
-        let group = MLXDistributedWrapper.initialize(strict: true, backend: "ring")
+        let group = MLXDistributedWrapper.initialize(strict: false, backend: "ring")
 
         if group.isValid {
             NovaMLXLog.info("[RingTransport] Ring group initialized: rank=\(group.rank), size=\(group.size)")
@@ -172,6 +172,52 @@ public final class RingTransportManager: @unchecked Sendable {
             return MLXArray.zeros(reference.shape)
         }
         return MLXDistributedWrapper.recvLike(reference, from: src, group: g)
+    }
+
+    /// Initialize using JACCL (RDMA over Thunderbolt) backend.
+    /// Tries JACCL first (auto-discovery via IBV), falls back to Ring (hostfile-based TCP).
+    @discardableResult
+    public func initializeJACCL(rank: Int) -> DistributedGroup {
+        tearDown()
+
+        setenv("MLX_RANK", "\(rank)", 1)
+
+        // Try JACCL first (RDMA, zero-copy)
+        if MLXDistributedWrapper.isBackendAvailable("jaccl") {
+            NovaMLXLog.info("[RingTransport] Trying JACCL backend (rank=\(rank))...")
+            let group = MLXDistributedWrapper.initialize(strict: false, backend: "jaccl")
+            if group.isValid && group.size > 1 {
+                NovaMLXLog.info("[RingTransport] JACCL group initialized: rank=\(group.rank), size=\(group.size)")
+                lock.withLock { _group = group }
+                return group
+            }
+            NovaMLXLog.warning("[RingTransport] JACCL init returned size=\(group.size), falling back to Ring")
+        }
+
+        // Fallback: Ring backend with hostfile (TCP, properly discovers peers)
+        NovaMLXLog.info("[RingTransport] Falling back to Ring backend — requires hostfile from coordinator")
+        // Ring init is handled by the hostfile-based initialize() method
+        // JACCL auto-discovery didn't work; caller should use hostfile approach instead
+        return .uninitialized
+    }
+
+    /// Initialize Ring transport with hostfile for proper 2-node discovery.
+    /// Both sides must use the same hostfile and call init simultaneously.
+    @discardableResult
+    public func initializeRingWithHostfile(
+        coordinatorIP: String,
+        coordinatorPort: UInt16,
+        workerIP: String,
+        workerPort: UInt16,
+        rank: Int
+    ) -> DistributedGroup {
+        let json = RingTransportManager.buildHostfileJSON(
+            coordinatorIP: coordinatorIP,
+            coordinatorPort: coordinatorPort,
+            workerIP: workerIP,
+            workerPort: workerPort
+        )
+        return initializeFromHostfileJSON(json, rank: rank)
     }
 
     // MARK: - Teardown

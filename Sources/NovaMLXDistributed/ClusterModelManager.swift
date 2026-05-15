@@ -306,7 +306,20 @@ public final class ClusterModelManager: @unchecked Sendable {
             group = .uninitialized
         }
 
-        // 7. Create shard engines and bind weights
+        // 7. Prepare distributed transport config (Ring via hostfile for proper 2-node discovery)
+        let worker = availableWorkers.first
+        let workerHost = worker?.spec.networkHost ?? worker?.spec.hostname ?? "127.0.0.1"
+        let workerIP = resolveHostname(workerHost) ?? workerHost
+        let coordinatorIP = getLocalIP(matching: workerIP)
+        NovaMLXLog.info("[ClusterModel] Transport IPs: coordinator=\(coordinatorIP), worker=\(workerIP) (resolved from \(workerHost))")
+        let hostfileJSON = RingTransportManager.buildHostfileJSON(
+            coordinatorIP: coordinatorIP,
+            coordinatorPort: 29500,
+            workerIP: workerIP,
+            workerPort: 29500
+        )
+
+        // 8. Create shard engines and bind weights
         var engines: [ShardEngine] = []
         for (index, assignment) in plan.assignments.enumerated() {
             let isFirst = index == 0
@@ -364,6 +377,9 @@ public final class ClusterModelManager: @unchecked Sendable {
                     NovaMLXLog.error("[ClusterModel] Remote shard failed: \(host):7010 — \(error)")
                     // Don't throw — mark as failed but continue (partial activation)
                 }
+
+                // Ring initTransport: DISABLED (same reason as coordinator side)
+                // Skipping to avoid MLX distributed eval interference.
             }
 
             engines.append(ShardEngine(
@@ -377,7 +393,23 @@ public final class ClusterModelManager: @unchecked Sendable {
             self.shardEngines = engines
         }
 
-        // 8. Check if all nodes ready
+        // 10. Ring transport: DISABLED — MLX distributed group causes eval() crashes.
+        // The group init works (rank/size correct) but all subsequent eval() calls
+        // try distributed synchronization and crash. Re-enable when MLX supports
+        // isolated distributed contexts. All tensor transport via TCP for now.
+        let transportGroup = DistributedGroup.uninitialized
+        NovaMLXLog.info("[ClusterModel] Ring transport disabled (MLX eval interference), using TCP")
+
+        // 11. Enable Ring transport on policies now that both sides are init'd
+        if transportGroup.isValid {
+            for engine in engines {
+                if let remotePolicy = engine.policy as? RemoteShardPolicy {
+                    remotePolicy.enableRingTransport()
+                }
+            }
+        }
+
+        // 11. Check if all nodes ready
         let finalStatus = getStatus()
         if finalStatus.state == .ready {
             NovaMLXLog.info("[ClusterModel] Model \(modelId) activation complete — all shards ready")
@@ -390,5 +422,67 @@ public final class ClusterModelManager: @unchecked Sendable {
 
     private func bytesFormatted(_ bytes: UInt64) -> String {
         String(format: "%.1fGB", Double(bytes) / 1e9)
+    }
+
+    /// Resolve a hostname to IPv4. Handles .local mDNS names.
+    private func resolveHostname(_ host: String) -> String? {
+        // Fast path: already dotted-quad
+        if host.split(separator: ".").compactMap({ UInt8($0) }).count == 4 { return host }
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        var resolved: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &resolved) == 0, let ai = resolved else { return nil }
+        defer { freeaddrinfo(ai) }
+        var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        guard getnameinfo(ai.pointee.ai_addr, ai.pointee.ai_addrlen, &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0 else { return nil }
+        return String(decoding: buf.prefix(while: { $0 != 0 }).map { UInt8($0) }, as: UTF8.self)
+    }
+
+    /// Detect this machine's IP on the same subnet as `peerIP`.
+    /// Uses getifaddrs to enumerate interfaces, prefers same-subnet match.
+    /// Falls back to first non-loopback IPv4 address.
+    private func getLocalIP(matching peerIP: String) -> String {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let list = interfaces else {
+            NovaMLXLog.warning("[ClusterModel] getifaddrs failed, falling back to 127.0.0.1")
+            return "127.0.0.1"
+        }
+        defer { freeifaddrs(list) }
+
+        var bestMatch: String?
+        var firstNonLoopback: String?
+
+        var ptr = list
+        while let current = ptr.pointee.ifa_next {
+            ptr = current
+            guard let addr = ptr.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+
+            var ipBuffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var addrCopy = ptr.pointee.ifa_addr!.pointee
+            inet_ntop(AF_INET, &addrCopy.sa_data.2, &ipBuffer, socklen_t(INET_ADDRSTRLEN))
+            let ip = String(decoding: ipBuffer.prefix(while: { $0 != 0 }).map { UInt8($0) }, as: UTF8.self)
+
+            if ip == "127.0.0.1" { continue }
+            if firstNonLoopback == nil { firstNonLoopback = ip }
+
+            // Same /24 subnet as peer?
+            let peerParts = peerIP.split(separator: ".").compactMap { Int($0) }
+            let myParts = ip.split(separator: ".").compactMap { Int($0) }
+            if peerParts.count >= 3, myParts.count >= 3,
+               peerParts[0] == myParts[0], peerParts[1] == myParts[1], peerParts[2] == myParts[2] {
+                bestMatch = ip
+                break
+            }
+
+            // Link-local match (169.254.x.x)
+            if peerIP.hasPrefix("169.254."), ip.hasPrefix("169.254.") {
+                bestMatch = ip
+                break
+            }
+        }
+
+        let result = bestMatch ?? firstNonLoopback ?? "127.0.0.1"
+        NovaMLXLog.info("[ClusterModel] Local IP for transport (peer=\(peerIP)): \(result)")
+        return result
     }
 }

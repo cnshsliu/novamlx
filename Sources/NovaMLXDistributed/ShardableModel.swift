@@ -138,15 +138,18 @@ public final class ShardableModel: @unchecked Sendable {
     }
 
     /// Run forward pass through a specific layer by index.
-    /// Uses the full 4-param signature (attentionMask, ssmMask, cache) that most
-    /// modern transformer layers require (Qwen35, Gemma3n, etc).
+    /// Tries protocol conformance in order: 4-param (hybrid), 3-param (standard), 2-param (simple).
     func forwardLayer(_ index: Int, input: MLXArray, cache: KVCache?, attentionMask: MLXFast.ScaledDotProductAttentionMaskMode, ssmMask: MLXArray?) -> MLXArray? {
         guard index >= 0 && index < layerModules.count else { return nil }
         let layer = layerModules[index]
 
-        // Try 4-param signature: (x, attentionMask, ssmMask, cache) — Qwen35, etc
+        // Try 4-param signature: (x, attentionMask, ssmMask, cache) — Qwen35, Qwen3Next, etc
         if let block = layer as? any DistributedLayerProtocol4 {
             return block.callAsFunction(input, attentionMask: attentionMask, ssmMask: ssmMask, cache: cache)
+        }
+        // Try 3-param signature: (x, mask, cache) — Qwen3, Qwen3MoE, etc
+        if let block = layer as? any DistributedLayerProtocol3 {
+            return block.callAsFunction(input, mask: attentionMask, cache: cache)
         }
         // Fallback: 2-param signature (x, cache) — older/simpler architectures
         if let block = layer as? any TransformerBlockProtocol {
@@ -235,6 +238,13 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
     /// Whether this shard includes norm + head (last shard).
     public let isLast: Bool
 
+    /// Whether any of this shard's caches are MambaCache (hybrid model with SSM/linear layers).
+    /// MambaCache uses fixed-size state that can't be trimmed — double-buffer decode
+    /// would corrupt it on rollback.
+    public var hasMambaCache: Bool {
+        kvCaches.contains { $0 is MambaCache }
+    }
+
     public init(
         assignment: ShardAssignment,
         engine: MLXEngine,
@@ -290,6 +300,23 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
         isReady = true
 
         NovaMLXLog.info("[SlicedForwardPolicy] Bound layers \(layerRange) (\(isFirst ? "first" : "mid")/\(isLast ? "last" : "mid")), \(kvCaches.count) caches")
+    }
+
+    /// Reset KV caches for a new inference request.
+    /// Creates fresh caches — old state is discarded.
+    /// Must be called before each new conversation to prevent cross-request contamination.
+    public func resetCaches() async throws {
+        guard isReady else { return }
+        guard let container = engine?.getContainer(for: modelId),
+              let mlxContainer = container.mlxContainer else { return }
+
+        let range = self.layerRange
+        let cacheBox = await mlxContainer.perform { context in
+            let allCaches = context.model.newCache(parameters: nil)
+            let clampedRange = Swift.min(range.lowerBound, allCaches.count)..<Swift.min(range.upperBound, allCaches.count)
+            return KVCacheBox(Array(allCaches[clampedRange]))
+        }
+        self.kvCaches = cacheBox.caches
     }
 
     public func compute(input: MLXArray) async throws -> MLXArray {
@@ -359,39 +386,97 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
         isReady = false
     }
 
-    /// Trim KV caches to keep only entries up to the given position.
-    /// Uses `trim(n)` pattern from FusedBatchScheduler speculative decoding.
-    public func rollbackCache(position: Int) async throws {
+    /// Snapshot of MambaCache states for safe rollback during double-buffer decode.
+    /// MambaCache uses fixed-size arrays updated in-place — trim() corrupts them.
+    /// Instead, snapshot before prediction, restore if prediction was wrong.
+    public struct MambaSnapshot: @unchecked Sendable {
+        let states: [[MLXArray]]  // One [MLXArray] per MambaCache in kvCaches order
+        let offsets: [Int]
+    }
+
+    /// Snapshot all MambaCache states. Non-Mamba caches are skipped (trim handles them).
+    /// Forces eval on copied arrays to ensure snapshot is materialized (not lazy views).
+    public func snapshotMambaStates() -> MambaSnapshot? {
+        guard isReady else { return nil }
+        var states: [[MLXArray]] = []
+        var offsets: [Int] = []
+        for cache in kvCaches {
+            if let mamba = cache as? MambaCache {
+                let copied = mamba.state.map { $0[.ellipsis] }
+                for arr in copied { MLX.eval(arr) }
+                states.append(copied)
+                offsets.append(mamba.offset)
+            }
+        }
+        guard !states.isEmpty else { return nil }
+        return MambaSnapshot(states: states, offsets: offsets)
+    }
+
+    /// Restore MambaCache states from a previous snapshot.
+    /// KVCacheSimple entries are handled by trim in rollbackCache.
+    public func restoreMambaStates(from snapshot: MambaSnapshot) {
+        guard isReady else { return }
+        var snapIdx = 0
+        for cache in kvCaches {
+            if let mamba = cache as? MambaCache, snapIdx < snapshot.states.count {
+                mamba.state = snapshot.states[snapIdx]
+                mamba.offset = snapshot.offsets[snapIdx]
+                snapIdx += 1
+            }
+        }
+    }
+
+    /// Rollback caches after wrong predictions.
+    /// KVCacheSimple: trim excess entries. MambaCache: restore from snapshot.
+    /// - Parameters:
+    ///   - position: Cache offset to restore to (confirmed position)
+    ///   - speculatedCount: How many tokens were speculated (for logging)
+    ///   - mambaSnapshot: Snapshot taken before speculation (restores MambaCache)
+    public func rollbackCache(position: Int, speculatedCount: Int = 1, mambaSnapshot: MambaSnapshot? = nil) async throws {
         guard isReady else { return }
         for cache in kvCaches {
+            if cache is MambaCache { continue }
             let currentOffset = cache.offset
             let excess = currentOffset - position
             if excess > 0 {
                 cache.trim(excess)
             }
         }
+        if let snapshot = mambaSnapshot {
+            restoreMambaStates(from: snapshot)
+        }
     }
 
     // MARK: - Double-Buffer Prediction
 
-    /// Predict the next token from a hidden state and pre-compute the hidden for it.
+    /// Result of speculative multi-token draft: predicted tokens + their precomputed hidden states.
+    public struct DraftBundle: @unchecked Sendable {
+        public let predictedTokens: [Int]
+        public let precomputedStates: [MLXArray]
+        public let mambaSnapshot: MambaSnapshot?
+        public var count: Int { predictedTokens.count }
+    }
+
+    /// Draft K tokens from a hidden state, precomputing hidden states for each.
     ///
-    /// Pipeline:
-    /// 1. Run N extra worker layers on hidden state (throwaway KV caches, ~1.3ms/layer)
-    /// 2. Apply norm + head on refined hidden → argmax → predicted token
-    /// 3. Pre-compute hidden for predicted token (embed + coord layers, ~31.8ms)
+    /// Pipeline per draft token:
+    /// 1. Apply norm + head on current hidden → argmax → predicted token
+    /// 2. Embed predicted token, run coord layers → precomputed hidden (updates caches)
     ///
-    /// More extra layers = better prediction accuracy but less overlap with worker.
-    /// Used for double-buffering: wrong predictions are "free" (overlapped with worker compute).
-    public func predictAndPrecompute(
-        hiddenState: MLXArray,
+    /// The first token also runs N extra worker layers (throwaway caches) for better accuracy.
+    /// MambaCache snapshot is taken before any cache modifications for safe rollback.
+    public func draftTokens(
+        from activation: MLXArray,
+        count: Int = 2,
         extraPredictionLayers: Int = 0
-    ) async throws -> (predicted: Int, precomputed: MLXArray)? {
+    ) async throws -> DraftBundle? {
         guard isReady, let shardable = shardableModel else { return nil }
         guard let container = engine?.getContainer(for: modelId),
               let mlxContainer = container.mlxContainer else { return nil }
 
-        let hiddenBox = SendableBox(hiddenState)
+        let mambaSnapshot = snapshotMambaStates()
+
+        let hiddenBox = SendableBox(activation)
         let cacheBox = KVCacheBox(kvCaches)
         let range = self.layerRange
         let extraLayers = extraPredictionLayers
@@ -399,7 +484,7 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
         let result = await mlxContainer.perform { context in
             var h = hiddenBox.value
 
-            // Step 1: Run extra worker layers for better prediction (throwaway caches)
+            // Step 1: Run extra worker layers for better first-token prediction
             if extraLayers > 0 {
                 let workerStart = range.upperBound
                 let extraEnd = min(workerStart + extraLayers, shardable.count)
@@ -412,22 +497,34 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
                 }
             }
 
-            // Step 2: Predict from (refined) hidden state — norm + head + argmax
-            guard let logits = shardable.head(h) else { return nil as (Int, SendableBox<MLXArray>)? }
-            MLX.eval(logits)
-            let predicted = argmaxToken(logits)
+            // Step 2: Draft K tokens — predict, embed, run coord layers for each
+            var tokens: [Int] = []
+            var states: [SendableBox<MLXArray>] = []
 
-            // Step 3: Pre-compute hidden for predicted token (embed + coord layers)
-            var precomputed = MLXArray(Int32(predicted))
-            if precomputed.ndim == 0 { precomputed = precomputed.reshaped([1, 1]) }
-            else if precomputed.ndim == 1 { precomputed = precomputed.expandedDimensions(axis: 0) }
-            if let embedded = shardable.embed(precomputed) { precomputed = embedded }
-            precomputed = shardable.forwardLayers(range, input: precomputed, caches: cacheBox.caches)
-            MLX.asyncEval(precomputed)
-            return (predicted, SendableBox(precomputed))
+            for _ in 0..<count {
+                guard let logits = shardable.head(h) else { break }
+                MLX.eval(logits)
+                let predicted = argmaxToken(logits)
+                tokens.append(predicted)
+
+                var embedded = MLXArray(Int32(predicted))
+                if embedded.ndim == 0 { embedded = embedded.reshaped([1, 1]) }
+                else if embedded.ndim == 1 { embedded = embedded.expandedDimensions(axis: 0) }
+                if let emb = shardable.embed(embedded) { embedded = emb }
+                h = shardable.forwardLayers(range, input: embedded, caches: cacheBox.caches)
+                MLX.asyncEval(h)
+                states.append(SendableBox(h))
+            }
+
+            guard !tokens.isEmpty else { return nil as ([Int], [SendableBox<MLXArray>])? }
+            return (tokens, states)
         }
 
         guard let result = result else { return nil }
-        return (predicted: result.0, precomputed: result.1.value)
+        return DraftBundle(
+            predictedTokens: result.0,
+            precomputedStates: result.1.map { $0.value },
+            mambaSnapshot: mambaSnapshot
+        )
     }
 }
