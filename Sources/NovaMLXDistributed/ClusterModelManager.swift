@@ -306,24 +306,16 @@ public final class ClusterModelManager: @unchecked Sendable {
             group = .uninitialized
         }
 
-        // 7. Prepare distributed transport config (Ring via hostfile for proper 2-node discovery)
-        let worker = availableWorkers.first
-        let workerHost = worker?.spec.networkHost ?? worker?.spec.hostname ?? "127.0.0.1"
-        let workerIP = resolveHostname(workerHost) ?? workerHost
-        let coordinatorIP = getLocalIP(matching: workerIP)
-        NovaMLXLog.info("[ClusterModel] Transport IPs: coordinator=\(coordinatorIP), worker=\(workerIP) (resolved from \(workerHost))")
-        let hostfileJSON = RingTransportManager.buildHostfileJSON(
-            coordinatorIP: coordinatorIP,
-            coordinatorPort: 29500,
-            workerIP: workerIP,
-            workerPort: 29500
-        )
+        // 7. Transport config: TCP only (Ring/JACCL disabled)
+        // No hostfile or IP resolution needed for TCP data plane
 
         // 8. Create shard engines and bind weights
         var engines: [ShardEngine] = []
         for (index, assignment) in plan.assignments.enumerated() {
+            // In 2-node pipeline, coordinator owns head (isLast=true) so worker
+            // is a pure transformer-layer node. This cuts worker compute in half.
             let isFirst = index == 0
-            let isLast = index == plan.assignments.count - 1
+            let isLast = plan.assignments.count <= 2 || index == plan.assignments.count - 1
             let policy: ComputePolicy
 
             if assignment.nodeId == "local-coordinator" {
@@ -378,15 +370,8 @@ public final class ClusterModelManager: @unchecked Sendable {
                     // Don't throw — mark as failed but continue (partial activation)
                 }
 
-                // Send initTransport to worker for JACCL/Ring data plane
-                if let remotePolicy = policy as? RemoteShardPolicy {
-                    do {
-                        NovaMLXLog.info("[ClusterModel] Sending initTransport to worker (JACCL/Ring)...")
-                        try remotePolicy.sendInitTransport(backend: "jaccl", rank: 1, hostfileJSON: hostfileJSON)
-                    } catch {
-                        NovaMLXLog.warning("[ClusterModel] initTransport failed: \(error), continuing with TCP fallback")
-                    }
-                }
+                // Ring transport disabled — skip initTransport
+                // TCP data plane is used instead of Ring/JACCL
             }
 
             engines.append(ShardEngine(
@@ -400,43 +385,13 @@ public final class ClusterModelManager: @unchecked Sendable {
             self.shardEngines = engines
         }
 
-        // 10. Initialize JACCL transport on coordinator
-        // Try JACCL (RDMA) first — uses IBV auto-discovery, no hostfile needed.
-        // Falls back to Ring (TCP) via hostfile if JACCL unavailable.
-        // Note: MLX distributed group makes eval() a distributed barrier.
-        // JACCL (RDMA) may behave differently from Ring (TCP) — testing needed.
-        var transportGroup = DistributedGroup.uninitialized
-        if availableWorkers.count > 0 {
-            NovaMLXLog.info("[ClusterModel] Initializing transport on coordinator (rank=0)...")
-            transportGroup = RingTransportManager.shared.initializeJACCL(rank: 0)
-
-            if !transportGroup.isValid {
-                // JACCL failed, try Ring with hostfile
-                NovaMLXLog.info("[ClusterModel] JACCL unavailable, trying Ring with hostfile...")
-                transportGroup = RingTransportManager.shared.initializeRingWithHostfile(
-                    coordinatorIP: coordinatorIP,
-                    coordinatorPort: 29500,
-                    workerIP: workerIP,
-                    workerPort: 29500,
-                    rank: 0
-                )
-            }
-
-            if transportGroup.isValid {
-                NovaMLXLog.info("[ClusterModel] Transport group ready: rank=\(transportGroup.rank), size=\(transportGroup.size)")
-            } else {
-                NovaMLXLog.warning("[ClusterModel] All transport backends failed, using TCP fallback")
-            }
-        }
-
-        // 11. Enable Ring transport on policies now that both sides are init'd
-        if transportGroup.isValid {
-            for engine in engines {
-                if let remotePolicy = engine.policy as? RemoteShardPolicy {
-                    remotePolicy.enableRingTransport()
-                }
-            }
-        }
+        // 10. Ring/JACCL transport: DISABLED — TCP data plane is more reliable.
+        // Ring transport has a coordinator/worker mismatch where the worker's
+        // RingTransportManager.isReady can be stale or the Ring send/recv
+        // sequence desyncs from the TCP control channel. TCP transport via
+        // conn.sendTensor/recvTensor is battle-tested and works correctly.
+        // Re-enable when Ring transport is debugged.
+        NovaMLXLog.info("[ClusterModel] Using TCP data plane (Ring/JACCL disabled)")
 
         // 11. Check if all nodes ready
         let finalStatus = getStatus()
