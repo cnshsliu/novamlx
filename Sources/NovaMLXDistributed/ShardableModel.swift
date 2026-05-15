@@ -380,6 +380,17 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
         return resultBox.value
     }
 
+    /// Run norm + lm_head + argmax on a hidden state tensor.
+    /// Used by the coordinator after receiving the worker's output.
+    /// Returns (sampledTokenId, logits).
+    func computeHeadOnly(_ hidden: MLXArray) -> (tokenId: Int, logits: MLXArray)? {
+        guard isReady, let shardable = shardableModel else { return nil }
+        guard let logits = shardable.head(hidden) else { return nil }
+        MLX.eval(logits)
+        let tokenId = argmaxToken(logits)
+        return (tokenId, logits)
+    }
+
     public func releaseWeights() {
         shardableModel = nil
         kvCaches = []
