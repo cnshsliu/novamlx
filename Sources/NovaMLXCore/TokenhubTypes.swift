@@ -15,11 +15,22 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
     public var isLocal: Bool
     public var isFree: Bool
     public var isManaged: Bool
+    public var supportsResponsesAPI: Bool
+    public var supportsVision: Bool
+    public var visionStrategy: String?
+    public var anthropicEndpoint: String?
+    public var visionCompanionModel: String?
     public var requestCount: Int
     public var successCount: Int
     public var avgLatencyMs: Double
     public var lastTestedAt: Date?
     public var lastStatus: String?
+    public var contextWindowOverride: Int?
+
+    public var effectiveContextWindow: Int {
+        if let override = contextWindowOverride { return override }
+        return ModelSpecs.contextWindow(for: remoteModel)
+    }
 
     public init(
         name: String,
@@ -32,9 +43,15 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
         isLocal: Bool = false,
         isFree: Bool = false,
         isManaged: Bool = false,
+        supportsResponsesAPI: Bool = false,
+        supportsVision: Bool = false,
+        visionStrategy: String? = nil,
+        anthropicEndpoint: String? = nil,
+        visionCompanionModel: String? = nil,
         requestCount: Int = 0,
         successCount: Int = 0,
-        avgLatencyMs: Double = 0
+        avgLatencyMs: Double = 0,
+        contextWindowOverride: Int? = nil
     ) {
         self.id = name.lowercased().replacingOccurrences(of: " ", with: "-")
         self.name = name
@@ -47,9 +64,15 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
         self.isLocal = isLocal
         self.isFree = isFree
         self.isManaged = isManaged
+        self.supportsResponsesAPI = supportsResponsesAPI
+        self.supportsVision = supportsVision
+        self.visionStrategy = visionStrategy
+        self.anthropicEndpoint = anthropicEndpoint
+        self.visionCompanionModel = visionCompanionModel
         self.requestCount = requestCount
         self.successCount = successCount
         self.avgLatencyMs = avgLatencyMs
+        self.contextWindowOverride = contextWindowOverride
     }
 
     public init(from decoder: Decoder) throws {
@@ -66,11 +89,17 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
         isLocal = (try? c.decode(Bool.self, forKey: .isLocal)) ?? false
         isFree = (try? c.decode(Bool.self, forKey: .isFree)) ?? false
         isManaged = (try? c.decode(Bool.self, forKey: .isManaged)) ?? false
+        supportsResponsesAPI = (try? c.decode(Bool.self, forKey: .supportsResponsesAPI)) ?? false
+        supportsVision = (try? c.decode(Bool.self, forKey: .supportsVision)) ?? false
+        visionStrategy = try? c.decode(String.self, forKey: .visionStrategy)
+        anthropicEndpoint = try? c.decode(String.self, forKey: .anthropicEndpoint)
+        visionCompanionModel = try? c.decode(String.self, forKey: .visionCompanionModel)
         requestCount = (try? c.decode(Int.self, forKey: .requestCount)) ?? 0
         successCount = (try? c.decode(Int.self, forKey: .successCount)) ?? 0
         avgLatencyMs = (try? c.decode(Double.self, forKey: .avgLatencyMs)) ?? 0
         lastTestedAt = try? c.decode(Date.self, forKey: .lastTestedAt)
         lastStatus = try? c.decode(String.self, forKey: .lastStatus)
+        contextWindowOverride = try? c.decode(Int.self, forKey: .contextWindowOverride)
     }
 }
 
@@ -218,10 +247,11 @@ public final class TokenhubManager: @unchecked Sendable {
     // MARK: - Managed Provider Provisioning
 
     /// Cloud model endpoint for managed providers.
-    private static let cloudBaseURL = "https://chat.baystoneai.com/v1"
+    private static let tknetBaseURL = "https://api.tknet.ai/v1"
 
     /// Provision managed providers from cloud model discovery.
     /// Creates/updates providers for each model. Removes stale managed providers.
+    // TODO(tknet): Change data source to tknet.ai with tag-based filtering.
     public func provisionManagedProviders(remoteModels: [(id: String, name: String)]) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -233,13 +263,13 @@ public final class TokenhubManager: @unchecked Sendable {
             desiredIds.insert(managedId)
 
             if let idx = all.firstIndex(where: { $0.id == managedId }) {
-                all[idx].endpoint = Self.cloudBaseURL
+                all[idx].endpoint = Self.tknetBaseURL
                 all[idx].remoteModel = model.id
                 all[idx].apiKey = ""
             } else {
                 var provider = TokenhubProvider(
                     name: "Cloud \(model.id)",
-                    endpoint: Self.cloudBaseURL,
+                    endpoint: Self.tknetBaseURL,
                     apiKey: "",
                     remoteModel: model.id,
                     isEnabled: true,
