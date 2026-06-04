@@ -24,6 +24,13 @@ struct SettingsPageView: View {
     @State private var cliInstalled: Bool = false
     @State private var cliInstallMessage: String? = nil
 
+    // tknet.ai
+    @State private var tknetApiKey: String = ""
+    @State private var tknetApiKeyVerified: Bool = false
+    @State private var tknetVerifyMessage: String? = nil
+    @State private var tknetVerifying: Bool = false
+    @State private var tknetApiKeyVisible: Bool = false
+
     // Config editor state
     @State private var isEditing = false
     @State private var cfgHost = "127.0.0.1"
