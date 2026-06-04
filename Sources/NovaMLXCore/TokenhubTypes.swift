@@ -227,6 +227,8 @@ public final class TokenhubManager: @unchecked Sendable {
     public func enforceProviderLimits() -> [String] {
         lock.lock()
         defer { lock.unlock() }
+        // tknet.ai users bypass provider limits
+        if hasValidTknetKey() { return [] }
         if isSubscribed() { return [] }
 
         var all = loadAll()
