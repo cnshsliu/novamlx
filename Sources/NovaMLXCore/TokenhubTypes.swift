@@ -1,5 +1,6 @@
 import Foundation
 import os.log
+import NovaMLXInference
 
 // MARK: - TokenhubProvider
 
@@ -338,6 +339,47 @@ public final class TokenhubManager: @unchecked Sendable {
 
         try saveAll(all)
         log.info("[Tokenhub] Provisioned \(remoteModels.count) managed providers, removed \(removed) stale")
+    }
+
+    /// Provision managed tknet.ai providers from cloud model discovery.
+    /// Creates/updates providers for each nova-tagged model. Removes stale nova providers.
+    /// Each provider inherits the API Key from Settings (auto-populated, not stored).
+    public func provisionTknetProviders(remoteModels: [TknetModel]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        var all = loadAll()
+        var desiredIds = Set<String>()
+
+        for model in remoteModels {
+            let managedId = "nova-\(model.id.lowercased())"
+            desiredIds.insert(managedId)
+
+            if let idx = all.firstIndex(where: { $0.id == managedId }) {
+                all[idx].endpoint = Self.tknetBaseURL
+                all[idx].remoteModel = model.id
+                all[idx].apiKey = ""  // API Key inherited from Settings
+            } else {
+                var provider = TokenhubProvider(
+                    name: "⭐ \(model.id)",
+                    endpoint: Self.tknetBaseURL,
+                    apiKey: "",  // API Key inherited from Settings
+                    remoteModel: model.id,
+                    isEnabled: true,
+                    includeInLoadBalance: true,
+                    tags: ["nova", "managed"],
+                    isManaged: true
+                )
+                provider.id = managedId
+                all.append(provider)
+            }
+        }
+
+        let before = all.count
+        all.removeAll { $0.isManaged && $0.tags.contains("nova") && !desiredIds.contains($0.id) }
+        let removed = before - all.count
+
+        try saveAll(all)
+        log.info("[Tokenhub] Provisioned \(remoteModels.count) nova providers, removed \(removed) stale")
     }
 
     /// Remove all managed providers (on unsubscribe/logout).
