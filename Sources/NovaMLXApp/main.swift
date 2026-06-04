@@ -38,8 +38,16 @@ struct NovaMLXApp: App {
             Button { appDelegate.openMainWindow(to: .models) } label: {
                 Label(l10n.tr("app.models"), systemImage: "cube.box")
             }
+            Button { appDelegate.openMainWindow(to: .tokenhub) } label: {
+                Label(l10n.tr("app.tokenhub"), systemImage: "server.rack")
+            }
             Button { appDelegate.openMainWindow(to: .chat) } label: {
-                Label(l10n.tr("app.chat"), systemImage: "bubble.left.and.bubble.right")
+                Label(l10n.tr("app.chat"), systemImage: "cpu")
+            }
+            if appDelegate.appState.clusterEnabled {
+                Button { appDelegate.openMainWindow(to: .cluster) } label: {
+                    Label(l10n.tr("app.cluster"), systemImage: "xserve")
+                }
             }
             Button { appDelegate.openMainWindow(to: .settings) } label: {
                 Label(l10n.tr("app.settings"), systemImage: "gearshape")
@@ -59,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let engine = MLXEngine()
     let settingsManager: ModelSettingsManager
     let workerMode: Bool
+
     lazy var inferenceService: InferenceService = {
         // Read cluster settings (needed for both workerMode and non-workerMode paths)
         let (isCluster, clusterConfig) = Self.readClusterSettings()
@@ -113,6 +122,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Enable worker subprocess for crash isolation
         self.workerMode = true
+
+        // Coordinator nodes start on the Cluster page so the Thunderbolt subnet
+        // enforcement in scanNetwork() runs immediately on launch.
+        if Self.readClusterSettings().0 {
+            appState.requestedPage = .cluster
+        }
 
         super.init()
     }
@@ -240,10 +255,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             let serverConfig = await config.serverConfig
+            let hfEndpoint = await config.huggingfaceEndpoint
             apiServer = NovaMLXAPIServer(
                 inferenceService: inferenceService,
                 modelManager: modelManager,
-                config: serverConfig
+                config: serverConfig,
+                huggingfaceEndpoint: hfEndpoint
             )
 
             appState.isServerRunning = true
@@ -273,10 +290,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Cloud providers — validate subscription with network check
                 do {
                     _ = try await CloudAuth.validate()
-                    let models = await CloudBackend.shared.fetchModels()
-                    let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
-                    try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
-                    NovaMLXLog.info("Cloud managed providers provisioned: \(remoteModels.count)")
+                    // TODO: Re-enable with tknet.ai in Task 11 (provisionTknetProviders) + Task 17 (verifyAndFetchTknetModels)
+                    // let models = await CloudBackend.shared.fetchModels()
+                    // let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
+                    // try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
+                    // NovaMLXLog.info("Cloud managed providers provisioned: \(remoteModels.count)")
+                    NovaMLXLog.info("Cloud provisioning skipped (tknet.ai integration pending)")
                 } catch {
                     NovaMLXLog.info("Not subscribed, skipping cloud provisioning")
                 }
@@ -307,7 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         coordinatorHost: cluster.coordinatorHost ?? "0.0.0.0",
                         coordinatorPort: cluster.coordinatorPort ?? 6591,
                         strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
-                        minLayersPerShard: cluster.minLayersPerShard ?? 32
+                        minLayersPerShard: cluster.minLayersPerShard ?? 32,
+                        enableRingTransport: false   // TCP fallback — Ring broken with link-local Thunderbolt
                     )
                     try? ClusterManager.shared.startAsCoordinator(config: clusterConfig)
 
@@ -332,6 +352,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
 
                     NovaMLXLog.info("[Cluster] Started as coordinator on port \(clusterConfig.coordinatorPort)")
+
+                    // Force the main window open on the Cluster page for autonomous
+                    // validation of Thunderbolt subnet discovery (scanNetwork).
+                    Task { @MainActor in
+                        self.openMainWindow(to: .cluster)
+                    }
                 case "worker":
                     if let host = cluster.coordinatorHost {
                         let clusterConfig = ClusterConfig(
@@ -339,7 +365,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             coordinatorHost: host,
                             coordinatorPort: cluster.coordinatorPort ?? 6591,
                             strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
-                            minLayersPerShard: cluster.minLayersPerShard ?? 32
+                            minLayersPerShard: cluster.minLayersPerShard ?? 32,
+                        enableRingTransport: false   // TCP fallback — Ring broken with link-local Thunderbolt
                         )
                         WorkerShardService.shared.setEngine(engine)
                         WorkerService.shared.start(config: clusterConfig)
@@ -372,10 +399,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             let serverConfig = await config.serverConfig
+            let hfEndpoint = await config.huggingfaceEndpoint
             apiServer = NovaMLXAPIServer(
                 inferenceService: inferenceService,
                 modelManager: modelManager,
-                config: serverConfig
+                config: serverConfig,
+                huggingfaceEndpoint: hfEndpoint
             )
 
             appState.serverPort = serverConfig.port
@@ -393,7 +422,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         coordinatorHost: cluster.coordinatorHost ?? "0.0.0.0",
                         coordinatorPort: cluster.coordinatorPort ?? 6591,
                         strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
-                        minLayersPerShard: cluster.minLayersPerShard ?? 32
+                        minLayersPerShard: cluster.minLayersPerShard ?? 32,
+                        enableRingTransport: false   // TCP fallback — Ring broken with link-local Thunderbolt
                     )
                     try? ClusterManager.shared.startAsCoordinator(config: clusterConfig)
                     NovaMLXLog.info("[Cluster] Restarted as coordinator on port \(clusterConfig.coordinatorPort)")
@@ -404,7 +434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             coordinatorHost: host,
                             coordinatorPort: cluster.coordinatorPort ?? 6591,
                             strategy: ClusterStrategy(rawValue: cluster.strategy ?? "minNodes") ?? .minNodes,
-                            minLayersPerShard: cluster.minLayersPerShard ?? 32
+                            minLayersPerShard: cluster.minLayersPerShard ?? 32,
+                        enableRingTransport: false   // TCP fallback — Ring broken with link-local Thunderbolt
                         )
                         WorkerShardService.shared.setEngine(engine)
                         WorkerService.shared.start(config: clusterConfig)
@@ -491,7 +522,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func openMainWindow(to page: AppPage = .status) {
-        appState.requestedPage = page
+        // When launched as coordinator, default to Cluster page so that
+        // scanNetwork() (with Thunderbolt subnet enforcement) runs immediately.
+        let effectivePage: AppPage = {
+            if page != .status { return page }
+            let (isCoordinator, _) = Self.readClusterSettings()
+            return isCoordinator ? .cluster : .status
+        }()
+
+        appState.requestedPage = effectivePage
 
         if let window = mainWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)

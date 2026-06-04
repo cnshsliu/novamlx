@@ -66,7 +66,9 @@ struct SettingsPageView: View {
         ScrollView {
             VStack(spacing: 20) {
                 serverConfigSection
-                clusterSection
+                if clusterEnabled || appState.clusterEnabled {
+                    clusterSection
+                }
                 cloudAccountSection
                 cliSection
                 languageSection
@@ -497,7 +499,14 @@ struct SettingsPageView: View {
             configDict["defaultModel"] = cfgDefaultModel
         }
 
+        // Preserve existing keys we don't manage (modelsDirectory, huggingfaceEndpoint, etc.)
         let configPath = NovaMLXPaths.configFile
+        if let existingData = try? Data(contentsOf: configPath),
+           let existing = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any] {
+            for (key, value) in existing where configDict[key] == nil {
+                configDict[key] = value
+            }
+        }
 
         do {
             let data = try JSONSerialization.data(withJSONObject: configDict, options: [.prettyPrinted, .sortedKeys])
@@ -547,7 +556,11 @@ struct SettingsPageView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
-            .onChange(of: clusterEnabled) { cfgHasUnsavedChanges = true }
+            .onChange(of: clusterEnabled) {
+                cfgHasUnsavedChanges = true
+                appState.clusterEnabled = clusterEnabled
+                persistClusterToggle()
+            }
 
             if clusterEnabled {
                 // Role picker
@@ -651,8 +664,61 @@ struct SettingsPageView: View {
             }
         }
         .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .sectionCard()
         .task { refreshClusterWorkers() }
+    }
+
+    /// Persist cluster toggle to disk + in-memory config immediately.
+    /// Without this, syncClusterEnabled() polls disk every 2s and re-enables cluster from stale config.
+    private func persistClusterToggle() {
+        let configPath = NovaMLXPaths.configFile
+        guard let data = try? Data(contentsOf: configPath),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var server = json["server"] as? [String: Any] else { return }
+
+        if clusterEnabled {
+            var clusterDict: [String: Any] = ["role": clusterRole]
+            clusterDict["coordinatorPort"] = clusterPort
+            server["cluster"] = clusterDict
+        } else {
+            server.removeValue(forKey: "cluster")
+        }
+        json["server"] = server
+
+        do {
+            let newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+            try newData.write(to: configPath, options: .atomic)
+        } catch {
+            NovaMLXLog.error("[Settings] Failed to persist cluster toggle: \(error)")
+        }
+
+        // Keep in-memory config in sync so server picks up the change
+        Task {
+            let config = NovaMLXConfiguration.shared
+            let currentServer = await config.serverConfig
+            let clusterSettings: ServerConfig.ClusterSettings? = clusterEnabled
+                ? ServerConfig.ClusterSettings(
+                    role: clusterRole,
+                    coordinatorHost: clusterRole == "worker" ? clusterHost : nil,
+                    coordinatorPort: clusterPort,
+                    strategy: clusterStrategy,
+                    minLayersPerShard: clusterMinLayers
+                )
+                : nil
+            let newServer = ServerConfig(
+                host: currentServer.host,
+                port: currentServer.port,
+                adminPort: currentServer.adminPort,
+                apiKeys: currentServer.apiKeys,
+                maxConcurrentRequests: currentServer.maxConcurrentRequests,
+                requestTimeout: currentServer.requestTimeout,
+                maxRequestSizeMB: currentServer.maxRequestSizeMB,
+                maxProcessMemory: currentServer.maxProcessMemory,
+                cluster: clusterSettings
+            )
+            await config.setServerConfig(newServer)
+        }
     }
 
     private func refreshClusterWorkers() {
@@ -795,14 +861,14 @@ struct SettingsPageView: View {
             }
             // Refresh status in background
             Task { await refreshCloudStatus() }
-            // Re-provision managed providers if subscribed
-            if let cache = AuthCache.load(), !cache.isExpired, cache.valid {
-                Task {
-                    let models = await CloudBackend.shared.fetchModels()
-                    let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
-                    try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
-                }
-            }
+            // TODO: Re-enable with tknet.ai in Task 11 (provisionTknetProviders) + Task 17 (verifyAndFetchTknetModels)
+            // if let cache = AuthCache.load(), !cache.isExpired, cache.valid {
+            //     Task {
+            //         let models = await CloudBackend.shared.fetchModels()
+            //         let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
+            //         try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
+            //     }
+            // }
         }
     }
 
@@ -876,12 +942,12 @@ struct SettingsPageView: View {
                     cloudLoggingIn = false
                     if check.valid {
                         cloudAuthMessage = "Signed in successfully!"
-                        // Auto-provision managed providers
-                        Task {
-                            let models = await CloudBackend.shared.fetchModels()
-                            let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
-                            try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
-                        }
+                        // TODO: Re-enable with tknet.ai in Task 11 (provisionTknetProviders) + Task 17 (verifyAndFetchTknetModels)
+                        // Task {
+                        //     let models = await CloudBackend.shared.fetchModels()
+                        //     let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
+                        //     try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
+                        // }
                     } else {
                         cloudAuthMessage = "Signed in, but no active subscription."
                     }
