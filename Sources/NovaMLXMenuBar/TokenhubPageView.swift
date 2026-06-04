@@ -513,13 +513,13 @@ struct TokenhubPageView: View {
                         .font(.system(size: 10))
                         .foregroundColor(NovaTheme.Colors.textTertiary)
                         .frame(width: 80, alignment: .trailing)
-                    Text("tknet:\(provider.id)")
+                    Text(provider.id)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(NovaTheme.Colors.textSecondary)
                     Button {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString("tknet:\(provider.id)", forType: .string)
-                        agentToast = "Copied: tknet:\(provider.id)"
+                        NSPasteboard.general.setString(provider.id, forType: .string)
+                        agentToast = "Copied: \(provider.id)"
                         showAgentToast = true
                     } label: {
                         Image(systemName: "doc.on.clipboard")
@@ -557,7 +557,7 @@ struct TokenhubPageView: View {
             agentLauncherRow(
                 agent: agent,
                 onAgentChange: { selectedAgentPerProvider[provider.id] = $0 },
-                modelName: "tknet:\(provider.id)",
+                modelName: provider.id,
                 allProviders: providers
             )
         }
@@ -917,7 +917,7 @@ struct TokenhubPageView: View {
                             HStack(spacing: 4) {
                                 if testProxyRunning { ProgressView().controlSize(.small) }
                                 else { Image(systemName: "arrow.triangle.2.circlepath") }
-                                Text("Test tknet:\(formName)")
+                                Text("Test \(formName)")
                             }
                         }
                         .buttonStyle(.bordered)
@@ -1421,7 +1421,7 @@ struct TokenhubPageView: View {
         }
     }
 
-    // MARK: - Test via NovaMLX (tknet:provider-name)
+    // MARK: - Test via NovaMLX (provider-name)
 
     private func testViaNovaMLX() {
         testProxyRunning = true
@@ -1467,14 +1467,14 @@ struct TokenhubPageView: View {
             let body: [String: Any]
             if useResponses {
                 body = [
-                    "model": "tknet:\(providerName)",
+                    "model": providerName,
                     "input": "Hi, reply with just 'OK'",
                     "max_output_tokens": 10,
                     "stream": false
                 ]
             } else {
                 body = [
-                    "model": "tknet:\(providerName)",
+                    "model": providerName,
                     "messages": [["role": "user", "content": "Hi, reply with just 'OK'"]],
                     "max_tokens": 10,
                     "stream": false
