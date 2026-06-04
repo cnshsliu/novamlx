@@ -133,7 +133,7 @@ public final class ClusterModelManager: @unchecked Sendable {
 
     /// Deactivate the current model. Releases all shards on all nodes.
     public func deactivateModel() async throws -> ClusterModelStatus {
-        let (currentState, currentModel) = lock.withLock { (state, activeModel) }
+        let (_, currentModel) = lock.withLock { (state, activeModel) }
 
         guard currentModel != nil else {
             throw ClusterModelError.noModelActive
@@ -247,13 +247,23 @@ public final class ClusterModelManager: @unchecked Sendable {
             .filter { $0.status == .ready || $0.status == .active }
 
         let localMemory = MLX.GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? ProcessInfo.processInfo.physicalMemory
+
+        // Detect local CPU model for compute ratio lookup
+        var cpuSize = 0
+        sysctlbyname("machdep.cpu.brand_string", nil, &cpuSize, nil, 0)
+        var cpuBuffer = [CChar](repeating: 0, count: cpuSize)
+        sysctlbyname("machdep.cpu.brand_string", &cpuBuffer, &cpuSize, nil, 0)
+        let localCpuModel = String(decoding: cpuBuffer.prefix(while: { $0 != 0 }).map { UInt8($0) }, as: UTF8.self)
+
         let coordinatorSpec = NodeSpec(
             nodeId: "local-coordinator",
             totalMemoryBytes: localMemory,
             computeCapability: 1.0,
             hostname: "127.0.0.1",
-            port: clusterConfig?.coordinatorPort ?? 6591
+            port: clusterConfig?.coordinatorPort ?? 6591,
+            cpuModel: localCpuModel
         )
+        NovaMLXLog.info("[ClusterModel] Coordinator CPU: \(localCpuModel), compute ratio: \(computeRatio(for: localCpuModel))")
         let effectiveNodes = [coordinatorSpec] + availableWorkers.map(\.spec)
 
         guard effectiveNodes.count >= 1 else {
@@ -280,7 +290,7 @@ public final class ClusterModelManager: @unchecked Sendable {
 
         // 5. Initialize node readiness tracking
         var readinessMap: [String: ShardReadiness] = [:]
-        for (index, assignment) in plan.assignments.enumerated() {
+        for (_, assignment) in plan.assignments.enumerated() {
             let hostname: String
             if assignment.nodeId == "local-coordinator" {
                 hostname = "127.0.0.1"
@@ -312,12 +322,12 @@ public final class ClusterModelManager: @unchecked Sendable {
         // 8. Create shard engines and bind weights
         var engines: [ShardEngine] = []
         for (index, assignment) in plan.assignments.enumerated() {
-            // In 2-node pipeline, coordinator owns head (isLast=true) so worker
-            // is a pure transformer-layer node. This cuts worker compute in half.
             let isFirst = index == 0
-            // In 2-node pipeline, coordinator (index 0) owns head so worker is
-            // a pure transformer-layer node. In 3+ nodes, last node owns head.
-            let isLast = plan.assignments.count <= 2 ? (index == 0) : (index == plan.assignments.count - 1)
+            // 2-node pipeline: BOTH nodes need head (isLast=true).
+            // Coordinator: uses computeHeadOnly for prefill first token.
+            // Worker: uses computeAndSample for decode (layers+head+argmax → 4-byte token).
+            // 3+ nodes: only last node owns head.
+            let isLast = plan.assignments.count <= 2 ? true : (index == plan.assignments.count - 1)
             let policy: ComputePolicy
 
             if assignment.nodeId == "local-coordinator" {
@@ -372,8 +382,7 @@ public final class ClusterModelManager: @unchecked Sendable {
                     // Don't throw — mark as failed but continue (partial activation)
                 }
 
-                // Ring transport disabled — skip initTransport
-                // TCP data plane is used instead of Ring/JACCL
+                // Ring/JACCL transport init happens after all engines are created (step 10)
             }
 
             engines.append(ShardEngine(
@@ -387,13 +396,55 @@ public final class ClusterModelManager: @unchecked Sendable {
             self.shardEngines = engines
         }
 
-        // 10. Ring/JACCL transport: DISABLED — TCP data plane is more reliable.
-        // Ring transport has a coordinator/worker mismatch where the worker's
-        // RingTransportManager.isReady can be stale or the Ring send/recv
-        // sequence desyncs from the TCP control channel. TCP transport via
-        // conn.sendTensor/recvTensor is battle-tested and works correctly.
-        // Re-enable when Ring transport is debugged.
-        NovaMLXLog.info("[ClusterModel] Using TCP data plane (Ring/JACCL disabled)")
+        // 10. Ring/JACCL transport init
+        let ringEnabled = clusterConfig?.enableRingTransport ?? false
+
+        if ringEnabled && engines.count == 2,
+           let remoteEngine = engines.first(where: { $0.policy is RemoteShardPolicy }),
+           let remotePolicy = remoteEngine.policy as? RemoteShardPolicy {
+
+            let worker = availableWorkers.first { $0.spec.nodeId == remoteEngine.assignment.nodeId }
+            let workerRawIP = worker?.spec.networkHost ?? worker?.spec.hostname ?? remoteEngine.assignment.nodeId
+            // Resolve mDNS hostname to IPv4 — Ring transport chokes on IPv6
+            let workerIP = resolveHostname(workerRawIP) ?? workerRawIP
+            let coordIP = getLocalIP(matching: workerIP)
+            let ringPort: UInt16 = 8900
+
+            let hostfileJSON = RingTransportManager.buildHostfileJSON(
+                coordinatorIP: coordIP,
+                coordinatorPort: ringPort,
+                workerIP: workerIP,
+                workerPort: ringPort
+            )
+
+            NovaMLXLog.info("[ClusterModel] Initializing Ring transport (coord=\(coordIP):\(ringPort), worker=\(workerIP):\(ringPort))")
+
+            do {
+                let ack = try remotePolicy.sendInitTransport(backend: "ring", rank: 1, hostfileJSON: hostfileJSON)
+                if ack {
+                    // Extra reachability check from coordinator before we also block
+                    RingTransportManager.shared.testConnectivity(hostfileJSON: hostfileJSON, myRank: 0)
+
+                    // Worker is now blocking on Ring init — coordinator MUST init NOW.
+                    // This blocks until both sides connect (or fails if unreachable).
+                    let ringGroup = RingTransportManager.shared.initializeFromHostfileJSON(hostfileJSON, rank: 0)
+                    if ringGroup.isValid && ringGroup.size > 1 {
+                        remotePolicy.enableRingTransport()
+                        NovaMLXLog.info("[ClusterModel] Ring transport ENABLED (rank=\(ringGroup.rank), size=\(ringGroup.size))")
+                    } else {
+                        NovaMLXLog.warning("[ClusterModel] Ring init failed (size=\(ringGroup.size)), TCP fallback")
+                    }
+                }
+            } catch {
+                NovaMLXLog.warning("[ClusterModel] Ring transport init error: \(error), TCP fallback")
+            }
+        } else if engines.count > 2 {
+            NovaMLXLog.info("[ClusterModel] Ring transport not yet supported for \(engines.count) nodes, using TCP")
+        } else if !ringEnabled {
+            NovaMLXLog.info("[ClusterModel] Ring transport disabled (set enableRingTransport = true in ClusterConfig to attempt it)")
+        } else {
+            NovaMLXLog.info("[ClusterModel] Ring transport not applicable for this configuration")
+        }
 
         // 11. Check if all nodes ready
         let finalStatus = getStatus()

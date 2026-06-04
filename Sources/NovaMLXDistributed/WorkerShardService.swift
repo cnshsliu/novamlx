@@ -23,6 +23,7 @@ enum ShardServiceMessage: UInt32 {
     case cacheRolledBack = 13   // Worker → Coord: ack
     case initTransport = 14     // Coord → Worker: initialize JACCL/Ring transport (rank, backend)
     case transportReady = 15    // Worker → Coord: transport initialized and ready
+    case requestModelSync = 16  // Coord → Worker: ensure model is present (trigger WeightDistributor pull)
 }
 
 // MARK: - Shard Service Wire Format
@@ -121,6 +122,7 @@ public final class WorkerShardService: @unchecked Sendable {
     private let transport: TCPTensorTransport
     private var listener: TCPListener?
     private var coordinatorConn: TCPConnection?
+    private var lastCoordinatorHost: String?          // used for WeightDistributor auto-sync
     private let lock = NSLock()
     private var isRunning = false
 
@@ -165,6 +167,8 @@ public final class WorkerShardService: @unchecked Sendable {
         listener = try TCPListener(port: port) { [weak self] nodeId, conn in
             self?.lock.withLock {
                 self?.coordinatorConn = conn
+                // Remember the coordinator identifier (often a good reachable hostname/IP)
+                self?.lastCoordinatorHost = nodeId
             }
             NovaMLXLog.info("[WorkerShardService] Coordinator connected: \(nodeId)")
         }
@@ -222,7 +226,7 @@ public final class WorkerShardService: @unchecked Sendable {
                         try await handleCompute(conn: conn, hasTensor: header.hasTensor, payload: payload)
 
                     case .computeAndSample:
-                        try await handleComputeAndSample(conn: conn, hasTensor: header.hasTensor)
+                        try await handleComputeAndSample(conn: conn, hasTensor: header.hasTensor, payload: payload)
 
                     case .releaseWeights:
                         handleReleaseWeights()
@@ -239,6 +243,25 @@ public final class WorkerShardService: @unchecked Sendable {
 
                     case .initTransport:
                         try await handleInitTransport(conn: conn, payload: payload)
+
+                    case .requestModelSync:
+                        if header.payloadSize > 0 {
+                            let payloadData = try conn.recvData(count: header.payloadSize)
+                            if let modelId = String(data: payloadData, encoding: .utf8), !modelId.isEmpty {
+                                // Trigger the same ensure logic we have for bindWeights
+                                Task {
+                                    let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+                                    if !FileManager.default.fileExists(atPath: modelDir.path), let host = self.lastCoordinatorHost {
+                                        _ = try? await WeightDistributor.shared.ensureModelAvailable(
+                                            modelId: modelId,
+                                            expectedPath: modelDir.path,
+                                            coordinatorHost: host,
+                                            coordinatorPort: 6591
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
                     case .computeResult, .error, .sampledToken, .verifiedTokens, .cacheRolledBack, .transportReady:
                         NovaMLXLog.warning("[WorkerShardService] Unexpected message from coordinator: \(header.msgType)")
@@ -290,10 +313,30 @@ public final class WorkerShardService: @unchecked Sendable {
         }
 
         // Load model directly into main engine using Worker's local model path
+        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+
+        // NEW: Auto-sync from coordinator if the model is not present on this worker
+        if !FileManager.default.fileExists(atPath: modelDir.path) {
+            if let host = lastCoordinatorHost {
+                NovaMLXLog.info("[WorkerShardService] Model \(modelId) missing locally — triggering WeightDistributor sync from coordinator \(host)")
+                do {
+                    _ = try await WeightDistributor.shared.ensureModelAvailable(
+                        modelId: modelId,
+                        expectedPath: modelDir.path,
+                        coordinatorHost: host,
+                        coordinatorPort: 6591
+                    )
+                    NovaMLXLog.info("[WorkerShardService] Model sync completed for \(modelId)")
+                } catch {
+                    NovaMLXLog.warning("[WorkerShardService] Auto model sync failed for \(modelId): \(error). Will try local load anyway.")
+                }
+            } else {
+                NovaMLXLog.warning("[WorkerShardService] Cannot auto-sync \(modelId): no known coordinator host yet.")
+            }
+        }
+
         if engine.getContainer(for: modelId) == nil {
             NovaMLXLog.info("[WorkerShardService] Loading model \(modelId) into engine...")
-            // Always resolve from Worker's local models dir — Coordinator's path is remote
-            let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
             let config = ModelConfig(identifier: ModelIdentifier(id: modelId, family: .qwen))
             _ = try await engine.loadModel(from: modelDir, config: config, skipMemoryGate: true)
             NovaMLXLog.info("[WorkerShardService] Model \(modelId) loaded into engine")
@@ -379,7 +422,15 @@ public final class WorkerShardService: @unchecked Sendable {
             } else {
                 let resultHeader = ShardWireFormat.encode(msgType: .computeResult, hasTensor: true)
                 try conn.sendData(resultHeader)
-                let outputToSend = output.dtype != .bfloat16 ? output.asType(.bfloat16) : output
+                // Skip bfloat16 for small tensors — conversion overhead > bandwidth savings
+                let outputToSend: MLXArray
+                if output.dtype == .bfloat16 {
+                    outputToSend = output
+                } else if output.nbytes < 65536 {
+                    outputToSend = output
+                } else {
+                    outputToSend = output.asType(.bfloat16)
+                }
                 try conn.sendTensor(outputToSend)
             }
         } catch {
@@ -389,7 +440,7 @@ public final class WorkerShardService: @unchecked Sendable {
         }
     }
 
-    private func handleComputeAndSample(conn: TCPConnection, hasTensor: Bool) async throws {
+    private func handleComputeAndSample(conn: TCPConnection, hasTensor: Bool, payload: Data = Data()) async throws {
         guard let policy = lock.withLock({ policy }) else {
             let errorPayload = "No policy assigned".data(using: .utf8) ?? Data()
             let msg = ShardWireFormat.encode(msgType: .error, payload: errorPayload)
@@ -397,11 +448,26 @@ public final class WorkerShardService: @unchecked Sendable {
             return
         }
 
-        guard hasTensor else {
-            throw ShardServiceError.invalidMessage("computeAndSample requires input tensor")
-        }
+        let useRing = RingTransportManager.shared.isReady
 
-        let inputTensor = try conn.recvTensor()
+        let inputTensor: MLXArray
+        if useRing && !hasTensor && payload.count >= 8 {
+            // Ring transport: shape in TCP payload, tensor via Ring
+            let ndim = (payload.count - 4) / 4
+            var shape = [Int]()
+            for i in 0..<ndim {
+                let dim = payload[i*4..<(i*4+4)].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+                shape.append(Int(dim))
+            }
+            let dtypeRaw = payload[payload.count-4..<payload.count].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+            let dtype = DTypeFromRaw(dtypeRaw) ?? .float32
+            inputTensor = RingTransportManager.shared.recv(shape: shape, dtype: dtype, from: 0)
+        } else {
+            guard hasTensor else {
+                throw ShardServiceError.invalidMessage("computeAndSample requires input tensor")
+            }
+            inputTensor = try conn.recvTensor()
+        }
 
         do {
             let logits = try await policy.compute(input: inputTensor)
@@ -438,6 +504,7 @@ public final class WorkerShardService: @unchecked Sendable {
         }
 
         let inputTensor = try conn.recvTensor()
+        NovaMLXLog.info("[WorkerShardService] speculativeVerify received (shape: \(inputTensor.shape), using speculative path)")
 
         do {
             let logits = try await policy.compute(input: inputTensor)
@@ -525,12 +592,20 @@ public final class WorkerShardService: @unchecked Sendable {
         let ack = ShardWireFormat.encode(msgType: .transportReady)
         try conn.sendData(ack)
 
+        NovaMLXLog.info("[WorkerShardService] transportReady sent to coordinator. Now entering blocking Ring/JACCL init (this is the common hang point)...")
+
         // Now init transport (blocks until coord also inits)
         let group: DistributedGroup
         if let hostfile = hostfileJSON {
             group = RingTransportManager.shared.initializeFromHostfileJSON(hostfile, rank: rank)
         } else {
             group = RingTransportManager.shared.initializeJACCL(rank: rank)
+        }
+
+        if group.isValid {
+            NovaMLXLog.info("[WorkerShardService] Ring/JACCL init SUCCEEDED for rank \(rank)")
+        } else {
+            NovaMLXLog.error("[WorkerShardService] Ring/JACCL init FAILED or timed out for rank \(rank). Check coordinator logs for matching hostfile and preflight results.")
         }
 
         if group.isValid {

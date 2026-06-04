@@ -249,6 +249,14 @@ public final class WorkerDeployer: @unchecked Sendable {
                         throw DeployError.remoteCommandFailed("write config", cfgCode)
                     }
 
+                    // Write separate cluster-policy.json with Thunderbolt policy from Coordinator's config
+                    let policyJSON = clusterPolicyJSON(coordinatorHost: coordinatorHost, coordinatorPort: coordinatorPort)
+                    let policyCmd = "mkdir -p ~/.nova && cat > ~/.nova/cluster-policy.json <<'NOVAMLX_EOF'\n\(policyJSON)\nNOVAMLX_EOF"
+                    let (policyOut, policyCode) = try await sshCommandWithOutput(host: host, username: username, command: policyCmd)
+                    guard policyCode == 0 else {
+                        throw DeployError.remoteCommandFailed("write cluster-policy.json", policyCode)
+                    }
+
                     // Phase: launching
                     updateDeployment(host) { $0.phase = .launching }
                     continuation.yield(.launching)
@@ -283,6 +291,108 @@ public final class WorkerDeployer: @unchecked Sendable {
     }
 
     // MARK: - Lifecycle
+
+    // MARK: - Redeploy (Step 3) — Update an already-registered worker using SSH Agent
+
+    /// Redeploys (updates) an existing worker using the currently running Coordinator's binary + policy.
+    /// This is the lightweight path for "update" rather than initial deployment.
+    /// It relies on ssh-agent (the user must have done `ssh-add`).
+    public func redeployWorker(
+        host: String,
+        networkHost: String,           // Preferred IP (usually 10.42.x.x from Thunderbolt discovery)
+        username: String = NSUserName()
+    ) async throws {
+        let target = "\(username)@\(networkHost)"
+
+        updateDeployment(host) { $0.phase = .transferring }
+        NovaMLXLog.info("[WorkerDeployer] Starting redeploy to \(host) via \(networkHost)")
+
+        // 1. Kill existing worker processes
+        updateDeployment(host) { $0.phase = .launching } // reuse launching for "stopping old"
+        _ = try? await runSSHCommand(target: target, command: "killall NovaMLX 2>/dev/null; killall NovaMLXWorker 2>/dev/null; sleep 1; echo 'killed'")
+
+        // 2. Rsync the latest app bundle
+        updateDeployment(host) { $0.phase = .transferring }
+        let bundlePath = Self.defaultAppBundlePath()
+        let remoteAppDir = "/Users/\(username)/Applications/NovaMLX.app"
+
+        let (rsyncOut, rsyncCode) = try await runProcess(
+            executable: "/usr/bin/rsync",
+            arguments: [
+                "-az", "--delete",
+                "-e", "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15",
+                "--exclude=.DS_Store",
+                bundlePath + "/",
+                "\(target):\(remoteAppDir)/"
+            ],
+            timeout: 180
+        )
+        guard rsyncCode == 0 else {
+            updateDeployment(host) { $0.phase = .failed; $0.errorMessage = rsyncOut }
+            throw DeployError.rsyncFailed(rsyncOut)
+        }
+
+        // 3. Push the authoritative cluster-policy.json
+        updateDeployment(host) { $0.phase = .configuring }
+        let policyJSON = currentClusterPolicyJSON()
+        let policyCmd = """
+        mkdir -p ~/.nova && cat > ~/.nova/cluster-policy.json <<'EOF'
+        \(policyJSON)
+        EOF
+        """
+        let (_, policyCode) = try await runSSHCommandWithOutput(target: target, command: policyCmd)
+        guard policyCode == 0 else {
+            updateDeployment(host) { $0.phase = .failed; $0.errorMessage = "write cluster-policy.json failed" }
+            throw DeployError.remoteCommandFailed("write cluster-policy.json", policyCode)
+        }
+
+        // 4. Launch the new worker
+        updateDeployment(host) { $0.phase = .launching }
+        let coordinatorForWorker = networkHost
+        let launchCmd = """
+        open \(remoteAppDir) 2>/dev/null || nohup \(remoteAppDir)/Contents/MacOS/NovaMLXWorker \
+            --role worker \
+            --coordinator \(coordinatorForWorker) \
+            > ~/nova-worker.log 2>&1 &
+        """
+
+        _ = try await runSSHCommand(target: target, command: launchCmd)
+
+        updateDeployment(host) { d in
+            d.phase = .running
+            d.deployedAt = Date()
+            d.errorMessage = nil
+        }
+
+        NovaMLXLog.info("[WorkerDeployer] Redeploy command sent to \(host). Waiting for re-registration...")
+    }
+
+    // MARK: - Low-level SSH helpers that prefer ssh-agent
+
+    private func runSSHCommand(target: String, command: String) async throws -> String {
+        let (out, code) = try await runProcess(
+            executable: "/usr/bin/ssh",
+            arguments: [
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=15",
+                target,
+                command
+            ],
+            timeout: 60
+        )
+        guard code == 0 else {
+            throw DeployError.remoteCommandFailed(command, code)
+        }
+        return out
+    }
+
+    private func runSSHCommandWithOutput(target: String, command: String) async throws -> (String, Int32) {
+        return try await runProcess(
+            executable: "/usr/bin/ssh",
+            arguments: ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", target, command],
+            timeout: 60
+        )
+    }
 
     public func startWorker(host: String, username: String) async throws {
         let remoteApp = "Applications/NovaMLX.app"
@@ -358,6 +468,25 @@ public final class WorkerDeployer: @unchecked Sendable {
 
     // MARK: - Helpers
 
+    // Returns the current authoritative cluster policy as JSON string (for pushing to workers)
+    private func currentClusterPolicyJSON() -> String {
+        let policyPath = ("~/.nova/cluster-policy.json" as NSString).expandingTildeInPath
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)),
+           let jsonObject = try? JSONSerialization.jsonObject(with: data),
+           let jsonData = try? JSONSerialization.data(withJSONObject: jsonObject, options: [.prettyPrinted]) {
+            return String(data: jsonData, encoding: .utf8) ?? "{}"
+        }
+        // Fallback: minimal policy if none exists locally
+        return """
+        {
+          "thunderbolt": {
+            "subnet": "10.42.0.0/24",
+            "enforce": true
+          }
+        }
+        """
+    }
+
     private func sshCommand(host: String, username: String, command: String, timeout: Int = 30) async throws -> String {
         let (output, code) = try await runProcess(
             executable: "/usr/bin/ssh",
@@ -432,6 +561,36 @@ public final class WorkerDeployer: @unchecked Sendable {
               "coordinatorHost": "\(coordinatorHost)",
               "coordinatorPort": \(coordinatorPort)
             }
+          }
+        }
+        """
+    }
+
+    private func clusterPolicyJSON(coordinatorHost: String, coordinatorPort: Int) -> String {
+        // Read Thunderbolt policy from Coordinator's own config
+        var thunderboltJSON = "null"
+        if let configData = try? Data(contentsOf: NovaMLXPaths.configFile),
+           let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
+           let cluster = config["cluster"] as? [String: Any],
+           let tb = cluster["thunderbolt"] as? [String: Any] {
+            let subnet = (tb["subnet"] as? String) ?? "10.42.0.0/24"
+            let enforce = tb["enforce"] as? Bool ?? true
+            let interfaces = (tb["preferredInterfaces"] as? [String])?.map { "\"\($0)\"" }.joined(separator: ", ") ?? "[]"
+            thunderboltJSON = """
+            {
+              "subnet": "\(subnet)",
+              "enforce": \(enforce),
+              "preferredInterfaces": [\(interfaces)]
+            }
+            """
+        }
+
+        return """
+        {
+          "thunderbolt": \(thunderboltJSON),
+          "coordinator": {
+            "host": "\(coordinatorHost)",
+            "port": \(coordinatorPort)
           }
         }
         """

@@ -6,6 +6,7 @@ public actor NovaMLXConfiguration {
     private var _modelsDirectory: URL
     private var _serverConfig: ServerConfig
     private var _defaultModel: String?
+    private var _huggingfaceEndpoint: String?   // For custom HF mirror / endpoint
 
     private init() {
         _modelsDirectory = NovaMLXPaths.modelsDir
@@ -24,6 +25,10 @@ public actor NovaMLXConfiguration {
         get async { _defaultModel }
     }
 
+    public var huggingfaceEndpoint: String? {
+        get async { _huggingfaceEndpoint }
+    }
+
     public func setModelsDirectory(_ url: URL) {
         _modelsDirectory = url
     }
@@ -34,6 +39,10 @@ public actor NovaMLXConfiguration {
 
     public func setDefaultModel(_ model: String?) {
         _defaultModel = model
+    }
+
+    public func setHuggingfaceEndpoint(_ endpoint: String?) {
+        _huggingfaceEndpoint = endpoint
     }
 
     public func initializeDirectories() throws {
@@ -49,6 +58,7 @@ public actor NovaMLXConfiguration {
         if let modelsDir = config.modelsDirectory {
             _modelsDirectory = URL(fileURLWithPath: modelsDir)
         }
+        _huggingfaceEndpoint = config.huggingfaceEndpoint
     }
 
     public func saveToFile(_ url: URL) throws {
@@ -56,6 +66,7 @@ public actor NovaMLXConfiguration {
             server: _serverConfig,
             defaultModel: _defaultModel,
             modelsDirectory: _modelsDirectory.path,
+            huggingfaceEndpoint: _huggingfaceEndpoint,
             language: nil
         )
         let data = try JSONEncoder().encode(config)
@@ -90,5 +101,6 @@ private struct PersistedConfig: Codable {
     let server: ServerConfig
     let defaultModel: String?
     let modelsDirectory: String?
+    let huggingfaceEndpoint: String?   // Added for HF mirror support
     let language: String?
 }

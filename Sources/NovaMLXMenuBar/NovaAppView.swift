@@ -7,12 +7,10 @@ import NovaMLXUtils
 
 public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
-    case cluster = "Cluster"
     case models = "Models"
-    case downloads = "Downloads"
     case tokenhub = "Tokenhub"
     case chat = "Playground"
-    case agents = "Agents"
+    case cluster = "Cluster"
     case settings = "Settings"
 
     public var id: String { rawValue }
@@ -22,10 +20,8 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
         case .cluster: return "xserve"
         case .models: return "cube.box"
-        case .downloads: return "arrow.down.circle"
         case .tokenhub: return "server.rack"
         case .chat: return "cpu"
-        case .agents: return "app.badge.checkmark"
         case .settings: return "gearshape"
         }
     }
@@ -105,7 +101,7 @@ public struct NovaAppView: View {
 
                 Spacer()
 
-                if page == .downloads && appState.activeDownloadCount > 0 {
+                if page == .models && appState.activeDownloadCount > 0 {
                     Text("\(appState.activeDownloadCount)")
                         .font(.caption2)
                         .foregroundColor(.white)
@@ -129,6 +125,7 @@ public struct NovaAppView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("sidebar-\(page.rawValue.lowercased())")
     }
 
     private var sidebarHeader: some View {
@@ -247,18 +244,12 @@ public struct NovaAppView: View {
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .models ? 1 : 0)
-            DownloadsPageView(appState: appState, modelManager: modelManager)
-                .environmentObject(l10n)
-                .opacity(selectedPage == .downloads ? 1 : 0)
             TokenhubPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .tokenhub ? 1 : 0)
             ChatPageView(appState: appState, inferenceService: inferenceService)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
-            AgentsPageView(appState: appState)
-                .environmentObject(l10n)
-                .opacity(selectedPage == .agents ? 1 : 0)
             SettingsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .settings ? 1 : 0)
@@ -270,10 +261,8 @@ public struct NovaAppView: View {
         case .status: return l10n.tr("app.status")
         case .cluster: return l10n.tr("app.cluster")
         case .models: return l10n.tr("app.models")
-        case .downloads: return l10n.tr("app.downloads")
-        case .tokenhub: return "Tokenhub"
+        case .tokenhub: return l10n.tr("app.tokenhub")
         case .chat: return l10n.tr("app.chat")
-        case .agents: return l10n.tr("app.agents")
         case .settings: return l10n.tr("app.settings")
         }
     }

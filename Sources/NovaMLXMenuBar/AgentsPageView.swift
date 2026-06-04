@@ -71,13 +71,7 @@ struct AgentsPageView: View {
                 .foregroundColor(NovaTheme.Colors.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(16)
-        .background(NovaTheme.Colors.cardBackground)
-        .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.lg))
-        .overlay(
-            RoundedRectangle(cornerRadius: NovaTheme.Radius.lg)
-                .stroke(NovaTheme.Colors.cardBorder, lineWidth: 1)
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Server Status

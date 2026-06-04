@@ -10,6 +10,7 @@ struct ModelsPageView: View {
     let modelManager: ModelManager
     @EnvironmentObject var l10n: L10n
 
+    @State private var selectedTab: ModelsTab = .local
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var refreshTrigger = false
@@ -19,13 +20,65 @@ struct ModelsPageView: View {
     @State private var showDeleteConfirmation = false
     @State private var loadingModelId: String?
 
+    enum ModelsTab: String, CaseIterable {
+        case local
+        case downloads
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                loadedSection
-                downloadedSection
+        VStack(spacing: 0) {
+            // Tab bar
+            HStack(spacing: 0) {
+                ForEach(ModelsTab.allCases, id: \.self) { tab in
+                    Button(action: { selectedTab = tab }) {
+                        HStack(spacing: 6) {
+                            if tab == .local {
+                                Image(systemName: "desktopcomputer")
+                                    .font(.system(size: 10))
+                            } else {
+                                Image(systemName: "arrow.down.circle")
+                                    .font(.system(size: 10))
+                            }
+                            Text(tab == .local ? l10n.tr("app.localModels") : l10n.tr("app.downloads"))
+                                .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
+                        }
+                        .foregroundColor(selectedTab == tab ? NovaTheme.Colors.accent : NovaTheme.Colors.textTertiary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(selectedTab == tab ? NovaTheme.Colors.accent.opacity(0.1) : Color.clear)
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
+
+                if appState.activeDownloadCount > 0 {
+                    Text("\(appState.activeDownloadCount)")
+                        .font(.caption2)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(NovaTheme.Colors.accent)
+                        .clipShape(Capsule())
+                }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 4)
+
+            Divider().padding(.horizontal, 24)
+
+            // Tab content
+            Group {
+                switch selectedTab {
+                case .local:
+                    localModelsContent
+                case .downloads:
+                    DownloadsPageView(appState: appState, modelManager: modelManager)
+                        .environmentObject(l10n)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .alert(alertMessage, isPresented: $showAlert) {
             Button("OK", role: .cancel) {}
@@ -54,6 +107,16 @@ struct ModelsPageView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
             refreshTrigger.toggle()
+        }
+    }
+
+    private var localModelsContent: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                loadedSection
+                downloadedSection
+            }
+            .padding(24)
         }
     }
 
@@ -146,7 +209,20 @@ struct ModelsPageView: View {
         let downloaded = allDownloaded.filter { !loaded.contains($0.id) }
 
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(l10n.tr("models.noInactiveModels"), icon: "arrow.down.circle", count: downloaded.count)
+            HStack {
+                sectionHeader(l10n.tr("models.noInactiveModels"), icon: "arrow.down.circle", count: downloaded.count)
+                Spacer()
+                Button {
+                    refreshTrigger.toggle()
+                    // Force rescan of local models directory
+                    NotificationCenter.default.post(name: .novaMLXModelsChanged, object: nil)
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
 
             if downloaded.isEmpty {
                 emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))

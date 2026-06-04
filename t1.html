@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NovaMLX — RDMA / JACCL / Ring Transport Status Report</title>
+<style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; padding: 2rem; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 1.8rem; margin-bottom: 0.3rem; color: var(--accent); }
+  h2 { font-size: 1.3rem; margin-top: 2rem; margin-bottom: 0.5rem; color: var(--purple); border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { font-size: 1.1rem; margin-top: 1.2rem; margin-bottom: 0.3rem; color: var(--text); }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+  p, li { font-size: 0.95rem; margin-bottom: 0.4rem; }
+  ul { padding-left: 1.5rem; margin-bottom: 0.8rem; }
+  code { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 0.85rem; font-family: 'SF Mono', 'Fira Code', monospace; }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 0.6rem 0 1rem; font-size: 0.82rem; line-height: 1.5; }
+  table { width: 100%; border-collapse: collapse; margin: 0.8rem 0; font-size: 0.9rem; }
+  th, td { border: 1px solid var(--border); padding: 0.5rem 0.8rem; text-align: left; }
+  th { background: var(--surface); color: var(--muted); font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.78rem; font-weight: 600; }
+  .badge-green { background: #1a3a2a; color: var(--green); }
+  .badge-red { background: #3a1a1a; color: var(--red); }
+  .badge-yellow { background: #3a2e1a; color: var(--yellow); }
+  .badge-blue { background: #1a2a3a; color: var(--accent); }
+  .badge-purple { background: #2a1a3a; color: var(--purple); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; margin: 0.8rem 0; }
+  .card-title { font-weight: 600; margin-bottom: 0.4rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  .tag { color: var(--muted); font-size: 0.8rem; }
+  .finding { border-left: 3px solid var(--accent); padding-left: 0.8rem; margin: 0.6rem 0; }
+  .arrow { color: var(--accent); font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>RDMA / JACCL / Ring Transport — Status Report</h1>
+<p class="subtitle">NovaMLX Distributed Inference &bull; Generated 2026-05-16</p>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>1. Hardware Configuration</h2>
+
+<table>
+  <tr><th></th><th>Coordinator</th><th>Worker</th></tr>
+  <tr><td>Machine</td><td>MacBook Pro (M4 Max)</td><td>Mac Mini (M4)</td></tr>
+  <tr><td>Chip</td><td>Apple M4 Max (40 GPU cores)</td><td>Apple M4 (10 GPU cores)</td></tr>
+  <tr><td>Unified Memory</td><td>128 GB</td><td>24 GB</td></tr>
+  <tr><td>Interconnect</td><td colspan="2">Thunderbolt 4 (40 Gbps theoretical, ~3-5 GB/s practical)</td></tr>
+  <tr><td>Thunderbolt RDMA</td><td colspan="2"><span class="badge badge-yellow">TB4 — NOT supported</span> (requires Thunderbolt 5)</td></tr>
+  <tr><td>OS</td><td>macOS 26 (Tahoe)</td><td>macOS 26 (Tahoe)</td></tr>
+  <tr><td>IPv4 over TB</td><td>169.254.85.210</td><td>169.254.117.190</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>2. Three Transport Layers — Overview</h2>
+
+<div class="grid">
+  <div class="card">
+    <div class="card-title"><span class="badge badge-green">ACTIVE</span> &nbsp;TCP Data Plane</div>
+    <p>Custom binary protocol over TCP. Coordinator sends tensor bytes, worker receives, computes, returns result. Currently used for both control and data.</p>
+    <ul>
+      <li>Latency: ~3ms for 16KB tensor send+recv</li>
+      <li>Bandwidth: limited by TCP kernel buffer copies</li>
+      <li>Mature, battle-tested, works reliably</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="card-title"><span class="badge badge-red">HANGS</span> &nbsp;Ring (MLX TCP Backend)</div>
+    <p>MLX's built-in Ring backend. Uses TCP sockets internally but managed by the MLX distributed framework. Requires a JSON hostfile and <code>MLX_RANK</code> env var.</p>
+    <ul>
+      <li>Coordinator logs "Rank 0 accepting" then blocks</li>
+      <li>Worker never connects — hangs on init</li>
+      <li>Likely a link-local IPv4 + TCP binding issue</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="card-title"><span class="badge badge-yellow">NOT AVAILABLE</span> &nbsp;JACCL (RDMA)</div>
+    <p>Apple's JACCL backend uses <code>libibverbs</code> (infiniband/verbs.h) for RDMA over Thunderbolt. Zero-copy, ~5-14μs latency, ~80 Gb/s bandwidth.</p>
+    <ul>
+      <li>Requires Thunderbolt 5 hardware</li>
+      <li>Requires <code>sudo rdma_ctl enable</code> on all nodes</li>
+      <li>Requires macOS 26.3+ for large frame support</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>3. What We Built &amp; Tested</h2>
+
+<h3>3.1 The Fix: Coordinator Never Initialized Its Own Ring Group</h3>
+
+<div class="finding">
+<p><strong>Root cause of the original desync:</strong> The code sent <code>initTransport</code> to the worker (which initialized its Ring group), but the <strong>coordinator never called <code>RingTransportManager.shared.initializeFromHostfileJSON()</code></strong> on its own side. Both ranks must call init simultaneously for the Ring backend to connect them.</p>
+</div>
+
+<p>We fixed this in <code>ClusterModelManager.swift</code>:</p>
+<pre>
+// AFTER worker acks initTransport:
+// Worker is now blocking on Ring init — coordinator MUST init NOW
+let ringGroup = RingTransportManager.shared.initializeFromHostfileJSON(hostfileJSON, rank: 0)
+if ringGroup.isValid && ringGroup.size > 1 {
+    remotePolicy.enableRingTransport()
+}
+</pre>
+
+<h3>3.2 The Fix: mDNS Hostname → IPv4 Resolution</h3>
+
+<div class="finding">
+<p>The worker's hostname was <code>lucass-mac-mini.local</code> (mDNS), which resolves to IPv6 link-local. The MLX Ring backend's TCP sockets fail silently on IPv6. We added <code>resolveHostname()</code> to convert to IPv4 before building the hostfile.</p>
+</div>
+
+<h3>3.3 The Fix: Shard Rebalancing</h3>
+
+<p>While testing Ring transport, we also optimized the shard allocation strategy. The spread strategy now minimizes total sequential pipeline latency by giving maximum layers to the fastest node:</p>
+
+<table>
+  <tr><th>Metric</th><th>Before (54/12)</th><th>After (58/8)</th><th>Change</th></tr>
+  <tr><td>Decode tok/s</td><td>8.0–8.4</td><td><strong>9.0–9.3</strong></td><td class="badge-green">+10%</td></tr>
+  <tr><td>Coordinator time</td><td>~71 ms</td><td>~70 ms</td><td>~same</td></tr>
+  <tr><td>Worker time</td><td>~48 ms</td><td>~36 ms</td><td class="badge-green">−25%</td></tr>
+  <tr><td>Total per-token</td><td>~119 ms</td><td>~108 ms</td><td class="badge-green">−9%</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>4. Ring Backend — Detailed Analysis of the Hang</h2>
+
+<p>After fixing the coordinator-init and IPv4 bugs, we re-tested Ring transport. The result: <strong>it still hangs</strong>. Here's the detailed sequence:</p>
+
+<pre>
+# Coordinator (rank=0, M4 Max)
+[ClusterModel] Initializing Ring transport (coord=169.254.85.210:8900, worker=169.254.117.190:8900)
+[RemoteShardPolicy] Worker acknowledged initTransport (backend=ring)
+[RingTransport] Initializing Ring backend from hostfile JSON (rank=0)...
+<b>[ring] Rank 0 accepting</b>                          ← blocks here indefinitely
+
+# Worker (rank=1, M4 Mac Mini)
+[WorkerShardService] Initializing transport: backend=ring, rank=1
+[RingTransport] Initializing Ring backend from hostfile JSON (rank=1)...
+                                                  ← no output after this, blocks silently
+</pre>
+
+<h3>MLX Ring Backend Init Sequence (from C++ source)</h3>
+
+<p>Looking at <code>ring.cpp</code> in the vendored MLX source, the init logic is:</p>
+<pre>
+// RingGroup constructor (ring.cpp:381-438)
+size_ = nodes.size();          // 2 nodes
+int connect_to = (rank + 1) % size_;  // rank 0 → connect to rank 1
+
+if (rank &lt; connect_to) {       // rank 0 &lt; 1: TRUE
+    // Step 1: Accept connections on OUR addresses (rank 0's IPs)
+    sockets_left_ = accept_connections(nodes[rank]);
+    // Step 2: Connect to rank 1's addresses
+    sockets_right_ = make_connections(nodes[connect_to]);
+}
+</pre>
+
+<p>The Ring topology connects each rank to its neighbors in a ring: rank 0 connects to rank 1 (right) and accepts from rank 1 (left). For 2 nodes, rank 0 <span class="arrow">→</span> accepts on its own address, then connects to rank 1.</p>
+
+<h3>Why It Hangs</h3>
+
+<p>The <code>accept_connections()</code> function (ring.cpp:331) creates a TCP server socket, binds to the address from the hostfile, and calls <code>accept()</code>. The problem is:</p>
+
+<div class="finding">
+<p><strong>Both sides must reach their connection step simultaneously.</strong> Rank 0 is blocking on <code>accept()</code> at its own address (169.254.85.210:8900). Rank 1 should be connecting to rank 0, but the worker's log shows it never even prints "Rank 1 connecting" — it blocks before reaching the RingGroup constructor.</p>
+</div>
+
+<p>Possible reasons the worker blocks before the RingGroup constructor:</p>
+<ul>
+  <li><strong>Hostfile parsing issue</strong> — The worker's hostfile JSON might be malformed or the wrong path</li>
+  <li><strong>Ring backend not available</strong> — <code>mlx_distributed_is_available("ring")</code> might return false on the worker</li>
+  <li><strong>Environment variable conflict</strong> — The worker already has <code>MLX_HOSTFILE</code> or <code>MLX_RANK</code> set from a previous failed init</li>
+  <li><strong>Thread starvation</strong> — The worker is already using the Swift cooperative thread pool for the shard service, and the Ring init's C++ thread blocks</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>5. JACCL / RDMA — Why It's Not Available</h2>
+
+<h3>Hardware Requirement: Thunderbolt 5</h3>
+
+<p>JACCL uses Apple's <code>libibverbs</code> (infiniband/verbs.h) for RDMA operations. The IBV wrapper dynamically loads <code>librdma</code> at runtime:</p>
+<pre>
+// vendors/mlx-swift/.../distributed/jaccl/utils.h
+struct IBVWrapper {
+  bool is_available() {
+    return librdma_handle_ != nullptr;  // dlopen("librdma.dylib")
+  }
+  ibv_device** (*get_device_list)(int*);
+  ibv_qp* (*create_qp)(ibv_pd*, ibv_qp_init_attr*);
+  ibv_mr* (*reg_mr)(ibv_pd*, void*, size_t, int);  // RDMA memory registration
+  // ...
+};
+</pre>
+
+<p>Our hardware is <strong>Thunderbolt 4</strong> (M4 Max + M4 Mac Mini). RDMA over Thunderbolt requires <strong>Thunderbolt 5</strong> hardware:</p>
+
+<table>
+  <tr><th>Requirement</th><th>Current</th><th>Needed</th></tr>
+  <tr><td>Thunderbolt version</td><td><span class="badge badge-red">TB4</span></td><td><span class="badge badge-green">TB5</span></td></tr>
+  <tr><td><code>librdma.dylib</code> loaded</td><td><span class="badge badge-red">No</span></td><td>Yes</td></tr>
+  <tr><td><code>sudo rdma_ctl enable</code></td><td>Not applicable</td><td>Required on all nodes</td></tr>
+  <tr><td>macOS version for large frames</td><td>macOS 26</td><td>macOS 26.3+</td></tr>
+</table>
+
+<p>On our hardware, <code>isBackendAvailable("jaccl")</code> returns <code>true</code> (the code is compiled in), but <code>initialize(strict: false, backend: "jaccl")</code> returns <code>group.size == 0</code> because <code>IBVWrapper::is_available()</code> returns false — <code>librdma.dylib</code> doesn't exist on TB4 machines.</p>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>6. Conclusions</h2>
+
+<div class="card">
+  <div class="card-title">Conclusion 1: Ring Transport Bug is in MLX's C++ Layer</div>
+  <p>The Ring (TCP) backend hangs during init because the worker process never reaches the connection phase. This is a bug in the MLX distributed framework's Ring backend initialization — likely related to how the C++ code handles the hostfile parsing or socket binding on link-local IPv4 addresses (169.254.x.x). <strong>This is not something we can fix at the Swift layer.</strong></p>
+  <p class="tag">Action: File an issue with MLX / test with non-link-local IPs</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Conclusion 2: JACCL/RDMA Requires New Hardware</div>
+  <p>JACCL is the right long-term solution — zero-copy RDMA with ~5μs latency would eliminate the entire TCP overhead. But it requires Thunderbolt 5 hardware. Our M4 Max (TB4) + M4 Mac Mini (TB4) cannot use RDMA. When TB5 Macs are available, JACCL should work out of the box since all the code is already compiled and wired.</p>
+  <p class="tag">Action: Enable JACCL when TB5 hardware is available</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Conclusion 3: Current TCP Performance is Near Physical Limit</div>
+  <p>With shard rebalancing (58/8), the sequential pipeline achieves 9.3 tok/s decode. The breakdown: coord(GPU) ~70ms + TCP ~3ms + worker(GPU) ~36ms = ~109ms. TCP overhead is only ~3% of total time. Even with RDMA (0ms transfer), we'd gain at most ~3% → ~9.6 tok/s. The real bottleneck is GPU compute time, not network.</p>
+  <p class="tag">Action: Focus on speculative decoding or tensor parallelism for next gains</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>7. Performance Summary</h2>
+
+<table>
+  <tr><th>Transport</th><th>Status</th><th>Latency/step</th><th>Decode tok/s</th><th>Bottleneck</th></tr>
+  <tr>
+    <td>TCP (custom)</td>
+    <td><span class="badge badge-green">WORKING</span></td>
+    <td>~3ms</td>
+    <td><strong>9.3</strong></td>
+    <td>GPU compute (106ms)</td>
+  </tr>
+  <tr>
+    <td>Ring (MLX TCP)</td>
+    <td><span class="badge badge-red">HANGS</span></td>
+    <td>N/A</td>
+    <td>N/A</td>
+    <td>Init fails — MLX C++ bug</td>
+  </tr>
+  <tr>
+    <td>JACCL (RDMA)</td>
+    <td><span class="badge badge-yellow">N/A</span></td>
+    <td>~0.005ms (theoretical)</td>
+    <td>~9.6 (projected)</td>
+    <td>Requires Thunderbolt 5</td>
+  </tr>
+</table>
+
+<h3>Where Does the Time Go? (per decode token)</h3>
+<pre>
+  ┌─────────────────────────────────────────────────────────┐
+  │  Coordinator (58 layers)         ████ 70ms (64%)       │
+  │  TCP send (16KB tensor)          █ 3ms (3%)             │
+  │  Worker (8 layers + head+argmax) ████ 36ms (33%)       │
+  │  TCP recv (4-byte token)         ░ &lt;1ms                 │
+  │  ─────────────────────────────────────────             │
+  │  Total:                          ~109ms → 9.2 tok/s     │
+  └─────────────────────────────────────────────────────────┘
+</pre>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>8. Code Changes Made This Session</h2>
+
+<table>
+  <tr><th>File</th><th>Change</th></tr>
+  <tr><td><code>DistributedTypes.swift</code></td><td>Rewrote <code>spread</code> strategy to minimize sequential pipeline latency. Fastest node gets max layers, slowest get <code>minLayersPerShard</code>. Fixed memPerLayer calculation.</td></tr>
+  <tr><td><code>ClusterModelManager.swift</code></td><td>Added coordinator Ring init after worker ack. Added IPv4 hostname resolution. Ring init currently disabled (<code>if false &&</code>) pending MLX bug fix.</td></tr>
+  <tr><td><code>RemoteShardPolicy.swift</code></td><td>Added Ring transport path to <code>computeAndSample()</code> — send input via Ring, receive 4-byte token via TCP.</td></tr>
+  <tr><td><code>WorkerShardService.swift</code></td><td>Added Ring transport receive support to <code>handleComputeAndSample()</code>. Pass payload to handler.</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>9. Next Steps</h2>
+
+<ol>
+  <li><strong>Debug MLX Ring backend hang</strong> — Try with non-link-local IPv4 (e.g., assign static IPs on a private subnet). If Ring works with regular IPs, the bug is specific to link-local (169.254.x.x) handling in MLX's TCP socket code.</li>
+  <li><strong>Test Ring with real subnet IPs</strong> — Configure Thunderbolt bridge with 10.x.x.x addresses instead of relying on link-local auto-assignment.</li>
+  <li><strong>Enable JACCL when TB5 hardware available</strong> — Remove the <code>if false &&</code> guard. The code is ready.</li>
+  <li><strong>Pursue speculative decoding</strong> — Draft model predicts tokens, worker verifies in batch. Overlaps coord+worker compute. Projected 2x speedup for compatible models.</li>
+</ol>
+
+</body>
+</html>

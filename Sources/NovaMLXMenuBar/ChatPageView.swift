@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 import NovaMLXCore
 import NovaMLXInference
 import NovaMLXUtils
@@ -21,6 +22,10 @@ struct ChatPageView: View {
     @State private var selectedTag = ""
     @State private var isLoading = false
     @State private var displayMode: ChatDisplayMode = .pretty
+
+    // Active inference task for cancellation support (playground stop button)
+    @State private var currentInferenceTask: Task<Void, Never>? = nil
+    @State private var currentRequestId: UUID? = nil
 
     // History navigation
     @State private var sentHistory: [String] = []
@@ -128,6 +133,17 @@ struct ChatPageView: View {
             if isLoading {
                 ProgressView()
                     .controlSize(.small)
+                Button(action: { cancelCurrentInference() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "stop.circle")
+                            .font(.system(size: 10))
+                        Text("Stop")
+                            .font(.system(size: 10))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .foregroundColor(.red)
             }
 
             Button {
@@ -183,6 +199,7 @@ struct ChatPageView: View {
             .disabled(lastPayload == nil || lastResponse == nil)
 
             Button(l10n.tr("chat.clear")) {
+                cancelCurrentInference()
                 messages.removeAll()
                 lastPayload = nil
                 lastResponse = nil
@@ -440,12 +457,22 @@ struct ChatPageView: View {
                 }
             }
 
-            Button(action: { sendMessage() }) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title2)
+            if isLoading {
+                Button(action: { cancelCurrentInference() }) {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.title2)
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Stop inference")
+            } else {
+                Button(action: { sendMessage() }) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                }
+                .buttonStyle(.plain)
+                .disabled(inputText.trimmingCharacters(in: .whitespaces).isEmpty || selectedModel.isEmpty)
             }
-            .buttonStyle(.plain)
-            .disabled(inputText.trimmingCharacters(in: .whitespaces).isEmpty || isLoading || selectedModel.isEmpty)
         }
         .padding(12)
         .background(NovaTheme.Colors.cardBackground)
@@ -511,6 +538,16 @@ struct ChatPageView: View {
         }
     }
 
+    private func cancelCurrentInference() {
+        currentInferenceTask?.cancel()
+        if let id = currentRequestId {
+            Task { await inferenceService.abort(requestId: id) }
+        }
+        currentInferenceTask = nil
+        currentRequestId = nil
+        isLoading = false
+    }
+
     // MARK: Pretty mode (existing InferenceService streaming)
 
     private func sendPretty(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
@@ -520,10 +557,15 @@ struct ChatPageView: View {
             return
         }
 
-        Task {
+        currentInferenceTask = Task {
+            defer {
+                isLoading = false
+                currentInferenceTask = nil
+                currentRequestId = nil
+            }
+
             guard inferenceService.isModelLoaded(model) else {
                 messages[assistantIdx].content = l10n.tr("chat.error", "Model '\(model.components(separatedBy: "/").last ?? model)' is not loaded. Load it from the Models page first.")
-                isLoading = false
                 return
             }
 
@@ -553,33 +595,58 @@ struct ChatPageView: View {
                 repetitionPenalty: Float(paramRepeatPenalty),
                 stream: true
             )
+            currentRequestId = request.id
 
             do {
+                // Detect if this is a thinking model and use ThinkingParser
+                let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: model)
+                let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
+
                 let tokenStream = inferenceService.stream(request)
                 for try await token in tokenStream {
-                    messages[assistantIdx].content += token.text
+                    if Task.isCancelled { break }
+
+                    // Parse thinking vs content for thinking models
+                    let parsed = thinkingParser.feed(token.text)
+                    if !parsed.text.isEmpty {
+                        messages[assistantIdx].content += parsed.text
+                    }
                 }
+
+                // Finalize thinking parser to flush any buffered content
+                let finalResult = thinkingParser.finalize()
+                if !finalResult.response.isEmpty {
+                    messages[assistantIdx].content += finalResult.response
+                }
+
                 if messages[assistantIdx].content.isEmpty {
                     messages[assistantIdx].content = l10n.tr("chat.noResponse")
                 }
             } catch {
                 if messages[assistantIdx].content.isEmpty {
-                    messages[assistantIdx].content = l10n.tr("chat.error", error.localizedDescription)
+                    if error is CancellationError || Task.isCancelled {
+                        messages[assistantIdx].content = "(cancelled)"
+                    } else {
+                        messages[assistantIdx].content = l10n.tr("chat.error", error.localizedDescription)
+                    }
                 }
             }
             lastResponse = messages[assistantIdx].content
-            isLoading = false
         }
     }
 
     // MARK: Pretty mode for Tokenhub (SSE via API server)
 
     private func sendPrettyTokenhub(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
-        Task {
+        currentInferenceTask = Task {
+            defer {
+                isLoading = false
+                currentInferenceTask = nil
+                currentRequestId = nil
+            }
             do {
                 guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
                     messages[assistantIdx].content = "Invalid URL"
-                    isLoading = false
                     return
                 }
                 var req = URLRequest(url: url)
@@ -598,6 +665,7 @@ struct ChatPageView: View {
 
                 let (bytes, _) = try await URLSession.shared.bytes(for: req)
                 for try await line in bytes.lines {
+                    if Task.isCancelled { break }
                     guard line.hasPrefix("data: ") else { continue }
                     let payload = String(line.dropFirst(6))
                     if payload == "[DONE]" { break }
@@ -614,22 +682,29 @@ struct ChatPageView: View {
                 }
             } catch {
                 if messages[assistantIdx].content.isEmpty {
-                    messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                    if error is CancellationError || Task.isCancelled {
+                        messages[assistantIdx].content = "(cancelled)"
+                    } else {
+                        messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                    }
                 }
             }
             lastResponse = messages[assistantIdx].content
-            isLoading = false
         }
     }
 
     // MARK: Raw JSON mode (non-streaming HTTP)
 
     private func sendRawJSON(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
-        Task {
+        currentInferenceTask = Task {
+            defer {
+                isLoading = false
+                currentInferenceTask = nil
+                currentRequestId = nil
+            }
             do {
                 guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
                     messages[assistantIdx].content = "Invalid URL"
-                    isLoading = false
                     return
                 }
                 var req = URLRequest(url: url)
@@ -657,21 +732,28 @@ struct ChatPageView: View {
                 let pretty = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
                 messages[assistantIdx].content = String(data: pretty, encoding: .utf8) ?? "Invalid response"
             } catch {
-                messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                if error is CancellationError || Task.isCancelled {
+                    messages[assistantIdx].content = "(cancelled)"
+                } else {
+                    messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                }
             }
             lastResponse = messages[assistantIdx].content
-            isLoading = false
         }
     }
 
     // MARK: Raw Stream mode (SSE)
 
     private func sendRawStream(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
-        Task {
+        currentInferenceTask = Task {
+            defer {
+                isLoading = false
+                currentInferenceTask = nil
+                currentRequestId = nil
+            }
             do {
                 guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
                     messages[assistantIdx].content = "Invalid URL"
-                    isLoading = false
                     return
                 }
                 var req = URLRequest(url: url)
@@ -697,6 +779,7 @@ struct ChatPageView: View {
                 let (bytes, _) = try await URLSession.shared.bytes(for: req)
                 var accumulated = ""
                 for try await line in bytes.lines {
+                    if Task.isCancelled { break }
                     guard line.hasPrefix("data: ") else { continue }
                     let payload = String(line.dropFirst(6))
                     if payload == "[DONE]" {
@@ -717,11 +800,14 @@ struct ChatPageView: View {
                 }
             } catch {
                 if messages[assistantIdx].content.isEmpty {
-                    messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                    if error is CancellationError || Task.isCancelled {
+                        messages[assistantIdx].content = "(cancelled)"
+                    } else {
+                        messages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                    }
                 }
             }
             lastResponse = messages[assistantIdx].content
-            isLoading = false
         }
     }
 

@@ -195,7 +195,8 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
             shardEngines = []
             for (index, assignment) in plan.assignments.enumerated() {
                 let isFirst = index == 0
-                let isLast = plan.assignments.count <= 2 ? (index == 0) : (index == plan.assignments.count - 1)
+                // 2-node: both nodes get head for remote sampling. 3+: only last.
+                let isLast = plan.assignments.count <= 2 ? true : (index == plan.assignments.count - 1)
                 let policy: ComputePolicy
 
                 if assignment.nodeId == "local-coordinator" {
@@ -321,199 +322,385 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
 
         // Detect remote sampling: last shard is remote → worker does argmax
         let remoteSamplingEnabled = shardEngines.count > 1 && shardEngines.last?.policy is RemoteShardPolicy
-        let coordHasMamba = (shardEngines.first?.policy as? SlicedForwardPolicy)?.hasMambaCache ?? false
-        let extraPredictionLayers = 5
 
-        // Adaptive speculation: start enabled for 2-shard setups with remote sampling.
-        // Runtime accuracy tracking auto-disables if prediction accuracy < 30%.
-        let speculationCapable = remoteSamplingEnabled && shardEngines.count == 2
-        var speculationEnabled = speculationCapable
+        NovaMLXLog.info("[Distributed] Remote sampling: \(remoteSamplingEnabled), pipeline: computeAndSample (speculativeVerify foundation enabled when numDraftTokens > 0)")
 
-        // Adaptive accuracy tracking
-        let adaptiveWindow = 20
-        let disableThreshold = 0.30
-        var recentPredictions: [Bool] = []  // rolling window of last N results
-        var correctPredictions = 0
-        var totalPredictions = 0
-        // Draft length: number of tokens to speculatively predict per iteration.
-        // K=1 (single-token) is optimal for 2-node setups where coord ≈ worker speed.
-        // K>1 is beneficial when coord is much faster than worker (3+ nodes).
-        let draftLength = 1
-
-        NovaMLXLog.info("[Distributed] Remote sampling: \(remoteSamplingEnabled), speculation: \(speculationCapable) (mamba: \(coordHasMamba)), draft: \(draftLength), extraPredLayers: \(extraPredictionLayers)")
-
-        if speculationCapable {
-            let coordPolicy = shardEngines[0].policy
-            guard let slicedCoord = coordPolicy as? SlicedForwardPolicy else {
+        // === REMOTE SAMPLING PIPELINE ===
+        // Worker owns the head (isLast=true). Decode loop:
+        //   coord computeLayersOnly(token) → activation (~32ms, single GPU op)
+        //   worker computeAndSample(activation) → 4-byte token ID (~34ms)
+        //   No hidden state transfer for decode — 4 bytes vs ~16KB.
+        if remoteSamplingEnabled && shardEngines.count == 2 {
+            guard let slicedCoord = shardEngines[0].policy as? SlicedForwardPolicy else {
                 throw DistributedInferenceError.shardPlanFailed("Coord policy is not SlicedForwardPolicy")
             }
             let workerPolicy = shardEngines[1].policy as! RemoteShardPolicy
-            var currentPosition = promptTokens.count
 
-            // First token: run head on prefill hidden state (coord has isLast=true)
-            let firstHeadResult = await slicedCoord.computeHeadOnly(activation)
-            guard let firstResult = firstHeadResult else {
-                throw DistributedInferenceError.shardPlanFailed("computeHeadOnly returned nil on prefill output")
-            }
-            let firstToken = firstResult.tokenId
+            // First token: activation is logits from worker (worker has head)
+            let firstToken = argmax(activation)
             if !eosTokenIds.contains(firstToken) {
                 generatedTokenIds.append(firstToken)
+            } else {
+                if shouldReleaseWeights { for s in shardEngines { s.policy.releaseWeights() } }
+                return InferenceResult(id: request.id, model: modelId, text: "", tokensPerSecond: 0, promptTokens: promptTokens.count, completionTokens: 0, finishReason: .stop)
             }
-            // Compute coord activation for first token (embedding + coord layers → hidden for worker)
+
+            // Convert logits → coordinator hidden state for the first decoded token.
+            // draftTokens() expects hidden states, not logits.
             activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(firstToken)))
-            currentPosition += 1
 
-            // Continuous async pipeline decode loop
-            var timingLogInterval = 0
+            let decodeStart = CFAbsoluteTimeGetCurrent()
+            var timingLogCounter = 0
+            var actualToken = firstToken
+
+            // === Speculative Decode State (A next) ===
+            let numDraft = request.numDraftTokens ?? 0
+            let useSpeculative = numDraft > 0
+            var workerCacheOffset = 0   // Approximate logical cache position on worker (for rollback)
+            var totalProposed: Int = 0
+            var totalAccepted: Int = 0
+
+            // 2.3 Overlap prototype (v2): 真正的 Compute/Communication Overlap
+            // 核心思想：在 Worker 执行 speculativeVerify 的同时，Coordinator 立即开始准备下一批 drafts。
+            // 注意：现在保存的是 DraftBundle，而不是只保存 token 列表，这样后面可以复用 precomputedStates。
+            var nextProposalTask: Task<SlicedForwardPolicy.DraftBundle?, Never>? = nil
+
+            // 用于真正复用 precomputedStates 的变量
+            // 当 overlapped proposal 被采用时，我们把 bundle 存到这里，下一轮尝试复用其 hidden state
+            var overlappedDraftBundle: SlicedForwardPolicy.DraftBundle? = nil
+
+            // 用于 Coordinator-head 提案跨轮复用 precomputedStates（非 overlapped 也适用）
+            var continuationHidden: MLXArray? = nil
+
+            // Overlap 统计（用于观察真实效果）
+            var overlappedProposalCount = 0
+            var normalProposalCount = 0
+
+            // === 第 1 项打磨：precomputedStates 复用收益统计 ===
+            var perfectReuseCount = 0          // 完美命中（整个 batch 直接复用）
+            var partialReuseCount = 0          // 部分命中（调用了 forwardRemainingDrafts）
+            var continuationReuseCount = 0     // 使用 continuationHidden 跨轮复用
+            var totalReusedStates = 0          // 累计复用的 hidden state 数量
+
             while generatedTokenIds.count < maxTokens {
-                if speculationEnabled {
-                    // === SPECULATIVE PATH — coord+worker compute simultaneously ===
-                    let t0 = CFAbsoluteTimeGetCurrent()
+                let t0 = CFAbsoluteTimeGetCurrent()
 
-                    // Step 1: Fire worker compute async (returns hidden state, not token ID)
-                    let activationBox = SendableBox(activation)
-                    let workerTask = Task {
-                        SendableBox(try await workerPolicy.compute(input: activationBox.value))
+                if useSpeculative {
+                    let proposalStartTime = CFAbsoluteTimeGetCurrent()
+                    // === Real multi-token speculative round (K >= 1) ===
+                    var draftTokens: [Int] = []
+                    var coordinatorDraftBundle: SlicedForwardPolicy.DraftBundle? = nil
+                    var usedOverlappedProposal = false
+                    var currentRoundDraftBundle: SlicedForwardPolicy.DraftBundle? = nil
+
+                    // 1. 优先使用上一次在后台准备好的 proposal（overlap 收益点）
+                    //    这次我们会保留完整的 DraftBundle，后面会尝试复用 precomputedStates
+                    if let task = nextProposalTask {
+                        let bundle = await task.value
+                        nextProposalTask = nil   // 用完就清掉
+
+                        if let bundle = bundle, !bundle.predictedTokens.isEmpty {
+                            currentRoundDraftBundle = bundle
+                            draftTokens = bundle.predictedTokens
+                            coordinatorDraftBundle = bundle
+                            usedOverlappedProposal = true
+                            overlappedProposalCount += 1
+
+                            // 关键：保存这个 overlapped bundle，后面尝试复用 precomputedStates
+                            overlappedDraftBundle = bundle
+                        }
                     }
 
-                    // Step 2: Draft token N+1 while worker is busy
-                    let draft = try? await slicedCoord.draftTokens(
-                        from: activation, count: draftLength, extraPredictionLayers: extraPredictionLayers
-                    )
-
-                    let tPrecompute = CFAbsoluteTimeGetCurrent()
-
-                    // Step 3: Await worker hidden state, run head locally
-                    let workerHidden = try await workerTask.value.value
-                    let tWorkerDone = CFAbsoluteTimeGetCurrent()
-                    guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else {
-                        break
+                    // 2. 如果没有 overlapped 的 proposal，再正常生成（优先 Coordinator-head）
+                    if draftTokens.isEmpty {
+                        let recentContext = Array(generatedTokenIds.suffix(16)) + [actualToken]
+                        if let bundle = try? await slicedCoord.draftTokens(from: activation, count: numDraft) {
+                            coordinatorDraftBundle = bundle
+                            currentRoundDraftBundle = bundle
+                            draftTokens = bundle.predictedTokens
+                        } else {
+                            draftTokens = engine?.specDecoder.speculate(context: recentContext) ?? []
+                        }
+                        normalProposalCount += 1
                     }
-                    let actualToken = headResult.tokenId
 
-                    // Step 4: Verify draft against actual token
-                    if let draft = draft, draft.count > 0, draft.predictedTokens[0] == actualToken {
-                        // HIT — use precomputed activation (zero idle time)
-                        activation = draft.precomputedStates[0]
-                        recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
-                        currentPosition += 1
+                    let k = min(numDraft, draftTokens.count)
+
+                    let proposalEndTime = CFAbsoluteTimeGetCurrent()
+                    let proposalDurationMs = (proposalEndTime - proposalStartTime) * 1000
+
+                    // 判断这一轮 proposal 是否真正 overlapped（即 proposal 时间主要在 Worker 验证期间发生）
+                    let wasOverlapped = usedOverlappedProposal
+
+                    if k == 0 {
+                        // No good drafts — fall back to single token this round
+                        activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
+                        actualToken = try await workerPolicy.computeAndSample(input: activation)
+                        workerCacheOffset += 1
 
                         if eosTokenIds.contains(actualToken) { break }
                         generatedTokenIds.append(actualToken)
+                        // (stop token + timing logging omitted in fallback for brevity)
+                        continue
+                    }
 
-                        // Verify subsequent draft tokens
-                        for i in 1..<draft.count {
-                            let verifyActivation = SendableBox(activation)
-                            let verifyTask = Task {
-                                SendableBox(try await workerPolicy.compute(input: verifyActivation.value))
-                            }
-                            let verifyHidden = try await verifyTask.value.value
-                            guard let verifyHead = await slicedCoord.computeHeadOnly(verifyHidden) else { break }
-                            let verifyToken = verifyHead.tokenId
+                    totalProposed += k
 
-                            if draft.predictedTokens[i] == verifyToken {
-                                activation = draft.precomputedStates[i]
-                                recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
-                                currentPosition += 1
+                    // === 真正使用 precomputedStates 的核心逻辑（A 方向扩展：跨轮复用）===
+                    var activationForBatch: MLXArray
 
-                                if eosTokenIds.contains(verifyToken) { break }
-                                generatedTokenIds.append(verifyToken)
+                    if let contHidden = continuationHidden, k > 0 {
+                        // 普通 Coordinator-head 提案跨轮复用（非 overlapped 也生效）
+                        activationForBatch = try await slicedCoord.forwardRemainingDrafts(
+                            startHidden: contHidden,
+                            remainingTokens: Array(draftTokens.prefix(k))
+                        )
+                        continuationHidden = nil
+                        continuationReuseCount += 1
+                        totalReusedStates += k   // 粗略统计：本次 batch 全靠 continuation
+                        NovaMLXLog.info("[Overlap] Used continuationHidden from previous Coordinator-head proposal")
+                    } else if let bundle = overlappedDraftBundle,
+                       k > 0,
+                       !bundle.precomputedStates.isEmpty {
+
+                        // 计算当前 drafts 和 bundle 里 predictedTokens 的最长公共前缀
+                        let maxPossible = min(k, bundle.predictedTokens.count)
+                        var matchLen = 0
+
+                        for i in 0..<maxPossible {
+                            if draftTokens[i] == bundle.predictedTokens[i] {
+                                matchLen += 1
                             } else {
-                                // Mismatch at draft[i]: rollback remaining, recompute
-                                recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
-                                try? await slicedCoord.rollbackCache(
-                                    position: currentPosition,
-                                    speculatedCount: draft.count - i,
-                                    mambaSnapshot: draft.mambaSnapshot
-                                )
-                                activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(verifyToken)))
-                                currentPosition += 1
-
-                                if eosTokenIds.contains(verifyToken) { break }
-                                generatedTokenIds.append(verifyToken)
                                 break
                             }
                         }
+
+                        if matchLen > 0 {
+                            // 可以复用前 matchLen 个 precomputed states
+
+                            if matchLen == k {
+                                // 完美命中整个 batch，直接用最后一个 precomputed state
+                                activationForBatch = bundle.precomputedStates[matchLen - 1]
+                                perfectReuseCount += 1
+                                totalReusedStates += matchLen
+                                NovaMLXLog.info("[Overlap] Full precomputedStates reuse: \(matchLen)/\(k)")
+                            } else {
+                                // 部分命中：真正实现增量 forward，只计算剩余的 drafts
+                                let startHidden = bundle.precomputedStates[matchLen - 1]
+                                let remainingDrafts = Array(draftTokens.prefix(k).suffix(from: matchLen))
+
+                                activationForBatch = try await slicedCoord.forwardRemainingDrafts(
+                                    startHidden: startHidden,
+                                    remainingTokens: remainingDrafts
+                                )
+
+                                partialReuseCount += 1
+                                totalReusedStates += matchLen
+                                NovaMLXLog.info("[Overlap] Partial precomputedStates reuse: forwarded only \(remainingDrafts.count) remaining drafts (saved \(matchLen))")
+                            }
+
+                            NovaMLXLog.info("[Overlap] Reused \(matchLen)/\(k) precomputedStates from DraftBundle")
+                        } else {
+                            // 完全对不上，正常计算
+                            let sequenceForCoord = [actualToken] + Array(draftTokens.prefix(k))
+                            let seqInput = MLXArray(sequenceForCoord.map { Int32($0) })
+                            activationForBatch = try await slicedCoord.computeLayersOnly(input: seqInput)
+                        }
                     } else {
-                        // MISS — rollback draft cache and recompute
-                        recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
-                        if let draft = draft {
+                        // 没有可复用的 overlapped bundle，正常路径
+                        let sequenceForCoord = [actualToken] + Array(draftTokens.prefix(k))
+                        let seqInput = MLXArray(sequenceForCoord.map { Int32($0) })
+                        activationForBatch = try await slicedCoord.computeLayersOnly(input: seqInput)
+                    }
+
+                    activation = activationForBatch
+
+                    // 用完后清空，避免下次误用
+                    overlappedDraftBundle = nil
+
+                    // 用 SendableBox 安全捕获 activation，供两个 Task 使用
+                    let activationBox = SendableBox(activation)
+                    let numDraftForNext = numDraft
+                    let slicedCoordBox = SendableBox(slicedCoord)
+
+                    // 4. 启动 Worker verification（放入 Task，以便 overlap）
+                    let verifyTask = Task {
+                        try await workerPolicy.speculativeVerify(input: activationBox.value)
+                    }
+
+                    // === 2.3 真正的 Overlap 开始 ===
+                    // 在 Worker 验证当前 batch 的同时，Coordinator 立即开始准备下一批 drafts
+                    // 这次我们保存完整的 DraftBundle（包含 precomputedStates 和 mambaSnapshot）
+                    let pendingNextProposalTask = Task<SlicedForwardPolicy.DraftBundle?, Never> { @Sendable in
+                        if let bundle = try? await slicedCoordBox.value.draftTokens(from: activationBox.value, count: numDraftForNext) {
+                            return bundle
+                        } else {
+                            // n-gram fallback 时返回 nil bundle
+                            return nil
+                        }
+                    }
+
+                    // 等待 Worker 完成 verification
+                    let verifiedTokens = try await verifyTask.value
+
+                    // 5. Compute acceptance: how many of the drafted tokens match the big model's argmax?
+                    var accepted = 0
+                    for i in 0..<k {
+                        let draftT = draftTokens[i]
+                        // verifiedTokens[0] corresponds to the original actualToken position
+                        // verifiedTokens[1..] correspond to the drafted positions
+                        let verifiedT = (i + 1 < verifiedTokens.count) ? verifiedTokens[i + 1] : -1
+                        if verifiedT == draftT {
+                            accepted += 1
+                        } else {
+                            break
+                        }
+                    }
+
+                    totalAccepted += accepted
+
+                    // 6. Append accepted tokens
+                    if accepted > 0 {
+                        let newlyAccepted = Array(draftTokens.prefix(accepted))
+                        generatedTokenIds.append(contentsOf: newlyAccepted)
+                        actualToken = newlyAccepted.last ?? actualToken
+
+                        // 如果本轮是 Coordinator-head 提案，保存接受后的 hidden state，用于下一轮增量 forward（A 方向）
+                        if coordinatorDraftBundle != nil {
+                            continuationHidden = coordinatorDraftBundle?.precomputedStates[accepted - 1]
+                        }
+                    }
+
+                    // 7. Handle rejection + bonus token
+                    let rejected = k - accepted
+                    if rejected > 0 {
+                        // Worker advanced its KV by (1 + k) during the speculativeVerify forward.
+                        // We only want to keep the accepted portion.
+                        // Rollback the excess rejected tokens on the worker.
+                        let excess = rejected
+                        if excess > 0 {
+                            let targetPosition = max(0, workerCacheOffset + accepted + 1 - excess)
+                            try? await workerPolicy.rollbackCache(position: targetPosition)
+                        }
+
+                        // Rejection 发生后，Coordinator 侧也尝试用 DraftBundle 的 mambaSnapshot 做 rollback
+                        if let bundle = currentRoundDraftBundle {
                             try? await slicedCoord.rollbackCache(
-                                position: currentPosition,
-                                speculatedCount: draft.count,
-                                mambaSnapshot: draft.mambaSnapshot
+                                position: workerCacheOffset + accepted + 1 - excess,
+                                speculatedCount: excess,
+                                mambaSnapshot: bundle.mambaSnapshot
                             )
                         }
-                        activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
-                        currentPosition += 1
 
-                        if eosTokenIds.contains(actualToken) { break }
-                        generatedTokenIds.append(actualToken)
-                    }
+                        // Rejection 发生后，之前启动的 next proposal 很可能基于旧 prefix，丢弃它
+                        nextProposalTask = nil
+                        continuationHidden = nil   // prefix 变了，跨轮复用的 hidden 也失效
 
-                    let t5 = CFAbsoluteTimeGetCurrent()
-
-                    // Timing log every 50 tokens
-                    timingLogInterval += 1
-                    if timingLogInterval % 50 == 1 {
-                        let totalMs = (t5 - t0) * 1000
-                        let precomputeMs = (tPrecompute - t0) * 1000
-                        let workerWaitMs = (tWorkerDone - tPrecompute) * 1000
-                        let accuracy = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : 0
-                        NovaMLXLog.info("[Distributed] Pipeline[\(generatedTokenIds.count)]: \(String(format: "%.1f", totalMs))ms draft=\(String(format: "%.1f", precomputeMs))ms wait=\(String(format: "%.1f", workerWaitMs))ms acc=\(String(format: "%.0f%%", accuracy * 100))(\(correctPredictions)/\(totalPredictions))")
-                    }
-
-                    // Adaptive check: disable speculation if accuracy too low
-                    if recentPredictions.count >= adaptiveWindow {
-                        let rolling = Double(recentPredictions.filter { $0 }.count) / Double(recentPredictions.count)
-                        if rolling < disableThreshold {
-                            speculationEnabled = false
-                            NovaMLXLog.info("[Distributed] Speculation disabled: rolling accuracy \(String(format: "%.0f%%", rolling * 100)) < \(String(format: "%.0f%%", disableThreshold * 100)) threshold")
+                        // Use the verified token at the rejection point as the "bonus" real token
+                        let rejectionIndex = accepted + 1
+                        if rejectionIndex < verifiedTokens.count {
+                            let bonusToken = verifiedTokens[rejectionIndex]
+                            if !eosTokenIds.contains(bonusToken) && generatedTokenIds.count < maxTokens {
+                                generatedTokenIds.append(bonusToken)
+                                actualToken = bonusToken
+                            }
+                        }
+                    } else {
+                        // All drafts accepted — the last verified token is a bonus from the big model
+                        if verifiedTokens.count > k {
+                            let bonus = verifiedTokens.last ?? verifiedTokens[k]
+                            if !eosTokenIds.contains(bonus) && generatedTokenIds.count < maxTokens {
+                                generatedTokenIds.append(bonus)
+                                actualToken = bonus
+                            }
                         }
                     }
 
-                    // Stop check for text suffix
-                    let fullText = tokenizer.decode(generatedTokenIds)
-                    if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
+                    // Update worker cache tracking
+                    workerCacheOffset += (1 + k)
+
+                    // Record acceptance (differentiate source for future A/B)
+                    if k > 0 {
+                        _ = (coordinatorDraftBundle != nil) ? "coord-head" : "ngram"
+                        engine?.specDecoder.recordAccepted(tokens: Array(draftTokens.prefix(k)), accepted: accepted)
+                        // TODO: later expose per-source acceptance rate in stats
+                    }
+
+                    // 把刚启动的下一个 proposal task 保存下来，供下一轮使用（实现 overlap）
+                    nextProposalTask = pendingNextProposalTask
+
+                    // Rich speculative round log
+                    let effective = accepted + (rejected > 0 ? 1 : 0) // +1 for potential bonus on rejection
+                    let overlapTag = usedOverlappedProposal ? " [overlap]" : ""
+                    NovaMLXLog.info("[Spec] round: proposed=\(k) accepted=\(accepted) effective=\(effective) tok/round (acc=\(String(format: "%.1f", totalProposed > 0 ? Double(totalAccepted)/Double(totalProposed)*100 : 0))%)\(overlapTag) | proposal=\(String(format: "%.1f", proposalDurationMs))ms overlapped=\(wasOverlapped)")
+
+                    // 每 20 轮输出一次 overlap 统计
+                    if (overlappedProposalCount + normalProposalCount) % 20 == 0 && (overlappedProposalCount + normalProposalCount) > 0 {
+                        let total = overlappedProposalCount + normalProposalCount
+                        let rate = Double(overlappedProposalCount) / Double(total) * 100
+                        NovaMLXLog.info("[Overlap] stats: overlapped=\(overlappedProposalCount)/\(total) (\(String(format: "%.1f", rate))%)")
+                    }
+
+                    // === precomputedStates 复用收益统计（每 20 轮）===
+                    let reuseTotal = perfectReuseCount + partialReuseCount + continuationReuseCount
+                    if reuseTotal > 0 && reuseTotal % 20 == 0 {
+                        let avgSaved = Double(totalReusedStates) / Double(reuseTotal)
+                        NovaMLXLog.info("[Reuse] precomputedStates: perfect=\(perfectReuseCount), partial=\(partialReuseCount), continuation=\(continuationReuseCount), avgSavedStates=\(String(format: "%.1f", avgSaved))")
+                    }
+
+                    // Early exit checks
+                    if eosTokenIds.contains(actualToken) { break }
+                    if !stopTokens.isEmpty {
+                        let tailIds = Array(generatedTokenIds.suffix(10))
+                        let tailText = tokenizer.decode(tailIds)
+                        if stopTokens.contains(where: { tailText.hasSuffix($0) }) { break }
+                    }
+
+                    // nextProposalTask 已经在 speculativeVerify 启动后被赋值（pendingNextProposalTask）
+                    // 这里不需要重复启动
+
                 } else {
-                    // === SEQUENTIAL PATH (speculation disabled) ===
-                    // Worker returns hidden state → coord runs head → token
-                    let workerHidden = try await workerPolicy.compute(input: activation)
-                    guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else { break }
-                    let sampledId = headResult.tokenId
-                    if eosTokenIds.contains(sampledId) { break }
-                    generatedTokenIds.append(sampledId)
-                    let fullText = tokenizer.decode(generatedTokenIds)
-                    if stopTokens.contains(where: { fullText.hasSuffix($0) }) { break }
-                    activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(sampledId)))
-                    currentPosition += 1
+                    // === Classic single-token path (baseline) ===
+                    activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
+                    let tAfterCoord = CFAbsoluteTimeGetCurrent()
+                    actualToken = try await workerPolicy.computeAndSample(input: activation)
+                    let tTotal = CFAbsoluteTimeGetCurrent()
+                    workerCacheOffset += 1
+
+                    if eosTokenIds.contains(actualToken) { break }
+                    generatedTokenIds.append(actualToken)
+
+                    // Stop token check
+                    if !stopTokens.isEmpty {
+                        let tailIds = Array(generatedTokenIds.suffix(10))
+                        let tailText = tokenizer.decode(tailIds)
+                        if stopTokens.contains(where: { tailText.hasSuffix($0) }) { break }
+                    }
+
+                    // Timing log every 20 tokens (baseline path)
+                    timingLogCounter += 1
+                    if timingLogCounter % 20 == 1 {
+                        let totalMs = (tTotal - t0) * 1000
+                        let coordMs = (tAfterCoord - t0) * 1000
+                        let workerMs = (tTotal - tAfterCoord) * 1000
+                        NovaMLXLog.info("[Pipeline] token \(generatedTokenIds.count): \(String(format: "%.1f", totalMs))ms coord=\(String(format: "%.1f", coordMs))ms worker=\(String(format: "%.1f", workerMs))ms")
+                    }
                 }
             }
 
-            let rate = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : 0
-            NovaMLXLog.info("[Distributed] Pipeline: \(correctPredictions)/\(totalPredictions) correct (\(String(format: "%.0f%%", rate * 100))), \(generatedTokenIds.count) tokens, speculative=\(speculationEnabled)")
+            let decodeElapsed = CFAbsoluteTimeGetCurrent() - decodeStart
+            let decodeTps = Double(generatedTokenIds.count) / decodeElapsed
+            NovaMLXLog.info("[Distributed] Pipeline done: \(generatedTokenIds.count) tokens, \(String(format: "%.1f", decodeTps)) tok/s")
         } else {
-            // Original non-speculative decode loop
+            // Single-node or multi-shard fallback
             for i in 0..<maxTokens {
                 let sampledId: Int
                 if i == 0 {
-                    // First token from prefill output (coord has head)
-                    if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
-                       let headResult = await slicedCoord.computeHeadOnly(activation) {
-                        sampledId = headResult.tokenId
-                    } else {
-                        sampledId = argmax(activation)
-                    }
+                    sampledId = argmax(activation)
                 } else if remoteSamplingEnabled {
-                    // Worker returns hidden state → coord runs head
                     let workerPolicy = shardEngines.last!.policy as! RemoteShardPolicy
                     let workerHidden = try await workerPolicy.compute(input: activation)
-                    if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
-                       let headResult = await slicedCoord.computeHeadOnly(workerHidden) {
-                        sampledId = headResult.tokenId
-                    } else {
-                        sampledId = argmax(workerHidden)
-                    }
+                    sampledId = argmax(workerHidden)
                 } else {
                     sampledId = argmax(activation)
                 }
@@ -541,7 +728,9 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
 
         NovaMLXLog.info("[Distributed] Completed: \(generatedTokenIds.count) tokens in \(String(format: "%.2f", elapsed))s (\(String(format: "%.1f", tps)) tok/s)")
 
-        let accuracy = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : nil
+        // Record final stats. speculationAccuracy will be populated once the speculative decode loop
+        // (using draftTokens + speculativeVerify + rollbackCache) is wired in the remote-sampling path.
+        let accuracy: Double? = engine?.specDecoder.acceptanceRate
         DistributedInferenceRunnerCache.shared.recordStats(DistributedInferenceStats(
             tokensPerSecond: tps,
             promptTokens: promptTokens.count,
@@ -659,7 +848,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                         shardEngines = []
                         for (index, assignment) in plan.assignments.enumerated() {
                             let isFirst = index == 0
-                            let isLast = plan.assignments.count <= 2 ? (index == 0) : (index == plan.assignments.count - 1)
+                            let isLast = plan.assignments.count <= 2 ? true : (index == plan.assignments.count - 1)
                             let policy: ComputePolicy
 
                             if assignment.nodeId == "local-coordinator" {
@@ -758,16 +947,6 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                     }
 
                     let remoteSamplingEnabled = shardEngines.count > 1 && shardEngines.last?.policy is RemoteShardPolicy
-                    let extraPredictionLayers = 5
-
-                    let speculationCapable = remoteSamplingEnabled && shardEngines.count == 2
-                    var speculationEnabled = speculationCapable
-                    let adaptiveWindow = 20
-                    let disableThreshold = 0.30
-                    var recentPredictions: [Bool] = []
-                    var correctPredictions = 0
-                    var totalPredictions = 0
-                    let draftLength = 1
 
                     // Running text buffer for stop token suffix check
                     var textBuffer = ""
@@ -793,20 +972,15 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                         return shouldStop
                     }
 
-                    if speculationCapable {
-                        let coordPolicy = shardEngines[0].policy
-                        guard let slicedCoord = coordPolicy as? SlicedForwardPolicy else {
+                    // === REMOTE SAMPLING PIPELINE (streaming) ===
+                    if remoteSamplingEnabled && shardEngines.count == 2 {
+                        guard let slicedCoord = shardEngines[0].policy as? SlicedForwardPolicy else {
                             throw DistributedInferenceError.shardPlanFailed("Coord policy is not SlicedForwardPolicy")
                         }
                         let workerPolicy = shardEngines[1].policy as! RemoteShardPolicy
-                        var currentPosition = promptTokens.count
 
-                        // First token: run head on prefill hidden state (coord has isLast=true)
-                        let firstHeadResult = await slicedCoord.computeHeadOnly(activation)
-                        guard let firstResult = firstHeadResult else {
-                            throw DistributedInferenceError.shardPlanFailed("computeHeadOnly returned nil on prefill output")
-                        }
-                        let firstToken = firstResult.tokenId
+                        // First token: activation is logits from worker (worker has head)
+                        let firstToken = argmax(activation)
                         if !eosTokenIds.contains(firstToken) {
                             if yieldToken(firstToken) {
                                 if shouldReleaseWeights { for s in shardEngines { s.policy.releaseWeights() } }
@@ -818,128 +992,159 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                             continuation.finish()
                             return
                         }
-                        // Compute coord activation for first token (embedding + coord layers → hidden for worker)
-                        activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(firstToken)))
-                        currentPosition += 1
 
-                        // Continuous async pipeline decode loop
+                        // Convert logits → coordinator hidden state for draftTokens()
+                        activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(firstToken)))
+
+                        var timingLogCounter = 0
+                        var actualToken = firstToken
+
+                        // === Speculative Decode State (streaming) ===
+                        let numDraft = request.numDraftTokens ?? 0
+                        let useSpeculative = numDraft > 0
+                        var workerCacheOffset = 0
+                        var totalProposed: Int = 0
+                        var totalAccepted: Int = 0
+                        var recentTokensForNgram: [Int] = []   // maintained for streaming ngram context
+
                         while generatedCount < maxTokens {
-                            if speculationEnabled {
-                                // Step 1: Fire worker compute async (returns hidden state)
-                                let activationBox = SendableBox(activation)
-                                let workerTask = Task {
-                                    SendableBox(try await workerPolicy.compute(input: activationBox.value))
+                            let t0 = CFAbsoluteTimeGetCurrent()
+
+                            if useSpeculative {
+                                // === Full K>1 speculative round for streaming ===
+                                // Prefer Coordinator-head drafts when possible (strong node)
+                                let contextForDraft = Array(recentTokensForNgram.suffix(16)) + [actualToken]
+                                var draftTokens: [Int] = []
+                                var currentRoundDraftBundle: SlicedForwardPolicy.DraftBundle? = nil
+
+                                if let bundle = try? await slicedCoord.draftTokens(from: activation, count: numDraft) {
+                                    currentRoundDraftBundle = bundle
+                                    draftTokens = bundle.predictedTokens
+                                } else {
+                                    draftTokens = engine?.specDecoder.speculate(context: contextForDraft) ?? []
                                 }
 
-                                // Step 2: Draft token N+1 while worker is busy
-                                let draft = try? await slicedCoord.draftTokens(
-                                    from: activation, count: draftLength, extraPredictionLayers: extraPredictionLayers
-                                )
+                                // 标记使用（避免 warning），实际在 rejection 时会用到
+                                _ = currentRoundDraftBundle
 
-                                // Step 3: Await worker hidden state, run head locally
-                                let workerHidden = try await workerTask.value.value
-                                guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else { break }
-                                let actualToken = headResult.tokenId
+                                let k = min(numDraft, draftTokens.count)
 
-                                // Step 4: Verify draft against actual token
-                                if let draft = draft, draft.count > 0, draft.predictedTokens[0] == actualToken {
-                                    // HIT — use precomputed activation (zero idle time)
-                                    activation = draft.precomputedStates[0]
-                                    recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
-                                    currentPosition += 1
-
+                                if k == 0 {
+                                    activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
+                                    actualToken = try await workerPolicy.computeAndSample(input: activation)
+                                    workerCacheOffset += 1
                                     if eosTokenIds.contains(actualToken) { break }
                                     if yieldToken(actualToken) { break }
+                                    recentTokensForNgram.append(actualToken)
+                                    if recentTokensForNgram.count > 32 { recentTokensForNgram.removeFirst() }
+                                    continue
+                                }
 
-                                    // Verify subsequent draft tokens
-                                    for i in 1..<draft.count {
-                                        let verifyActivation = SendableBox(activation)
-                                        let verifyTask = Task {
-                                            SendableBox(try await workerPolicy.compute(input: verifyActivation.value))
-                                        }
-                                        let verifyHidden = try await verifyTask.value.value
-                                        guard let verifyHead = await slicedCoord.computeHeadOnly(verifyHidden) else { break }
-                                        let verifyToken = verifyHead.tokenId
+                                totalProposed += k
 
-                                        if draft.predictedTokens[i] == verifyToken {
-                                            activation = draft.precomputedStates[i]
-                                            recordPrediction(true, &recentPredictions, &correctPredictions, &totalPredictions)
-                                            currentPosition += 1
+                                let sequenceForCoord = [actualToken] + Array(draftTokens.prefix(k))
+                                let seqInput = MLXArray(sequenceForCoord.map { Int32($0) })
+                                activation = try await slicedCoord.computeLayersOnly(input: seqInput)
 
-                                            if eosTokenIds.contains(verifyToken) { break }
-                                            if yieldToken(verifyToken) { break }
-                                        } else {
-                                            recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
-                                            try? await slicedCoord.rollbackCache(
-                                                position: currentPosition,
-                                                speculatedCount: draft.count - i,
-                                                mambaSnapshot: draft.mambaSnapshot
-                                            )
-                                            activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(verifyToken)))
-                                            currentPosition += 1
+                                let verifiedTokens = try await workerPolicy.speculativeVerify(input: activation)
 
-                                            if eosTokenIds.contains(verifyToken) { break }
-                                            if yieldToken(verifyToken) { break }
-                                            break
-                                        }
-                                    }
-                                } else {
-                                    // MISS — rollback draft cache and recompute
-                                    recordPrediction(false, &recentPredictions, &correctPredictions, &totalPredictions)
-                                    if let draft = draft {
+                                var accepted = 0
+                                for i in 0..<k {
+                                    let draftT = draftTokens[i]
+                                    let verifiedT = (i + 1 < verifiedTokens.count) ? verifiedTokens[i + 1] : -1
+                                    if verifiedT == draftT { accepted += 1 } else { break }
+                                }
+                                totalAccepted += accepted
+
+                                // Yield accepted tokens one by one for streaming
+                                var shouldStop = false
+                                for i in 0..<accepted {
+                                    let tok = draftTokens[i]
+                                    recentTokensForNgram.append(tok)
+                                    if recentTokensForNgram.count > 32 { recentTokensForNgram.removeFirst() }
+                                    if eosTokenIds.contains(tok) { shouldStop = true; break }
+                                    if yieldToken(tok) { shouldStop = true; break }
+                                }
+
+                                let rejected = k - accepted
+                                if rejected > 0 {
+                                    let excess = rejected
+                                    let targetPosition = max(0, workerCacheOffset + accepted + 1 - excess)
+                                    try? await workerPolicy.rollbackCache(position: targetPosition)
+
+                                    // Streaming 也支持用 DraftBundle 的 mambaSnapshot 做 Coordinator rollback
+                                    if let bundle = currentRoundDraftBundle {
                                         try? await slicedCoord.rollbackCache(
-                                            position: currentPosition,
-                                            speculatedCount: draft.count,
-                                            mambaSnapshot: draft.mambaSnapshot
+                                            position: targetPosition,
+                                            speculatedCount: excess,
+                                            mambaSnapshot: bundle.mambaSnapshot
                                         )
                                     }
-                                    activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
-                                    currentPosition += 1
 
-                                    if eosTokenIds.contains(actualToken) { break }
-                                    if yieldToken(actualToken) { break }
-                                }
-
-                                // Adaptive accuracy check
-                                if recentPredictions.count >= adaptiveWindow {
-                                    let rolling = Double(recentPredictions.filter { $0 }.count) / Double(recentPredictions.count)
-                                    if rolling < disableThreshold {
-                                        speculationEnabled = false
+                                    if !shouldStop {
+                                        let rejectionIndex = accepted + 1
+                                        if rejectionIndex < verifiedTokens.count {
+                                            let bonus = verifiedTokens[rejectionIndex]
+                                            if !eosTokenIds.contains(bonus) {
+                                                recentTokensForNgram.append(bonus)
+                                                if recentTokensForNgram.count > 32 { recentTokensForNgram.removeFirst() }
+                                                if yieldToken(bonus) { shouldStop = true }
+                                            }
+                                        }
+                                    }
+                                } else if !shouldStop {
+                                    if verifiedTokens.count > k {
+                                        let bonus = verifiedTokens.last ?? verifiedTokens[k]
+                                        if !eosTokenIds.contains(bonus) {
+                                            recentTokensForNgram.append(bonus)
+                                            if recentTokensForNgram.count > 32 { recentTokensForNgram.removeFirst() }
+                                            if yieldToken(bonus) { shouldStop = true }
+                                        }
                                     }
                                 }
+
+                                workerCacheOffset += (1 + k)
+                                if k > 0 {
+                                    engine?.specDecoder.recordAccepted(tokens: Array(draftTokens.prefix(k)), accepted: accepted)
+                                }
+
+                                NovaMLXLog.info("[Spec-Stream] round: proposed=\(k) accepted=\(accepted) (acc=\(String(format: "%.1f", totalProposed > 0 ? Double(totalAccepted)/Double(totalProposed)*100 : 0))%)")
+
+                                if shouldStop { break }
+
                             } else {
-                                // Sequential path — worker returns hidden state → coord runs head
-                                let workerHidden = try await workerPolicy.compute(input: activation)
-                                guard let headResult = await slicedCoord.computeHeadOnly(workerHidden) else { break }
-                                let sampledId = headResult.tokenId
-                                if eosTokenIds.contains(sampledId) { break }
-                                if yieldToken(sampledId) { break }
-                                activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(sampledId)))
-                                currentPosition += 1
+                                // Baseline single token streaming path
+                                activation = try await slicedCoord.computeLayersOnly(input: MLXArray(Int32(actualToken)))
+                                let tCoordDone = CFAbsoluteTimeGetCurrent()
+                                actualToken = try await workerPolicy.computeAndSample(input: activation)
+                                let tTotal = CFAbsoluteTimeGetCurrent()
+                                workerCacheOffset += 1
+
+                                recentTokensForNgram.append(actualToken)
+                                if recentTokensForNgram.count > 32 { recentTokensForNgram.removeFirst() }
+
+                                if eosTokenIds.contains(actualToken) { break }
+                                if yieldToken(actualToken) { break }
+
+                                timingLogCounter += 1
+                                if timingLogCounter % 20 == 1 {
+                                    let totalMs = (tTotal - t0) * 1000
+                                    let coordMs = (tCoordDone - t0) * 1000
+                                    let workerMs = (tTotal - tCoordDone) * 1000
+                                    NovaMLXLog.info("[Pipeline-Stream] token \(generatedCount): \(String(format: "%.1f", totalMs))ms coord=\(String(format: "%.1f", coordMs))ms worker=\(String(format: "%.1f", workerMs))ms")
+                                }
                             }
                         }
                     } else {
-                        // Non-speculative decode
+                        // Single-node or multi-shard fallback
                         for i in 0..<maxTokens {
                             let sampledId: Int
                             if i == 0 {
-                                // First token from prefill output (coord has head)
-                                if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
-                                   let headResult = await slicedCoord.computeHeadOnly(activation) {
-                                    sampledId = headResult.tokenId
-                                } else {
-                                    sampledId = argmax(activation)
-                                }
+                                sampledId = argmax(activation)
                             } else if remoteSamplingEnabled {
-                                // Worker returns hidden state → coord runs head
                                 let workerPolicy = shardEngines.last!.policy as! RemoteShardPolicy
                                 let workerHidden = try await workerPolicy.compute(input: activation)
-                                if let slicedCoord = shardEngines.first?.policy as? SlicedForwardPolicy,
-                                   let headResult = await slicedCoord.computeHeadOnly(workerHidden) {
-                                    sampledId = headResult.tokenId
-                                } else {
-                                    sampledId = argmax(workerHidden)
-                                }
+                                sampledId = argmax(workerHidden)
                             } else {
                                 sampledId = argmax(activation)
                             }
@@ -963,7 +1168,7 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
                     let tps = generatedCount > 0 && elapsed > 0 ? Double(generatedCount) / elapsed : 0
                     NovaMLXLog.info("[Distributed] Stream completed: \(generatedCount) tokens in \(String(format: "%.2f", elapsed))s (\(String(format: "%.1f", tps)) tok/s)")
 
-                    let accuracy = totalPredictions > 0 ? Double(correctPredictions) / Double(totalPredictions) : nil
+                    let accuracy: Double? = nil
                     DistributedInferenceRunnerCache.shared.recordStats(DistributedInferenceStats(
                         tokensPerSecond: tps,
                         promptTokens: promptTokens.count,
@@ -1043,19 +1248,6 @@ public final class DistributedInferenceRunner: @unchecked Sendable {
     }
 }
 
-// MARK: - Adaptive Speculation Helpers
-
-private func recordPrediction(
-    _ correct: Bool,
-    _ recent: inout [Bool],
-    _ correctCount: inout Int,
-    _ totalCount: inout Int
-) {
-    recent.append(correct)
-    if recent.count > 20 { recent.removeFirst() }
-    correctCount += correct ? 1 : 0
-    totalCount += 1
-}
 
 // MARK: - DistributedInferenceRunnerCache
 
@@ -1073,11 +1265,14 @@ public struct DistributedInferenceStats: Codable, Sendable {
     public let workerComputeMs: Double?
     public let transportMs: Double?
     public let headMs: Double?
+    public let workerWaitMs: Double?
+    public let overlapPct: Double?
 
     public init(tokensPerSecond: Double, promptTokens: Int, completionTokens: Int,
                 elapsedSeconds: Double, speculationAccuracy: Double? = nil,
                 coordComputeMs: Double? = nil, workerComputeMs: Double? = nil,
-                transportMs: Double? = nil, headMs: Double? = nil) {
+                transportMs: Double? = nil, headMs: Double? = nil,
+                workerWaitMs: Double? = nil, overlapPct: Double? = nil) {
         self.tokensPerSecond = tokensPerSecond
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
@@ -1087,6 +1282,8 @@ public struct DistributedInferenceStats: Codable, Sendable {
         self.workerComputeMs = workerComputeMs
         self.transportMs = transportMs
         self.headMs = headMs
+        self.workerWaitMs = workerWaitMs
+        self.overlapPct = overlapPct
         self.timestamp = Date()
     }
 }

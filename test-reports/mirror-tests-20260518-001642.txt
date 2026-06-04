@@ -1,0 +1,20 @@
+Started: Mon May 18 00:16:42 AST 2026
+[00:16:49] Navigating to Downloads...
+[00:16:54] 
+Running mirror tests...
+[00:16:54]   → Selecting: hf-mirror.com (China)
+[00:16:56] ❌ FAIL: Switch to hf-mirror.com — Could not locate or click the picker option
+[00:16:56]   → Selecting: ModelScope (Alibaba)
+[00:16:58] ❌ FAIL: Switch to ModelScope (Alibaba) — Could not locate or click the picker option
+[00:16:58]   → Selecting: Custom URL...
+[00:16:59] ❌ FAIL: Select Custom URL option — Could not locate or click the picker option
+[00:16:59]   → Typing custom URL...
+[00:17:02] ✅ PASS: Enter custom mirror URL
+[00:17:02]   → Performing search...
+[00:17:03] ✅ PASS: Search after mirror change
+[00:17:04] ========================================
+[00:17:04] FINAL RESULTS
+[00:17:04] Total : 5
+[00:17:04] Passed: 2
+[00:17:04] Failed: 3
+[00:17:04] Failed tests: Switch to hf-mirror.com Switch to ModelScope (Alibaba) Select Custom URL option

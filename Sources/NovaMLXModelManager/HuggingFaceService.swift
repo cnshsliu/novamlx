@@ -58,11 +58,30 @@ public struct FileProgress: Codable, Sendable {
     public var downloadedBytes: Int64
     public var totalBytes: Int64
     public var status: String  // "downloading", "completed", "failed", "waiting"
-    public init(filename: String, downloadedBytes: Int64 = 0, totalBytes: Int64 = 0, status: String = "waiting") {
+
+    public var currentURL: String?
+    public var retryCount: Int = 0
+    public var isResuming: Bool = false
+    public var speed: Double = 0
+
+    public init(
+        filename: String,
+        downloadedBytes: Int64 = 0,
+        totalBytes: Int64 = 0,
+        status: String = "waiting",
+        currentURL: String? = nil,
+        retryCount: Int = 0,
+        isResuming: Bool = false,
+        speed: Double = 0
+    ) {
         self.filename = filename
         self.downloadedBytes = downloadedBytes
         self.totalBytes = totalBytes
         self.status = status
+        self.currentURL = currentURL
+        self.retryCount = retryCount
+        self.isResuming = isResuming
+        self.speed = speed
     }
 }
 
@@ -138,11 +157,111 @@ private final class SharedProgress: @unchecked Sendable {
     }
 }
 
+// MARK: - Mirror Adapter (for different HF-compatible sources)
+
+enum MirrorKind: String, Sendable {
+    case huggingface
+    case modelscope
+}
+
+protocol MirrorAdapter: Sendable {
+    var kind: MirrorKind { get }
+    var endpoint: String { get }
+    var defaultRevision: String { get }
+
+    func searchURL(query: String, limit: Int, mlxOnly: Bool) -> URL
+    func modelDetailURL(repoId: String) -> URL
+    func fileListURL(repoId: String) -> URL
+    func resolveURL(repoId: String, filename: String) -> URL
+}
+
+// HF-compatible mirrors (official, hf-mirror.com, custom)
+private struct HFMirrorAdapter: MirrorAdapter {
+    let kind: MirrorKind = .huggingface
+    let endpoint: String
+    let defaultRevision: String = "main"
+
+    init(endpoint: String) {
+        self.endpoint = endpoint
+    }
+
+    func searchURL(query: String, limit: Int, mlxOnly: Bool) -> URL {
+        var components = URLComponents(string: "\(endpoint)/api/models")!
+        var items: [URLQueryItem] = [URLQueryItem(name: "limit", value: String(limit))]
+        if !query.isEmpty { items.append(URLQueryItem(name: "search", value: query)) }
+
+        // 搜索时默认不再强制加 filter=mlx
+        // 用户搜索 "Qwen"、"Llama" 这类通用词时，应该能搜到结果
+        // 如果以后加了 "只显示 MLX 模型" 的独立开关，再根据开关决定是否加 filter
+        // if mlxOnly { items.append(URLQueryItem(name: "filter", value: "mlx")) }
+
+        components.queryItems = items
+        return components.url!
+    }
+
+    func modelDetailURL(repoId: String) -> URL {
+        let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
+        return URL(string: "\(endpoint)/api/models/\(encoded)")!
+    }
+
+    func fileListURL(repoId: String) -> URL {
+        // HF style uses model detail which includes siblings
+        return modelDetailURL(repoId: repoId)
+    }
+
+    func resolveURL(repoId: String, filename: String) -> URL {
+        return URL(string: "\(endpoint)/\(repoId)/resolve/\(defaultRevision)/\(filename)")!
+    }
+}
+
+// Alibaba ModelScope adapter
+private struct ModelScopeAdapter: MirrorAdapter {
+    let kind: MirrorKind = .modelscope
+    let endpoint: String
+    let defaultRevision: String = "master"
+
+    init(endpoint: String) {
+        self.endpoint = endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint
+    }
+
+    func searchURL(query: String, limit: Int, mlxOnly: Bool) -> URL {
+        // Real endpoint is PUT /api/v1/dolphin/models with JSON body {Name, PageSize, ...}
+        // We keep a representative URL here for logging / future use.
+        return URL(string: "\(endpoint)/api/v1/dolphin/models")!
+    }
+
+    func modelDetailURL(repoId: String) -> URL {
+        let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
+        return URL(string: "\(endpoint)/api/v1/models/\(encoded)")!
+    }
+
+    func fileListURL(repoId: String) -> URL {
+        let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
+        return URL(string: "\(endpoint)/api/v1/models/\(encoded)/repo/files?Revision=\(defaultRevision)&Recursive=true")!
+    }
+
+    func resolveURL(repoId: String, filename: String) -> URL {
+        return URL(string: "\(endpoint)/models/\(repoId)/resolve/\(defaultRevision)/\(filename)")!
+    }
+}
+
+// Factory
+private extension HuggingFaceService {
+    static func makeAdapter(for endpoint: String?) -> any MirrorAdapter {
+        let ep = endpoint ?? "https://huggingface.co"
+        if ep.contains("modelscope") {
+            return ModelScopeAdapter(endpoint: ep)
+        } else {
+            return HFMirrorAdapter(endpoint: ep)
+        }
+    }
+}
+
 // MARK: - HuggingFaceService
 
 public final class HuggingFaceService: @unchecked Sendable {
     private let session: URLSession
-    private let baseURL: String
+    private let adapter: any MirrorAdapter
     private let lock = NovaMLXLock()
     private var activeTasks: [String: HFDownloadTask] = [:]
     private var downloadTask: Task<Void, Never>?
@@ -156,37 +275,216 @@ public final class HuggingFaceService: @unchecked Sendable {
 
     public init(modelDirectory: URL, endpoint: String? = nil) {
         self.modelDirectory = modelDirectory
-        self.baseURL = endpoint ?? "https://huggingface.co"
+        self.adapter = Self.makeAdapter(for: endpoint)
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 120
         config.timeoutIntervalForResource = 7200
         self.session = URLSession(configuration: config)
+
+        if adapter.kind != .huggingface || endpoint != nil {
+            NovaMLXLog.info("[HF] Using mirror \(adapter.kind.rawValue) @ \(adapter.endpoint) (defaultRevision=\(adapter.defaultRevision))")
+        }
     }
 
     // MARK: - Public API
 
-    public func searchModels(query: String, sort: String = "trending", limit: Int = 50, mlxOnly: Bool = true) async throws -> HFSearchResult {
-        var components = URLComponents(string: "\(baseURL)/api/models")!
-        var items = [URLQueryItem(name: "limit", value: String(limit))]
-        if !query.isEmpty { items.append(URLQueryItem(name: "search", value: query)) }
-        if mlxOnly { items.append(URLQueryItem(name: "filter", value: "mlx")) }
-        components.queryItems = items
-        let request = URLRequest(url: components.url!)
+    public func searchModels(query: String, sort: String = "trending", limit: Int = 50, mlxOnly: Bool = false) async throws -> HFSearchResult {
+        if adapter.kind == .modelscope {
+            // Real ModelScope search uses PUT /api/v1/dolphin/models (discovered via live traffic)
+            // The old /api/v1/models?search=... returned 404 and was never the correct endpoint.
+            let searchURL = URL(string: "\(adapter.endpoint)/api/v1/dolphin/models")!
+            var req = URLRequest(url: searchURL)
+            req.httpMethod = "PUT"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+            let body: [String: Any] = [
+                "PageSize": limit,
+                "PageNumber": 1,
+                "Name": query,
+                "SortBy": "Default",
+                "Criterion": [] as [Any],
+                "SingleCriterion": [] as [Any],
+                "Target": ""
+            ]
+            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            NovaMLXLog.info("[HF][ModelScope] Real search: PUT \(searchURL) Name=\(query) PageSize=\(limit) mlxOnly=\(mlxOnly)")
+            let (data, resp) = try await session.data(for: req)
+            if let http = resp as? HTTPURLResponse {
+                NovaMLXLog.info("[HF][ModelScope] Upstream HTTP \(http.statusCode)")
+            }
+            let preview = String(data: data.prefix(1200), encoding: .utf8) ?? "<binary/\(data.count)b>"
+            NovaMLXLog.info("[HF][ModelScope] Raw body preview: \(preview)")
+
+            return try parseModelScopeSearchResponse(data, limit: limit, mlxOnly: mlxOnly)
+        }
+
+        // HF-style (official, hf-mirror, custom)
+        let url = adapter.searchURL(query: query, limit: limit, mlxOnly: mlxOnly)
+        let request = URLRequest(url: url)
         let (data, _) = try await session.data(for: request)
-        let models = try JSONDecoder().decode([HFModelInfo].self, from: data)
-        return HFSearchResult(models: models, total: models.count)
+        return try parseHuggingFaceStyleSearchResponse(data)
+    }
+
+    // MARK: - 不同镜像的搜索解析
+
+    private func parseHuggingFaceStyleSearchResponse(_ data: Data) throws -> HFSearchResult {
+        // Try 1: Direct array
+        if let models = try? JSONDecoder().decode([HFModelInfo].self, from: data) {
+            return HFSearchResult(models: models, total: models.count)
+        }
+
+        // Try 2: Object with "models"
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let modelsArray = json["models"] as? [[String: Any]] {
+
+            let models: [HFModelInfo] = modelsArray.compactMap { dict in
+                guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+                return try? JSONDecoder().decode(HFModelInfo.self, from: data)
+            }
+            let total = json["total"] as? Int ?? models.count
+            return HFSearchResult(models: models, total: total)
+        }
+
+        // Try 3: Full object
+        if let result = try? JSONDecoder().decode(HFSearchResult.self, from: data) {
+            return result
+        }
+
+        throw NSError(domain: "HuggingFaceService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unexpected HF-style response"])
+    }
+
+    private func parseModelScopeSearchResponse(_ data: Data, limit: Int, mlxOnly: Bool) throws -> HFSearchResult {
+        // Real shape (from live reverse engineering of www.modelscope.cn):
+        // { "Code": 200, "Data": { "Model": { "Models": [ { "Id": num, "Name": "...", "Path": "Org", "Organization": {...}, "Downloads": N, "Stars": N, "Libraries": [...], "Tags": [...], "ModelType": "...", ... } ], "TotalCount": N }, "FiledAgg": {...} }, ... }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            NovaMLXLog.error("[HF][ModelScope] parse: not a JSON object")
+            throw NSError(domain: "HuggingFaceService", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unexpected ModelScope response (not JSON)"])
+        }
+
+        let dataObj = (json["Data"] as? [String: Any]) ?? (json["data"] as? [String: Any]) ?? [:]
+        let modelContainer = (dataObj["Model"] as? [String: Any]) ?? (dataObj["model"] as? [String: Any]) ?? [:]
+        var modelsArray = (modelContainer["Models"] as? [[String: Any]]) ?? (modelContainer["models"] as? [[String: Any]]) ?? []
+
+        // Legacy fallback (old guessed API)
+        if modelsArray.isEmpty {
+            modelsArray = (dataObj["models"] as? [[String: Any]]) ?? []
+        }
+
+        NovaMLXLog.info("[HF][ModelScope] parse: raw models in response = \(modelsArray.count), totalCount=\(modelContainer["TotalCount"] ?? dataObj["total"] ?? "n/a")")
+
+        var models: [HFModelInfo] = []
+        var skippedNoId = 0, skippedMlx = 0, skippedDecode = 0
+
+        for dict in modelsArray {
+            // Construct stable repoId: "Path/Name" (e.g. "Qwen/Qwen3.6-27B") used by fileList + downloads
+            let path = (dict["Path"] as? String)
+                ?? ((dict["Organization"] as? [String: Any])?["Name"] as? String)
+                ?? (dict["Owner"] as? String) ?? ""
+            let name = (dict["Name"] as? String) ?? (dict["name"] as? String) ?? ""
+            let fullId = path.isEmpty ? name : "\(path)/\(name)"
+            if fullId.isEmpty {
+                skippedNoId += 1
+                continue
+            }
+
+            // MLX filter using the fields that actually exist on ModelScope items (Libraries + Tags + ModelType + name)
+            if mlxOnly {
+                let libs = (dict["Libraries"] as? [String]) ?? []
+                let tags = (dict["Tags"] as? [String]) ?? []
+                let modelType = ((dict["ModelType"] as? String) ?? (dict["model_type"] as? String) ?? "").lowercased()
+                let hasMlx = libs.contains("mlx") || tags.contains("mlx") || modelType.contains("mlx") || fullId.lowercased().contains("mlx")
+                if !hasMlx {
+                    skippedMlx += 1
+                    continue
+                }
+            }
+
+            // Normalize to something the HFModelInfo decoder can understand (it expects "id", "author", "downloads" etc.)
+            var norm: [String: Any] = [
+                "id": fullId,
+                "author": path,
+                "downloads": dict["Downloads"] ?? 0,
+                "likes": dict["Stars"] ?? 0,
+                "tags": Array(Set(((dict["Tags"] as? [String]) ?? []) + ((dict["Libraries"] as? [String]) ?? []))),
+                "pipelineTag": (dict["Tasks"] as? [String])?.first ?? (dict["ModelType"] as? String) ?? "" as String?
+            ]
+            if let t = dict["CreatedTime"] ?? dict["LastUpdatedTime"] { norm["createdAt"] = "\(t)" }
+
+            var info: HFModelInfo?
+            if let itemData = try? JSONSerialization.data(withJSONObject: norm),
+               let decoded = try? JSONDecoder().decode(HFModelInfo.self, from: itemData) {
+                info = decoded
+            } else if let itemData2 = try? JSONSerialization.data(withJSONObject: dict),
+                      let decoded2 = try? JSONDecoder().decode(HFModelInfo.self, from: itemData2) {
+                info = decoded2
+            }
+
+            if let info = info {
+                models.append(info)
+            } else {
+                skippedDecode += 1
+            }
+
+            if models.count >= limit { break }
+        }
+
+        NovaMLXLog.info("[HF][ModelScope] parse done: kept=\(models.count) skippedNoId=\(skippedNoId) skippedMlx=\(skippedMlx) skippedDecode=\(skippedDecode)")
+
+        let total = (modelContainer["TotalCount"] as? Int) ?? (dataObj["total"] as? Int) ?? models.count
+        return HFSearchResult(models: models, total: total)
     }
 
     public func getModelDetail(repoId: String) async throws -> HFModelDetail {
-        let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
-        let url = URL(string: "\(baseURL)/api/models/\(encoded)")!
+        let url = adapter.modelDetailURL(repoId: repoId)
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (data, _) = try await session.data(for: request)
         return try JSONDecoder().decode(HFModelDetail.self, from: data)
     }
 
-    public func startDownload(repoId: String, hfToken: String? = nil) async throws -> HFDownloadTask {
+    /// Adapter-aware file list fetch.
+    /// For HF mirrors: uses /api/models/{repo} which returns siblings.
+    /// For ModelScope: uses the special /repo/files endpoint and converts the response.
+    private func fetchFileList(
+        repoId: String,
+        hfToken: String?,
+        adapter: any MirrorAdapter
+    ) async throws -> [HFModelDetail.HFFile] {
+        if adapter.kind == .huggingface {
+            let detail = try await Self.getModelDetailStatic(
+                repoId: repoId,
+                baseURL: adapter.endpoint,
+                session: session,
+                hfToken: hfToken
+            )
+            return Self.filterDownloadable(detail.siblings ?? [])
+        } else {
+            // ModelScope path — delegate to dedicated implementation
+            NovaMLXLog.info("[HF][Download] ModelScope branch taken for \(repoId), adapter.endpoint=\(adapter.endpoint), kind=\(adapter.kind)")
+            let ms = ModelScopeService(endpoint: adapter.endpoint, session: session)
+            let files = try await ms.listFiles(repoId: repoId, revision: adapter.defaultRevision)
+
+            NovaMLXLog.info("[HF][Download] ModelScope file list returned \(files.count) files for \(repoId)")
+            return files.map { f in
+                HFModelDetail.HFFile(rfilename: f.path, size: f.size)
+            }
+        }
+    }
+
+    public func startDownload(
+        repoId: String,
+        hfToken: String? = nil,
+        mirrorEndpoint: String? = nil
+    ) async throws -> HFDownloadTask {
+        // If the caller supplied a live mirror (ModelScope, hf-mirror, custom),
+        // build a one-off adapter for this download only.
+        // The HFDownloadTask is still registered in *this* service's activeTasks
+        // (the one that the /tasks API reads), so the UI always sees it.
+        let effectiveAdapter = mirrorEndpoint != nil
+            ? Self.makeAdapter(for: mirrorEndpoint)
+            : self.adapter
+
         var task = HFDownloadTask(repoId: repoId)
         task.status = "downloading"
         lock.withLock { activeTasks[task.id] = task }
@@ -197,7 +495,11 @@ public final class HuggingFaceService: @unchecked Sendable {
 
         let taskCopy = task
         downloadTask = Task { [weak self] in
-            await self?.runDownload(task: taskCopy, hfToken: hfToken) { [weak self] _ in
+            await self?.runDownload(
+                task: taskCopy,
+                hfToken: hfToken,
+                adapter: effectiveAdapter
+            ) { [weak self] _ in
                 self?.onModelDownloaded?(repoId)
             }
         }
@@ -227,6 +529,7 @@ public final class HuggingFaceService: @unchecked Sendable {
     private func runDownload(
         task: HFDownloadTask,
         hfToken: String?,
+        adapter: any MirrorAdapter,
         onModelDownloaded: @Sendable @escaping (String) -> Void
     ) async {
         let targetDir = modelDirectory.appendingPathComponent(
@@ -238,9 +541,8 @@ public final class HuggingFaceService: @unchecked Sendable {
         }
 
         do {
-            // Step 1: File list
-            let detail = try await Self.getModelDetailStatic(repoId: task.repoId, baseURL: baseURL, session: session, hfToken: hfToken)
-            let allFiles = Self.filterDownloadable(detail.siblings ?? [])
+            // Step 1: File list (adapter-aware)
+            let allFiles = try await self.fetchFileList(repoId: task.repoId, hfToken: hfToken, adapter: adapter)
             let totalFiles = allFiles.count
             guard totalFiles > 0 else {
                 currentTask.status = "failed"
@@ -253,13 +555,32 @@ public final class HuggingFaceService: @unchecked Sendable {
             var fileInfos: [FileToDownload] = []
             var estimatedTotal: Int64 = 0
             for file in allFiles {
-                let url = URL(string: "\(baseURL)/\(task.repoId)/resolve/main/\(file.rfilename)")!
-                let size = await Self.headFileSize(url: url, session: session, hfToken: hfToken)
+                let url = adapter.resolveURL(repoId: task.repoId, filename: file.rfilename)
+                if adapter.kind == .modelscope {
+                    NovaMLXLog.info("[HF][ModelScope] Resolve URL for \(file.rfilename): \(url)")
+                }
+                let size: Int64
+                if adapter.kind == .modelscope && file.size ?? 0 > 0 {
+                    // Trust the size we already received from ModelScope's /repo/files API
+                    size = Int64(file.size ?? 0)
+                } else {
+                    size = await Self.headFileSize(url: url, session: session, hfToken: hfToken)
+                }
                 fileInfos.append(.init(filename: file.rfilename, expectedSize: size, sourceURL: url))
                 if size > 0 { estimatedTotal += size }
             }
+
+            // Initialize fileProgresses with URL info for the Backend Activity panel
+            currentTask.fileProgresses = fileInfos.map {
+                FileProgress(
+                    filename: $0.filename,
+                    totalBytes: $0.expectedSize,
+                    status: "waiting",
+                    currentURL: $0.sourceURL.absoluteString
+                )
+            }
+            save(currentTask)
             currentTask.totalBytes = estimatedTotal
-            currentTask.fileProgresses = fileInfos.map { .init(filename: $0.filename, totalBytes: $0.expectedSize, status: "waiting") }
             save(currentTask)
 
             #if DEBUG
@@ -327,6 +648,17 @@ public final class HuggingFaceService: @unchecked Sendable {
                             if t.totalBytes > 0 {
                                 t.progress = min(Double(t.downloadedBytes) / Double(t.totalBytes) * 99.0, 99.0)
                             }
+
+                            // Very aggressive logging of what the UI will see
+                            let activeFiles = t.fileProgresses.filter { $0.downloadedBytes > 0 || $0.status == "downloading" }
+                            if !activeFiles.isEmpty {
+                                let shortId = String(taskId.prefix(8))
+                                NovaMLXLog.info("[DL][SYNC] Task \(shortId) downloaded=\(t.downloadedBytes)/\(t.totalBytes) progress=\(String(format: "%.1f", t.progress))%")
+                                for fp in activeFiles {
+                                    NovaMLXLog.info("[DL][SYNC]   → \(fp.filename): \(fp.downloadedBytes)/\(fp.totalBytes)B status=\(fp.status)")
+                                }
+                            }
+
                             self.activeTasks[taskId] = t
                         }
                     }
@@ -399,9 +731,9 @@ public final class HuggingFaceService: @unchecked Sendable {
             currentTask.error = error.localizedDescription
             currentTask.completedAt = Date()
             save(currentTask)
-            #if DEBUG
-            NovaMLXLog.error("[DL] FAILED \(task.repoId): \(error.localizedDescription)")
-            #endif
+            let failingURL = (error as NSError).userInfo["failingURL"] as? String ?? ""
+            let extra = failingURL.isEmpty ? "" : " (URL: \(failingURL))"
+            NovaMLXLog.error("[DL] FAILED \(task.repoId)\(extra): \(error.localizedDescription)")
         }
     }
 
@@ -448,6 +780,12 @@ public final class HuggingFaceService: @unchecked Sendable {
                 request.timeoutInterval = 600
                 if let t = token { request.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
 
+                // ModelScope CDN friendliness
+                if file.sourceURL.host?.contains("modelscope") == true {
+                    request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                                     forHTTPHeaderField: "User-Agent")
+                }
+
                 var resumeFrom: Int64 = 0
                 if existing > 0 {
                     request.setValue("bytes=\(existing)-", forHTTPHeaderField: "Range")
@@ -464,8 +802,9 @@ public final class HuggingFaceService: @unchecked Sendable {
                     isResume = false
                     if resumeFrom > 0 { try? fm.removeItem(at: temp); resumeFrom = 0 }
                 } else {
+                    NovaMLXLog.error("[HF] Download stream got HTTP \(http.statusCode) for \(file.sourceURL)")
                     throw NSError(domain: "NovaMLX", code: http.statusCode,
-                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"])
+                                  userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode) for \(file.sourceURL)"])
                 }
 
                 // Discover actual file size from response if HEAD didn't give it to us
@@ -483,18 +822,41 @@ public final class HuggingFaceService: @unchecked Sendable {
 
                 var written: Int64 = resumeFrom
                 var buffer = Data()
-                let flushSize = 512 * 1024
+                let flushSize = 64 * 1024
                 var sinceLastReport: Int64 = 0
+                var lastReportTime = Date()
+                let reportInterval: TimeInterval = 0.35   // force progress update every ~350ms even if buffer not full
+
+                var firstDataLogged = false
+                let isLargeFile = file.expectedSize > 50_000_000   // log first data only for files > 50MB
 
                 for try await byte in asyncBytes {
+                    if !firstDataLogged && written == resumeFrom + 1 {
+                        firstDataLogged = true
+                        if isLargeFile {
+                            NovaMLXLog.info("[DL] Started receiving data for large file: \(file.filename) (expected \(file.expectedSize / 1_000_000) MB)")
+                        }
+                    }
                     buffer.append(byte)
                     written += 1
                     sinceLastReport += 1
-                    if buffer.count >= flushSize {
+
+                    let shouldFlushBySize = buffer.count >= flushSize
+                    let shouldFlushByTime = sinceLastReport > 0 &&
+                        Date().timeIntervalSince(lastReportTime) >= reportInterval
+
+                    if shouldFlushBySize || shouldFlushByTime {
                         try handle.write(contentsOf: buffer)
                         progress.addBytes(sinceLastReport, forFile: file.filename)
+
+                        // Very aggressive per-file logging for debugging 0% progress
+                        let fileLive = progress.getFileBytes(file.filename)
+                        let sharedLive = progress.getTotal()
+                        NovaMLXLog.info("[DL][AGGRESSIVE] \(file.filename) +\(sinceLastReport)B this flush | fileNow=\(fileLive)B shared=\(sharedLive)B written=\(written)B")
+
                         sinceLastReport = 0
                         buffer.removeAll(keepingCapacity: true)
+                        lastReportTime = Date()
                     }
                 }
                 if !buffer.isEmpty {
@@ -559,12 +921,25 @@ public final class HuggingFaceService: @unchecked Sendable {
         var req = URLRequest(url: url)
         req.httpMethod = "HEAD"
         if let t = hfToken { req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
+
+        // ModelScope's CDN is picky — use a browser UA to avoid TLS/redirect issues on many repos
+        if url.host?.contains("modelscope") == true {
+            req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                         forHTTPHeaderField: "User-Agent")
+        }
+
         do {
             let (_, resp) = try await session.data(for: req)
-            if let http = resp as? HTTPURLResponse,
-               let cl = http.value(forHTTPHeaderField: "Content-Length"),
-               let size = Int64(cl) { return size }
-        } catch {}
+            if let http = resp as? HTTPURLResponse {
+                if http.statusCode != 200 && http.statusCode != 206 {
+                    NovaMLXLog.error("[HF] HEAD failed for \(url) → HTTP \(http.statusCode)")
+                }
+                if let cl = http.value(forHTTPHeaderField: "Content-Length"),
+                   let size = Int64(cl) { return size }
+            }
+        } catch {
+            NovaMLXLog.error("[HF] HEAD error for \(url): \(error.localizedDescription)")
+        }
         return 0
     }
 

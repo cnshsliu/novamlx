@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Logging
 import NovaMLXCore
 import NovaMLXUtils
@@ -102,14 +103,40 @@ public final class WorkerService: @unchecked Sendable {
         let nodeId = "\(hostname)-\(physicalMemory)"
         let port = queue.sync { config?.coordinatorPort ?? 6591 }
 
+        let fingerprint = Self.computeBinaryFingerprint()
+        let cfgHash = Self.computeConfigHash()
+
         return NodeSpec(
             nodeId: nodeId,
             totalMemoryBytes: physicalMemory,
             computeCapability: 1.0,
             hostname: hostname,
             port: port,
-            cpuModel: Self.readCPUModel()
+            cpuModel: Self.readCPUModel(),
+            binaryFingerprint: fingerprint,
+            configHash: cfgHash
         )
+    }
+
+    /// Returns a simple but stable fingerprint of the running binary.
+    static func computeBinaryFingerprint() -> String {
+        // Use the public version + current executable modification time for now.
+        let version = NovaMLXCore.version
+        let execURL = Bundle.main.executableURL ?? Bundle.main.bundleURL
+        let modDate = (try? FileManager.default.attributesOfItem(atPath: execURL.path)[.modificationDate] as? Date) ?? Date()
+        let time = Int(modDate.timeIntervalSince1970)
+        return "\(version)-\(time)"
+    }
+
+    /// Computes a hash of the authoritative cluster policy file if it exists.
+    static func computeConfigHash() -> String? {
+        let policyPath = ("~/.nova/cluster-policy.json" as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: policyPath),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)) else {
+            return nil
+        }
+        let hash = SHA256.hash(data: data)
+        return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
 
     /// Read CPU model string via sysctl (e.g. "Apple M2 Pro", "Apple M4 Max").

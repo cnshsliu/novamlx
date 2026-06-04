@@ -329,7 +329,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         embeddingService: EmbeddingService = EmbeddingService(),
         rerankerService: RerankerService = RerankerService(),
         mcpManager: MCPManager = MCPManager(),
-        config: ServerConfig = ServerConfig()
+        config: ServerConfig = ServerConfig(),
+        huggingfaceEndpoint: String? = nil
     ) {
         self.inferenceService = inferenceService
         self.modelManager = modelManager
@@ -339,7 +340,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         self.benchmarkService = BenchmarkService(inferenceService: inferenceService)
         self.perplexityService = PerplexityService(inferenceService: inferenceService)
         self.updateChecker = UpdateChecker()
-        self.hfService = HuggingFaceService(modelDirectory: modelManager.modelsDirectory)
+        self.hfService = HuggingFaceService(modelDirectory: modelManager.modelsDirectory, endpoint: huggingfaceEndpoint)
         self.config = config
         // When HF download completes, re-run discovery so model appears in registry
         self.hfService.onModelDownloaded = { [weak self] repoId in
@@ -402,6 +403,21 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 let response = OpenAIModelsResponse(data: modelList)
                 return try Self.jsonResponse(response)
+            }
+            Get("/v1/models/{id}") { request, context in
+                let modelId = try context.parameters.require("id")
+                let models = self.modelManager.downloadedModels()
+                guard let record = models.first(where: { $0.id == modelId }) else {
+                    return try Self.jsonResponse(["error": ["message": "Model not found: \(modelId)", "type": "invalid_request_error"]], httpStatus: .notFound)
+                }
+                let detector = self.capabilitiesDetector
+                let caps = detector.capabilities(
+                    for: record.id,
+                    modelType: record.modelType,
+                    localURL: record.localURL
+                )
+                let model = OpenAIModel(id: record.id, nova: OpenAIModelNova(capabilities: caps))
+                return try Self.jsonResponse(model)
             }
             Post("/v1/chat/completions") { request, context in
                 let body = try await request.body.collect(upTo: .max)
@@ -1099,22 +1115,57 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
             Post("/v1/responses") { request, context in
                 let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(OpenAIResponseRequest.self, from: body)
+                let rawBody = Data(buffer: body)
+                // DEBUG: dump raw body BEFORE decode to catch decode failures
+                let debugPreURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("tokenhub_pre_decode.json")
+                try? rawBody.write(to: debugPreURL)
+                NovaMLXLog.info("[Tokenhub/Responses] PRE-DECODE dump to \(debugPreURL.path)")
 
+                let req: OpenAIResponseRequest
+                do {
+                    req = try JSONDecoder().decode(OpenAIResponseRequest.self, from: body)
+                } catch {
+                    NovaMLXLog.error("[Tokenhub/Responses] DECODE FAILED: \(error)")
+                    throw error
+                }
+
+                // Tokenhub passthrough: convert Responses API → Chat Completions, forward, convert back
+                if TokenhubManager.shared.isTokenhubModel(req.model) {
+                    return try await Self.handleTokenhubResponsesPassthrough(
+                        req: req, rawBody: rawBody, inference: inference
+                    )
+                }
+
+                let isStreaming = req.stream ?? false
                 let respLoadOutcome = try await Self.ensureModelReady(
-                    modelId: req.model, isStreaming: false,
+                    modelId: req.model, isStreaming: isStreaming,
                     cfg: cfg, inference: inference, embeddings: embeddings,
                     coordinator: coordinator, request: request
                 )
 
                 let respClientType = ClientDetector.detect(request: request)
-                var respResponse = try await Self.handleResponsesRequest(req: req, inference: inference, cfg: cfg, clientType: respClientType)
-                Self.applyKeepAlive(req.keepAlive, modelId: req.model, pool: inference.engine.pool)
-                if case .justLoaded(let ms) = respLoadOutcome {
-                    respResponse.headers[.init("X-Model-Cold-Load")!] = "true"
-                    respResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                if isStreaming {
+                    var respResponse = try await Self.handleStreamResponses(
+                        req: req, inference: inference, cfg: cfg,
+                        clientType: respClientType, coordinator: coordinator
+                    )
+                    if case .justLoaded(let ms) = respLoadOutcome {
+                        respResponse.headers[.init("X-Model-Cold-Load")!] = "true"
+                        respResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                    }
+                    return respResponse
+                } else {
+                    var respResponse = try await Self.handleResponsesRequest(
+                        req: req, inference: inference, cfg: cfg,
+                        clientType: respClientType, coordinator: coordinator
+                    )
+                    Self.applyKeepAlive(req.keepAlive, modelId: req.model, pool: inference.engine.pool)
+                    if case .justLoaded(let ms) = respLoadOutcome {
+                        respResponse.headers[.init("X-Model-Cold-Load")!] = "true"
+                        respResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                    }
+                    return respResponse
                 }
-                return respResponse
             }
             Get("/v1/responses/{id}") { request, context in
                 let responseId = try context.parameters.require("id")
@@ -2163,7 +2214,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             includeInLoadBalance: updated.includeInLoadBalance
                         )
                         // Preserve test result timestamps
-                        try? tokenhubMgr.update(updated)
+                        _ = try? tokenhubMgr.update(updated)
                     }
                 }
                 struct TestResult: Encodable {
@@ -2228,8 +2279,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let params = Self.parseQuery(query)
                     let q = params["q"] ?? ""
                     let limit = Int(params["limit"] ?? "50") ?? 50
-                    let mlxOnly = params["mlx_only"] != "false"
-                    let result = try await hf.searchModels(query: q, limit: limit, mlxOnly: mlxOnly)
+                    let mlxOnly = params["mlx_only"] == "true"
+                    let endpoint = params["endpoint"] ?? params["mirror"]
+                    NovaMLXLog.info("[HF][Search] admin request q=\(q) endpoint=\(endpoint ?? "official") mlxOnly=\(mlxOnly) limit=\(limit)")
+
+                    let searchService: HuggingFaceService = {
+                        if let ep = endpoint, !ep.isEmpty {
+                            return HuggingFaceService(modelDirectory: self.modelManager.modelsDirectory, endpoint: ep)
+                        }
+                        return hf
+                    }()
+
+                    let result = try await searchService.searchModels(query: q, limit: limit, mlxOnly: mlxOnly)
                     return try Self.jsonResponse(result)
                 } catch {
                     NovaMLXLog.error("HF search failed: \(error)")
@@ -2243,7 +2304,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     guard let repoId = params["repo_id"] else {
                         return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
                     }
-                    let detail = try await hf.getModelDetail(repoId: repoId)
+                    let endpoint = params["endpoint"] ?? params["mirror"]
+
+                    let infoService: HuggingFaceService = {
+                        if let ep = endpoint, !ep.isEmpty {
+                            return HuggingFaceService(modelDirectory: self.modelManager.modelsDirectory, endpoint: ep)
+                        }
+                        return hf
+                    }()
+
+                    let detail = try await infoService.getModelDetail(repoId: repoId)
                     return try Self.jsonResponse(detail)
                 } catch {
                     return try Self.jsonResponse(["error": error.localizedDescription])
@@ -2255,10 +2325,24 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
                     let repoId = json["repo_id"] as? String ?? ""
                     let hfToken = json["hf_token"] as? String
+                    let endpoint = json["endpoint"] as? String
                     guard !repoId.isEmpty else {
                         return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
                     }
-                    let task = try await hf.startDownload(repoId: repoId, hfToken: hfToken)
+
+                    if let ep = endpoint, !ep.isEmpty {
+                        NovaMLXLog.info("[HF] Download request for \(repoId) using custom endpoint: \(ep)")
+                    }
+
+                    // Always use the global hf instance so that the created HFDownloadTask
+                    // ends up in the activeTasks that GET /admin/api/hf/tasks returns.
+                    // The live mirrorEndpoint (if any) is passed down so ModelScope / custom
+                    // mirrors still get the correct listing + resolve logic.
+                    let task = try await hf.startDownload(
+                        repoId: repoId,
+                        hfToken: hfToken,
+                        mirrorEndpoint: endpoint
+                    )
                     return try Self.jsonResponse(["success": "true", "task_id": task.id] as [String: String])
                 } catch {
                     return try Self.jsonResponse(["error": error.localizedDescription])
@@ -2668,6 +2752,756 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         }
 
         // Should not reach here, but just in case
+        return Response(status: .badGateway)
+    }
+
+    // MARK: - TokenHub Responses API Passthrough
+    // Converts Responses API request → Chat Completions → forward → convert response back
+
+    private static func handleTokenhubResponsesPassthrough(
+        req: OpenAIResponseRequest,
+        rawBody: Data,
+        inference: InferenceService
+    ) async throws -> Response {
+        // DEBUG: dump raw request
+        let debugRawURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("tokenhub_raw_request.json")
+        try? rawBody.write(to: debugRawURL)
+        NovaMLXLog.info("[Tokenhub/Responses] RAW REQUEST dumped to \(debugRawURL.path) prevId=\(req.previousResponseId ?? "none") input=\(req.input)")
+        NovaMLXLog.info("[Tokenhub/Responses] TOOLS after Codable decode: \(req.tools?.count ?? -1) tools, stream=\(req.stream ?? false)")
+        // Also dump raw JSON tools for comparison
+        if let rawObj = try? JSONSerialization.jsonObject(with: rawBody) as? [String: Any],
+           let rawTools = rawObj["tools"] as? [[String: Any]] {
+            NovaMLXLog.info("[Tokenhub/Responses] RAW JSON tools count: \(rawTools.count)")
+            for (i, t) in rawTools.enumerated() {
+                let ttype = t["type"] as? String ?? "MISSING"
+                let name = t["name"] as? String ?? "MISSING"
+                NovaMLXLog.info("[Tokenhub/Responses]   raw tool[\(i)] type=\(ttype) name=\(name)")
+            }
+        } else {
+            NovaMLXLog.info("[Tokenhub/Responses] RAW JSON: no tools field found in request body")
+        }
+
+        guard let provider = TokenhubManager.shared.resolve(modelName: req.model, tag: nil) else {
+            return try Self.jsonResponse(
+                ["error": ["message": "Unknown tokenhub provider: \(req.model)", "type": "invalid_request_error"]],
+                httpStatus: .badRequest
+            )
+        }
+
+        let isLB = req.model.lowercased() == "tknet"
+        let maxRetries = isLB ? 2 : 0
+        var triedProviders = Set<String>()
+        var lastProvider = provider
+
+        func effectiveApiKey(_ p: TokenhubProvider) -> String {
+            if p.isManaged { return AuthCache.loadSession() ?? "" }
+            return p.apiKey
+        }
+
+        // Convert Responses API request → Chat Completions request
+        func buildChatCompletionsBody(remoteModel: String) async throws -> Data {
+            var messages: [[String: Any]] = []
+            var messageImageBlocks: [Int: [String]] = [:]  // messageIdx → imageURLs for preprocessing
+            if let instructions = req.instructions, !instructions.isEmpty {
+                messages.append(["role": "system", "content": instructions])
+            }
+
+            // Resolve previous_response_id: prepend stored conversation history
+            if let prevId = req.previousResponseId {
+                if let prevResp = ResponseStore.shared.get(prevId) {
+                    let prevMsgs = Self.extractMessagesFromResponse(prevResp)
+                    for msg in prevMsgs {
+                        var entry: [String: Any] = ["role": msg.role.rawValue]
+                        if let content = msg.content { entry["content"] = content }
+                        if let toolCalls = msg.toolCalls {
+                            entry["tool_calls"] = toolCalls.map { tc in
+                                [
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": ["name": tc.functionName, "arguments": tc.arguments]
+                                ] as [String: Any]
+                            }
+                        }
+                        messages.append(entry)
+                    }
+                } else {
+                    NovaMLXLog.warning("[Tokenhub/Responses] previous_response_id '\(prevId)' not found in ResponseStore")
+                }
+            }
+
+            switch req.input {
+            case .text(let prompt):
+                messages.append(["role": "user", "content": prompt])
+            case .items(let items):
+                for item in items {
+                    switch item {
+                    case .message(let msg):
+                        let role = msg.role == "developer" ? "system" : msg.role
+                        let (text, imageURLs) = ImagePreprocessor.extractContent(msg.content)
+                        if imageURLs.isEmpty {
+                            messages.append(["role": role, "content": text])
+                        } else if lastProvider.supportsVision {
+                            // Provider supports vision — build multimodal content parts
+                            var contentParts: [[String: Any]] = []
+                            if !text.isEmpty {
+                                contentParts.append(["type": "text", "text": text])
+                            }
+                            for url in imageURLs {
+                                contentParts.append(["type": "image_url", "image_url": ["url": url]])
+                            }
+                            messages.append(["role": role, "content": contentParts])
+                        } else {
+                            // Text-only provider — collect images for preprocessing
+                            messageImageBlocks[messages.count] = imageURLs
+                            messages.append(["role": role, "content": text])
+                        }
+                    case .functionCall(let fc):
+                        // Validate arguments — model may produce invalid JSON
+                        var args = fc.arguments
+                        if !isValidJSON(args) {
+                            // Try to fix: quote unquoted values like {"key": some value}
+                            args = fixJSONArguments(args)
+                        }
+                        messages.append([
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [[
+                                "id": fc.callId,
+                                "type": "function",
+                                "function": ["name": fc.name, "arguments": args]
+                            ] as [String: Any]]
+                        ])
+                    case .functionCallOutput(let fcOut):
+                        messages.append(["role": "tool", "content": fcOut.output, "tool_call_id": fcOut.callId])
+                    case .reasoning(let r):
+                        // DeepSkip requires reasoning_content on assistant messages when using thinking mode
+                        let summaryText = (r.summary ?? []).map { $0.text }.joined(separator: "\n")
+                        if !summaryText.isEmpty {
+                            for j in stride(from: messages.count - 1, through: 0, by: -1) {
+                                if messages[j]["role"] as? String == "assistant" {
+                                    messages[j]["reasoning_content"] = summaryText
+                                    break
+                                }
+                            }
+                        }
+                    case .skipped:
+                        break
+                    }
+                }
+            case .none:
+                break
+            }
+
+            // Merge consecutive same-role messages — most providers reject them
+            // user+user → single user with concatenated content
+            // assistant(text)+assistant(tool_calls) → single assistant with both
+            var merged: [[String: Any]] = []
+            for msg in messages {
+                guard let last = merged.last else { merged.append(msg); continue }
+                let lastRole = last["role"] as? String ?? ""
+                let msgRole = msg["role"] as? String ?? ""
+                if lastRole == msgRole {
+                    if msgRole == "user" {
+                        // Merge user messages
+                        let prev = last["content"] as? String ?? ""
+                        let cur = msg["content"] as? String ?? ""
+                        merged[merged.count - 1]["content"] = prev + "\n" + cur
+                    } else if msgRole == "assistant" {
+                        // Merge: prev has text, new has tool_calls (or vice versa)
+                        var combined = last
+                        if let tc = msg["tool_calls"] as? [[String: Any]] {
+                            var existing = combined["tool_calls"] as? [[String: Any]] ?? []
+                            existing.append(contentsOf: tc)
+                            combined["tool_calls"] = existing
+                            if let c = msg["content"] as? String, !c.isEmpty {
+                                let prev = combined["content"] as? String ?? ""
+                                combined["content"] = prev.isEmpty ? c : prev + "\n" + c
+                            }
+                        } else if let c = msg["content"] as? String, !c.isEmpty {
+                            let prev = combined["content"] as? String ?? ""
+                            combined["content"] = prev.isEmpty ? c : prev + "\n" + c
+                        }
+                        merged[merged.count - 1] = combined
+                    } else {
+                        merged.append(msg)
+                    }
+                } else {
+                    merged.append(msg)
+                }
+            }
+            messages = merged
+
+            // Image preprocessing: convert images to text descriptions for text-only providers
+            if !messageImageBlocks.isEmpty && !lastProvider.supportsVision {
+                let backend = ImagePreprocessor.resolveBackend(provider: lastProvider, inference: inference)
+                let result = await ImagePreprocessor.preprocess(
+                    messages: messages,
+                    imageBlocks: messageImageBlocks,
+                    backend: backend,
+                    inference: inference
+                )
+                messages = result.messages
+                if result.imagesProcessed > 0 {
+                    NovaMLXLog.info("[Tokenhub/Responses] Preprocessed \(result.imagesProcessed) images for text-only provider \(lastProvider.name)")
+                }
+            }
+
+            // DeepSeek requires reasoning_content on ALL assistant messages when thinking mode is active
+            // If any assistant msg has reasoning_content, backfill empty string on the rest
+            let hasReasoning = messages.contains { ($0["role"] as? String) == "assistant" && $0["reasoning_content"] != nil }
+            if hasReasoning {
+                for i in messages.indices where (messages[i]["role"] as? String) == "assistant" {
+                    if messages[i]["reasoning_content"] == nil {
+                        messages[i]["reasoning_content"] = ""
+                    }
+                }
+            }
+
+            // Helper: check if string is valid JSON
+            func isValidJSON(_ str: String) -> Bool {
+                guard !str.isEmpty,
+                      let data = str.data(using: .utf8),
+                      let _ = try? JSONSerialization.jsonObject(with: data) else { return false }
+                return true
+            }
+
+            // Helper: fix common malformed JSON from model output
+            func fixJSONArguments(_ str: String) -> String {
+                guard let regex = try? NSRegularExpression(pattern: ":\\s*([^\"\\[\\{\\dtnf][^\\}]*?)\\s*([\\},])") else { return "{}" }
+                let range = NSRange(str.startIndex..., in: str)
+                var fixed = str
+                if let match = regex.firstMatch(in: str, range: range) {
+                    if let valRange = Range(match.range(at: 1), in: str),
+                       let endRange = Range(match.range(at: 2), in: str) {
+                        let value = String(fixed[valRange])
+                        let escaped = value.replacingOccurrences(of: "\"", with: "\\\"")
+                        fixed = String(fixed[..<valRange.lowerBound]) + "\"" + escaped + "\"" + String(fixed[endRange.lowerBound...])
+                    }
+                }
+                return fixed
+            }
+
+            var body: [String: Any] = [
+                "model": remoteModel,
+                "messages": messages
+            ]
+            if let temp = req.temperature { body["temperature"] = temp }
+            if let topP = req.topP { body["top_p"] = topP }
+            if let maxTokens = req.maxOutputTokens { body["max_tokens"] = maxTokens }
+            if let stream = req.stream { body["stream"] = stream }
+
+            // Convert tools — only forward function-type tools with valid names
+            // Codex sends Responses API format (name at top level) AND non-function tools (web_search, etc)
+            // Must convert Responses format → Chat Completions format for upstream
+            if let rawTools = (try? JSONSerialization.jsonObject(with: rawBody)) as? [String: Any],
+               let toolsArray = rawTools["tools"] as? [[String: Any]] {
+                var functionTools: [[String: Any]] = []
+                for tool in toolsArray {
+                    let toolType = tool["type"] as? String ?? "function"
+                    // Skip non-function tools (web_search, code_interpreter, etc.)
+                    guard toolType == "function" || tool["function"] != nil else { continue }
+
+                    // Try Responses API format: name at top level
+                    if let name = tool["name"] as? String, !name.isEmpty {
+                        var fnDict: [String: Any] = [
+                            "name": name,
+                            "description": tool["description"] as? String ?? ""
+                        ]
+                        if let params = tool["parameters"] as? [String: Any] {
+                            fnDict["parameters"] = params
+                        }
+                        functionTools.append(["type": "function", "function": fnDict])
+                    }
+                    // Try Chat Completions format: name is nested under "function"
+                    else if let fn = tool["function"] as? [String: Any],
+                            let fnName = fn["name"] as? String, !fnName.isEmpty {
+                        functionTools.append(tool)
+                    }
+                    // else: tool has no valid name — skip it entirely
+                }
+                if !functionTools.isEmpty {
+                    body["tools"] = functionTools
+                }
+            } else if let tools = req.tools, !tools.isEmpty {
+                // Fallback to Codable-decoded tools if rawBody parsing fails
+                let functionTools = tools.filter { $0.type == "function" && !$0.name.isEmpty }
+                if !functionTools.isEmpty {
+                    body["tools"] = functionTools.map { tool -> [String: Any] in
+                        var fn: [String: Any] = [
+                            "name": tool.name,
+                            "description": tool.description ?? ""
+                        ]
+                        if let params = tool.parameters,
+                           let paramData = try? JSONEncoder().encode(params),
+                           let paramObj = try? JSONSerialization.jsonObject(with: paramData) {
+                            fn["parameters"] = paramObj
+                        }
+                        return ["type": "function", "function": fn]
+                    }
+                }
+            }
+
+            // Convert text.format → response_format
+            if let textFormat = req.text?.format {
+                var rf: [String: Any] = ["type": textFormat.type]
+                if let schema = textFormat.schema,
+                   let schemaData = try? JSONEncoder().encode(schema),
+                   let schemaObj = try? JSONSerialization.jsonObject(with: schemaData) {
+                    rf["json_schema"] = schemaObj
+                }
+                body["response_format"] = rf
+            }
+
+            // Safety: strip any tools that somehow lack a valid function.name
+            if var toolsArray = body["tools"] as? [[String: Any]] {
+                toolsArray = toolsArray.filter { tool in
+                    guard let fn = tool["function"] as? [String: Any],
+                          let name = fn["name"] as? String, !name.isEmpty else {
+                        return false
+                    }
+                    return true
+                }
+                body["tools"] = toolsArray.isEmpty ? nil : toolsArray
+            }
+
+            // DEBUG: dump final body after all conversions
+            if let dumpData = try? JSONSerialization.data(withJSONObject: body, options: .prettyPrinted) {
+                let debugURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("tokenhub_debug_messages.json")
+                try? dumpData.write(to: debugURL)
+                NovaMLXLog.info("[Tokenhub/Responses] DEBUG final body: \(messages.count) msgs, \(body["tools"] != nil ? "with tools" : "no tools")")
+            }
+
+            return try JSONSerialization.data(withJSONObject: body)
+        }
+
+        // Convert Chat Completions response → Responses API response
+        func convertToResponsesResponse(_ chatData: Data, model: String) -> Data? {
+            guard let json = try? JSONSerialization.jsonObject(with: chatData) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let first = choices.first,
+                  let message = first["message"] as? [String: Any] else { return nil }
+
+            let content = message["content"] as? String ?? ""
+            let usage = json["usage"] as? [String: Any]
+            let responseId = "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
+
+            var toolCalls: [[String: Any]] = []
+            if let tc = message["tool_calls"] as? [[String: Any]] {
+                for (idx, call) in tc.enumerated() {
+                    let fn = call["function"] as? [String: Any] ?? [:]
+                    toolCalls.append([
+                        "type": "function_call",
+                        "id": "fc_\(responseId.suffix(12))_\(idx)",
+                        "status": "completed",
+                        "call_id": call["id"] ?? "",
+                        "name": fn["name"] ?? "",
+                        "arguments": fn["arguments"] ?? ""
+                    ])
+                }
+            }
+
+            var output: [[String: Any]] = []
+
+            if !content.isEmpty {
+                output.append([
+                    "type": "message",
+                    "id": "msg_\(responseId.suffix(12))",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [["type": "output_text", "text": content, "annotations": []]]
+                ])
+            }
+            for tc in toolCalls {
+                output.append(tc)
+            }
+
+            var response: [String: Any] = [
+                "id": responseId,
+                "object": "response",
+                "created_at": Int(Date().timeIntervalSince1970),
+                "model": model,
+                "status": "completed",
+                "output": output
+            ]
+            if let usage {
+                response["usage"] = [
+                    "input_tokens": usage["prompt_tokens"] ?? 0,
+                    "output_tokens": usage["completion_tokens"] ?? 0,
+                    "total_tokens": usage["total_tokens"] ?? 0
+                ]
+            }
+
+            // Store for previous_response_id support — include user input for multi-turn
+            var storeResponse = response
+            var storeOutput = output
+            var userText: String?
+            switch req.input {
+            case .text(let t): userText = t
+            case .items(let items):
+                userText = items.compactMap { item -> String? in
+                    if case .message(let msg) = item { return msg.content.textValue }
+                    return nil
+                }.joined(separator: "\n")
+            case .none: break
+            }
+            if let ut = userText, !ut.isEmpty {
+                storeOutput.insert([
+                    "type": "message",
+                    "id": "msg_user_\(responseId.suffix(12))",
+                    "status": "completed",
+                    "role": "user",
+                    "content": [["type": "output_text", "text": ut, "annotations": []]]
+                ], at: 0)
+            }
+            storeResponse["output"] = storeOutput
+            if let respObj = try? JSONDecoder().decode(OpenAIResponseObject.self, from: try JSONSerialization.data(withJSONObject: storeResponse)) {
+                ResponseStore.shared.put(respObj)
+            }
+
+            return try? JSONSerialization.data(withJSONObject: response)
+        }
+
+        for attempt in 0...maxRetries {
+            triedProviders.insert(lastProvider.name)
+            let isStreaming = req.stream ?? false
+
+            // Provider natively supports /v1/responses → raw passthrough, no conversion
+            if lastProvider.supportsResponsesAPI {
+                NovaMLXLog.info("[Tokenhub/Responses] -> \(lastProvider.name) RAW PASSTHROUGH streaming=\(isStreaming)\(attempt > 0 ? " retry#\(attempt)" : "")")
+
+                // Swap model name in raw body, forward as-is
+                var rawObj = (try? JSONSerialization.jsonObject(with: rawBody)) as? [String: Any] ?? [:]
+                rawObj["model"] = lastProvider.remoteModel
+                let forwardBody = try? JSONSerialization.data(withJSONObject: rawObj)
+
+                let baseURL = URL(string: lastProvider.endpoint)!
+                var urlRequest = URLRequest(url: baseURL.appendingPathComponent("responses"))
+                urlRequest.httpMethod = "POST"
+                urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                if !effectiveApiKey(lastProvider).isEmpty {
+                    urlRequest.setValue("Bearer \(effectiveApiKey(lastProvider))", forHTTPHeaderField: "Authorization")
+                }
+                urlRequest.timeoutInterval = 120
+                urlRequest.httpBody = forwardBody
+
+                if isStreaming {
+                    let start = ContinuousClock.now
+                    let (bytes, urlResponse) = try await URLSession.shared.bytes(for: urlRequest)
+                    guard let http = urlResponse as? HTTPURLResponse, http.statusCode == 200 else {
+                        let statusCode = (urlResponse as? HTTPURLResponse)?.statusCode ?? 502
+                        NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) raw passthrough streaming failed HTTP \(statusCode)")
+                        let elapsed = ContinuousClock.now - start
+                        TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: durationToMs(elapsed))
+                        if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
+                            lastProvider = next
+                            continue
+                        }
+                        return Response(status: .init(integerLiteral: statusCode))
+                    }
+                    let elapsed = ContinuousClock.now - start
+                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: true, latencyMs: durationToMs(elapsed))
+
+                    // Pass through SSE events as-is, inject X-Tokenhub-Provider header
+                    let providerName = lastProvider.name
+                    let responseBody = ResponseBody { writer in
+                        do {
+                            for try await line in bytes.lines {
+                                try await writer.write(ByteBuffer(string: "\(line)\n"))
+                            }
+                        } catch {
+                            NovaMLXLog.warning("[Tokenhub/Responses] Raw passthrough stream error: \(error)")
+                        }
+                    }
+                    var headers = HTTPFields()
+                    headers[.init("X-Tokenhub-Provider")!] = providerName
+                    return Response(status: .ok, headers: headers, body: responseBody)
+                } else {
+                    // Non-streaming: forward and return as-is
+                    let start = ContinuousClock.now
+                    let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+                    let statusCode = (urlResponse as? HTTPURLResponse)?.statusCode ?? 502
+                    let elapsed = ContinuousClock.now - start
+                    let success = (200...299).contains(statusCode)
+                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: success, latencyMs: durationToMs(elapsed))
+
+                    if !success {
+                        NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) raw passthrough failed HTTP \(statusCode)")
+                        if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
+                            lastProvider = next
+                            continue
+                        }
+                        return Response(status: .init(integerLiteral: statusCode), body: ResponseBody(byteBuffer: ByteBuffer(data: data)))
+                    }
+
+                    var hdrs = HTTPFields()
+                    hdrs[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    return Response(status: .ok, headers: hdrs, body: ResponseBody(byteBuffer: ByteBuffer(data: data)))
+                }
+            }
+
+            // Provider does NOT support /v1/responses → convert Responses→ChatCompletions
+            NovaMLXLog.info("[Tokenhub/Responses] -> \(lastProvider.name) remoteModel=\(lastProvider.remoteModel) streaming=\(isStreaming)\(attempt > 0 ? " retry#\(attempt)" : "")")
+
+            let bodyData = try await buildChatCompletionsBody(remoteModel: lastProvider.remoteModel)
+            let baseURL = URL(string: lastProvider.endpoint)!
+            var urlRequest = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
+            urlRequest.httpMethod = "POST"
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if !effectiveApiKey(lastProvider).isEmpty {
+                urlRequest.setValue("Bearer \(effectiveApiKey(lastProvider))", forHTTPHeaderField: "Authorization")
+            }
+            urlRequest.timeoutInterval = 120
+            urlRequest.httpBody = bodyData
+
+            if isStreaming {
+                let start = ContinuousClock.now
+                let (bytes, urlResponse) = try await URLSession.shared.bytes(for: urlRequest)
+                guard let http = urlResponse as? HTTPURLResponse, http.statusCode == 200 else {
+                    let statusCode = (urlResponse as? HTTPURLResponse)?.statusCode ?? 502
+                    NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) streaming failed HTTP \(statusCode)")
+                    let elapsed = ContinuousClock.now - start
+                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: durationToMs(elapsed))
+                    if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
+                        lastProvider = next
+                        continue
+                    }
+                    return Response(status: .init(integerLiteral: statusCode))
+                }
+                let elapsed = ContinuousClock.now - start
+                TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: true, latencyMs: durationToMs(elapsed))
+
+                let responseId = "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
+                let msgId = "msg_\(responseId.suffix(12))"
+                let model = lastProvider.remoteModel
+                let providerName = lastProvider.name
+
+                let responseBody = ResponseBody { writer in
+                    do {
+                        func sse(_ event: String, _ data: Encodable) async throws {
+                            let jsonData = try JSONEncoder().encode(data)
+                            try await writer.write(ByteBuffer(string: "event: \(event)\ndata: \(String(data: jsonData, encoding: .utf8) ?? "")\n\n"))
+                        }
+
+                        let emptyResp = ResponsesSSEResponse(id: responseId, status: "in_progress", model: model)
+                        try await sse("response.created", ResponsesSSECreated(response: emptyResp))
+                        try await sse("response.in_progress", ResponsesSSECreated(response: emptyResp))
+
+                        // Track output items: text message + potential tool calls + reasoning
+                        var fullText = ""
+                        var textMessageStarted = false
+                        var outputItems: [ResponseOutputItem] = []
+                        var currentOutputIndex = 0
+
+                        // Tool call tracking (parallel calls supported)
+                        struct ToolCallAccumulator {
+                            var id: String
+                            var callId: String
+                            var name: String
+                            var arguments: String
+                        }
+                        var toolCalls: [Int: ToolCallAccumulator] = [:]  // index → accumulator
+
+                        // Reasoning tracking
+                        var reasoningId: String? = nil
+                        var reasoningText = ""
+                        var reasoningStarted = false
+
+                        func startTextMessage() async throws {
+                            guard !textMessageStarted else { return }
+                            textMessageStarted = true
+                            try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: currentOutputIndex, item: .message(ResponseOutputMessage(id: msgId, status: "in_progress", content: []))))
+                            try await sse("response.content_part.added", ResponsesSSEContentPartAdded(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, part: ResponseContentItem(text: "")))
+                        }
+
+                        func finishTextMessage() async throws {
+                            guard textMessageStarted else { return }
+                            textMessageStarted = false
+                            try await sse("response.output_text.done", ResponsesSSETextDone(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, text: fullText))
+                            try await sse("response.content_part.done", ResponsesSSEContentPartDone(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, part: ResponseContentItem(text: fullText)))
+                            try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .message(ResponseOutputMessage(id: msgId, content: [ResponseContentItem(text: fullText)]))))
+                            outputItems.append(.message(ResponseOutputMessage(id: msgId, content: [ResponseContentItem(text: fullText)])))
+                            currentOutputIndex += 1
+                        }
+
+                        for try await line in bytes.lines {
+                            guard line.hasPrefix("data: ") else { continue }
+                            if line == "data: [DONE]" { break }
+
+                            let jsonStr = String(line.dropFirst(6))
+                            guard let jsonData = jsonStr.data(using: .utf8),
+                                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                                  let choices = json["choices"] as? [[String: Any]],
+                                  let first = choices.first else { continue }
+
+                            let delta = first["delta"] as? [String: Any] ?? [:]
+
+                            // Handle text content
+                            if let content = delta["content"] as? String, !content.isEmpty {
+                                try await startTextMessage()
+                                fullText += content
+                                try await sse("response.output_text.delta", ResponsesSSETextDelta(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, delta: content))
+                            }
+
+                            // Handle reasoning/thinking content
+                            if let reasoningContent = delta["reasoning_content"] as? String, !reasoningContent.isEmpty {
+                                if !reasoningStarted {
+                                    reasoningStarted = true
+                                    let rsId = "rs_\(responseId.suffix(12))"
+                                    reasoningId = rsId
+                                    try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, status: "in_progress"))))
+                                }
+                                reasoningText += reasoningContent
+                                if let rsId = reasoningId {
+                                    try await sse("response.reasoning.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: reasoningContent))
+                                }
+                            }
+
+                            // Handle tool calls (parallel calls at different indices)
+                            if let toolCallDeltas = delta["tool_calls"] as? [[String: Any]] {
+                                // Finish any open text message before tool calls
+                                try await finishTextMessage()
+
+                                // Finish reasoning if active
+                                if reasoningStarted, let rsId = reasoningId {
+                                    let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
+                                    try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                                    try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
+                                    outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
+                                    currentOutputIndex += 1
+                                    reasoningStarted = false
+                                }
+
+                                for tcDelta in toolCallDeltas {
+                                    let tcIndex = tcDelta["index"] as? Int ?? 0
+                                    if toolCalls[tcIndex] == nil {
+                                        // New tool call — extract id, name
+                                        let tcId = "fc_\(responseId.suffix(12))_\(tcIndex)"
+                                        let callId = tcDelta["id"] as? String ?? "call_\(tcId)"
+                                        let fn = tcDelta["function"] as? [String: Any] ?? [:]
+                                        let name = fn["name"] as? String ?? ""
+
+                                        let outputIdx = currentOutputIndex + tcIndex
+                                        toolCalls[tcIndex] = ToolCallAccumulator(id: tcId, callId: callId, name: name, arguments: "")
+
+                                        // Emit output_item.added for function_call
+                                        try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: outputIdx, item: .functionCall(ResponseOutputFunctionCall(id: tcId, callId: callId, name: name, arguments: "", status: "in_progress"))))
+                                    }
+
+                                    // Accumulate argument deltas
+                                    if let fn = tcDelta["function"] as? [String: Any],
+                                       let argsDelta = fn["arguments"] as? String, !argsDelta.isEmpty {
+                                        toolCalls[tcIndex]?.arguments += argsDelta
+                                        let outputIdx = currentOutputIndex + tcIndex
+                                        let tc = toolCalls[tcIndex]!
+                                        try await sse("response.function_call_arguments.delta", ResponsesSSEFunctionCallArgsDelta(itemId: tc.id, outputIndex: outputIdx, callId: tc.callId, delta: argsDelta))
+                                    }
+                                }
+                            }
+                        }
+
+                        // Finish any open text message
+                        try await finishTextMessage()
+
+                        // Finish reasoning if still active
+                        if reasoningStarted, let rsId = reasoningId {
+                            let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
+                            try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                            try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
+                            outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
+                            currentOutputIndex += 1
+                        }
+
+                        // Finish tool calls
+                        for (tcIndex, tc) in toolCalls.sorted(by: { $0.key < $1.key }) {
+                            let outputIdx = currentOutputIndex + tcIndex
+                            try await sse("response.function_call_arguments.done", ResponsesSSEFunctionCallArgsDone(itemId: tc.id, outputIndex: outputIdx, callId: tc.callId, arguments: tc.arguments))
+                            try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: outputIdx, item: .functionCall(ResponseOutputFunctionCall(id: tc.id, callId: tc.callId, name: tc.name, arguments: tc.arguments))))
+                            outputItems.append(.functionCall(ResponseOutputFunctionCall(id: tc.id, callId: tc.callId, name: tc.name, arguments: tc.arguments)))
+                        }
+                        if !toolCalls.isEmpty {
+                            currentOutputIndex += toolCalls.count
+                        }
+
+                        // Final completed event — include user input for previous_response_id multi-turn
+                        var allOutputItems: [ResponseOutputItem] = []
+                        var userTextForStorage: String?
+                        switch req.input {
+                        case .text(let t): userTextForStorage = t
+                        case .items(let items):
+                            userTextForStorage = items.compactMap { item -> String? in
+                                if case .message(let msg) = item { return msg.content.textValue }
+                                return nil
+                            }.joined(separator: "\n")
+                        case .none: break
+                        }
+                        if let ut = userTextForStorage, !ut.isEmpty {
+                            allOutputItems.append(.message(ResponseOutputMessage(
+                                id: "msg_user_\(responseId.suffix(12))",
+                                role: "user",
+                                content: [ResponseContentItem(text: ut)]
+                            )))
+                        }
+                        allOutputItems.append(contentsOf: outputItems)
+
+                        // Client sees only assistant output; store includes user input for multi-turn
+                        let clientResp = OpenAIResponseObject(id: responseId, model: model, output: outputItems)
+                        try await sse("response.completed", ResponsesSSECompleted(response: clientResp))
+                        let storeResp = OpenAIResponseObject(id: responseId, model: model, output: allOutputItems)
+                        ResponseStore.shared.put(storeResp)
+                        try await writer.finish(nil)
+                    } catch {
+                        try? await writer.finish(nil)
+                    }
+                }
+
+                var headers = HTTPFields()
+                headers[.contentType] = "text/event-stream"
+                headers[.cacheControl] = "no-cache"
+                headers[.init("X-Tokenhub-Provider")!] = providerName
+                return Response(status: .ok, headers: headers, body: responseBody)
+            } else {
+                // Non-streaming
+                let start = ContinuousClock.now
+                let (data, urlResponse) = try await URLSession.shared.data(for: urlRequest)
+                let elapsed = ContinuousClock.now - start
+                let latencyMs = durationToMs(elapsed)
+                guard let http = urlResponse as? HTTPURLResponse else {
+                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: latencyMs)
+                    if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
+                        lastProvider = next
+                        continue
+                    }
+                    return Response(status: .internalServerError)
+                }
+                let success = http.statusCode < 400
+                TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: success, latencyMs: latencyMs)
+
+                if http.statusCode >= 400 {
+                    let body = String(data: data, encoding: .utf8)?.prefix(300) ?? "nil"
+                    NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) error HTTP \(http.statusCode): \(body)")
+                    if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
+                        lastProvider = next
+                        continue
+                    }
+                    var headers: HTTPFields = [.contentType: "application/json"]
+                    headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    return Response(status: .init(integerLiteral: http.statusCode), headers: headers, body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+
+                // Convert Chat Completions response → Responses API response
+                if let convertedData = convertToResponsesResponse(data, model: req.model) {
+                    var headers: HTTPFields = [.contentType: "application/json"]
+                    headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: convertedData)))
+                } else {
+                    // Fallback: return raw Chat Completions response
+                    var headers: HTTPFields = [.contentType: "application/json"]
+                    headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+            }
+        }
+
         return Response(status: .badGateway)
     }
 
@@ -3626,28 +4460,67 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     private static func handleResponsesRequest(
         req: OpenAIResponseRequest, inference: InferenceService,
-        cfg: ServerConfig, clientType: ClientType
+        cfg: ServerConfig, clientType: ClientType,
+        coordinator: AutoLoadCoordinator
     ) async throws -> Response {
-        var messages: [ChatMessage] = []
-        if let instructions = req.instructions {
-            messages.append(ChatMessage(role: .system, content: instructions))
+        var messages = mapResponsesInput(req)
+
+        // Tokenhub routing
+        if TokenhubManager.shared.isTokenhubModel(req.model) {
+            let rawDict = try JSONSerialization.jsonObject(with: try JSONEncoder().encode(req)) as? [String: Any]
+            return try await Self.handleTokenhubPassthrough(
+                modelName: req.model, rawBody: try JSONEncoder().encode(req),
+                path: "responses", inference: inference,
+                tag: rawDict?["tag"] as? String
+            )
         }
-        switch req.input {
-        case .text(let prompt):
-            messages.append(ChatMessage(role: .user, content: prompt))
-        case .messages(let inputMessages):
-            for msg in inputMessages {
-                let role: ChatMessage.Role = msg.role == "assistant" ? .assistant : .user
-                messages.append(ChatMessage(role: role, content: msg.content))
+
+        // Resolve previous_response_id: prepend stored messages
+        if let prevId = req.previousResponseId {
+            if let prevResp = ResponseStore.shared.get(prevId) {
+                let prevMessages = Self.extractMessagesFromResponse(prevResp)
+                messages = prevMessages + messages
+            } else {
+                throw NovaMLXError.apiError("previous_response_id '\(prevId)' not found or expired")
             }
-        case .none:
-            break
+        }
+
+        // Convert text.format to response_format
+        var responseFormat: ResponseFormat? = nil
+        var jsonSchemaDef: [String: Any]? = nil
+        if let fmt = req.text?.format, fmt.type == "json_schema" || fmt.type == "json_object" {
+            responseFormat = .jsonObject
+            if fmt.type == "json_schema", let schema = fmt.schema {
+                jsonSchemaDef = unwrapAnyCodable(schema) as? [String: Any]
+            }
+        }
+
+        // Convert tools to internal format
+        let tools: [[String: Any]]? = req.tools?.compactMap { tool in
+            guard tool.type == "function" else { return nil }
+            var dict: [String: Any] = [
+                "type": "function",
+                "function": [
+                    "name": tool.name,
+                    "description": tool.description ?? ""
+                ] as [String: Any]
+            ]
+            if let params = tool.parameters {
+                var fnDict = dict["function"] as! [String: Any]
+                fnDict["parameters"] = unwrapAnyCodable(params)
+                dict["function"] = fnDict
+            }
+            return dict
         }
 
         let request = InferenceRequest(
             model: req.model, messages: messages,
+            tools: tools,
             temperature: req.temperature, maxTokens: req.maxOutputTokens,
-            topP: req.topP, stream: false
+            topP: req.topP, stream: false,
+            responseFormat: responseFormat,
+            jsonSchemaDef: jsonSchemaDef,
+            enableThinking: req.reasoning != nil
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -3655,24 +4528,248 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let result = try await inference.generate(request)
         let responseId = "resp_\(result.id.uuidString.prefix(24))"
         let outputItemId = "msg_\(result.id.uuidString.prefix(24))"
+
+        var outputItems: [ResponseOutputItem] = []
+        // Main text output
+        outputItems.append(.message(ResponseOutputMessage(
+            id: outputItemId,
+            content: [ResponseContentItem(text: result.text)]
+        )))
+        // Tool calls
+        if let toolCalls = result.toolCalls {
+            for tc in toolCalls {
+                outputItems.append(.functionCall(ResponseOutputFunctionCall(
+                    id: "fc_\(tc.id.prefix(24))",
+                    callId: tc.id,
+                    name: tc.functionName,
+                    arguments: tc.arguments
+                )))
+            }
+        }
+
+        let ctxWin = inference.getContextWindow(for: req.model) ?? 0
+        let scaledInput = clientType.shouldScaleContext
+            ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin)
+            : result.promptTokens
+        let scaledOutput = clientType.shouldScaleContext
+            ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin)
+            : result.completionTokens
+
         let response = OpenAIResponseObject(
             id: responseId,
             model: result.model,
-            output: [
-                ResponseOutputItem(
-                    id: outputItemId,
-                    content: [ResponseContentItem(text: result.text)]
-                )
-            ],
-            usage: {
-                let ctxWin = inference.getContextWindow(for: req.model) ?? 0
-                let p = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
-                let c = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin) : result.completionTokens
-                return OpenAIUsage(promptTokens: p, completionTokens: c)
-            }()
+            output: outputItems,
+            usage: ResponsesUsage(inputTokens: scaledInput, outputTokens: scaledOutput)
         )
-        ResponseStore.shared.put(response)
+        // Store with user messages prepended for previous_response_id multi-turn
+        var storeOutputItems: [ResponseOutputItem] = []
+        for msg in messages {
+            let itemId = "msg_user_\(UUID().uuidString.prefix(12))"
+            storeOutputItems.append(.message(ResponseOutputMessage(id: itemId, role: msg.role.rawValue, content: [ResponseContentItem(text: msg.content ?? "")])))
+        }
+        storeOutputItems.append(contentsOf: outputItems)
+        let storeResponse = OpenAIResponseObject(id: responseId, model: result.model, output: storeOutputItems, usage: ResponsesUsage(inputTokens: scaledInput, outputTokens: scaledOutput))
+        ResponseStore.shared.put(storeResponse)
         return try jsonResponse(response)
+    }
+
+    /// Extract ChatMessages from a stored response for conversation continuation
+    private static func extractMessagesFromResponse(_ response: OpenAIResponseObject) -> [ChatMessage] {
+        var messages: [ChatMessage] = []
+        for item in response.output {
+            switch item {
+            case .message(let msg):
+                let role: ChatMessage.Role = msg.role == "assistant" ? .assistant : .user
+                let text = msg.content.map { $0.text }.joined()
+                messages.append(ChatMessage(role: role, content: text))
+            case .functionCall(let fc):
+                let toolCalls = [ToolCallResult(id: fc.callId, functionName: fc.name, arguments: fc.arguments)]
+                messages.append(ChatMessage(role: .assistant, content: nil, toolCalls: toolCalls))
+            case .reasoning:
+                break  // Reasoning items are not converted to chat messages
+            }
+        }
+        return messages
+    }
+
+    // MARK: - Responses API Streaming
+
+    private static func handleStreamResponses(
+        req: OpenAIResponseRequest, inference: InferenceService,
+        cfg: ServerConfig, clientType: ClientType,
+        coordinator: AutoLoadCoordinator
+    ) async throws -> Response {
+        var messages = mapResponsesInput(req)
+
+        // Resolve previous_response_id
+        if let prevId = req.previousResponseId {
+            if let prevResp = ResponseStore.shared.get(prevId) {
+                let prevMessages = Self.extractMessagesFromResponse(prevResp)
+                messages = prevMessages + messages
+            } else {
+                throw NovaMLXError.apiError("previous_response_id '\(prevId)' not found or expired")
+            }
+        }
+
+        let capturedMessages = messages
+        let request = InferenceRequest(
+            model: req.model, messages: messages,
+            temperature: req.temperature, maxTokens: req.maxOutputTokens,
+            topP: req.topP, stream: true,
+            enableThinking: req.reasoning != nil
+        )
+
+        let reqTag = request.id.uuidString.prefix(8)
+        let responseId = "resp_\(request.id.uuidString.prefix(24))"
+        let msgId = "msg_\(request.id.uuidString.prefix(24))"
+        let rsId = "rs_\(request.id.uuidString.prefix(24))"
+        let modelId = req.model
+
+        let keepAliveStream = Self.withSSEKeepAlive(
+            Self.loadAwareStream(
+                modelId: modelId, inference: inference,
+                coordinator: coordinator, autoLoadCfg: cfg.autoLoad,
+                inferenceStreamProducer: { inference.stream(request) }
+            ),
+            reqTag: String(reqTag)
+        )
+
+        let body: ResponseBody = .init { writer in
+            CurrentInferenceModel.shared.modelID = modelId
+            defer { CurrentInferenceModel.shared.modelID = nil }
+            var fullText = ""
+            var reasoningText = ""
+            var tokenCount = 0
+            let encoder = JSONEncoder()
+            let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: modelId)
+            let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
+            var outputItems: [ResponseOutputItem] = []
+            var currentOutputIndex = 0
+            var textMessageStarted = false
+            var reasoningStarted = false
+
+            func sse(_ event: String, _ data: Encodable) async throws {
+                let jsonData = try encoder.encode(data)
+                try await writer.write(ByteBuffer(string: "event: \(event)\ndata: \(String(data: jsonData, encoding: .utf8) ?? "{}")\n\n"))
+            }
+
+            do {
+                let emptyResp = ResponsesSSEResponse(id: responseId, status: "in_progress", model: modelId)
+                try await sse("response.created", ResponsesSSECreated(response: emptyResp))
+                try await sse("response.in_progress", ResponsesSSECreated(response: emptyResp))
+
+                for try await event in keepAliveStream {
+                    switch event {
+                    case .token(let token):
+                        if !token.text.isEmpty {
+                            // Feed through ThinkingParser to separate reasoning from text
+                            let parsed = thinkingParser.feed(token.text)
+                            if parsed.type == .thinking && !parsed.text.isEmpty {
+                                if !reasoningStarted {
+                                    reasoningStarted = true
+                                    try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, status: "in_progress"))))
+                                }
+                                reasoningText += parsed.text
+                                try await sse("response.reasoning.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: parsed.text))
+                            }
+                            if parsed.type == .content && !parsed.text.isEmpty {
+                                if !textMessageStarted {
+                                    // Finish reasoning if active
+                                    if reasoningStarted {
+                                        let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
+                                        try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                                        try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
+                                        outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
+                                        currentOutputIndex += 1
+                                        reasoningStarted = false
+                                    }
+                                    textMessageStarted = true
+                                    try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: currentOutputIndex, item: .message(ResponseOutputMessage(id: msgId, status: "in_progress", content: []))))
+                                    try await sse("response.content_part.added", ResponsesSSEContentPartAdded(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, part: ResponseContentItem(text: "")))
+                                }
+                                fullText += parsed.text
+                                try await sse("response.output_text.delta", ResponsesSSETextDelta(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, delta: parsed.text))
+                            }
+                        }
+                        tokenCount += 1
+                        if token.finishReason != nil {
+                            // Finalize any remaining thinking content
+                            let finalParsed = thinkingParser.finalize()
+                            if !finalParsed.thinking.isEmpty {
+                                if !reasoningStarted {
+                                    reasoningStarted = true
+                                    try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, status: "in_progress"))))
+                                }
+                                reasoningText += finalParsed.thinking
+                                try await sse("response.reasoning.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: finalParsed.thinking))
+                            }
+                            if reasoningStarted {
+                                let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
+                                try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                                try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
+                                outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
+                                currentOutputIndex += 1
+                                reasoningStarted = false
+                            }
+                            if !finalParsed.response.isEmpty {
+                                fullText += finalParsed.response
+                                if !textMessageStarted {
+                                    textMessageStarted = true
+                                    try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: currentOutputIndex, item: .message(ResponseOutputMessage(id: msgId, status: "in_progress", content: []))))
+                                    try await sse("response.content_part.added", ResponsesSSEContentPartAdded(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, part: ResponseContentItem(text: "")))
+                                }
+                                try await sse("response.output_text.delta", ResponsesSSETextDelta(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, delta: finalParsed.response))
+                            }
+                            // Finish text message
+                            if textMessageStarted {
+                                try await sse("response.output_text.done", ResponsesSSETextDone(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, text: fullText))
+                                try await sse("response.content_part.done", ResponsesSSEContentPartDone(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, part: ResponseContentItem(text: fullText)))
+                                try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .message(ResponseOutputMessage(id: msgId, content: [ResponseContentItem(text: fullText)]))))
+                                outputItems.append(.message(ResponseOutputMessage(id: msgId, content: [ResponseContentItem(text: fullText)])))
+                            }
+
+                            // response.completed
+                            let ctxWin = inference.getContextWindow(for: modelId) ?? 0
+                            let pToks = clientType.shouldScaleContext
+                                ? cfg.scaleTokenCount(token.promptTokens ?? 0, modelContextWindow: ctxWin)
+                                : (token.promptTokens ?? 0)
+                            let cToks = clientType.shouldScaleContext
+                                ? cfg.scaleTokenCount(tokenCount, modelContextWindow: ctxWin)
+                                : tokenCount
+                            let completedResp = OpenAIResponseObject(
+                                id: responseId, model: modelId,
+                                output: outputItems,
+                                usage: ResponsesUsage(inputTokens: pToks, outputTokens: cToks)
+                            )
+                            try await sse("response.completed", ResponsesSSECompleted(response: completedResp))
+                            // Store with user messages for previous_response_id multi-turn
+                            var storeOutputItems: [ResponseOutputItem] = []
+                            for msg in capturedMessages {
+                                let itemId = "msg_user_\(UUID().uuidString.prefix(12))"
+                                storeOutputItems.append(.message(ResponseOutputMessage(id: itemId, role: msg.role.rawValue, content: [ResponseContentItem(text: msg.content ?? "")])))
+                            }
+                            storeOutputItems.append(contentsOf: outputItems)
+                            let storeResp = OpenAIResponseObject(id: responseId, model: modelId, output: storeOutputItems, usage: ResponsesUsage(inputTokens: pToks, outputTokens: cToks))
+                            ResponseStore.shared.put(storeResp)
+                        }
+                    case .keepAlive:
+                        try await writer.write(ByteBuffer(string: ": keep-alive\n\n"))
+                    case .done:
+                        break
+                    }
+                }
+                try await writer.finish(nil)
+            } catch {
+                NovaMLXLog.error("[SSE:\(reqTag)] Responses stream error: \(error)")
+                try? await writer.finish(nil)
+            }
+        }
+
+        return Response(
+            status: .ok,
+            headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive", .init("X-Accel-Buffering")!: "no"],
+            body: body
+        )
     }
 
     private enum SSEKeepAliveEvent: Sendable {

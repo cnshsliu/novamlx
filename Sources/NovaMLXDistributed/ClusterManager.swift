@@ -55,18 +55,26 @@ public struct WorkerInfo: Codable, Sendable, Equatable {
     public let registeredAt: Date
     public var lastHeartbeat: Date
 
+    /// Fingerprints recorded at the time of last successful deployment / registration.
+    public var deployedBinaryFingerprint: String?
+    public var deployedConfigHash: String?
+
     public init(
         nodeId: String,
         spec: NodeSpec,
         status: WorkerStatus = .registering,
         registeredAt: Date = Date(),
-        lastHeartbeat: Date = Date()
+        lastHeartbeat: Date = Date(),
+        deployedBinaryFingerprint: String? = nil,
+        deployedConfigHash: String? = nil
     ) {
         self.nodeId = nodeId
         self.spec = spec
         self.status = status
         self.registeredAt = registeredAt
         self.lastHeartbeat = lastHeartbeat
+        self.deployedBinaryFingerprint = deployedBinaryFingerprint ?? spec.binaryFingerprint
+        self.deployedConfigHash = deployedConfigHash ?? spec.configHash
     }
 }
 
@@ -200,7 +208,9 @@ public final class ClusterManager: @unchecked Sendable {
         let info = WorkerInfo(
             nodeId: spec.nodeId,
             spec: spec,
-            status: .registering
+            status: .registering,
+            deployedBinaryFingerprint: spec.binaryFingerprint,
+            deployedConfigHash: spec.configHash
         )
 
         queue.sync {
@@ -374,7 +384,10 @@ public final class ClusterManager: @unchecked Sendable {
             if var existing = _workers[nodeId] {
                 // Update heartbeat, promote to ready on successful poll
                 existing.lastHeartbeat = Date()
-                // spec updated on next full discovery
+                // Capture latest fingerprints reported by the worker
+                if let fp = spec.binaryFingerprint { existing.deployedBinaryFingerprint = fp }
+                if let ch = spec.configHash { existing.deployedConfigHash = ch }
+
                 if existing.status == .disconnected || existing.status == .registering {
                     existing.status = .ready
                     logger.info("Worker \(nodeId) \(existing.status == .disconnected ? "back online" : "registered → ready")")
@@ -387,7 +400,9 @@ public final class ClusterManager: @unchecked Sendable {
                     spec: spec,
                     status: .ready,
                     registeredAt: Date(),
-                    lastHeartbeat: Date()
+                    lastHeartbeat: Date(),
+                    deployedBinaryFingerprint: spec.binaryFingerprint,
+                    deployedConfigHash: spec.configHash
                 )
                 _workers[nodeId] = info
                 logger.info("Worker discovered via poll: \(nodeId) (\(hostname), \(cpuModel), \(memory) bytes)")

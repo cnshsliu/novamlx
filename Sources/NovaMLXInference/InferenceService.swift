@@ -332,6 +332,8 @@ public final class InferenceService: @unchecked Sendable {
             worker.sendAbort(requestId: requestId)
         } else {
             engine.abort(requestId: requestId)
+            batcher.abort(requestId: requestId)
+            fusedScheduler.abort(requestId: requestId)
         }
     }
 

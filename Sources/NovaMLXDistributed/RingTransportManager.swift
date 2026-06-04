@@ -129,17 +129,277 @@ public final class RingTransportManager: @unchecked Sendable {
         setenv("MLX_RING_VERBOSE", "1", 1)
 
         NovaMLXLog.info("[RingTransport] Initializing Ring backend from hostfile JSON (rank=\(rank))...")
+        NovaMLXLog.info("[RingTransport] Hostfile path: \(hostfilePath)")
+        if let content = try? String(contentsOfFile: hostfilePath) {
+            NovaMLXLog.info("[RingTransport] Hostfile content:\n\(content)")
+        }
 
-        let group = MLXDistributedWrapper.initialize(strict: false, backend: "ring")
+        logToRingDebug("Starting Ring init - hostfile=\(hostfilePath), rank=\(rank)")
+        logToRingDebug("Hostfile content:\n\(try? String(contentsOfFile: hostfilePath) ?? "unreadable")")
+
+        // Dump current IPv4 interfaces for diagnostics (very useful when debugging link-local vs static IP issues)
+        dumpIPv4Interfaces()
+
+        // === AGGRESSIVE DIAGNOSTICS ===
+        dumpMLXEnvironment()
+        preflightSocketTest(hostfilePath: hostfilePath, rank: rank)
+        detectLinkLocalAndWarn(hostfilePath: hostfilePath, rank: rank)
+
+        if rank == 0 {
+            testRingConnectivity(hostfilePath: hostfilePath, myRank: rank)
+        }
+
+        logToRingDebug("Diagnostics complete. Starting actual MLX Ring init...")
+
+        let start = CFAbsoluteTimeGetCurrent()
+
+        // Run the potentially hanging init in a background queue with timeout
+        // so we never hard-hang the main service thread and can report progress.
+        let group = initializeRingWithTimeout(hostfilePath: hostfilePath, rank: rank, timeoutSeconds: 20)
+
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        NovaMLXLog.info("[RingTransport] mlx_distributed_init (ring, rank=\(rank)) finished after \(String(format: "%.3f", elapsed))s")
 
         if group.isValid {
-            NovaMLXLog.info("[RingTransport] Ring group initialized: rank=\(group.rank), size=\(group.size)")
+            NovaMLXLog.info("[RingTransport] Ring group initialized successfully: rank=\(group.rank), size=\(group.size)")
             lock.withLock { _group = group }
         } else {
-            NovaMLXLog.error("[RingTransport] Ring group initialization failed")
+            NovaMLXLog.error("[RingTransport] Ring initialization FAILED or TIMED OUT (rank=\(rank))")
+            NovaMLXLog.error("[RingTransport] Common causes:")
+            NovaMLXLog.error("  - Both machines still on link-local 169.254.x.x (run Scripts/setup-thunderbolt-ring.sh)")
+            NovaMLXLog.error("  - Firewall / network extension blocking the ports")
+            NovaMLXLog.error("  - MLX Ring C++ bug with certain interface names or IPv6 preference")
+            NovaMLXLog.error("  - Worker process did not have MLX_HOSTFILE / MLX_RANK visible at launch time")
         }
 
         return group
+    }
+
+    private func dumpIPv4Interfaces() {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let list = interfaces else {
+            NovaMLXLog.warning("[RingTransport] Could not enumerate interfaces")
+            return
+        }
+        defer { freeifaddrs(list) }
+
+        var ptr = list
+        NovaMLXLog.info("[RingTransport] Current IPv4 interfaces:")
+        while let current = ptr.pointee.ifa_next {
+            ptr = current
+            guard let addr = ptr.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET),
+                  let namePtr = ptr.pointee.ifa_name else { continue }
+
+            let ifname = String(cString: namePtr)
+            var ipBuffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var addrCopy = addr.pointee
+            inet_ntop(AF_INET, &addrCopy.sa_data.2, &ipBuffer, socklen_t(INET_ADDRSTRLEN))
+            let ip = String(decoding: ipBuffer.prefix(while: { $0 != 0 }).map { UInt8($0) }, as: UTF8.self)
+
+            if ip != "127.0.0.1" {
+                NovaMLXLog.info("  \(ifname): \(ip)")
+            }
+        }
+    }
+
+    private func dumpMLXEnvironment() {
+        NovaMLXLog.info("[RingTransport] MLX environment at Ring init time:")
+        let mlxKeys = ["MLX_HOSTFILE", "MLX_RANK", "MLX_RING_VERBOSE", "MLX_LOG_LEVEL", "MLX_DEBUG"]
+        for key in mlxKeys {
+            if let val = getenv(key) {
+                NovaMLXLog.info("  \(key) = \(String(cString: val))")
+            } else {
+                NovaMLXLog.info("  \(key) = (not set)")
+            }
+        }
+    }
+
+    /// Writes very detailed information to ~/.nova/ring-debug.log
+    /// This file is extremely useful when debugging Ring hangs.
+    private func logToRingDebug(_ message: String) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let logDir = home.appendingPathComponent(".nova")
+        let logFile = logDir.appendingPathComponent("ring-debug.log")
+
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(timestamp)] [rank=\(getenv("MLX_RANK").map { String(cString: $0) } ?? "?")] \(message)\n"
+
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logFile.path) {
+                if let handle = try? FileHandle(forWritingTo: logFile) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    try? handle.close()
+                }
+            } else {
+                try? data.write(to: logFile)
+            }
+        }
+    }
+
+    /// Attempts to bind/listen on the ports listed in the hostfile before asking MLX to do it.
+    /// Sets SO_REUSEADDR + SO_REUSEPORT for robustness on Thunderbolt.
+    private func preflightSocketTest(hostfilePath: String, rank: Int) {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: hostfilePath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [[String]] else {
+            NovaMLXLog.warning("[RingTransport] Could not parse hostfile for preflight test")
+            return
+        }
+
+        guard rank < json.count else { return }
+
+        let myAddrs = json[rank]
+        NovaMLXLog.info("[RingTransport] Preflight socket test (with SO_REUSE*) for rank \(rank): \(myAddrs)")
+
+        for addrStr in myAddrs {
+            let parts = addrStr.split(separator: ":")
+            guard parts.count == 2,
+                  let port = UInt16(parts[1]) else { continue }
+
+            let sock = socket(AF_INET, SOCK_STREAM, 0)
+            if sock < 0 {
+                NovaMLXLog.error("[RingTransport] socket() failed: errno=\(errno) (\(String(cString: strerror(errno)))")
+                continue
+            }
+
+            // Be nice to Thunderbolt networking restarts
+            var opt: Int32 = 1
+            setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, socklen_t(MemoryLayout<Int32>.size))
+
+            var sin = sockaddr_in()
+            sin.sin_family = sa_family_t(AF_INET)
+            sin.sin_port = in_port_t(port.bigEndian)
+            sin.sin_addr.s_addr = INADDR_ANY
+
+            let bindResult = withUnsafePointer(to: &sin) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+
+            if bindResult != 0 {
+                NovaMLXLog.error("[RingTransport] bind(\(port)) failed: errno=\(errno) (\(String(cString: strerror(errno))))")
+            } else {
+                let listenResult = listen(sock, 1)
+                if listenResult != 0 {
+                    NovaMLXLog.error("[RingTransport] listen(\(port)) failed: errno=\(errno)")
+                } else {
+                    NovaMLXLog.info("[RingTransport] Preflight ✓ bound+listening on port \(port) (SO_REUSEADDR/PORT set)")
+                }
+            }
+            close(sock)
+        }
+    }
+
+    /// Public version used by ClusterModelManager before starting the handshake.
+    public func testConnectivity(hostfileJSON: String, myRank: Int) {
+        let tempPath = NSTemporaryDirectory() + "ring_connectivity_test_\(myRank).json"
+        try? hostfileJSON.data(using: .utf8)?.write(to: URL(fileURLWithPath: tempPath))
+        testRingConnectivity(hostfilePath: tempPath, myRank: myRank)
+        try? FileManager.default.removeItem(atPath: tempPath)
+    }
+
+    /// Tries to TCP connect to the *other* rank's addresses.
+    /// This is the best way to know whether the Thunderbolt link is actually usable before both sides block in Ring init.
+    private func testRingConnectivity(hostfilePath: String, myRank: Int) {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: hostfilePath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [[String]] else {
+            return
+        }
+
+        let otherRank = 1 - myRank
+        guard otherRank < json.count else { return }
+
+        let peerAddrs = json[otherRank]
+        NovaMLXLog.info("[RingTransport] Testing TCP reachability to peer (rank \(otherRank)) addresses: \(peerAddrs)")
+
+        for addrStr in peerAddrs {
+            let parts = addrStr.split(separator: ":")
+            guard parts.count == 2,
+                  let port = UInt16(parts[1]),
+                  let ip = parts.first else { continue }
+
+            let sock = socket(AF_INET, SOCK_STREAM, 0)
+            guard sock >= 0 else { continue }
+
+            var sin = sockaddr_in()
+            sin.sin_family = sa_family_t(AF_INET)
+            sin.sin_port = in_port_t(port.bigEndian)
+            inet_pton(AF_INET, String(ip), &sin.sin_addr)
+
+            let connectResult = withUnsafePointer(to: &sin) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+
+            if connectResult == 0 {
+                NovaMLXLog.info("[RingTransport] ✓ TCP connect to \(addrStr) succeeded — network path looks good")
+                close(sock)
+                return
+            } else {
+                NovaMLXLog.warning("[RingTransport] TCP connect to \(addrStr) failed: errno=\(errno) (\(String(cString: strerror(errno))))")
+            }
+            close(sock)
+        }
+        NovaMLXLog.error("[RingTransport] Could not TCP-connect to any of the peer's Ring addresses. The link is probably not ready or firewalled.")
+    }
+
+    private func detectLinkLocalAndWarn(hostfilePath: String, rank: Int) {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: hostfilePath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [[String]] else {
+            return
+        }
+
+        guard rank < json.count else { return }
+
+        let myAddrs = json[rank]
+        let hasLinkLocal = myAddrs.contains { $0.hasPrefix("169.254.") }
+
+        if hasLinkLocal {
+            NovaMLXLog.error("═══════════════════════════════════════════════════════════════")
+            NovaMLXLog.error("[RingTransport] *** WARNING: You are using link-local addresses (169.254.x.x) ***")
+            NovaMLXLog.error("[RingTransport] MLX Ring frequently hangs or fails to connect on these addresses over Thunderbolt.")
+            NovaMLXLog.error("[RingTransport] STRONGLY RECOMMENDED: Run Scripts/setup-thunderbolt-ring.sh and assign stable private IPs (10.42.0.1 / 10.42.0.2).")
+            NovaMLXLog.error("═══════════════════════════════════════════════════════════════")
+        }
+    }
+
+    /// Runs mlx_distributed_init in a background queue with a hard timeout.
+    /// Prevents the entire worker process from hanging forever on a bad Ring init.
+    private func initializeRingWithTimeout(hostfilePath: String, rank: Int, timeoutSeconds: TimeInterval) -> DistributedGroup {
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultGroup: DistributedGroup = .uninitialized
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // We re-set the env vars inside the background task to be extra safe
+            setenv("MLX_HOSTFILE", hostfilePath, 1)
+            setenv("MLX_RANK", "\(rank)", 1)
+            setenv("MLX_RING_VERBOSE", "1", 1)
+
+            self.logToRingDebug("Background thread: calling mlx_distributed_init (strict=false, backend=ring)")
+
+            NovaMLXLog.info("[RingTransport] (background) Calling MLXDistributedWrapper.initialize for ring (rank=\(rank))...")
+            let g = MLXDistributedWrapper.initialize(strict: false, backend: "ring")
+            resultGroup = g
+            semaphore.signal()
+        }
+
+        let waitResult = semaphore.wait(timeout: .now() + timeoutSeconds)
+
+        if waitResult == .timedOut {
+            logToRingDebug("TIMEOUT after \(timeoutSeconds)s - Ring init is stuck")
+            NovaMLXLog.error("[RingTransport] *** TIMEOUT: mlx_distributed_init did not return after \(timeoutSeconds)s ***")
+            NovaMLXLog.error("[RingTransport] This almost always means the C++ RingGroup constructor is stuck in accept() or connect().")
+            NovaMLXLog.error("[RingTransport] Check that both machines can reach each other's IPs on the Thunderbolt link.")
+            return .uninitialized
+        }
+
+        logToRingDebug("Ring init completed. valid=\(resultGroup.isValid), size=\(resultGroup.size)")
+        return resultGroup
     }
 
     // MARK: - Transport

@@ -1,0 +1,5 @@
+As soon as you finish downloading Qwen3-8B-4bit on the M4 Max, I can immediately:
+1. Rsync it to the Mac Mini (should be very fast over 10.42.0.0/24)
+2. Restart both sides
+3. Activate the model with Ring enabled
+4. Start collecting the rich diagnostics we built

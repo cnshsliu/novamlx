@@ -12,6 +12,12 @@ struct DownloadsPageView: View {
     @State private var searchResults: [HFSearchResult] = []
     @State private var isSearching = false
     @State private var manualDownloadInput = ""
+    @State private var selectedMirrorOption = "official"
+    @State private var customMirrorURL = ""
+
+    // Mirror change toast
+    @State private var showMirrorChangeNote = false
+    @State private var mirrorChangeMessage = ""
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var showApiKeyPrompt = false
@@ -19,6 +25,13 @@ struct DownloadsPageView: View {
     @State private var isSavingApiKey = false
     @State private var selectedModelCard: ModelCardData?
     @State private var suggestedSearches = ["mlx-community/gemma4", "mlx-community/qwen3.6"]
+
+    // Backend Activity panel
+    @State private var isBackendActivityExpanded = false
+    @State private var currentSearchEndpoint: String? = nil  // Temporary for showing during search
+
+    // For dynamic search results header
+    @State private var lastSearchSourceName: String = ""
 
     private func fetchSuggestedSearches() async {
         guard let url = URL(string: "https://raw.githubusercontent.com/cnshsliu/novamlx/main/suggested-searches.txt") else { return }
@@ -46,6 +59,10 @@ struct DownloadsPageView: View {
 
         ScrollView {
             VStack(spacing: 20) {
+                modelSourceSection
+
+                backendActivitySection
+
                 if !activeOrFailed.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         sectionHeader(
@@ -107,6 +124,7 @@ struct DownloadsPageView: View {
                     Image(systemName: "magnifyingglass").foregroundColor(.secondary)
                     TextField(l10n.tr("models.searchPlaceholder"), text: $searchText)
                         .textFieldStyle(.plain)
+                        .accessibilityIdentifier("downloads-search-field")
                         .onSubmit { performSearch() }
                 }
                 .padding(.horizontal, 10)
@@ -155,13 +173,21 @@ struct DownloadsPageView: View {
 
     private var searchResultsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(l10n.tr("models.searchResults"), icon: "magnifyingglass", count: searchResults.count)
+            let headerTitle = searchResultsHeaderTitle
+            sectionHeader(headerTitle, icon: "magnifyingglass", count: searchResults.count)
 
             ForEach(searchResults, id: \.id) { result in
                 searchResultRow(result)
             }
         }
         .sectionCard()
+    }
+
+    private var searchResultsHeaderTitle: String {
+        if !lastSearchSourceName.isEmpty {
+            return "Search results from \(lastSearchSourceName)"
+        }
+        return l10n.tr("models.searchResults")
     }
 
     private func searchResultRow(_ result: HFSearchResult) -> some View {
@@ -245,6 +271,275 @@ struct DownloadsPageView: View {
         }
     }
 
+    // MARK: - Model Source (Global Mirror Selector)
+
+    private var modelSourceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Model Source", icon: "globe", count: nil)
+                .accessibilityIdentifier("model-source-section")
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Mirror")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $selectedMirrorOption) {
+                        Text("Official (huggingface.co)").tag("official")
+                        Text("hf-mirror.com (China)").tag("hf-mirror")
+                        Text("ModelScope (Alibaba)").tag("modelscope")
+                        Text("Custom URL...").tag("custom")
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("model-source-picker")
+                    .onChange(of: selectedMirrorOption) { newOption in
+                        let endpoint: String? = {
+                            switch newOption {
+                            case "official": return nil
+                            case "hf-mirror": return "https://hf-mirror.com"
+                            case "modelscope": return "https://www.modelscope.cn"
+                            case "custom": return customMirrorURL.isEmpty ? nil : customMirrorURL
+                            default: return nil
+                            }
+                        }()
+                        Task {
+                            await appState.setHuggingfaceEndpoint(endpoint)
+                        }
+                        mirrorChangeMessage = (newOption == "official")
+                            ? "Switched to official Hugging Face"
+                            : (newOption == "modelscope")
+                                ? "Switched to ModelScope (Alibaba)"
+                                : "Mirror changed. New downloads will use the selected source."
+                        showMirrorChangeNote = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                            showMirrorChangeNote = false
+                        }
+                    }
+                }
+
+                if selectedMirrorOption == "custom" {
+                    TextField("Custom endpoint (e.g. https://hf-mirror.com)", text: $customMirrorURL)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11, design: .monospaced))
+                        .accessibilityIdentifier("model-source-custom-field")
+                        .onSubmit {
+                            Task {
+                                let trimmed = customMirrorURL.trimmingCharacters(in: .whitespaces)
+                                await appState.setHuggingfaceEndpoint(trimmed.isEmpty ? nil : trimmed)
+                            }
+                        }
+                }
+            }
+
+            if showMirrorChangeNote {
+                Text(mirrorChangeMessage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            // Mirror-specific guidance
+            let guidance = mirrorGuidanceText
+            if !guidance.isEmpty {
+                Text(guidance)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .padding(.top, 4)
+            }
+        }
+        .sectionCard()
+        .task {
+            if let endpoint = await appState.huggingfaceEndpoint {
+                if endpoint == "https://hf-mirror.com" {
+                    selectedMirrorOption = "hf-mirror"
+                } else if endpoint == "https://www.modelscope.cn" {
+                    selectedMirrorOption = "modelscope"
+                } else {
+                    selectedMirrorOption = "custom"
+                    customMirrorURL = endpoint
+                }
+            } else {
+                selectedMirrorOption = "official"
+            }
+        }
+    }
+
+    // MARK: - Backend Activity Panel (collapsible, below Model Source)
+
+    private var backendActivitySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Clickable header
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isBackendActivityExpanded.toggle()
+                }
+            } label: {
+                HStack {
+                    Text(backendActivityTitle)
+                        .font(.headline)
+
+                    Spacer()
+
+                    if !isBackendActivityExpanded {
+                        Text(backendActivitySummary)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Image(systemName: isBackendActivityExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if isBackendActivityExpanded {
+                VStack(alignment: .leading, spacing: 10) {
+                    // Current mirror
+                    HStack {
+                        Text("Mirror:")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text(currentMirrorDisplayName)
+                            .font(.caption2)
+                            .foregroundColor(.primary)
+                    }
+
+                    if isSearching, let url = currentSearchEndpoint {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Search")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text("Querying: \(url)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.primary)
+                                .lineLimit(3)
+                        }
+                    }
+
+                    let active = activeDownloadFileDetails
+                    if !active.isEmpty {
+                        Text("Active Downloads")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+
+                        ForEach(active) { detail in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(detail.filename)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .lineLimit(1)
+
+                                if let url = detail.currentURL {
+                                    Text(url)
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(2)
+                                }
+
+                                HStack(spacing: 12) {
+                                    Text("\(detail.progress, specifier: "%.1f")%")
+                                    if detail.speed > 0 {
+                                        Text("\(formatBytes(Int64(detail.speed)))/s")
+                                    }
+                                    if detail.retryCount > 0 {
+                                        Text("Retry \(detail.retryCount)")
+                                            .foregroundColor(.orange)
+                                    }
+                                    if detail.isResuming {
+                                        Text("Resuming")
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                                .font(.caption2)
+                            }
+                            .padding(8)
+                            .background(Color.gray.opacity(0.08))
+                            .cornerRadius(6)
+                        }
+                    } else if !isSearching {
+                        Text("No active backend operations")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private var backendActivitySummary: String {
+        if isSearching { return "Searching..." }
+        let count = appState.downloadTasks.values.filter { $0.isActive }.count
+        if count > 0 {
+            return "\(count) active"
+        }
+        return "Idle"
+    }
+
+    private var currentMirrorDisplayName: String {
+        switch selectedMirrorOption {
+        case "official": return "Official (huggingface.co)"
+        case "hf-mirror": return "hf-mirror.com (China)"
+        case "modelscope": return "ModelScope (Alibaba)"
+        case "custom": return "Custom"
+        default: return "Official"
+        }
+    }
+
+    // Dynamic title for Backend Activity panel
+    private var backendActivityTitle: String {
+        if isSearching, let endpoint = currentSearchEndpoint {
+            if endpoint.contains("hf-mirror") {
+                return "hf-mirror.com"
+            } else if endpoint.contains("modelscope") {
+                return "ModelScope"
+            } else if endpoint.contains("huggingface.co") || endpoint.isEmpty {
+                return "huggingface.co"
+            } else {
+                return "Custom Mirror"
+            }
+        }
+        
+        let activeDownloads = appState.downloadTasks.values.filter { $0.isActive }
+        if !activeDownloads.isEmpty {
+            return currentMirrorDisplayName
+        }
+        
+        return "Backend Activities"
+    }
+
+    private var mirrorGuidanceText: String {
+        switch selectedMirrorOption {
+        case "modelscope":
+            return "⚠️ ModelScope has limited API support for search & download. Strongly recommended: manually download the model and place the files in your node’s models directory, then click Refresh on the Models tab."
+        case "custom":
+            return "Using custom mirror. In-app download may fail. Manual download to the models directory + click Refresh on Models tab is safer."
+        case "official", "hf-mirror":
+            return "Note: In-app download can be slow/unreliable. Manual download + place files in the models directory, then click Refresh on the Models tab is often faster."
+        default:
+            return ""
+        }
+    }
+
+    private var activeDownloadFileDetails: [DownloadFileDetail] {
+        appState.downloadTasks.values
+            .filter { $0.isActive }
+            .flatMap { task in
+                task.fileProgresses
+                    .filter { $0.status == "downloading" || $0.status == "waiting" }
+                    .map { file in
+                        DownloadFileDetail(
+                            filename: file.filename,
+                            currentURL: file.currentURL,
+                            speed: file.speed,
+                            progress: task.totalBytes > 0 ? Double(file.downloadedBytes) / Double(task.totalBytes) * 100 : 0,
+                            retryCount: file.retryCount,
+                            isResuming: file.isResuming
+                        )
+                    }
+            }
+    }
+
     // MARK: - Manual Download
 
     private var manualDownloadSection: some View {
@@ -280,6 +575,20 @@ struct DownloadsPageView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(modelManager.modelsDirectory.path, forType: .string)
                 }
+        }
+        .onAppear {
+            Task {
+                if let endpoint = await appState.huggingfaceEndpoint {
+                    if endpoint == "https://hf-mirror.com" {
+                        selectedMirrorOption = "hf-mirror"
+                    } else {
+                        selectedMirrorOption = "custom"
+                        customMirrorURL = endpoint
+                    }
+                } else {
+                    selectedMirrorOption = "official"
+                }
+            }
         }
         .sectionCard()
     }
@@ -479,13 +788,52 @@ struct DownloadsPageView: View {
         }
 
         isSearching = true
+
+        let sourceName = {
+            switch selectedMirrorOption {
+            case "official": return "huggingface.co"
+            case "hf-mirror": return "hf-mirror.com"
+            case "modelscope": return "ModelScope"
+            case "custom": return customMirrorURL.isEmpty ? "Custom" : "Custom Mirror"
+            default: return "huggingface.co"
+            }
+        }()
+        currentSearchEndpoint = {
+            switch selectedMirrorOption {
+            case "modelscope": return "https://www.modelscope.cn"
+            case "hf-mirror":  return "https://hf-mirror.com"
+            case "custom":     return customMirrorURL.isEmpty ? nil : customMirrorURL
+            default:           return "https://huggingface.co"
+            }
+        }()
+
+        lastSearchSourceName = sourceName
+
         Task {
             let adminPort = appState.adminPort
             let query = searchText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? searchText
-            guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/search?q=\(query)") else {
+            // 彻底尊重用户选择的镜像进行搜索（不再偷偷替换）
+            let searchEndpoint: String? = {
+                switch selectedMirrorOption {
+                case "official":
+                    return nil
+                case "hf-mirror":
+                    return "https://hf-mirror.com"
+                case "modelscope":
+                    return "https://www.modelscope.cn"
+                case "custom":
+                    return customMirrorURL.isEmpty ? nil : customMirrorURL
+                default:
+                    return nil
+                }
+            }()
+            let endpointQuery = searchEndpoint != nil ? "&endpoint=\(searchEndpoint!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" : ""
+            guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/search?q=\(query)\(endpointQuery)") else {
                 alertMessage = l10n.tr("models.invalidUrl")
                 showAlert = true
                 isSearching = false
+                currentSearchEndpoint = nil
+                lastSearchSourceName = ""
                 return
             }
             do {
@@ -500,12 +848,21 @@ struct DownloadsPageView: View {
                     isSearching = false
                     return
                 }
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let results = json["models"] as? [[String: Any]] {
-                    searchResults = results.compactMap { r in
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let resultsArray: [[String: Any]] = {
+                        if let direct = json["models"] as? [[String: Any]] {
+                            return direct
+                        } else if let array = json as? [[String: Any]] {
+                            return array
+                        }
+                        return []
+                    }()
+
+                    searchResults = resultsArray.compactMap { r in
                         guard let id = r["id"] as? String else { return nil }
                         return HFSearchResult(id: id, tags: r["tags"] as? [String] ?? [])
                     }
+
                     if searchResults.isEmpty {
                         alertMessage = l10n.tr("models.noResults", searchText)
                         showAlert = true
@@ -519,6 +876,8 @@ struct DownloadsPageView: View {
                 showAlert = true
             }
             isSearching = false
+            currentSearchEndpoint = nil
+            // Do NOT clear lastSearchSourceName here, so the header keeps showing the source
         }
     }
 
@@ -605,7 +964,16 @@ struct DownloadsPageView: View {
         selectedModelCard = ModelCardData(repoId: repoId)
         Task {
             let adminPort = appState.adminPort
-            guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/model-card?repo_id=\(repoId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? repoId)") else { return }
+            let cardEndpoint: String? = {
+                switch selectedMirrorOption {
+                case "modelscope": return "https://www.modelscope.cn"
+                case "hf-mirror":  return "https://hf-mirror.com"
+                case "custom":     return customMirrorURL.isEmpty ? nil : customMirrorURL
+                default:           return nil
+                }
+            }()
+            let cardQuery = cardEndpoint != nil ? "&endpoint=\(cardEndpoint!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" : ""
+            guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/model-card?repo_id=\(repoId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? repoId)\(cardQuery)") else { return }
             do {
                 var request = URLRequest(url: url)
                 if let apiKey = appState.apiKey {
@@ -732,3 +1100,15 @@ private struct ModelCardFile: Identifiable {
     let name: String
     let size: Int64
 }
+
+
+struct DownloadFileDetail: Identifiable {
+    let id = UUID()
+    let filename: String
+    let currentURL: String?
+    let speed: Double
+    let progress: Double
+    let retryCount: Int
+    let isResuming: Bool
+}
+

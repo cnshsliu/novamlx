@@ -1,0 +1,29 @@
+NovaMLX Mirror Feature Test Report - 20260518-001209
+============================================
+[00:12:09] Killing previous instances...
+[00:12:11] Launching fresh build...
+[00:12:16] Ensuring we are on the Downloads tab...
+[00:12:21] 
+--- Test: Model Source section is visible ---
+[00:12:21] ✅ PASS: Model Source section visible after navigation
+[00:12:21]   Selecting mirror: hf-mirror.com (China)
+[00:12:23] ❌ FAIL: Switch to hf-mirror.com (China) - FAILED: System Events got an error: Can’t get pop up button 1 of window 1 of process "NovaMLX". Invalid index.
+[00:12:23]   Selecting mirror: ModelScope (Alibaba)
+[00:12:25] ❌ FAIL: Switch to ModelScope (Alibaba) - FAILED: System Events got an error: Can’t get pop up button 1 of window 1 of process "NovaMLX". Invalid index.
+[00:12:25] 
+--- Test: Custom URL input ---
+[00:12:27] ❌ FAIL: Enter custom mirror URL - FAILED: System Events got an error: Can’t get attribute "AXIdentifier".
+[00:12:27] 
+--- Test: Search works after changing mirror ---
+[00:12:28] ❌ FAIL: Perform search after mirror change - FAILED: System Events got an error: Can’t get attribute "AXIdentifier".
+[00:12:29] ==========================================
+[00:12:29] TEST SUMMARY
+[00:12:29] Total Tests : 5
+[00:12:29] Passed      : 1
+[00:12:29] Failed      : 4
+[00:12:29] Failed tests:
+[00:12:29]   - Switch to hf-mirror.com (China)
+[00:12:29]   - Switch to ModelScope (Alibaba)
+[00:12:29]   - Enter custom mirror URL
+[00:12:29]   - Perform search after mirror change
+[00:12:29] ==========================================

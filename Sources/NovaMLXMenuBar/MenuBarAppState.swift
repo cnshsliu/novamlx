@@ -148,11 +148,25 @@ public final class MenuBarAppState: ObservableObject {
         downloadTasks.values.filter { $0.isActive }.count
     }
 
+    // MARK: - Hugging Face Mirror
+    public var huggingfaceEndpoint: String? {
+        get async { await NovaMLXConfiguration.shared.huggingfaceEndpoint }
+    }
+
+    public func setHuggingfaceEndpoint(_ endpoint: String?) async {
+        await NovaMLXConfiguration.shared.setHuggingfaceEndpoint(endpoint)
+        let configFile = NovaMLXPaths.configFile
+        try? await NovaMLXConfiguration.shared.saveToFile(configFile)
+    }
+
     public func startDownload(repoId: String) {
         guard downloadTasks[repoId]?.isActive != true else { return }
         downloadTasks[repoId] = DownloadTaskInfo(repoId: repoId)
 
         Task {
+            // Read current mirror before entering the inner Task
+            let currentEndpoint = await self.huggingfaceEndpoint
+
             guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/download") else {
                 downloadTasks[repoId]?.status = .failed
                 downloadTasks[repoId]?.errorMessage = "Invalid URL"
@@ -163,7 +177,13 @@ public final class MenuBarAppState: ObservableObject {
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
-                request.httpBody = try JSONSerialization.data(withJSONObject: ["repo_id": repoId])
+
+                // Send current mirror so the server uses the latest setting without restart
+                let body: [String: Any] = [
+                    "repo_id": repoId,
+                    "endpoint": currentEndpoint as Any
+                ]
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
                 let (data, response) = try await URLSession.shared.data(for: request)
                 if let httpResp = response as? HTTPURLResponse, httpResp.statusCode != 200 {
                     let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
@@ -289,7 +309,11 @@ public final class MenuBarAppState: ObservableObject {
                             filename: name,
                             downloadedBytes: f["downloadedBytes"] as? Int64 ?? 0,
                             totalBytes: f["totalBytes"] as? Int64 ?? 0,
-                            status: f["status"] as? String ?? "waiting"
+                            status: f["status"] as? String ?? "waiting",
+                            currentURL: f["currentURL"] as? String,
+                            retryCount: f["retryCount"] as? Int ?? 0,
+                            isResuming: f["isResuming"] as? Bool ?? false,
+                            speed: f["speed"] as? Double ?? 0
                         )
                     }
                 }

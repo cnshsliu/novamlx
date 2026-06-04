@@ -37,6 +37,9 @@ public final class ClusterAdminRoutes: @unchecked Sendable {
                 "status": $0.status.rawValue,
                 "hostname": $0.spec.hostname,
                 "port": $0.spec.port,
+                "networkHost": $0.spec.networkHost as Any,
+                "binaryFingerprint": $0.deployedBinaryFingerprint as Any,
+                "configHash": $0.deployedConfigHash as Any,
                 "memory": $0.spec.totalMemoryBytes,
                 "cpuModel": $0.spec.cpuModel,
                 "lastHeartbeat": ISO8601DateFormatter().string(from: $0.lastHeartbeat),
@@ -181,6 +184,8 @@ public final class ClusterAdminRoutes: @unchecked Sendable {
                 "coordComputeMs": stats.coordComputeMs as Any,
                 "workerComputeMs": stats.workerComputeMs as Any,
                 "headMs": stats.headMs as Any,
+                "workerWaitMs": stats.workerWaitMs as Any,
+                "overlapPct": stats.overlapPct as Any,
                 "timestampAgo": String(format: "%.0fs", Date().timeIntervalSince(stats.timestamp)),
             ] as [String: Any]
         }

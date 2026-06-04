@@ -54,8 +54,10 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
     }
 
     /// Quantize activation to bfloat16 for transport (~2x compression).
+    /// Skip for small tensors (< 64KB) where conversion overhead exceeds bandwidth savings.
     private func quantizeForTransport(_ array: MLXArray) -> MLXArray {
         if array.dtype == .bfloat16 { return array }
+        if array.nbytes < 65536 { return array }
         return array.asType(.bfloat16)
     }
 
@@ -205,12 +207,27 @@ public final class RemoteShardPolicy: ComputePolicy, @unchecked Sendable {
             throw ShardEngineError.notReady
         }
 
-        // Send computeAndSample command + input tensor (TCP path only for now)
-        let msg = ShardWireFormat.encode(msgType: .computeAndSample, hasTensor: true)
-        try conn.sendData(msg)
-        try conn.sendTensor(input)
+        if useRingTransport {
+            // Ring data plane: send control + shape via TCP, input via Ring
+            var shapePayload = Data(capacity: input.shape.count * 4 + 4)
+            for dim in input.shape {
+                shapePayload.append(contentsOf: withUnsafeBytes(of: UInt32(dim).bigEndian) { Data($0) })
+            }
+            shapePayload.append(contentsOf: withUnsafeBytes(of: DTypeToRaw(input.dtype).bigEndian) { Data($0) })
+            let msg = ShardWireFormat.encode(msgType: .computeAndSample, payload: shapePayload, hasTensor: false)
+            try conn.sendData(msg)
 
-        // Receive 4-byte token ID back
+            // Send input tensor via Ring (zero-copy RDMA or kernel-bypass TCP)
+            eval(input)
+            _ = RingTransportManager.shared.send(input, to: workerRank)
+        } else {
+            // TCP data plane
+            let msg = ShardWireFormat.encode(msgType: .computeAndSample, hasTensor: true)
+            try conn.sendData(msg)
+            try conn.sendTensor(input)
+        }
+
+        // Receive 4-byte token ID back (always TCP — too small for Ring to help)
         let headerData = try conn.recvData(count: ShardWireFormat.headerSize)
         guard let header = ShardWireFormat.decodeHeader(headerData) else {
             throw ShardServiceError.invalidMessage("bad computeAndSample response header")

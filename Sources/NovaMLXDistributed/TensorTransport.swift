@@ -42,8 +42,9 @@ enum WireFormat {
     }
 
     /// Encode a tensor header + shape + data into a single Data buffer.
+    /// Uses no-copy access on Apple Silicon (eval + pointer wrap, no memcpy).
     static func encode(array: MLXArray) -> Data {
-        let arrayData = array.asData(access: .copy)
+        let arrayData = array.asData(access: .noCopyIfContiguous)
         let shape = arrayData.shape
         let dtype = arrayData.dType
         let ndim = shape.count
@@ -120,10 +121,9 @@ enum WireFormat {
         return MLXArray(tensorData, shape, dtype: dtype)
     }
 
-    /// Compute total wire size for an array (without encoding).
+    /// Compute total wire size for an array (without encoding or copying).
     static func wireSize(for array: MLXArray) -> Int {
-        let d = array.asData(access: .copy)
-        return headerSize + d.shape.count * 8 + d.data.count
+        return headerSize + array.shape.count * 8 + array.nbytes
     }
 }
 
@@ -255,7 +255,9 @@ public final class TCPTensorTransport: TensorTransport, @unchecked Sendable {
 // MARK: - TCP Connection
 
 /// A persistent TCP connection to a single remote node.
-/// Uses POSIX sockets with blocking I/O on a serial queue.
+/// Uses POSIX sockets with blocking I/O on a serial GCD queue.
+/// The queue ensures TCP I/O runs on a dedicated pthread, not blocking
+/// the Swift cooperative thread pool.
 final class TCPConnection: @unchecked Sendable {
     fileprivate let socket: Int32
     fileprivate let queue = DispatchQueue(label: "com.novamlx.tensor-conn", qos: .userInteractive)
@@ -281,23 +283,18 @@ final class TCPConnection: @unchecked Sendable {
 
     func recv() throws -> MLXArray {
         try queue.sync {
-            // Read header
             let headerData = try Self.recvExact(socket: self.socket, count: WireFormat.headerSize)
             let m = headerData.readUInt32(at: 0)
             guard m == WireFormat.magic else { throw TransportError.invalidMagic }
 
             let ndim = Int(headerData.readUInt32(at: 8))
-            let _ = headerData.readUInt32(at: 12) // dtypeRaw — read again with full data
+            let _ = headerData.readUInt32(at: 12)
             let nbytes = Int(headerData.readUInt64(at: 16))
 
-            // Read shape
             let shapeSize = ndim * 8
             let shapeData = shapeSize > 0 ? try Self.recvExact(socket: self.socket, count: shapeSize) : Data()
-
-            // Read tensor payload
             let payloadData = try Self.recvExact(socket: self.socket, count: nbytes)
 
-            // Reassemble full message for decode
             var full = Data()
             full.append(headerData)
             full.append(shapeData)
@@ -327,16 +324,16 @@ final class TCPConnection: @unchecked Sendable {
     }
 
     /// Send an MLXArray as a wire-format tensor.
-    /// Optimized: write header+shape first, then stream tensor bytes directly.
+    /// Zero-copy: eval() + noCopyIfContiguous avoids memcpy on Apple Silicon.
     func sendTensor(_ array: MLXArray) throws {
         try queue.sync {
-            let arrayData = array.asData(access: .copy)
+            // eval() ensures GPU computation is complete, then wrap memory (no copy)
+            let arrayData = array.asData(access: .noCopyIfContiguous)
             let shape = arrayData.shape
             let dtype = arrayData.dType
             let ndim = shape.count
             let nbytes = arrayData.data.count
 
-            // Build header + shape (small, ~48 bytes for 3D tensor)
             var header = Data(capacity: WireFormat.headerSize + ndim * 8)
             header.append(contentsOf: withUnsafeBytes(of: WireFormat.magic.bigEndian) { Array($0) })
             header.append(contentsOf: withUnsafeBytes(of: WireFormat.MessageType.tensor.rawValue.bigEndian) { Array($0) })
@@ -350,18 +347,15 @@ final class TCPConnection: @unchecked Sendable {
                 header.append(contentsOf: withUnsafeBytes(of: &dim64) { Array($0) })
             }
 
-            // Send header + shape
             try Self.sendAll(socket: self.socket, data: header)
-            // Send tensor bytes directly (avoids copying into larger buffer)
             try Self.sendAll(socket: self.socket, data: arrayData.data)
         }
     }
 
     /// Receive an MLXArray tensor from the wire format.
-    /// Optimized: single allocation, recv directly into buffer, zero-copy shape parse.
+    /// Single allocation: recv shape + payload together, construct MLXArray directly.
     func recvTensor() throws -> MLXArray {
         try queue.sync {
-            // Read header (32 bytes) directly into pre-allocated buffer
             var headerBuf = Data(count: WireFormat.headerSize)
             try headerBuf.withUnsafeMutableBytes { ptr in
                 var remaining = WireFormat.headerSize
@@ -387,8 +381,8 @@ final class TCPConnection: @unchecked Sendable {
                 throw TransportError.invalidDType(dtypeRaw)
             }
 
-            // Read shape + payload in one allocation
-            let payloadSize = ndim * 8 + nbytes
+            let shapeBytes = ndim * 8
+            let payloadSize = shapeBytes + nbytes
             var payload = Data(count: payloadSize)
             try payload.withUnsafeMutableBytes { ptr in
                 var remaining = payloadSize
@@ -402,7 +396,6 @@ final class TCPConnection: @unchecked Sendable {
                 }
             }
 
-            // Parse shape directly from payload (zero-copy via bounds-checked access)
             var shape = [Int]()
             shape.reserveCapacity(ndim)
             for i in 0..<ndim {
@@ -414,9 +407,7 @@ final class TCPConnection: @unchecked Sendable {
                 shape.append(Int(Int64(bigEndian: dim64)))
             }
 
-            // Extract tensor data — use subdataWithRange to avoid full copy
-            let tensorStart = ndim * 8
-            let tensorData = payload.subdata(in: tensorStart..<(tensorStart + nbytes))
+            let tensorData = payload.subdata(in: shapeBytes..<(shapeBytes + nbytes))
             return MLXArray(tensorData, shape, dtype: dtype)
         }
     }

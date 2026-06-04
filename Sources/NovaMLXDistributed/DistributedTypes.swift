@@ -33,13 +33,19 @@ public struct ClusterConfig: Codable, Sendable, Equatable {
     /// Default: 32 (roughly 8-16 transformer blocks).
     public let minLayersPerShard: Int
 
+    /// Whether to attempt using MLX Ring transport (instead of custom TCP).
+    /// Ring is currently experimental and only recommended after assigning
+    /// stable private IPs via Scripts/setup-thunderbolt-ring.sh.
+    public var enableRingTransport: Bool
+
     public init(
         role: ClusterRole,
         coordinatorHost: String,
         coordinatorPort: Int = 6591,
         strategy: ClusterStrategy = .minNodes,
         prefill: PrefillConfig = PrefillConfig(),
-        minLayersPerShard: Int = 32
+        minLayersPerShard: Int = 32,
+        enableRingTransport: Bool = false
     ) {
         self.role = role
         self.coordinatorHost = coordinatorHost
@@ -47,6 +53,7 @@ public struct ClusterConfig: Codable, Sendable, Equatable {
         self.strategy = strategy
         self.prefill = prefill
         self.minLayersPerShard = minLayersPerShard
+        self.enableRingTransport = enableRingTransport
     }
 
     public init(from decoder: Decoder) throws {
@@ -57,6 +64,7 @@ public struct ClusterConfig: Codable, Sendable, Equatable {
         strategy = try container.decodeIfPresent(ClusterStrategy.self, forKey: .strategy) ?? .minNodes
         prefill = try container.decodeIfPresent(PrefillConfig.self, forKey: .prefill) ?? PrefillConfig()
         minLayersPerShard = try container.decodeIfPresent(Int.self, forKey: .minLayersPerShard) ?? 32
+        enableRingTransport = try container.decodeIfPresent(Bool.self, forKey: .enableRingTransport) ?? false
     }
 }
 
@@ -75,6 +83,12 @@ public struct NodeSpec: Codable, Sendable, Equatable {
     /// Falls back to `hostname` if not set.
     public var networkHost: String?
 
+    /// Fingerprint of the binary the worker is running (for version consistency check).
+    public var binaryFingerprint: String?
+
+    /// Hash of the authoritative cluster configuration (mainly cluster-policy.json).
+    public var configHash: String?
+
     public init(
         nodeId: String,
         totalMemoryBytes: UInt64,
@@ -82,7 +96,9 @@ public struct NodeSpec: Codable, Sendable, Equatable {
         hostname: String,
         port: Int,
         cpuModel: String = "",
-        networkHost: String? = nil
+        networkHost: String? = nil,
+        binaryFingerprint: String? = nil,
+        configHash: String? = nil
     ) {
         self.nodeId = nodeId
         self.totalMemoryBytes = totalMemoryBytes
@@ -91,7 +107,25 @@ public struct NodeSpec: Codable, Sendable, Equatable {
         self.port = port
         self.cpuModel = cpuModel
         self.networkHost = networkHost
+        self.binaryFingerprint = binaryFingerprint
+        self.configHash = configHash
     }
+}
+
+/// Map Apple Silicon CPU model string to relative GPU compute ratio.
+/// Used by ShardPlan to weight layer assignment by GPU capability.
+/// M4 Max = 1.0 baseline (40 GPU cores).
+public func computeRatio(for cpuModel: String) -> Double {
+    if cpuModel.contains("M4 Max") { return 1.0 }
+    if cpuModel.contains("M4 Pro") { return 0.50 }
+    if cpuModel.contains("M4") { return 0.23 }      // base M4 (10 cores)
+    if cpuModel.contains("M3 Max") { return 0.75 }
+    if cpuModel.contains("M3 Pro") { return 0.38 }
+    if cpuModel.contains("M3") { return 0.19 }
+    if cpuModel.contains("M2 Max") { return 0.75 }
+    if cpuModel.contains("M2 Pro") { return 0.38 }
+    if cpuModel.contains("M2") { return 0.19 }
+    return 0.2  // conservative default for unknown chips
 }
 
 // MARK: - LayerType
@@ -177,8 +211,8 @@ public struct ShardPlan: Codable, Sendable, Equatable {
     ///
     /// - **minNodes**: Use fewest nodes that can hold the model. Packs nodes
     ///   greedily by memory until all layers are assigned.
-    /// - **spread**: Distribute evenly across nodes, but each shard gets at
-    ///   least `minLayersPerShard` layers. Excess nodes are left idle.
+    /// - **spread**: Minimize sequential pipeline latency. Fastest node gets
+    ///   maximum layers, slowest get minimum (`minLayersPerShard`). Memory-capped.
     ///
     /// Both strategies enforce `minLayersPerShard` to prevent over-splitting
     /// where communication overhead would dominate compute.
@@ -199,8 +233,6 @@ public struct ShardPlan: Codable, Sendable, Equatable {
             activeNodes.count <= totalLayers,
             "Cannot distribute \(totalLayers) layers across \(activeNodes.count) nodes"
         )
-
-        let totalMemory = activeNodes.reduce(UInt64(0)) { $0 + $1.totalMemoryBytes }
 
         var assignments: [ShardAssignment] = []
         var currentLayer = 0
@@ -233,29 +265,51 @@ public struct ShardPlan: Codable, Sendable, Equatable {
             }
 
         case .spread:
-            // Even distribution proportional to memory, respecting minPerShard.
-            for (index, node) in activeNodes.enumerated() {
-                let isLast = index == activeNodes.count - 1
-                var layersForNode: Int
+            // Sequential pipeline optimization: minimize total latency.
+            // total_time = sum(layers_i * time_per_layer_i)
+            // Since faster nodes have lower time_per_layer, giving them more layers
+            // reduces total time. Optimal: give minPerShard to slow nodes, rest to fastest.
+            let sortedIndices = activeNodes.indices.sorted { i, j in
+                computeRatio(for: activeNodes[i].cpuModel) > computeRatio(for: activeNodes[j].cpuModel)
+            }
+            var layerAllocation = [Int](repeating: minPerShard, count: activeNodes.count)
+            var remaining = totalLayers - activeNodes.count * minPerShard
 
-                if isLast {
-                    layersForNode = totalLayers - currentLayer
-                } else {
-                    let remainingNodes = activeNodes.count - index
-                    let remainingLayers = totalLayers - currentLayer
-                    let evenSplit = remainingLayers / remainingNodes
-                    if totalMemory > 0 {
-                        let ratio = Double(node.totalMemoryBytes) / Double(totalMemory)
-                        layersForNode = max(minPerShard, Int(ratio * Double(totalLayers)))
-                    } else {
-                        layersForNode = max(minPerShard, evenSplit)
-                    }
-                    // Don't overshoot: leave room for remaining nodes
-                    let maxAllowed = remainingLayers - (remainingNodes - 1) * minPerShard
-                    layersForNode = min(layersForNode, maxAllowed)
-                    layersForNode = max(minPerShard, layersForNode)
+            // Greedy: fill fastest nodes first, respecting memory
+            for idx in sortedIndices {
+                let node = activeNodes[idx]
+                let alreadyAllocated = layerAllocation[idx]
+                if idx == sortedIndices[0] {
+                    // Fastest node gets all extra layers on top of its minimum
+                    layerAllocation[idx] = alreadyAllocated + remaining
+                    remaining = 0
                 }
+                // Memory sanity: if node can't hold its allocation, reduce and redistribute
+                let profileMemory = profiles.reduce(UInt64(0)) { $0 + $1.estimatedMemoryBytes }
+                let memPerLayer = totalLayers > 0 ? profileMemory / UInt64(totalLayers) : 0
+                if memPerLayer > 0 {
+                    let maxLayersByMem = Int(node.totalMemoryBytes / max(1, memPerLayer))
+                    if layerAllocation[idx] > maxLayersByMem && maxLayersByMem >= minPerShard {
+                        let excess = layerAllocation[idx] - maxLayersByMem
+                        layerAllocation[idx] = maxLayersByMem
+                        remaining += excess
+                    }
+                }
+            }
+            // If fastest node was capped, give excess to next-fastest
+            if remaining > 0 {
+                for i in 1..<sortedIndices.count {
+                    let idx = sortedIndices[i]
+                    let add = min(remaining, totalLayers - layerAllocation.reduce(0, +))
+                    if add > 0 {
+                        layerAllocation[idx] += add
+                        remaining -= add
+                    }
+                }
+            }
 
+            for (index, node) in activeNodes.enumerated() {
+                let layersForNode = layerAllocation[index]
                 let endLayer = min(currentLayer + layersForNode, totalLayers)
                 let memEstimate = profiles[currentLayer..<endLayer]
                     .reduce(UInt64(0)) { $0 + $1.estimatedMemoryBytes }
