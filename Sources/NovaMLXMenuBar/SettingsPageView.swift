@@ -395,6 +395,48 @@ struct SettingsPageView: View {
         exit(0)
     }
 
+    // MARK: - tknet.ai
+
+    private func verifyAndFetchTknetModels() async {
+        tknetVerifying = true
+        tknetVerifyMessage = nil
+        tknetApiKeyVerified = false
+
+        do {
+            let config = NovaMLXConfiguration.shared
+
+            // Verify API key
+            let isValid = await config.cloudBackend.verifySettingsApiKey(apiKey: tknetApiKey)
+            if !isValid {
+                tknetVerifyMessage = l10n.tr("settings.tknet.invalidKey")
+                tknetVerifying = false
+                return
+            }
+
+            // Fetch models
+            let models = await config.cloudBackend.fetchTknetModels(apiKey: tknetApiKey)
+            if models.isEmpty {
+                tknetVerifyMessage = l10n.tr("settings.tknet.noModels")
+                tknetVerifying = false
+                return
+            }
+
+            // Provision providers
+            await config.tokenhubTypes.provisionTknetProviders(apiKey: tknetApiKey, models: models)
+
+            // Save API key
+            await config.tokenhubTypes.saveTknetApiKey(tknetApiKey)
+
+            // Update UI state
+            tknetApiKeyVerified = true
+            tknetVerifyMessage = l10n.tr("settings.tknet.success", String(models.count))
+        } catch {
+            tknetVerifyMessage = "Error: \(error.localizedDescription)"
+        }
+
+        tknetVerifying = false
+    }
+
     private func loadCurrentConfig() {
         let configPath = NovaMLXPaths.configFile
 
