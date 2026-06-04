@@ -39,6 +39,27 @@ public actor CloudBackend {
         }
     }
 
+    /// Fetch nova-tagged models from tknet.ai using valid API Key.
+    public func fetchTknetModels(apiKey: String) async -> [TknetModel] {
+        let url = Self.tknetManagementURL.appendingPathComponent("models")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "tag", value: "nova")]
+
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let decoded = try JSONDecoder().decode(TknetModelsResponse.self, from: data)
+            NovaMLXLog.info("tknet.ai: discovered \(decoded.data.count) nova models")
+            return decoded.data
+        } catch {
+            NovaMLXLog.error("tknet.ai model fetch error: \(error.localizedDescription)")
+            return []
+        }
+    }
+
     // MARK: - Tokenhub Provider Proxy (OpenAI, Non-streaming)
 
     public func proxy(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
