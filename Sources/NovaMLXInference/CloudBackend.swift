@@ -7,6 +7,9 @@ import NovaMLXUtils
 public actor CloudBackend {
     public static let shared = CloudBackend()
 
+    static let tknetBaseURL = URL(string: "https://api.tknet.ai/v1")!
+    static let tknetManagementURL = URL(string: "https://tknet.ai/api/v1")!
+
     // MARK: - Tokenhub Provider Proxy (OpenAI, Non-streaming)
 
     public func proxy(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
@@ -378,6 +381,30 @@ public actor CloudBackend {
 }
 
 // MARK: - Types
+
+public struct TknetModel: Codable, Sendable {
+    public let id: String
+    public let object: String
+    public let created: TimeInterval?
+    public let ownedBy: String?
+    public let pricing: Pricing?
+    public let tags: [String]
+
+    public struct Pricing: Codable, Sendable {
+        public let inputPricePerMillion: Double?
+        public let outputPricePerMillion: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case inputPricePerMillion = "input_price_per_million"
+            case outputPricePerMillion = "output_price_per_million"
+        }
+    }
+}
+
+private struct TknetModelsResponse: Codable {
+    let object: String
+    let data: [TknetModel]
+}
 
 public struct CloudModelInfo: Sendable {
     public let remoteId: String
