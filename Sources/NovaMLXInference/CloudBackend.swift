@@ -7,68 +7,6 @@ import NovaMLXUtils
 public actor CloudBackend {
     public static let shared = CloudBackend()
 
-    static let cloudBaseURL = URL(string: "https://chat.baystoneai.com/v1")!
-
-    private var cachedModels: [CloudModelInfo] = []
-    private var lastFetchTime: Date = .distantPast
-    private let refreshInterval: TimeInterval = 600
-
-    // MARK: - Model Discovery
-
-    /// Fetch available models from remote endpoint for auto-provisioning.
-    public func fetchModels() async -> [CloudModelInfo] {
-        if !cachedModels.isEmpty, Date().timeIntervalSince(lastFetchTime) < refreshInterval {
-            return cachedModels
-        }
-
-        let url = Self.cloudBaseURL.appendingPathComponent("models")
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 10
-
-        // Use session token for auth
-        if let session = AuthCache.loadSession(), !session.isEmpty {
-            request.setValue("Bearer \(session)", forHTTPHeaderField: "Authorization")
-        }
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                NovaMLXLog.error("Cloud model discovery failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
-                return cachedModels
-            }
-
-            struct ModelsResponse: Decodable {
-                let data: [ModelEntry]
-            }
-            struct ModelEntry: Decodable {
-                let id: String
-            }
-
-            let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
-            cachedModels = decoded.data.map { CloudModelInfo(remoteId: $0.id) }
-            lastFetchTime = Date()
-            NovaMLXLog.info("Cloud: discovered \(cachedModels.count) remote models")
-            return cachedModels
-        } catch {
-            NovaMLXLog.error("Cloud model discovery error: \(error.localizedDescription)")
-            return cachedModels
-        }
-    }
-
-    // MARK: - Health Check (Cloud)
-
-    public func healthCheck() async -> Bool {
-        let url = Self.cloudBaseURL.appendingPathComponent("models")
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 5
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
-        } catch {
-            return false
-        }
-    }
-
     // MARK: - Tokenhub Provider Proxy (OpenAI, Non-streaming)
 
     public func proxy(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
