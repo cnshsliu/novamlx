@@ -184,6 +184,12 @@ public final class TokenhubManager: @unchecked Sendable {
             return get(providerName)
         }
 
+        // Direct model name → check if it matches any provider's remoteModel
+        // For local models: model name = provider.remoteModel (e.g., "mlx-community/Qwen3.6-35B-A3B-4bit")
+        if let provider = list().first(where: { $0.remoteModel == modelName }) {
+            return provider
+        }
+
         return nil
     }
 
