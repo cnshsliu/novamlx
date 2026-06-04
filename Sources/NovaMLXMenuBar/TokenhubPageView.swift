@@ -185,7 +185,7 @@ struct TokenhubPageView: View {
     /// Mask API Key in AWS format: first 4 chars + ... + last 3 chars
     /// Example: "sk-abc123def456" → "sk-a...456"
     private func maskApiKey(_ key: String) -> String {
-        guard key.count >= 7 else return "****"
+        if key.count < 7 { return "****" }
         let prefix = String(key.prefix(4))
         let suffix = String(key.suffix(3))
         return "\(prefix)...\(suffix)"

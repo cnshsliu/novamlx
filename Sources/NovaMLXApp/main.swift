@@ -290,12 +290,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Cloud providers — validate subscription with network check
                 do {
                     _ = try await CloudAuth.validate()
-                    // TODO: Re-enable with tknet.ai in Task 11 (provisionTknetProviders) + Task 17 (verifyAndFetchTknetModels)
-                    // let models = await CloudBackend.shared.fetchModels()
-                    // let remoteModels = models.map { (id: $0.remoteId, name: $0.remoteId) }
-                    // try? TokenhubManager.shared.provisionManagedProviders(remoteModels: remoteModels)
-                    // NovaMLXLog.info("Cloud managed providers provisioned: \(remoteModels.count)")
-                    NovaMLXLog.info("Cloud provisioning skipped (tknet.ai integration pending)")
+
+                    // Verify tknet.ai API Key and provision nova providers
+                    if let apiKey = TokenhubManager.shared.loadTknetApiKeyFromSettings(), !apiKey.isEmpty {
+                        let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: apiKey)
+                        if isValid {
+                            let models = await CloudBackend.shared.fetchTknetModels(apiKey: apiKey)
+                            if !models.isEmpty {
+                                try? TokenhubManager.shared.provisionTknetProviders(remoteModels: models)
+                                NovaMLXLog.info("tknet.ai nova providers provisioned: \(models.count) models")
+                            } else {
+                                NovaMLXLog.info("tknet.ai API key valid but no nova models found")
+                            }
+                        } else {
+                            NovaMLXLog.info("tknet.ai API key invalid, skipping nova provider provisioning")
+                        }
+                    } else {
+                        NovaMLXLog.info("No tknet.ai API key configured")
+                    }
                 } catch {
                     NovaMLXLog.info("Not subscribed, skipping cloud provisioning")
                 }
