@@ -13,6 +13,7 @@ struct ProviderCatalogEntry: Identifiable {
     static let entries: [ProviderCatalogEntry] = [
         ProviderCatalogEntry(id: "openai", displayName: "OpenAI", endpoint: "https://api.openai.com/v1", icon: "circle.hexagon"),
         ProviderCatalogEntry(id: "anthropic", displayName: "Anthropic", endpoint: "https://api.anthropic.com/v1", icon: "brain.head.profile"),
+        ProviderCatalogEntry(id: "tknet", displayName: "tknet.ai", endpoint: "https://api.tknet.ai/v1", icon: "star.circle"),
         ProviderCatalogEntry(id: "groq", displayName: "Groq", endpoint: "https://api.groq.com/openai/v1", icon: "bolt.horizontal"),
         ProviderCatalogEntry(id: "together", displayName: "Together AI", endpoint: "https://api.together.xyz/v1", icon: "person.2"),
         ProviderCatalogEntry(id: "fireworks", displayName: "Fireworks AI", endpoint: "https://api.fireworks.ai/inference/v1", icon: "fireworks"),
@@ -42,7 +43,22 @@ struct TokenhubPageView: View {
 
     @State private var providers: [TokenhubProvider] = []
     @State private var editingProvider: TokenhubProvider?
+    @State private var selectedProvider: TokenhubProvider?
     @State private var isCreatingNew = false
+
+    // Right panel mode
+    @State private var rightPanelMode: RightPanelMode = .empty
+
+    // Agent launcher
+    @State private var selectedAgentPerProvider: [String: AgentSpec] = [:]
+    @State private var lbSelectedAgent: AgentSpec = AgentRegistry.all[0]
+    @State private var agentToast: String?
+    @State private var showAgentToast = false
+    @State private var showCodexRestartConfirm = false
+    @State private var pendingCodexLaunch: (agent: AgentSpec, modelName: String)?
+    @State private var showDeleteConfirm = false
+    @State private var pendingDeleteProvider: TokenhubProvider?
+    @State private var apiKeyVisibility: [String: Bool] = [:]
 
     // Form
     @State private var formName = ""
@@ -52,6 +68,7 @@ struct TokenhubPageView: View {
     @State private var formEnabled = false
     @State private var formIncludeInLB = false
     @State private var formIsFree = false
+    @State private var formSupportsResponses = false
     @State private var formTags = ""
     @State private var isVerified = false
 
@@ -75,8 +92,14 @@ struct TokenhubPageView: View {
 
     private let manager = TokenhubManager.shared
 
+    enum RightPanelMode {
+        case empty
+        case detail
+        case editing
+    }
+
     private var isFormActive: Bool {
-        isCreatingNew || editingProvider != nil
+        rightPanelMode == .editing
     }
 
     private var isEditingManaged: Bool {
@@ -84,12 +107,24 @@ struct TokenhubPageView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            leftPanel
-                .frame(width: 200)
-            Divider()
-            rightPanel
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            // Top: Load Balance (full width)
+            if !lbProviders.isEmpty {
+                loadBalanceSection
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                Divider()
+                    .padding(.vertical, 0)
+            }
+
+            // Bottom: Provider List + Detail
+            HStack(spacing: 0) {
+                leftPanel
+                    .frame(width: 200)
+                Divider()
+                rightPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
@@ -105,6 +140,55 @@ struct TokenhubPageView: View {
         } message: {
             Text(alertMessage)
         }
+        .alert("Restart Codex?", isPresented: $showCodexRestartConfirm) {
+            Button("Restart", role: .destructive) {
+                guard let pending = pendingCodexLaunch else { return }
+                AgentConfigGenerator.launchOrRestartCodex(agent: pending.agent, forceRestart: true) { success in
+                    DispatchQueue.main.async {
+                        agentToast = success ? "\(pending.agent.displayName) restarted with \(pending.modelName)" : "\(pending.agent.displayName) not found"
+                        showAgentToast = true
+                        pendingCodexLaunch = nil
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingCodexLaunch = nil
+            }
+        } message: {
+            if let pending = pendingCodexLaunch {
+                Text("Codex is running. To switch model to \(pending.modelName), Codex must be restarted. Unsaved work may be lost.")
+            } else {
+                Text("Codex is running and must be restarted.")
+            }
+        }
+        .alert("Delete Provider?", isPresented: $showDeleteConfirm) {
+            Button("Delete", role: .destructive) {
+                if let provider = pendingDeleteProvider {
+                    deleteProvider(provider)
+                    pendingDeleteProvider = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeleteProvider = nil
+            }
+        } message: {
+            if let provider = pendingDeleteProvider {
+                Text("Are you sure you want to delete \(provider.name)? This cannot be undone.")
+            } else {
+                Text("Are you sure you want to delete this provider?")
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Mask API Key in AWS format: first 4 chars + ... + last 3 chars
+    /// Example: "sk-abc123def456" → "sk-a...456"
+    private func maskApiKey(_ key: String) -> String {
+        guard key.count >= 7 else return "****"
+        let prefix = String(key.prefix(4))
+        let suffix = String(key.suffix(3))
+        return "\(prefix)...\(suffix)"
     }
 
     // MARK: - Left Panel (My Providers only)
@@ -166,54 +250,60 @@ struct TokenhubPageView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+                Spacer()
             } else {
-                let managed = providers.filter { $0.isManaged }
-                let userProviders = providers.filter { !$0.isManaged }
-
-                if !managed.isEmpty {
-                    HStack {
-                        Image(systemName: "cloud.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(NovaTheme.Colors.accent)
-                        Text("Cloud Models")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(NovaTheme.Colors.textTertiary)
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Sort: local models first, then enabled, then disabled
+                        let sorted = providers.sorted { a, b in
+                            if a.isLocal != b.isLocal { return a.isLocal }
+                            if a.isEnabled != b.isEnabled { return a.isEnabled }
+                            return a.name < b.name
+                        }
+                        ForEach(sorted) { provider in
+                            myProviderRow(provider)
+                        }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
-                    .padding(.bottom, 2)
-
-                    ForEach(managed) { provider in
-                        myProviderRow(provider)
-                    }
-
-                    if !userProviders.isEmpty {
-                        Divider()
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 4)
-                    }
-                }
-
-                ForEach(userProviders) { provider in
-                    myProviderRow(provider)
                 }
             }
-
-            Spacer()
         }
         .background(NovaTheme.Colors.cardBackground)
     }
 
     private func myProviderRow(_ provider: TokenhubProvider) -> some View {
         Button(action: { selectMyProvider(provider) }) {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
+                // LB indicator: 4px vertical bar
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(provider.includeInLoadBalance ? NovaTheme.Colors.accent.opacity(0.7) : Color.clear)
+                    .frame(width: 4)
+
+                Spacer().frame(width: 6)
+
+                // Free indicator: fixed-width slot, visible dot when free
+                Group {
+                    if provider.isFree {
+                        Circle()
+                            .fill(NovaTheme.Colors.statusOK.opacity(0.6))
+                            .frame(width: 5, height: 5)
+                    } else {
+                        Color.clear.frame(width: 5, height: 5)
+                    }
+                }.frame(width: 8)
+
+                Spacer().frame(width: 4)
+
+                // Status dot
                 Circle()
                     .fill(bulkIndicatorColor(for: provider))
                     .frame(width: 6, height: 6)
+
+                Spacer().frame(width: 8)
+
                 VStack(alignment: .leading, spacing: 1) {
                     Text(provider.name)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(editingProvider?.id == provider.id ? NovaTheme.Colors.accent : NovaTheme.Colors.textPrimary)
+                        .foregroundColor((editingProvider?.id == provider.id || selectedProvider?.id == provider.id) ? NovaTheme.Colors.accent : NovaTheme.Colors.textPrimary)
                         .lineLimit(1)
                     HStack(spacing: 4) {
                         Text(provider.remoteModel.isEmpty ? "no model" : provider.remoteModel)
@@ -230,6 +320,12 @@ struct TokenhubPageView: View {
                                     .foregroundColor(NovaTheme.Colors.textTertiary)
                             }
                         }
+                        if !provider.apiKey.isEmpty {
+                            Text(maskApiKey(provider.apiKey))
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(NovaTheme.Colors.textTertiary)
+                                .lineLimit(1)
+                        }
                     }
                 }
                 Spacer()
@@ -241,14 +337,7 @@ struct TokenhubPageView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
-            .background(editingProvider?.id == provider.id ? NovaTheme.Colors.accent.opacity(0.15) : Color.clear)
-            .overlay(alignment: .leading) {
-                if editingProvider?.id == provider.id {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(NovaTheme.Colors.accent)
-                        .frame(width: 2)
-                }
-            }
+            .background((editingProvider?.id == provider.id || selectedProvider?.id == provider.id) ? NovaTheme.Colors.accent.opacity(0.15) : Color.clear)
             .cornerRadius(6)
             .contentShape(Rectangle())
         }
@@ -258,28 +347,359 @@ struct TokenhubPageView: View {
             else { NSCursor.pop() }
         }
         .contextMenu {
-            Button(role: .destructive) {
-                deleteProvider(provider)
+            Button {
+                duplicateProvider(provider)
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("Duplicate", systemImage: "doc.on.doc")
+            }
+            if !provider.isLocal {
+                Button(role: .destructive) {
+                    pendingDeleteProvider = provider
+                    showDeleteConfirm = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
             }
         }
     }
 
     // MARK: - Right Panel
 
+    private var lbProviders: [TokenhubProvider] {
+        providers.filter { $0.isEnabled && $0.includeInLoadBalance }
+    }
+
     private var rightPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if isFormActive {
-                    formContent
-                } else {
+                switch rightPanelMode {
+                case .empty:
                     emptyState
+                case .detail:
+                    if let provider = selectedProvider {
+                        providerDetailSection(provider)
+                    }
+                case .editing:
+                    formContent
                 }
             }
             .padding(24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Load Balance Section (fixed at top)
+
+    private var loadBalanceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 12))
+                    .foregroundColor(NovaTheme.Colors.accent)
+                Text("Load Balance")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(NovaTheme.Colors.textPrimary)
+                Spacer()
+                let count = lbProviders.count
+                Text("\(count) provider\(count == 1 ? "" : "s")")
+                    .font(.system(size: 10))
+                    .foregroundColor(NovaTheme.Colors.textTertiary)
+            }
+
+            // Context window info
+            let (ctx, mixed) = ModelSpecs.lbContextWindow(from: providers)
+            HStack(spacing: 4) {
+                Text("Context:")
+                    .font(.system(size: 10))
+                    .foregroundColor(NovaTheme.Colors.textTertiary)
+                Text(formatContext(ctx))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(NovaTheme.Colors.textSecondary)
+                if mixed {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(.orange)
+                    Text("Mixed context sizes in pool — using minimum for compatibility")
+                        .font(.system(size: 9))
+                        .foregroundColor(.orange)
+                }
+            }
+
+            // Agent launcher row
+            agentLauncherRow(
+                agent: lbSelectedAgent,
+                onAgentChange: { lbSelectedAgent = $0 },
+                modelName: "tknet",
+                allProviders: providers
+            )
+        }
+        .padding(14)
+        .background(NovaTheme.Colors.cardBackground)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(NovaTheme.Colors.accent.opacity(0.2), lineWidth: 1)
+        )
+        .cornerRadius(8)
+    }
+
+    // MARK: - Provider Detail Section
+
+    private func providerDetailSection(_ provider: TokenhubProvider) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header with Edit/Copy/Delete
+            HStack {
+                Circle()
+                    .fill(provider.isEnabled ? NovaTheme.Colors.statusOK : NovaTheme.Colors.textTertiary)
+                    .frame(width: 8, height: 8)
+                Text(provider.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(NovaTheme.Colors.textPrimary)
+                if provider.isLocal {
+                    Label("Local", systemImage: "internaldrive")
+                        .font(.system(size: 9))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(NovaTheme.Colors.accentDim)
+                        .clipShape(Capsule())
+                } else if provider.isManaged {
+                    Label("Managed", systemImage: "lock.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(NovaTheme.Colors.accentDim)
+                        .clipShape(Capsule())
+                }
+                Spacer()
+
+                Button {
+                    loadFormFromProvider(provider)
+                    rightPanelMode = .editing
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    duplicateProvider(provider)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                if !provider.isLocal {
+                    Button(role: .destructive) {
+                        pendingDeleteProvider = provider
+                        showDeleteConfirm = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            // Info grid
+            VStack(alignment: .leading, spacing: 6) {
+                detailRow(label: "Upstream Model", value: provider.remoteModel)
+                HStack(alignment: .top) {
+                    Text("API Model:")
+                        .font(.system(size: 10))
+                        .foregroundColor(NovaTheme.Colors.textTertiary)
+                        .frame(width: 80, alignment: .trailing)
+                    Text("tknet:\(provider.id)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("tknet:\(provider.id)", forType: .string)
+                        agentToast = "Copied: tknet:\(provider.id)"
+                        showAgentToast = true
+                    } label: {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 9))
+                            .foregroundColor(NovaTheme.Colors.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                detailRow(label: "Endpoint", value: provider.endpoint)
+                detailRow(label: "Context", value: formatContext(provider.effectiveContextWindow))
+                if !provider.tags.isEmpty {
+                    detailRow(label: "Tags", value: provider.tags.joined(separator: ", "))
+                }
+                if provider.requestCount > 0 {
+                    HStack(spacing: 12) {
+                        Text("Stats:")
+                            .font(.system(size: 10))
+                            .foregroundColor(NovaTheme.Colors.textTertiary)
+                        Text("\(provider.successCount)/\(provider.requestCount) OK")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(NovaTheme.Colors.textTertiary)
+                        if provider.avgLatencyMs > 0 {
+                            Text(String(format: "%.0fms avg", provider.avgLatencyMs))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(NovaTheme.Colors.textTertiary)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
+            // Agent launcher
+            let agent = selectedAgentPerProvider[provider.id] ?? AgentRegistry.all[0]
+            agentLauncherRow(
+                agent: agent,
+                onAgentChange: { selectedAgentPerProvider[provider.id] = $0 },
+                modelName: "tknet:\(provider.id)",
+                allProviders: providers
+            )
+        }
+        .padding(14)
+        .background(NovaTheme.Colors.cardBackground)
+        .cornerRadius(8)
+    }
+
+    private func detailRow(label: String, value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(label + ":")
+                .font(.system(size: 10))
+                .foregroundColor(NovaTheme.Colors.textTertiary)
+                .frame(width: 60, alignment: .trailing)
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(NovaTheme.Colors.textSecondary)
+                .lineLimit(2)
+        }
+    }
+
+    // MARK: - Agent Launcher Row (shared between LB and provider detail)
+
+    private func agentLauncherRow(
+        agent: AgentSpec,
+        onAgentChange: @escaping (AgentSpec) -> Void,
+        modelName: String,
+        allProviders: [TokenhubProvider]
+    ) -> some View {
+        HStack(spacing: 8) {
+            // Agent picker
+            Menu {
+                ForEach(AgentRegistry.all) { a in
+                    Button(action: { onAgentChange(a) }) {
+                        Label(a.displayName, systemImage: a.icon)
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: agent.icon)
+                        .font(.system(size: 10))
+                    Text(agent.displayName)
+                        .font(.system(size: 11))
+                }
+                .foregroundColor(NovaTheme.Colors.textPrimary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(NovaTheme.Colors.rowBackground)
+                .cornerRadius(6)
+            }
+            .menuStyle(.borderlessButton)
+
+            Spacer()
+
+            // APP button
+            if agent.hasApp {
+                Button(action: {
+                    // Always regenerate full Codex config (catalog + config.toml)
+                    let warning = AgentConfigGenerator.generateConfig(
+                        agent: agent,
+                        providers: allProviders,
+                        apiKey: appState.apiKey,
+                        modelName: modelName
+                    )
+                    if let w = warning { agentToast = w }
+
+                    if AgentConfigGenerator.isCodexRunning() {
+                        // Codex is running — need restart to pick up new model
+                        pendingCodexLaunch = (agent: agent, modelName: modelName)
+                        showCodexRestartConfirm = true
+                    } else {
+                        // Not running — just launch
+                        AgentConfigGenerator.launchOrRestartCodex(agent: agent, forceRestart: false) { success in
+                            DispatchQueue.main.async {
+                                agentToast = success ? "\(agent.displayName) launched with \(modelName)" : "\(agent.displayName) not found"
+                                showAgentToast = true
+                            }
+                        }
+                    }
+                }) {
+                    Label("APP", systemImage: "play.fill")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+
+            // CLI button (copy to clipboard)
+            if agent.hasCLI {
+                Button(action: {
+                    let _ = AgentConfigGenerator.generateConfig(
+                        agent: agent,
+                        providers: allProviders,
+                        apiKey: appState.apiKey,
+                        modelName: modelName
+                    )
+                    let cmd = AgentConfigGenerator.generateCLICommand(
+                        agent: agent,
+                        modelName: modelName,
+                        apiKey: appState.apiKey
+                    )
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(cmd, forType: .string)
+                    agentToast = "Copied: \(cmd)"
+                    showAgentToast = true
+                }) {
+                    Label("CLI", systemImage: "doc.on.clipboard")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .overlay {
+            // Toast overlay
+            if showAgentToast, let msg = agentToast {
+                Text(msg)
+                    .font(.system(size: 9))
+                    .foregroundColor(NovaTheme.Colors.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(NovaTheme.Colors.cardBackground)
+                    .cornerRadius(4)
+                    .shadow(radius: 2)
+                    .offset(y: -24)
+                    .onAppear {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                            showAgentToast = false
+                            agentToast = nil
+                        }
+                    }
+            }
+        }
+    }
+
+    private func formatContext(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 {
+            return "\(tokens / 1_000_000)M"
+        } else if tokens >= 1024 {
+            return "\(tokens / 1024)K"
+        }
+        return "\(tokens)"
     }
 
     private var emptyState: some View {
@@ -350,13 +770,42 @@ struct TokenhubPageView: View {
                     TextField("https://api.example.com/v1", text: $formEndpoint)
                         .textFieldStyle(.roundedBorder)
                         .controlSize(.small)
+                        .disabled(editingProvider?.tags.contains("tknet") == true)
+                        .help(editingProvider?.tags.contains("tknet") == true
+                            ? "tknet.ai endpoint is fixed"
+                            : "API endpoint URL")
                 }
 
                 // API Key
-                formField(label: "API Key", hint: nil) {
-                    SecureField("sk-...", text: $formApiKey)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.small)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("API Key")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+
+                        Spacer()
+
+                        if !formApiKey.isEmpty {
+                            Button(action: {
+                                apiKeyVisibility[editingProvider?.id ?? ""] = !(apiKeyVisibility[editingProvider?.id ?? ""] ?? false)
+                            }) {
+                                Image(systemName: (apiKeyVisibility[editingProvider?.id ?? ""] ?? false) ? "eye.slash.fill" : "eye.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    if (apiKeyVisibility[editingProvider?.id ?? ""] ?? false) {
+                        TextField("API Key", text: $formApiKey)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                    } else {
+                        SecureField("API Key", text: $formApiKey)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                    }
                 }
 
                 // Tags
@@ -426,6 +875,10 @@ struct TokenhubPageView: View {
                 if !isEditingManaged {
                     Toggle("Free", isOn: $formIsFree)
                         .controlSize(.small)
+                        .onChange(of: formIsFree) { saveManagedToggles() }
+                    Toggle("/RESPS", isOn: $formSupportsResponses)
+                        .controlSize(.small)
+                        .onChange(of: formSupportsResponses) { saveManagedToggles() }
                 }
             }
 
@@ -506,8 +959,11 @@ struct TokenhubPageView: View {
                     .controlSize(.small)
                     .disabled(formName.isEmpty || formEndpoint.isEmpty)
 
-                    if editingProvider != nil {
-                        Button(role: .destructive, action: { deleteEditingProvider() }) {
+                    if let editing = editingProvider, !editing.isLocal {
+                        Button(role: .destructive, action: {
+                            pendingDeleteProvider = editing
+                            showDeleteConfirm = true
+                        }) {
                             Text("Delete")
                         }
                         .buttonStyle(.bordered)
@@ -587,7 +1043,6 @@ struct TokenhubPageView: View {
     // MARK: - Actions
 
     private func startCreating() {
-        // Check free-tier limit
         if !CloudAuth.isSubscribed() && manager.userProviderCount() >= TokenhubManager.freeProviderLimit {
             alertMessage = "Free tier: max \(TokenhubManager.freeProviderLimit) providers. Subscribe for unlimited."
             showAlert = true
@@ -595,6 +1050,8 @@ struct TokenhubPageView: View {
         }
         isCreatingNew = true
         editingProvider = nil
+        selectedProvider = nil
+        rightPanelMode = .editing
         formName = ""
         formEndpoint = ""
         formApiKey = ""
@@ -602,6 +1059,7 @@ struct TokenhubPageView: View {
         formEnabled = false
         formIncludeInLB = false
         formIsFree = false
+        formSupportsResponses = false
         formTags = ""
         isVerified = false
         availableModels = []
@@ -620,6 +1078,12 @@ struct TokenhubPageView: View {
 
     private func selectMyProvider(_ provider: TokenhubProvider) {
         isCreatingNew = false
+        editingProvider = nil
+        selectedProvider = provider
+        rightPanelMode = .detail
+    }
+
+    private func loadFormFromProvider(_ provider: TokenhubProvider) {
         editingProvider = provider
         formName = provider.name
         formEndpoint = provider.endpoint
@@ -628,6 +1092,7 @@ struct TokenhubPageView: View {
         formEnabled = provider.isEnabled
         formIncludeInLB = provider.includeInLoadBalance
         formIsFree = provider.isFree
+        formSupportsResponses = provider.supportsResponsesAPI
         formTags = provider.tags.joined(separator: ", ")
         isVerified = provider.isEnabled || provider.includeInLoadBalance
         availableModels = []
@@ -647,6 +1112,7 @@ struct TokenhubPageView: View {
         formEnabled = false
         formIncludeInLB = false
         formIsFree = false
+        formSupportsResponses = false
         formTags = ""
         isVerified = false
         availableModels = []
@@ -654,6 +1120,7 @@ struct TokenhubPageView: View {
         saveError = nil
         testEndpointResult = nil
         testProxyResult = nil
+        rightPanelMode = selectedProvider != nil ? .detail : .empty
     }
 
     private func parseTags(_ raw: String) -> [String] {
@@ -668,12 +1135,14 @@ struct TokenhubPageView: View {
         return lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("::1")
     }
 
-    /// Save Enabled/LB toggles for managed providers (auto-saved on toggle change).
+    /// Save Enabled/LB/Free toggles for any provider (auto-saved on toggle change).
     private func saveManagedToggles() {
-        guard let editing = editingProvider, editing.isManaged else { return }
+        guard let editing = editingProvider else { return }
         var updated = editing
         updated.isEnabled = formEnabled
         updated.includeInLoadBalance = formIncludeInLB
+        updated.isFree = formIsFree
+        updated.supportsResponsesAPI = formSupportsResponses
         try? manager.update(updated)
         editingProvider = updated
         reloadProviders()
@@ -690,7 +1159,8 @@ struct TokenhubPageView: View {
             includeInLoadBalance: formIncludeInLB,
             tags: parseTags(formTags),
             isLocal: isLocalEndpoint(formEndpoint),
-            isFree: formIsFree
+            isFree: formIsFree,
+            supportsResponsesAPI: formSupportsResponses
         )
 
         if let editing = editingProvider {
@@ -713,8 +1183,10 @@ struct TokenhubPageView: View {
         if isCreatingNew {
             clearForm()
         } else {
-            // Stay selected on the updated provider
-            editingProvider = provider
+            // Return to detail view for the saved provider
+            editingProvider = nil
+            selectedProvider = provider
+            rightPanelMode = .detail
             reloadProviders()
         }
     }
@@ -722,6 +1194,10 @@ struct TokenhubPageView: View {
     private func deleteProvider(_ provider: TokenhubProvider) {
         try? manager.delete(provider.name)
         if editingProvider?.id == provider.id { clearForm() }
+        if selectedProvider?.id == provider.id {
+            selectedProvider = nil
+            rightPanelMode = .empty
+        }
         reloadProviders()
     }
 
@@ -732,15 +1208,64 @@ struct TokenhubPageView: View {
         reloadProviders()
     }
 
+    /// Duplicate a provider with a unique name suffix.
+    private func duplicateProvider(_ provider: TokenhubProvider) {
+        var baseName = provider.name
+        // Strip existing numeric suffix like "-2", "-3" etc.
+        if let range = baseName.range(of: #"-\d+$"#, options: .regularExpression) {
+            baseName = String(baseName[baseName.startIndex..<range.lowerBound])
+        }
+
+        // Find next available unique name
+        var candidate: String
+        var suffix = 2
+        repeat {
+            candidate = "\(baseName)-\(suffix)"
+            suffix += 1
+        } while manager.get(candidate) != nil
+
+        var newProvider = TokenhubProvider(
+            name: candidate,
+            endpoint: provider.endpoint,
+            apiKey: provider.apiKey,
+            remoteModel: provider.remoteModel,
+            isEnabled: provider.isEnabled,
+            includeInLoadBalance: provider.includeInLoadBalance,
+            tags: provider.tags,
+            isLocal: provider.isLocal,
+            isFree: provider.isFree,
+            supportsResponsesAPI: provider.supportsResponsesAPI,
+            visionStrategy: provider.visionStrategy,
+            anthropicEndpoint: provider.anthropicEndpoint,
+            contextWindowOverride: provider.contextWindowOverride
+        )
+        // Reset stats for the duplicate
+        newProvider.requestCount = 0
+        newProvider.successCount = 0
+        newProvider.avgLatencyMs = 0
+
+        do {
+            try manager.create(newProvider)
+            reloadProviders()
+            // Select the new provider
+            if let created = manager.get(candidate) {
+                selectedProvider = created
+                rightPanelMode = .detail
+            }
+            agentToast = "Duplicated as \(candidate)"
+            showAgentToast = true
+        } catch {
+            alertMessage = "Failed to duplicate: \(error.localizedDescription)"
+            showAlert = true
+        }
+    }
+
     private func reloadProviders() {
         providers = manager.list()
             .sorted { $0.isEnabled && !$1.isEnabled }
     }
 
     private func bulkIndicatorColor(for provider: TokenhubProvider) -> Color {
-        if let result = bulkTestProgress[provider.name] {
-            return result == "OK" ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError
-        }
         return provider.isEnabled ? NovaTheme.Colors.statusOK : NovaTheme.Colors.textTertiary
     }
 
@@ -750,11 +1275,12 @@ struct TokenhubPageView: View {
         bulkTestRunning = true
         bulkTestProgress = [:]
         let allProviders = manager.list()
+        let key = appState.apiKey
         Task {
             await withTaskGroup(of: (String, Bool).self) { group in
                 for provider in allProviders {
                     group.addTask {
-                        let ok = await Self.testSingleProvider(provider)
+                        let ok = await Self.testSingleProvider(provider, localApiKey: key)
                         return (provider.name, ok)
                     }
                 }
@@ -777,7 +1303,7 @@ struct TokenhubPageView: View {
         }
     }
 
-    private static func testSingleProvider(_ provider: TokenhubProvider) async -> Bool {
+    private static func testSingleProvider(_ provider: TokenhubProvider, localApiKey: String?) async -> Bool {
         guard !provider.remoteModel.isEmpty else { return false }
         let endpoint = provider.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: endpoint) else { return false }
@@ -785,8 +1311,16 @@ struct TokenhubPageView: View {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
-        if !provider.apiKey.isEmpty {
-            request.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
+        let effectiveKey: String
+        if provider.isLocal {
+            effectiveKey = localApiKey ?? ""
+        } else if provider.isManaged {
+            effectiveKey = AuthCache.loadSession() ?? ""
+        } else {
+            effectiveKey = provider.apiKey
+        }
+        if !effectiveKey.isEmpty {
+            request.setValue("Bearer \(effectiveKey)", forHTTPHeaderField: "Authorization")
         }
         let body: [String: Any] = [
             "model": provider.remoteModel,
@@ -905,7 +1439,8 @@ struct TokenhubPageView: View {
                 includeInLoadBalance: formIncludeInLB,
                 tags: parseTags(formTags),
                 isLocal: isLocalEndpoint(formEndpoint),
-                isFree: formIsFree
+                isFree: formIsFree,
+                supportsResponsesAPI: formSupportsResponses
             )
             if editingProvider == nil {
                 if manager.get(providerName) == nil {
@@ -915,7 +1450,9 @@ struct TokenhubPageView: View {
                 _ = try? manager.update(provider)
             }
 
-            guard let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions") else {
+            let useResponses = formSupportsResponses
+            let path = useResponses ? "/v1/responses" : "/v1/chat/completions"
+            guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else {
                 await MainActor.run { testProxyResult = "Invalid local URL"; testProxyRunning = false }
                 return
             }
@@ -927,12 +1464,22 @@ struct TokenhubPageView: View {
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             }
 
-            let body: [String: Any] = [
-                "model": "tknet:\(providerName)",
-                "messages": [["role": "user", "content": "Hi, reply with just 'OK'"]],
-                "max_tokens": 10,
-                "stream": false
-            ]
+            let body: [String: Any]
+            if useResponses {
+                body = [
+                    "model": "tknet:\(providerName)",
+                    "input": "Hi, reply with just 'OK'",
+                    "max_output_tokens": 10,
+                    "stream": false
+                ]
+            } else {
+                body = [
+                    "model": "tknet:\(providerName)",
+                    "messages": [["role": "user", "content": "Hi, reply with just 'OK'"]],
+                    "max_tokens": 10,
+                    "stream": false
+                ]
+            }
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
             do {
