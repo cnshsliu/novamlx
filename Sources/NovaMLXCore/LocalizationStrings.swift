@@ -31,8 +31,8 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "Cluster",
-
-        // Cluster Page
+        "app.tokenhub": "Tokenhub",
+        "app.localModels": "Local Models",
         "cluster.disabled": "Cluster mode is disabled",
         "cluster.enableHint": "Enable cluster mode in Settings to monitor distributed nodes",
         "cluster.goToSettings": "Go to Settings",
@@ -238,6 +238,18 @@ enum LocalizationStrings {
         "settings.memoryLimitGB": "GB",
         "settings.memoryLimitMB": "MB",
 
+        // tknet.ai Settings
+        "settings.tknet.title": "tknet.ai",
+        "settings.tknet.helpText": "Use any valid tknet.ai API Key to fetch nova-tagged models.",
+        "settings.tknet.apiKey": "API Key",
+        "settings.tknet.verifyButton": "Verify & Fetch Models",
+        "settings.tknet.verifying": "Verifying...",
+        "settings.tknet.success": "Fetched %d nova models successfully.",
+        "settings.tknet.invalidKey": "Invalid API Key. Please check and try again.",
+        "settings.tknet.networkError": "Network error. Please check your connection.",
+        "settings.tknet.noModels": "Valid API Key, but no nova-tagged models found.",
+        "settings.tknet.apiKeyPlaceholder": "tknet.ai API Key",
+
         // Agents Page
         "agents.integrations": "Agent Integrations",
         "agents.configLabel": "Configuration",
@@ -298,9 +310,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "集群",
-
-        // Cluster Page
-        "cluster.disabled": "集群模式已禁用",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "下载",
+        "app.localModels": "本机模型",
         "cluster.enableHint": "在设置中启用集群模式以监控分布式节点",
         "cluster.goToSettings": "前往设置",
         "cluster.workers": "工作节点",
@@ -503,6 +515,18 @@ enum LocalizationStrings {
         "settings.memoryLimitGB": "GB",
         "settings.memoryLimitMB": "MB",
 
+        // tknet.ai 设置
+        "settings.tknet.title": "tknet.ai",
+        "settings.tknet.helpText": "使用任意有效的 tknet.ai API Key 来获取 nova 标签的模型。",
+        "settings.tknet.apiKey": "API 密钥",
+        "settings.tknet.verifyButton": "验证并获取模型",
+        "settings.tknet.verifying": "验证中...",
+        "settings.tknet.success": "成功获取 %d 个 nova 模型。",
+        "settings.tknet.invalidKey": "无效的 API 密钥。请检查后重试。",
+        "settings.tknet.networkError": "网络错误。请检查您的网络连接。",
+        "settings.tknet.noModels": "API 密钥有效，但未找到带有 nova 标签的模型。",
+        "settings.tknet.apiKeyPlaceholder": "tknet.ai API 密钥",
+
         "agents.integrations": "智能体集成",
         "agents.configLabel": "配置",
         "agents.description": "将智能体工具连接到 NovaMLX 作为推理后端。NovaMLX 提供 OpenAI 兼容的 API 供这些智能体直接使用。",
@@ -559,6 +583,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "集群",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "下载",
+        "app.localModels": "本机模型",
 
         "cluster.disabled": "集群模式已禁用",
         "cluster.enableHint": "在設定中啟用集群模式以監控分佈式節點",
@@ -819,6 +846,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "集群",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "下载",
+        "app.localModels": "本机模型",
 
         "cluster.disabled": "集群模式已停用",
         "cluster.enableHint": "在設定中啟用集群模式以監控分散式節點",
@@ -1073,6 +1103,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "クラスター",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "ダウンロード",
+        "app.localModels": "ローカルモデル",
 
         "cluster.disabled": "クラスターモードは無効です",
         "cluster.enableHint": "設定でクラスターモードを有効にして分散ノードを監視",
@@ -1333,6 +1366,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "클러스터",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "다운로드",
+        "app.localModels": "로컬 모델",
 
         "cluster.disabled": "클러스터 모드가 비활성화되었습니다",
         "cluster.enableHint": "설정에서 클러스터 모드를 활성화하여 분산 노드 모니터링",
@@ -1593,6 +1629,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "Cluster",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "Downloads",
+        "app.localModels": "Local Models",
 
         "cluster.disabled": "Le mode cluster est désactivé",
         "cluster.enableHint": "Activez le mode cluster dans les paramètres pour surveiller les nœuds distribués",
@@ -1853,6 +1892,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "Cluster",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "Downloads",
+        "app.localModels": "Local Models",
 
         "cluster.disabled": "Clustermodus ist deaktiviert",
         "cluster.enableHint": "Aktivieren Sie den Clustermodus in den Einstellungen, um verteilte Knoten zu überwachen",
@@ -2113,6 +2155,9 @@ enum LocalizationStrings {
         "app.mlx": "MLX",
         "app.novamlx": "NovaMLX",
         "app.cluster": "Кластер",
+        "app.tokenhub": "Tokenhub",
+        "app.downloads": "Загрузки",
+        "app.localModels": "Локальные модели",
 
         "cluster.disabled": "Кластерный режим отключён",
         "cluster.enableHint": "Включите кластерный режим в настройках для мониторинга распределённых узлов",
