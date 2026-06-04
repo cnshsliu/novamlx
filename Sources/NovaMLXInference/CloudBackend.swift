@@ -10,6 +10,35 @@ public actor CloudBackend {
     static let tknetBaseURL = URL(string: "https://api.tknet.ai/v1")!
     static let tknetManagementURL = URL(string: "https://tknet.ai/api/v1")!
 
+    // MARK: - API Key Verification
+
+    /// Verify tknet.ai API Key by fetching nova models.
+    /// Returns true if key is valid and returns at least one nova model.
+    public func verifySettingsApiKey(apiKey: String) async -> Bool {
+        let url = Self.tknetManagementURL.appendingPathComponent("models")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "tag", value: "nova")]
+
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            if http.statusCode == 200 {
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let models = json["data"] as? [[String: Any]] {
+                    return !models.isEmpty
+                }
+            }
+            return false
+        } catch {
+            NovaMLXLog.error("tknet.ai API Key verification failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     // MARK: - Tokenhub Provider Proxy (OpenAI, Non-streaming)
 
     public func proxy(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
