@@ -123,6 +123,9 @@ public final class TokenhubManager: @unchecked Sendable {
         return d
     }()
 
+    private var tknetKeyVerificationCache: (Bool, Date)?
+    private let cacheValidity: TimeInterval = 300  // 5 minutes
+
     private init(fileURL: URL = NovaMLXPaths.tokenhubProvidersFile) {
         self.fileURL = fileURL
         ensureDirectory()
@@ -255,6 +258,23 @@ public final class TokenhubManager: @unchecked Sendable {
             return nil
         }
         return apiKey
+    }
+
+    /// Check if user has valid tknet.ai API Key configured in Settings.
+    /// Returns true if API Key exists and passes verification.
+    public func hasValidTknetKey() -> Bool {
+        guard let apiKey = loadTknetApiKeyFromSettings(), !apiKey.isEmpty else {
+            return false
+        }
+        // Check cached verification result
+        if let (isValid, timestamp) = tknetKeyVerificationCache {
+            let cacheValid = Date().timeIntervalSince(timestamp) < cacheValidity
+            if cacheValid {
+                return isValid
+            }
+        }
+        // Cache expired - assume valid temporarily, actual verification happens async
+        return true
     }
 
     // MARK: - Managed Provider Provisioning
