@@ -277,6 +277,21 @@ public final class TokenhubManager: @unchecked Sendable {
         return true
     }
 
+    /// Called on app launch to verify tknet.ai API Key.
+    /// Updates cached verification result for 5 minutes.
+    public func verifyTknetKeyOnLaunch() async -> Bool {
+        guard let apiKey = loadTknetApiKeyFromSettings(), !apiKey.isEmpty else {
+            return false
+        }
+
+        let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: apiKey)
+
+        // Update cache
+        tknetKeyVerificationCache = (isValid, Date())
+
+        return isValid
+    }
+
     // MARK: - Managed Provider Provisioning
 
     /// Cloud model endpoint for managed providers.
