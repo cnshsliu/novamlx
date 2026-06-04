@@ -473,6 +473,54 @@ curl -X PUT http://localhost:8081/admin/models/my-model/settings \
 }
 ```
 
+### Cloud Providers (TokenHub)
+
+NovaMLX supports routing requests to cloud API providers (OpenAI, Anthropic, Groq, etc.) for models you don't have locally. Access via the **TokenHub** tab in the menu bar GUI.
+
+#### tknet.ai Integration
+
+NovaMLX integrates with **tknet.ai** for automatic nova model discovery and provider provisioning:
+
+1. **Configure API Key**:
+   - Open Settings → tknet.ai section
+   - Enter your tknet.ai API Key (format: `sk-xxxxx`)
+   - Click "Verify & Fetch Models"
+
+2. **Auto-Provisioning**:
+   - Nova providers (tagged with ⭐) are automatically created for each nova-tagged model
+   - Providers inherit API Key from Settings (not stored per-provider)
+   - On app launch, nova providers sync with tknet.ai model catalog
+
+3. **Provider Features**:
+   - **AWS-style masking**: API keys display as `sk-a...456` (first 4 + ... + last 3)
+   - **Visibility toggle**: Eye icon to show/hide API keys in edit form
+   - **Managed protection**: Nova providers cannot be deleted or have their endpoints modified
+   - **Unlimited slots**: Valid tknet.ai API Key unlocks unlimited third-party provider slots (vs 3 for free users)
+
+4. **Usage**:
+   ```bash
+   # Use tknet provider via CLI (prefix: tknet:)
+   nova chat --model tknet:deepseek-v4-flash
+
+   # Or via API
+   curl http://localhost:8080/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model":"tknet:deepseek-v4-flash","messages":[{"role":"user","content":"Hello!"}]}'
+   ```
+
+#### Manual Provider Configuration
+
+Add custom providers directly in TokenHub:
+
+| Field    | Example                              |
+| -------- | ------------------------------------ |
+| Name     | `my-openai`                          |
+| Endpoint | `https://api.openai.com/v1`         |
+| API Key  | `sk-...`                             |
+| Model    | `gpt-4o`                             |
+
+Use provider catalog presets for popular services (OpenAI, Anthropic, Groq, Together, Fireworks, Mistral, DeepSeek, OpenRouter, Gemini, xAI, DashScope, GLM).
+
 ---
 
 ## Requirements
