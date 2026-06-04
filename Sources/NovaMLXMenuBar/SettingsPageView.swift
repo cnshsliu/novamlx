@@ -68,6 +68,7 @@ struct SettingsPageView: View {
                     clusterSection
                 }
                 cliSection
+                tknetConfigSection
                 languageSection
                 turboQuantSection
                 sessionsSection
@@ -1008,6 +1009,62 @@ struct SettingsPageView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            }
+        }
+        .padding(16)
+        .sectionCard()
+    }
+
+    // MARK: - tknet.ai
+
+    private var tknetConfigSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("tknet.ai", icon: "link")
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(l10n.tr("settings.tknet.apiKey"))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 8) {
+                    ZStack(alignment: .trailing) {
+                        if tknetApiKeyVisible {
+                            TextField(l10n.tr("settings.tknet.apiKeyPlaceholder"), text: $tknetApiKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 12, design: .monospaced))
+                        } else {
+                            SecureField(l10n.tr("settings.tknet.apiKeyPlaceholder"), text: $tknetApiKey)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 12, design: .monospaced))
+                        }
+
+                        Button(action: { tknetApiKeyVisible.toggle() }) {
+                            Image(systemName: tknetApiKeyVisible ? "eye.slash.fill" : "eye.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 8)
+                    }
+
+                    Button(l10n.tr("settings.tknet.verify")) {
+                        Task { await verifyAndFetchTknetModels() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(tknetApiKey.isEmpty || tknetVerifying)
+                }
+
+                if tknetVerifying {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if let message = tknetVerifyMessage {
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundColor(tknetApiKeyVerified ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
+                }
             }
         }
         .padding(16)
