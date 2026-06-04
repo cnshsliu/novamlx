@@ -244,6 +244,19 @@ public final class TokenhubManager: @unchecked Sendable {
         return disabled
     }
 
+    /// Load tknet.ai API Key from Settings config file.
+    /// Returns nil if not configured or on error.
+    private func loadTknetApiKeyFromSettings() -> String? {
+        let configPath = NovaMLXPaths.configFile
+        guard let data = try? Data(contentsOf: configPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tknetConfig = json["tknet"] as? [String: Any],
+              let apiKey = tknetConfig["apiKey"] as? String else {
+            return nil
+        }
+        return apiKey
+    }
+
     // MARK: - Managed Provider Provisioning
 
     /// Cloud model endpoint for managed providers.
