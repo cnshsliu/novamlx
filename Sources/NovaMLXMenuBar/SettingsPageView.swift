@@ -420,7 +420,7 @@ struct SettingsPageView: View {
             }
 
             // Provision providers
-            try TokenhubManager.shared.provisionTknetProviders(models: models, apiKey: tknetApiKey)
+            try TokenhubManager.shared.provisionTknetProviders(remoteModels: models)
 
             // Save API key
             try TokenhubManager.shared.saveTknetApiKey(tknetApiKey)
@@ -437,7 +437,7 @@ struct SettingsPageView: View {
 
     private func loadTknetApiKey() {
         Task {
-            let apiKey = TokenhubManager.shared.loadTknetApiKey()
+            let apiKey = TokenhubManager.shared.loadTknetApiKeyFromSettings()
             await MainActor.run {
                 tknetApiKey = apiKey ?? ""
                 tknetApiKeyVerified = (apiKey != nil && !apiKey!.isEmpty)

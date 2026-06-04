@@ -1,6 +1,5 @@
 import Foundation
 import os.log
-import NovaMLXInference
 
 // MARK: - TokenhubProvider
 
@@ -123,9 +122,6 @@ public final class TokenhubManager: @unchecked Sendable {
         d.dateDecodingStrategy = .iso8601
         return d
     }()
-
-    private var tknetKeyVerificationCache: (Bool, Date)?
-    private let cacheValidity: TimeInterval = 300  // 5 minutes
 
     private init(fileURL: URL = NovaMLXPaths.tokenhubProvidersFile) {
         self.fileURL = fileURL
@@ -252,7 +248,7 @@ public final class TokenhubManager: @unchecked Sendable {
 
     /// Load tknet.ai API Key from Settings config file.
     /// Returns nil if not configured or on error.
-    private func loadTknetApiKeyFromSettings() -> String? {
+    public func loadTknetApiKeyFromSettings() -> String? {
         let configPath = NovaMLXPaths.configFile
         guard let data = try? Data(contentsOf: configPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -264,35 +260,13 @@ public final class TokenhubManager: @unchecked Sendable {
     }
 
     /// Check if user has valid tknet.ai API Key configured in Settings.
-    /// Returns true if API Key exists and passes verification.
+    /// Returns true if API Key exists.
+    /// Actual validation happens in Settings via CloudBackend.verifySettingsApiKey().
     public func hasValidTknetKey() -> Bool {
         guard let apiKey = loadTknetApiKeyFromSettings(), !apiKey.isEmpty else {
             return false
         }
-        // Check cached verification result
-        if let (isValid, timestamp) = tknetKeyVerificationCache {
-            let cacheValid = Date().timeIntervalSince(timestamp) < cacheValidity
-            if cacheValid {
-                return isValid
-            }
-        }
-        // Cache expired - assume valid temporarily, actual verification happens async
         return true
-    }
-
-    /// Called on app launch to verify tknet.ai API Key.
-    /// Updates cached verification result for 5 minutes.
-    public func verifyTknetKeyOnLaunch() async -> Bool {
-        guard let apiKey = loadTknetApiKeyFromSettings(), !apiKey.isEmpty else {
-            return false
-        }
-
-        let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: apiKey)
-
-        // Update cache
-        tknetKeyVerificationCache = (isValid, Date())
-
-        return isValid
     }
 
     // MARK: - Managed Provider Provisioning
@@ -432,9 +406,6 @@ public final class TokenhubManager: @unchecked Sendable {
             try newData.write(to: configPath, options: .atomic)
             log.info("[Tokenhub] Cleared tknet.ai config from settings")
         }
-
-        // Clear verification cache
-        tknetKeyVerificationCache = nil
     }
 
     /// Remove all managed providers (on unsubscribe/logout).

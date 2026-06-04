@@ -432,25 +432,6 @@ public actor CloudBackend {
 
 // MARK: - Types
 
-public struct TknetModel: Codable, Sendable {
-    public let id: String
-    public let object: String
-    public let created: TimeInterval?
-    public let ownedBy: String?
-    public let pricing: Pricing?
-    public let tags: [String]
-
-    public struct Pricing: Codable, Sendable {
-        public let inputPricePerMillion: Double?
-        public let outputPricePerMillion: Double?
-
-        enum CodingKeys: String, CodingKey {
-            case inputPricePerMillion = "input_price_per_million"
-            case outputPricePerMillion = "output_price_per_million"
-        }
-    }
-}
-
 private struct TknetModelsResponse: Codable {
     let object: String
     let data: [TknetModel]

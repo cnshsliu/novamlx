@@ -670,14 +670,22 @@ public struct ServerConfig: Codable, Sendable {
         public let coordinatorPort: Int?
         public let strategy: String?
         public let minLayersPerShard: Int?
+        public let thunderbolt: ThunderboltSettings?
 
-        public init(role: String, coordinatorHost: String? = nil, coordinatorPort: Int? = nil, strategy: String? = nil, minLayersPerShard: Int? = nil) {
+        public init(role: String, coordinatorHost: String? = nil, coordinatorPort: Int? = nil, strategy: String? = nil, minLayersPerShard: Int? = nil, thunderbolt: ThunderboltSettings? = nil) {
             self.role = role
             self.coordinatorHost = coordinatorHost
             self.coordinatorPort = coordinatorPort
             self.strategy = strategy
             self.minLayersPerShard = minLayersPerShard
+            self.thunderbolt = thunderbolt
         }
+    }
+
+    public struct ThunderboltSettings: Codable, Sendable, Equatable {
+        public let subnet: String?
+        public let enforce: Bool?
+        public let preferredInterfaces: [String]?
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -819,18 +827,65 @@ public struct DownloadTaskInfo: Sendable {
     public var isActive: Bool { status == .downloading || status == .pending }
 }
 
-/// Lightweight per-file progress info for UI display
-public struct FileDownloadInfo: Sendable, Identifiable {
+/// Lightweight per-file progress info for UI display.
+/// Enhanced to expose backend details for the "Backend Activity" panel.
+public struct FileDownloadInfo: Sendable, Identifiable, Codable {
     public var id: String { filename }
     public let filename: String
     public var downloadedBytes: Int64
     public var totalBytes: Int64
     public var status: String  // "downloading", "completed", "failed", "waiting"
 
-    public init(filename: String, downloadedBytes: Int64 = 0, totalBytes: Int64 = 0, status: String = "waiting") {
+    /// The actual resolve URL being used for this file (important for ModelScope / custom mirrors)
+    public var currentURL: String?
+
+    /// Current retry attempt (0-based)
+    public var retryCount: Int = 0
+
+    /// Whether this download is using HTTP Range for resume
+    public var isResuming: Bool = false
+
+    /// Current speed in bytes per second (updated by the download engine)
+    public var speed: Double = 0
+
+    public init(
+        filename: String,
+        downloadedBytes: Int64 = 0,
+        totalBytes: Int64 = 0,
+        status: String = "waiting",
+        currentURL: String? = nil,
+        retryCount: Int = 0,
+        isResuming: Bool = false,
+        speed: Double = 0
+    ) {
         self.filename = filename
         self.downloadedBytes = downloadedBytes
         self.totalBytes = totalBytes
         self.status = status
+        self.currentURL = currentURL
+        self.retryCount = retryCount
+        self.isResuming = isResuming
+        self.speed = speed
+    }
+}
+
+// MARK: - tknet.ai Model Types
+
+public struct TknetModel: Codable, Sendable {
+    public let id: String
+    public let object: String
+    public let created: TimeInterval?
+    public let ownedBy: String?
+    public let pricing: Pricing?
+    public let tags: [String]
+
+    public struct Pricing: Codable, Sendable {
+        public let inputPricePerMillion: Double?
+        public let outputPricePerMillion: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case inputPricePerMillion = "input_price_per_million"
+            case outputPricePerMillion = "output_price_per_million"
+        }
     }
 }
