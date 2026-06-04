@@ -234,6 +234,25 @@ struct TokenhubPageView: View {
                     if isHovering { NSCursor.pointingHand.push() }
                     else { NSCursor.pop() }
                 }
+
+                Button(action: {
+                    // Re-sync local model providers
+                    let loaded = appState.loadedModels
+                    TokenhubManager.shared.provisionLocalProviders(loadedModels: loaded)
+                    reloadProviders()
+                    agentToast = "Refreshed: \(loaded.count) local models"
+                    showAgentToast = true
+                }) {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .help("Sync local model providers")
+                .onHover { isHovering in
+                    if isHovering { NSCursor.pointingHand.push() }
+                    else { NSCursor.pop() }
+                }
             }
             .padding(.horizontal, 12)
             .padding(.top, 12)

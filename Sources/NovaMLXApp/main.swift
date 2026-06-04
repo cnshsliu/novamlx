@@ -8,7 +8,6 @@ import NovaMLXModelManager
 import NovaMLXAPI
 import NovaMLXMenuBar
 import NovaMLXDistributed
-import AppKit
 
 /// Early env-var setup: runs before any GPU work because the static
 /// initializer is triggered when the module is loaded.
@@ -32,7 +31,7 @@ struct NovaMLXApp: App {
 
     var body: some Scene {
         let l10n = L10n.shared
-        return MenuBarExtra("TK") {
+        return MenuBarExtra("NovaMLX", systemImage: "brain.head.profile.fill") {
             Button { appDelegate.openMainWindow(to: .status) } label: {
                 Label(l10n.tr("app.status"), systemImage: "gauge.with.dots.needle.bottom.50percent")
             }
@@ -282,6 +281,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await inferenceService.restoreModels(modelManager: modelManager)
                 appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
                 appState.resumeIncompleteDownloads()
+
+                // Sync local model providers after models finish loading
+                let loaded = inferenceService.listLoadedModels()
+                TokenhubManager.shared.provisionLocalProviders(loadedModels: loaded)
+                NovaMLXLog.info("Local managed providers synced: \(loaded.count) models")
             }
 
             appState.startStatsMonitoring(inferenceService: inferenceService)
@@ -312,10 +316,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } catch {
                     NovaMLXLog.info("Not subscribed, skipping cloud provisioning")
                 }
-                // Local model providers
-                let loaded = inferenceService.listLoadedModels()
-                TokenhubManager.shared.provisionLocalProviders(loadedModels: loaded)
-                NovaMLXLog.info("Local managed providers synced: \(loaded.count) models")
             }
 
             let memHandler = MemoryPressureHandler(engine: engine, settingsManager: settingsManager)
