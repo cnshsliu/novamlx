@@ -382,6 +382,30 @@ public final class TokenhubManager: @unchecked Sendable {
         log.info("[Tokenhub] Provisioned \(remoteModels.count) nova providers, removed \(removed) stale")
     }
 
+    /// Save tknet.ai API Key to config file.
+    /// Creates/updates tknet.apiKey in the config JSON.
+    public func saveTknetApiKey(_ apiKey: String) throws {
+        let configPath = NovaMLXPaths.configFile
+
+        // Load existing config or create new
+        var config: [String: Any] = [:]
+        if let data = try? Data(contentsOf: configPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            config = json
+        }
+
+        // Update tknet section
+        var tknetConfig = config["tknet"] as? [String: Any] ?? [:]
+        tknetConfig["apiKey"] = apiKey
+        config["tknet"] = tknetConfig
+
+        // Save back to file
+        let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: configPath, options: .atomic)
+
+        log.info("[Tokenhub] Saved tknet.ai API Key to config")
+    }
+
     /// Remove all managed providers (on unsubscribe/logout).
     public func deprovisionManagedProviders() {
         lock.lock()
