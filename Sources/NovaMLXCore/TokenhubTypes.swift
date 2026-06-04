@@ -406,6 +406,37 @@ public final class TokenhubManager: @unchecked Sendable {
         log.info("[Tokenhub] Saved tknet.ai API Key to config")
     }
 
+    /// Clear tknet.ai configuration: remove managed nova providers and tknet config.
+    /// Clears verification cache. Called when user clears API Key.
+    public func clearTknetConfig() throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        // Remove all nova-managed providers
+        var all = loadAll()
+        let before = all.count
+        all.removeAll { $0.isManaged && $0.tags.contains("nova") }
+        let removed = before - all.count
+
+        if removed > 0 {
+            try saveAll(all)
+            log.info("[Tokenhub] Removed \(removed) nova-managed providers")
+        }
+
+        // Clear tknet config from file
+        let configPath = NovaMLXPaths.configFile
+        if let data = try? Data(contentsOf: configPath),
+           var config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            config.removeValue(forKey: "tknet")
+            let newData = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
+            try newData.write(to: configPath, options: .atomic)
+            log.info("[Tokenhub] Cleared tknet.ai config from settings")
+        }
+
+        // Clear verification cache
+        tknetKeyVerificationCache = nil
+    }
+
     /// Remove all managed providers (on unsubscribe/logout).
     public func deprovisionManagedProviders() {
         lock.lock()
