@@ -174,7 +174,7 @@ struct SettingsPageView: View {
         }
         .padding(16)
         .sectionCard()
-        .task { loadCurrentConfig() }
+        .task { loadCurrentConfig(); loadTknetApiKey() }
     }
 
     private var configPathRow: some View {
@@ -403,10 +403,8 @@ struct SettingsPageView: View {
         tknetApiKeyVerified = false
 
         do {
-            let config = NovaMLXConfiguration.shared
-
             // Verify API key
-            let isValid = await config.cloudBackend.verifySettingsApiKey(apiKey: tknetApiKey)
+            let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: tknetApiKey)
             if !isValid {
                 tknetVerifyMessage = l10n.tr("settings.tknet.invalidKey")
                 tknetVerifying = false
@@ -414,7 +412,7 @@ struct SettingsPageView: View {
             }
 
             // Fetch models
-            let models = await config.cloudBackend.fetchTknetModels(apiKey: tknetApiKey)
+            let models = await CloudBackend.shared.fetchTknetModels(apiKey: tknetApiKey)
             if models.isEmpty {
                 tknetVerifyMessage = l10n.tr("settings.tknet.noModels")
                 tknetVerifying = false
@@ -422,10 +420,10 @@ struct SettingsPageView: View {
             }
 
             // Provision providers
-            await config.tokenhubTypes.provisionTknetProviders(apiKey: tknetApiKey, models: models)
+            try TokenhubManager.shared.provisionTknetProviders(models: models, apiKey: tknetApiKey)
 
             // Save API key
-            await config.tokenhubTypes.saveTknetApiKey(tknetApiKey)
+            try TokenhubManager.shared.saveTknetApiKey(tknetApiKey)
 
             // Update UI state
             tknetApiKeyVerified = true
@@ -435,6 +433,16 @@ struct SettingsPageView: View {
         }
 
         tknetVerifying = false
+    }
+
+    private func loadTknetApiKey() {
+        Task {
+            let apiKey = TokenhubManager.shared.loadTknetApiKey()
+            await MainActor.run {
+                tknetApiKey = apiKey ?? ""
+                tknetApiKeyVerified = (apiKey != nil && !apiKey!.isEmpty)
+            }
+        }
     }
 
     private func loadCurrentConfig() {
