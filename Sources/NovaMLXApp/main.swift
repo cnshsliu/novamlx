@@ -25,13 +25,31 @@ private struct MLXEnvSetup {
     }()
 }
 
+// MARK: - Custom Menu Bar Icon
+
+struct TKMenuBarIcon: View {
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.accentColor)
+                .frame(width: 20, height: 20)
+
+            Text("TK")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+        }
+    }
+}
+
 @main
 struct NovaMLXApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
         let l10n = L10n.shared
-        return MenuBarExtra("NovaMLX", systemImage: "brain.head.profile.fill") {
+        return MenuBarExtra(content: {
+            TKMenuBarIcon()
+        }) {
             Button { appDelegate.openMainWindow(to: .status) } label: {
                 Label(l10n.tr("app.status"), systemImage: "gauge.with.dots.needle.bottom.50percent")
             }
