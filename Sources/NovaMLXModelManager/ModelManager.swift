@@ -299,6 +299,11 @@ public final class ModelManager: @unchecked Sendable {
             ("mlx-community/Phi-3.5-mini-instruct-4bit", .phi, .llm, "https://huggingface.co/mlx-community/Phi-3.5-mini-instruct-4bit", 2_200_000_000),
             ("mlx-community/Qwen2.5-7B-Instruct-4bit", .qwen, .llm, "https://huggingface.co/mlx-community/Qwen2.5-7B-Instruct-4bit", 4_400_000_000),
             ("mlx-community/gemma-2-9b-it-4bit", .gemma, .llm, "https://huggingface.co/mlx-community/gemma-2-9b-it-4bit", 5_200_000_000),
+            // Audio models
+            ("mlx-community/whisper-large-v3-turbo", .whisper, .audio, "https://huggingface.co/mlx-community/whisper-large-v3-turbo", 800_000_000),
+            ("mlx-community/whisper-small", .whisper, .audio, "https://huggingface.co/mlx-community/whisper-small", 244_000_000),
+            ("aufklarer/Qwen3-ASR-0.6B-MLX-4bit", .qwen3Asr, .audio, "https://huggingface.co/aufklarer/Qwen3-ASR-0.6B-MLX-4bit", 1_300_000_000),
+            ("mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit", .qwen3Tts, .audio, "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit", 2_500_000_000),
         ]
         for (id, family, type, url, size) in models {
             if lock.withLock({ _registry[id] }) == nil {

@@ -879,6 +879,62 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     return try Self.jsonResponse(response)
                 }
             }
+
+            // MARK: - Text-to-Speech
+            Post("/v1/audio/speech") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let contentType = request.headers[fields: HTTPField.Name("content-type")!].first?.value ?? ""
+
+                let input: String
+                let model: String
+                let voice: String
+                let responseFormat: String
+                let speed: Float
+
+                if contentType.lowercased().contains("multipart/form-data") {
+                    let parts = try MultipartParser.parse(body: Data(body.readableBytesView), contentType: contentType)
+                    guard let inputPart = parts["input"] else {
+                        throw NovaMLXError.apiError("Missing 'input' part in multipart upload")
+                    }
+                    input = String(data: inputPart.body, encoding: .utf8) ?? ""
+                    model = parts["model"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "tts"
+                    voice = parts["voice"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "Tingting"
+                    responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "mp3"
+                    speed = parts["speed"].flatMap { Float(String(data: $0.body, encoding: .utf8) ?? "") } ?? 1.0
+                } else {
+                    let req = try JSONDecoder().decode(TTSRequest.self, from: body)
+                    input = req.input
+                    model = req.model
+                    voice = req.voice ?? "Tingting"
+                    responseFormat = req.resolvedResponseFormat
+                    speed = req.speed ?? 1.0
+                }
+
+                guard !input.isEmpty else {
+                    throw NovaMLXError.apiError("'input' is required and must be non-empty")
+                }
+
+                // Calculate speech rate from speed multiplier (default 175 * 1.0)
+                let rate = Int(175.0 * Double(speed))
+
+                // Synthesize speech
+                let audioData = try await inference.ttsService.synthesize(
+                    text: input,
+                    voice: voice,
+                    rate: rate
+                )
+
+                // Return audio based on response format
+                let mimeType = self.mimeType(forFormat: responseFormat)
+                var headers: HTTPFields = [.contentType: mimeType]
+
+                return Response(
+                    status: .ok,
+                    headers: headers,
+                    body: .init(byteBuffer: ByteBuffer(data: audioData))
+                )
+            }
+
             Post("/v1/images/generations") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let req = try JSONDecoder().decode(ImageGenerationRequest.self, from: body)
@@ -5152,4 +5208,27 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         </html>
         """
     }
+
+    // MARK: - Audio Helper Functions
+
+    /// Get MIME type for audio format
+    private func mimeType(forFormat format: String) -> String {
+        switch format.lowercased() {
+        case "mp3":
+            return "audio/mpeg"
+        case "opus":
+            return "audio/opus"
+        case "aac":
+            return "audio/aac"
+        case "flac":
+            return "audio/flac"
+        case "wav":
+            return "audio/wav"
+        case "aiff":
+            return "audio/aiff"
+        default:
+            return "audio/mpeg"  // Default to MP3
+        }
+    }
+
 }

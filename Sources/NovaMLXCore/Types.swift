@@ -83,6 +83,8 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case bailing
     case gptOss
     case whisper
+    case qwen3Asr
+    case qwen3Tts
     case stableDiffusion
     case other
 

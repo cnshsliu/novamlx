@@ -532,13 +532,14 @@ struct TokenhubPageView: View {
                         .font(.system(size: 10))
                         .foregroundColor(NovaTheme.Colors.textTertiary)
                         .frame(width: 80, alignment: .trailing)
-                    Text(provider.id)
+                    Text(provider.isLocal ? provider.remoteModel : "tknet:" + provider.id)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(NovaTheme.Colors.textSecondary)
                     Button {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(provider.id, forType: .string)
-                        agentToast = "Copied: \(provider.id)"
+                        let copyValue = provider.isLocal ? provider.remoteModel : "tknet:" + provider.id
+                        NSPasteboard.general.setString(copyValue, forType: .string)
+                        agentToast = "Copied: " + copyValue
                         showAgentToast = true
                     } label: {
                         Image(systemName: "doc.on.clipboard")
@@ -936,7 +937,7 @@ struct TokenhubPageView: View {
                             HStack(spacing: 4) {
                                 if testProxyRunning { ProgressView().controlSize(.small) }
                                 else { Image(systemName: "arrow.triangle.2.circlepath") }
-                                Text("Test \(formName)")
+                                Text("Test \(isLocalEndpoint(formEndpoint) ? formName : "tknet:\(formName)")")
                             }
                         }
                         .buttonStyle(.bordered)
@@ -1169,15 +1170,23 @@ struct TokenhubPageView: View {
 
     private func saveProvider() {
         saveError = nil
+
+        // Auto-trim all text fields to prevent whitespace issues from copy-paste
+        let trimmedName = formName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEndpoint = formEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedApiKey = formApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedRemoteModel = formRemoteModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTags = formTags.trimmingCharacters(in: .whitespacesAndNewlines)
+
         let provider = TokenhubProvider(
-            name: formName,
-            endpoint: formEndpoint,
-            apiKey: formApiKey,
-            remoteModel: formRemoteModel,
+            name: trimmedName,
+            endpoint: trimmedEndpoint,
+            apiKey: trimmedApiKey,
+            remoteModel: trimmedRemoteModel,
             isEnabled: formEnabled,
             includeInLoadBalance: formIncludeInLB,
-            tags: parseTags(formTags),
-            isLocal: isLocalEndpoint(formEndpoint),
+            tags: parseTags(trimmedTags),
+            isLocal: isLocalEndpoint(trimmedEndpoint),
             isFree: formIsFree,
             supportsResponsesAPI: formSupportsResponses
         )
@@ -1483,17 +1492,18 @@ struct TokenhubPageView: View {
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             }
 
+            let modelName = provider.isLocal ? providerName : "tknet:\(providerName)"
             let body: [String: Any]
             if useResponses {
                 body = [
-                    "model": providerName,
+                    "model": modelName,
                     "input": "Hi, reply with just 'OK'",
                     "max_output_tokens": 10,
                     "stream": false
                 ]
             } else {
                 body = [
-                    "model": providerName,
+                    "model": modelName,
                     "messages": [["role": "user", "content": "Hi, reply with just 'OK'"]],
                     "max_tokens": 10,
                     "stream": false

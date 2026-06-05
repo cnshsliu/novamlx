@@ -403,8 +403,11 @@ struct SettingsPageView: View {
         tknetApiKeyVerified = false
 
         do {
+            // Auto-trim API key to prevent whitespace issues from copy-paste
+            let trimmedApiKey = tknetApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
             // Verify API key
-            let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: tknetApiKey)
+            let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: trimmedApiKey)
             if !isValid {
                 tknetVerifyMessage = l10n.tr("settings.tknet.invalidKey")
                 tknetVerifying = false
@@ -412,7 +415,13 @@ struct SettingsPageView: View {
             }
 
             // Fetch models
-            let models = await CloudBackend.shared.fetchTknetModels(apiKey: tknetApiKey)
+            let models = await CloudBackend.shared.fetchTknetModels(apiKey: trimmedApiKey)
+
+            // Provision providers
+            try TokenhubManager.shared.provisionTknetProviders(remoteModels: models)
+
+            // Save API key
+            try TokenhubManager.shared.saveTknetApiKey(trimmedApiKey)
             if models.isEmpty {
                 tknetVerifyMessage = l10n.tr("settings.tknet.noModels")
                 tknetVerifying = false

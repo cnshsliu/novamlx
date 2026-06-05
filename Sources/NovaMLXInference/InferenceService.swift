@@ -38,6 +38,7 @@ public final class InferenceService: @unchecked Sendable {
     private let fusedScheduler: FusedBatchScheduler
     public let settingsManager: ModelSettingsManager
     public let transcriptionService: TranscriptionService
+    public let ttsService: TTSService
     public let imageGenerationService: ImageGenerationService
     private let loadedModelsFile: URL
 
@@ -60,6 +61,7 @@ public final class InferenceService: @unchecked Sendable {
         self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
         self.settingsManager = settingsManager
         self.transcriptionService = TranscriptionService()
+        self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
         self.loadedModelsFile = NovaMLXPaths.loadedModelsFile
         self.workerMode = workerMode

@@ -84,11 +84,13 @@ public final class ModelDiscovery: Sendable {
     private static let audioArchitectures: Set<String> = [
         "WhisperForConditionalGeneration",
         "Qwen3ASRForConditionalGeneration",
+        // Qwen3-TTS uses Qwen3ForCausalLM base - detected via model_type or config
     ]
 
     private static let audioModelTypes: Set<String> = [
         "whisper",
         "qwen3_asr",
+        "qwen3_tts",  // Qwen3-TTS model type
     ]
 
     private static let imageArchitectures: Set<String> = [

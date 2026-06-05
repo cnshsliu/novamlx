@@ -23,3 +23,26 @@ struct TranscriptionResponse: Codable, Sendable {
     let language: String?
     let duration: Double?
 }
+
+// MARK: - Text-to-Speech Types
+
+struct TTSRequest: Codable, Sendable {
+    let model: String
+    let input: String
+    let voice: String?
+    let responseFormat: String?
+    let speed: Float?
+
+    enum CodingKeys: String, CodingKey {
+        case model, input, voice, speed
+        case responseFormat = "response_format"
+    }
+
+    var resolvedResponseFormat: String {
+        responseFormat ?? "mp3"
+    }
+}
+
+struct TTSResponse: Codable, Sendable {
+    // For streaming responses
+}
