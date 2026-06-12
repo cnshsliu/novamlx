@@ -1,0 +1,107 @@
+import GRDB
+
+enum ConfigDBSchema {
+    enum v1 {
+        static func createAll(in db: Database) throws {
+            try db.create(table: "config") { t in
+                t.column("id", .integer).primaryKey()
+                t.column("host", .text).notNull().defaults(to: "0.0.0.0")
+                t.column("port", .integer).notNull().defaults(to: 6590)
+                t.column("admin_port", .integer).notNull().defaults(to: 6591)
+                t.column("tls_enabled", .boolean).notNull().defaults(to: false)
+                t.column("tls_cert_path", .text)
+                t.column("tls_key_path", .text)
+                t.column("default_model", .text)
+                t.column("models_dir", .text)
+                t.column("hf_endpoint", .text).defaults(to: "https://huggingface.co")
+                t.column("auth_url", .text)
+                t.column("tknet_api_key", .text)
+                t.column("cluster_config", .text).defaults(to: "{}")
+                t.column("auto_load", .text).defaults(to: "{}")
+                t.column("log_level", .text).defaults(to: "info")
+            }
+
+            try db.create(table: "api_keys") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("key_hash", .text).notNull()
+                t.column("raw_key", .text).notNull()
+                t.column("key_prefix", .text).notNull()
+                t.column("key_suffix", .text).notNull().defaults(to: "")
+                t.column("created_at", .datetime).notNull()
+                t.column("expires_at", .datetime)
+                t.column("is_enabled", .boolean).notNull().defaults(to: true)
+                t.column("rate_limit_per_second", .double)
+                t.column("rate_limit_burst", .integer)
+                t.column("allowed_models", .text) // JSON array
+                t.column("allowed_endpoints", .text) // JSON array
+                t.column("max_tokens_per_period", .integer)
+                t.column("max_requests_per_period", .integer)
+                t.column("usage_reset_period", .text).notNull().defaults(to: "daily")
+                t.column("total_tokens_used", .integer).notNull().defaults(to: 0)
+                t.column("total_requests", .integer).notNull().defaults(to: 0)
+                t.column("last_used_at", .datetime)
+                t.column("period_tokens", .integer).notNull().defaults(to: 0)
+                t.column("period_requests", .integer).notNull().defaults(to: 0)
+                t.column("period_reset_date", .text)
+                t.column("per_model_tokens", .text).defaults(to: "{}") // JSON
+            }
+            try db.create(index: "idx_api_keys_hash", on: "api_keys", columns: ["key_hash"])
+
+            try db.create(table: "model_settings") { t in
+                t.column("model_id", .text).primaryKey()
+                t.column("alias", .text)
+                t.column("is_default", .boolean).notNull().defaults(to: false)
+                t.column("is_pinned", .boolean).notNull().defaults(to: false)
+                t.column("sampling_params", .text).defaults(to: "{}") // JSON
+                t.column("ttl_seconds", .integer)
+                t.column("context_window", .integer)
+                t.column("draft_model", .text)
+                t.column("updated_at", .datetime)
+            }
+
+            try db.create(table: "tokenhub_providers") { t in
+                t.column("name", .text).primaryKey()
+                t.column("endpoint", .text).notNull()
+                t.column("api_key", .text)
+                t.column("remote_model", .text)
+                t.column("is_enabled", .boolean).notNull().defaults(to: true)
+                t.column("is_managed", .boolean).notNull().defaults(to: false)
+                t.column("load_balance_weight", .double).defaults(to: 1.0)
+                t.column("total_requests", .integer).notNull().defaults(to: 0)
+                t.column("total_tokens", .integer).notNull().defaults(to: 0)
+                t.column("avg_latency_ms", .double)
+                t.column("last_used_at", .datetime)
+                t.column("extra_config", .text).defaults(to: "{}")
+            }
+
+            try db.create(table: "modelfiles") { t in
+                t.column("name", .text).primaryKey()
+                t.column("base_model", .text)
+                t.column("system_prompt", .text)
+                t.column("parameters", .text).defaults(to: "{}") // JSON
+                t.column("tools", .text).defaults(to: "[]") // JSON array
+                t.column("created_at", .datetime).notNull()
+                t.column("updated_at", .datetime)
+            }
+
+            try db.create(table: "auth_session") { t in
+                t.column("id", .integer).primaryKey()
+                t.column("session_token", .text).defaults(to: "")
+                t.column("auth_valid", .boolean).defaults(to: false)
+                t.column("auth_plan", .text)
+                t.column("auth_status", .text)
+                t.column("auth_cancel_at_period_end", .boolean).defaults(to: false)
+                t.column("auth_expires_at", .datetime)
+                t.column("auth_cached_at", .datetime)
+                t.column("user_email", .text)
+            }
+
+            try db.create(table: "cluster_policy") { t in
+                t.column("id", .integer).primaryKey()
+                t.column("policy_json", .text).defaults(to: "{}")
+                t.column("updated_at", .datetime)
+            }
+        }
+    }
+}
