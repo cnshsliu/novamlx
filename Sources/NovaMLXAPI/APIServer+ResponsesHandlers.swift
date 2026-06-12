@@ -63,7 +63,7 @@ extension NovaMLXAPIServer {
             }
 
             // Resolve previous_response_id: prepend stored conversation history
-            if let prevId = req.previousResponseId {
+            if let prevId = req.resolvedPreviousResponseId {
                 if let prevResp = ResponseStore.shared.get(prevId) {
                     let prevMsgs = Self.extractMessagesFromResponse(prevResp)
                     for msg in prevMsgs {
@@ -453,6 +453,9 @@ extension NovaMLXAPIServer {
             storeResponse["output"] = storeOutput
             if let respObj = try? JSONDecoder().decode(OpenAIResponseObject.self, from: try JSONSerialization.data(withJSONObject: storeResponse)) {
                 ResponseStore.shared.put(respObj)
+                if let convId = req.conversation?.id {
+                    ConversationStore.shared.record(conversationId: convId, responseId: responseId)
+                }
             }
 
             return try? JSONSerialization.data(withJSONObject: response)
@@ -650,6 +653,7 @@ extension NovaMLXAPIServer {
                                 reasoningText += reasoningContent
                                 if let rsId = reasoningId {
                                     try await sse("response.reasoning.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: reasoningContent))
+                                    try await sse("response.reasoning_text.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: reasoningContent))
                                 }
                             }
 
@@ -659,6 +663,7 @@ extension NovaMLXAPIServer {
                                 if reasoningStarted, let rsId = reasoningId {
                                     let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
                                     try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                                try await sse("response.reasoning_text.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
                                     try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
                                     outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
                                     currentOutputIndex += 1
@@ -695,6 +700,7 @@ extension NovaMLXAPIServer {
                         if reasoningStarted, let rsId = reasoningId {
                             let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
                             try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                            try await sse("response.reasoning_text.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
                             try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
                             outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
                             currentOutputIndex += 1
@@ -734,6 +740,9 @@ extension NovaMLXAPIServer {
                         try await sse("response.completed", ResponsesSSECompleted(response: clientResp))
                         let storeResp = OpenAIResponseObject(id: responseId, model: model, output: allOutputItems)
                         ResponseStore.shared.put(storeResp)
+                        if let convId = req.conversation?.id {
+                            ConversationStore.shared.record(conversationId: convId, responseId: responseId)
+                        }
                         try await writer.finish(nil)
                     } catch {
                         sequenceNumber += 1
@@ -817,8 +826,8 @@ extension NovaMLXAPIServer {
             )
         }
 
-        // Resolve previous_response_id: prepend stored messages
-        if let prevId = req.previousResponseId {
+        // Resolve previous_response_id (or conversation.id alias): prepend stored messages
+        if let prevId = req.resolvedPreviousResponseId {
             if let prevResp = ResponseStore.shared.get(prevId) {
                 let prevMessages = Self.extractMessagesFromResponse(prevResp)
                 messages = prevMessages + messages
@@ -910,6 +919,9 @@ extension NovaMLXAPIServer {
         storeOutputItems.append(contentsOf: outputItems)
         let storeResponse = OpenAIResponseObject(id: responseId, model: result.model, output: storeOutputItems, usage: ResponsesUsage(inputTokens: scaledInput, outputTokens: scaledOutput))
         ResponseStore.shared.put(storeResponse)
+        if let convId = req.conversation?.id {
+            ConversationStore.shared.record(conversationId: convId, responseId: responseId)
+        }
         return try jsonResponse(response)
     }
 
@@ -1018,12 +1030,14 @@ extension NovaMLXAPIServer {
                                 }
                                 reasoningText += parsed.text
                                 try await sse("response.reasoning.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: parsed.text))
+                                try await sse("response.reasoning_text.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: parsed.text))
                             }
                             if parsed.type == .content && !parsed.text.isEmpty {
                                 if !textMessageStarted {
                                     if reasoningStarted {
                                         let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
                                         try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                                        try await sse("response.reasoning_text.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
                                         try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
                                         outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
                                         currentOutputIndex += 1
@@ -1047,10 +1061,12 @@ extension NovaMLXAPIServer {
                                 }
                                 reasoningText += finalParsed.thinking
                                 try await sse("response.reasoning.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: finalParsed.thinking))
+                                try await sse("response.reasoning_text.delta", ResponsesSSEReasoningDelta(itemId: rsId, outputIndex: currentOutputIndex, delta: finalParsed.thinking))
                             }
                             if reasoningStarted {
                                 let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
                                 try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                                try await sse("response.reasoning_text.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
                                 try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
                                 outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
                                 currentOutputIndex += 1
@@ -1093,6 +1109,9 @@ extension NovaMLXAPIServer {
                             storeOutputItems.append(contentsOf: outputItems)
                             let storeResp = OpenAIResponseObject(id: responseId, model: modelId, output: storeOutputItems, usage: ResponsesUsage(inputTokens: pToks, outputTokens: cToks))
                             ResponseStore.shared.put(storeResp)
+                            if let convId = req.conversation?.id {
+                                ConversationStore.shared.record(conversationId: convId, responseId: responseId)
+                            }
                         }
                     case .keepAlive:
                         try await writer.write(ByteBuffer(string: ": keep-alive\n\n"))

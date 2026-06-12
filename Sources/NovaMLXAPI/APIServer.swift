@@ -1345,6 +1345,33 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 store.delete(responseId)
                 return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
             }
+            Post("/v1/responses/{id}/cancel") { request, context in
+                let responseId = try context.parameters.require("id")
+                guard ResponseStore.shared.get(responseId) != nil else {
+                    throw NovaMLXError.modelNotFound("Response \(responseId) not found")
+                }
+                // Local inference doesn't have a cancel API yet; return success for spec compat
+                let data = try JSONSerialization.data(withJSONObject: ["id": responseId, "status": "cancelled"])
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+            Get("/v1/responses/{id}/input_items") { request, context in
+                let responseId = try context.parameters.require("id")
+                guard let response = ResponseStore.shared.get(responseId) else {
+                    throw NovaMLXError.modelNotFound("Response \(responseId) not found")
+                }
+                // Extract user input items from stored response
+                var items: [[String: Any]] = []
+                for item in response.output {
+                    if case .message(let msg) = item, msg.role == "user" {
+                        for content in msg.content {
+                            items.append(["type": "message", "role": "user", "content": content.text])
+                        }
+                    }
+                }
+                let body: [String: Any] = ["object": "list", "data": items]
+                let data = try JSONSerialization.data(withJSONObject: body)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
             Get("/health") { _, _ in
                 let stats = inference.stats
                 let mcpStatuses = mcp.getServerStatuses()

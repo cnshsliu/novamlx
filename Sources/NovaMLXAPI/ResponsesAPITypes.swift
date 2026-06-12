@@ -17,14 +17,20 @@ public struct OpenAIResponseRequest: Codable, Sendable {
     public let stream: Bool?
     public let keepAlive: KeepAliveValue?
     public let reasoning: ResponsesReasoningConfig?
+    public let metadata: [String: String]?
+    public let store: Bool?
+    public let truncation: String?
+    public let parallelToolCalls: Bool?
+    public let conversation: ResponsesConversationRef?
 
     private enum CodingKeys: String, CodingKey {
-        case model, input, instructions, tools, temperature, stream, text, reasoning
+        case model, input, instructions, tools, temperature, stream, text, reasoning, metadata, store, truncation, conversation
         case toolChoice = "tool_choice"
         case topP = "top_p"
         case maxOutputTokens = "max_output_tokens"
         case previousResponseId = "previous_response_id"
         case keepAlive = "keep_alive"
+        case parallelToolCalls = "parallel_tool_calls"
     }
 
     public init(
@@ -40,7 +46,12 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         text: ResponsesTextConfig? = nil,
         stream: Bool? = nil,
         keepAlive: KeepAliveValue? = nil,
-        reasoning: ResponsesReasoningConfig? = nil
+        reasoning: ResponsesReasoningConfig? = nil,
+        metadata: [String: String]? = nil,
+        store: Bool? = nil,
+        truncation: String? = nil,
+        parallelToolCalls: Bool? = nil,
+        conversation: ResponsesConversationRef? = nil
     ) {
         self.model = model
         self.input = input
@@ -55,7 +66,26 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         self.stream = stream
         self.keepAlive = keepAlive
         self.reasoning = reasoning
+        self.metadata = metadata
+        self.store = store
+        self.truncation = truncation
+        self.parallelToolCalls = parallelToolCalls
+        self.conversation = conversation
     }
+
+    /// Resolve conversation.id → previous_response_id. If both are set, previousResponseId wins.
+    public var resolvedPreviousResponseId: String? {
+        if let previousResponseId { return previousResponseId }
+        if let convId = conversation?.id {
+            return ConversationStore.shared.lastResponseId(for: convId)
+        }
+        return nil
+    }
+}
+
+public struct ResponsesConversationRef: Codable, Sendable {
+    public let id: String
+    public init(id: String) { self.id = id }
 }
 
 public struct ResponsesReasoningConfig: Codable, Sendable {
@@ -365,10 +395,31 @@ public struct OpenAIResponseObject: Codable, Sendable {
     public let status: String
     public let output: [ResponseOutputItem]
     public let usage: ResponsesUsage?
+    public let completedAt: Int?
+    public let instructions: String?
+    public let maxOutputTokens: Int?
+    public let temperature: Double?
+    public let topP: Double?
+    public let toolChoice: AnyCodable?
+    public let tools: [ResponsesFunctionTool]?
+    public let previousResponseId: String?
+    public let reasoning: ResponsesReasoningConfig?
+    public let text: ResponsesTextConfig?
+    public let metadata: [String: String]?
+    public let store: Bool?
+    public let truncation: String?
+    public let parallelToolCalls: Bool?
 
     private enum CodingKeys: String, CodingKey {
-        case id, object, model, status, output, usage
+        case id, object, model, status, output, usage, instructions, metadata, store, truncation, tools
         case createdAt = "created_at"
+        case completedAt = "completed_at"
+        case maxOutputTokens = "max_output_tokens"
+        case temperature, topP = "top_p"
+        case toolChoice = "tool_choice"
+        case previousResponseId = "previous_response_id"
+        case reasoning, text
+        case parallelToolCalls = "parallel_tool_calls"
     }
 
     public init(
@@ -376,7 +427,20 @@ public struct OpenAIResponseObject: Codable, Sendable {
         model: String,
         status: String = "completed",
         output: [ResponseOutputItem],
-        usage: ResponsesUsage? = nil
+        usage: ResponsesUsage? = nil,
+        instructions: String? = nil,
+        maxOutputTokens: Int? = nil,
+        temperature: Double? = nil,
+        topP: Double? = nil,
+        toolChoice: AnyCodable? = nil,
+        tools: [ResponsesFunctionTool]? = nil,
+        previousResponseId: String? = nil,
+        reasoning: ResponsesReasoningConfig? = nil,
+        text: ResponsesTextConfig? = nil,
+        metadata: [String: String]? = nil,
+        store: Bool? = nil,
+        truncation: String? = nil,
+        parallelToolCalls: Bool? = nil
     ) {
         self.id = id
         self.object = "response"
@@ -385,6 +449,40 @@ public struct OpenAIResponseObject: Codable, Sendable {
         self.status = status
         self.output = output
         self.usage = usage
+        self.completedAt = status == "completed" ? Int(Date().timeIntervalSince1970) : nil
+        self.instructions = instructions
+        self.maxOutputTokens = maxOutputTokens
+        self.temperature = temperature
+        self.topP = topP
+        self.toolChoice = toolChoice
+        self.tools = tools
+        self.previousResponseId = previousResponseId
+        self.reasoning = reasoning
+        self.text = text
+        self.metadata = metadata
+        self.store = store
+        self.truncation = truncation
+        self.parallelToolCalls = parallelToolCalls
+    }
+
+    /// Copy request parameters into response object for OpenAI spec compliance
+    public func withRequestEcho(from req: OpenAIResponseRequest) -> OpenAIResponseObject {
+        OpenAIResponseObject(
+            id: id, model: model, status: status, output: output, usage: usage,
+            instructions: req.instructions,
+            maxOutputTokens: req.maxOutputTokens,
+            temperature: req.temperature,
+            topP: req.topP,
+            toolChoice: req.toolChoice,
+            tools: req.tools,
+            previousResponseId: req.previousResponseId,
+            reasoning: req.reasoning,
+            text: req.text,
+            metadata: req.metadata,
+            store: req.store,
+            truncation: req.truncation,
+            parallelToolCalls: req.parallelToolCalls
+        )
     }
 }
 
@@ -785,5 +883,22 @@ public struct ResponsesSSEReasoningDone: Codable, Sendable {
         self.itemId = itemId
         self.outputIndex = outputIndex
         self.summary = summary
+    }
+}
+
+// MARK: - Error SSE Event
+
+/// Emitted before closing stream on error, per OpenAI spec
+public struct ResponsesSSEError: Codable, Sendable {
+    public let type: String
+    public let code: String
+    public let message: String
+    public let param: String?
+
+    public init(code: String, message: String, param: String? = nil) {
+        self.type = "error"
+        self.code = code
+        self.message = message
+        self.param = param
     }
 }
