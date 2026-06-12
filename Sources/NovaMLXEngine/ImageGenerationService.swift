@@ -11,7 +11,9 @@ public final class ImageGenerationContainer: @unchecked Sendable {
     public let identifier: ModelIdentifier
     public let config: ModelConfig
     public private(set) var isLoaded: Bool
-    public var pipeline: SDPipeline?
+    public var pipeline: (any ImageGenerationPipeline)?
+
+    public var isFlux: Bool { config.identifier.family == .flux }
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -19,7 +21,7 @@ public final class ImageGenerationContainer: @unchecked Sendable {
         self.isLoaded = false
     }
 
-    public func setLoaded(pipeline: SDPipeline) {
+    public func setLoaded(pipeline: any ImageGenerationPipeline) {
         self.pipeline = pipeline
         isLoaded = true
         NovaMLXLog.info("Image model loaded: \(identifier.displayName)")
@@ -62,10 +64,16 @@ public final class ImageGenerationService: @unchecked Sendable {
         )
         NovaMLXLog.info("Loading image model from: \(url.path)")
 
-        // Clear MLX cache before loading to free memory from evicted models
         MLX.Memory.clearCache()
 
-        let pipeline = try SDPipeline(directoryURL: url)
+        let pipeline: any ImageGenerationPipeline
+        if config.identifier.family == .flux {
+            let flux = try FluxPipeline(directoryURL: url)
+            try flux.load()
+            pipeline = flux
+        } else {
+            pipeline = try SDPipeline(directoryURL: url)
+        }
         container.setLoaded(pipeline: pipeline)
 
         lock.withLock {
@@ -88,6 +96,12 @@ public final class ImageGenerationService: @unchecked Sendable {
         }
     }
 
+    public func listLoadedModels() -> [String] {
+        lock.withLock {
+            containers.filter { $0.value.isLoaded }.map { $0.key }
+        }
+    }
+
     public func generate(
         modelId: String,
         prompt: String,
@@ -99,7 +113,7 @@ public final class ImageGenerationService: @unchecked Sendable {
         steps: Int? = nil
     ) async throws -> ImageGenerationResult {
         try await _generateInternal(modelId: modelId, n: n, seed: seed) { pipeline, imageSeed in
-            try pipeline.generate(
+            try pipeline.generateImage(
                 prompt: prompt,
                 negativePrompt: negativePrompt,
                 steps: steps,
@@ -122,8 +136,18 @@ public final class ImageGenerationService: @unchecked Sendable {
         seed: UInt64? = nil,
         steps: Int? = nil
     ) async throws -> ImageGenerationResult {
-        try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "edit") { pipeline, imageSeed in
-            try pipeline.generateEdit(
+        guard let container = lock.withLock({ containers[modelId] }),
+              !container.isFlux
+        else {
+            throw NovaMLXError.apiError("Image editing is not supported by FLUX models")
+        }
+
+        guard let sdPipeline = container.pipeline as? SDPipeline else {
+            throw NovaMLXError.apiError("Image editing requires a StableDiffusion pipeline")
+        }
+
+        return try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "edit") { _, imageSeed in
+            let result = try sdPipeline.generateEdit(
                 from: image,
                 mask: mask,
                 prompt: prompt,
@@ -134,6 +158,7 @@ public final class ImageGenerationService: @unchecked Sendable {
                 width: width,
                 height: height
             )
+            return PipelineGenerationResult(images: result.images, seed: result.seed)
         }
     }
 
@@ -146,8 +171,18 @@ public final class ImageGenerationService: @unchecked Sendable {
         seed: UInt64? = nil,
         steps: Int? = nil
     ) async throws -> ImageGenerationResult {
-        try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "variation") { pipeline, imageSeed in
-            try pipeline.generateVariation(
+        guard let container = lock.withLock({ containers[modelId] }),
+              !container.isFlux
+        else {
+            throw NovaMLXError.apiError("Image variation is not supported by FLUX models")
+        }
+
+        guard let sdPipeline = container.pipeline as? SDPipeline else {
+            throw NovaMLXError.apiError("Image variation requires a StableDiffusion pipeline")
+        }
+
+        return try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "variation") { _, imageSeed in
+            let result = try sdPipeline.generateVariation(
                 from: image,
                 prompt: "",
                 negativePrompt: "",
@@ -157,6 +192,7 @@ public final class ImageGenerationService: @unchecked Sendable {
                 width: width,
                 height: height
             )
+            return PipelineGenerationResult(images: result.images, seed: result.seed)
         }
     }
 
@@ -167,7 +203,7 @@ public final class ImageGenerationService: @unchecked Sendable {
         n: Int,
         seed: UInt64? = nil,
         operation: String = "generation",
-        _ generateBlock: (SDPipeline, UInt64) throws -> SDPipeline.GenerationResult
+        _ generateBlock: (any ImageGenerationPipeline, UInt64) throws -> PipelineGenerationResult
     ) async throws -> ImageGenerationResult {
         guard let container = lock.withLock({ containers[modelId] }),
               container.isLoaded,
@@ -176,7 +212,6 @@ public final class ImageGenerationService: @unchecked Sendable {
             throw NovaMLXError.modelNotFound(modelId)
         }
 
-        // Serialize: only one generation at a time
         let wasGenerating = lock.withLock { () -> Bool in
             if isGenerating { return true }
             isGenerating = true

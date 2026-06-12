@@ -260,6 +260,29 @@ public class SDPipeline: @unchecked Sendable {
     }
 }
 
+// MARK: - ImageGenerationPipeline conformance
+
+extension SDPipeline: ImageGenerationPipeline {
+    public func generateImage(
+        prompt: String,
+        negativePrompt: String,
+        steps: Int?,
+        seed: UInt64?,
+        width: Int,
+        height: Int
+    ) throws -> PipelineGenerationResult {
+        let result = try generate(
+            prompt: prompt,
+            negativePrompt: negativePrompt,
+            steps: steps,
+            seed: seed,
+            width: width,
+            height: height
+        )
+        return PipelineGenerationResult(images: result.images, seed: result.seed)
+    }
+}
+
 public enum ImageGenerationError: LocalizedError {
     case unsupportedModelType
     case noOutput

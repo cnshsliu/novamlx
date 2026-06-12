@@ -9,10 +9,11 @@ struct ImageGenerationRequest: Codable, Sendable {
     let quality: String?
     let style: String?
     let seed: Int?
+    let steps: Int?
     let negativePrompt: String?
 
     enum CodingKeys: String, CodingKey {
-        case prompt, model, n, size, quality, style, seed
+        case prompt, model, n, size, quality, style, seed, steps
         case responseFormat = "response_format"
         case negativePrompt = "negative_prompt"
     }
@@ -23,6 +24,10 @@ struct ImageGenerationRequest: Codable, Sendable {
         case "256x256": return (256, 256)
         case "512x512": return (512, 512)
         case "1024x1024": return (1024, 1024)
+        case "768x1344": return (768, 1344)
+        case "1344x768": return (1344, 768)
+        case "864x1152": return (864, 1152)
+        case "1152x864": return (1152, 864)
         default: return (1024, 1024)
         }
     }
@@ -66,6 +71,10 @@ struct ImageEditRequest {
         case "256x256": return (256, 256)
         case "512x512": return (512, 512)
         case "1024x1024": return (1024, 1024)
+        case "768x1344": return (768, 1344)
+        case "1344x768": return (1344, 768)
+        case "864x1152": return (864, 1152)
+        case "1152x864": return (1152, 864)
         default: return (1024, 1024)
         }
     }
@@ -89,6 +98,10 @@ struct ImageVariationRequest {
         case "256x256": return (256, 256)
         case "512x512": return (512, 512)
         case "1024x1024": return (1024, 1024)
+        case "768x1344": return (768, 1344)
+        case "1344x768": return (1344, 768)
+        case "864x1152": return (864, 1152)
+        case "1152x864": return (1152, 864)
         default: return (1024, 1024)
         }
     }
