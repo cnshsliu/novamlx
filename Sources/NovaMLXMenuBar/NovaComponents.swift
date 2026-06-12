@@ -182,3 +182,180 @@ struct FlowLayout: Layout {
         return (CGSize(width: maxWidth, height: y + rowHeight), positions)
     }
 }
+
+// MARK: - ItemInput (Tag/Chip Multi-Select)
+
+/// Multi-select tag/chip input with dropdown suggestions.
+/// Ported from Svelte ItemInput.svelte.
+struct ItemInput: View {
+    @Binding var items: [String]
+    let suggestions: [String]
+    let placeholder: String
+
+    @State private var query = ""
+    @State private var isFocused = false
+    @State private var highlightIndex = -1
+    @FocusState private var fieldFocused: Bool
+
+    init(items: Binding<[String]>, suggestions: [String] = [], placeholder: String = "Type or select...") {
+        self._items = items
+        self.suggestions = suggestions
+        self.placeholder = placeholder
+    }
+
+    private var filtered: [String] {
+        guard !suggestions.isEmpty else { return [] }
+        let q = query.lowercased()
+        return suggestions
+            .filter { !items.contains($0) }
+            .filter { q.isEmpty || $0.lowercased().contains(q) }
+    }
+
+    @State private var dropdownDismissed = false
+
+    private var showDropdown: Bool {
+        isFocused && !filtered.isEmpty && !dropdownDismissed
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            inputField
+            if showDropdown {
+                dropdown
+            }
+        }
+    }
+
+    private var inputField: some View {
+        FlowLayout(spacing: 4) {
+            // Tag chips
+            ForEach(items, id: \.self) { item in
+                tagChip(item)
+            }
+
+            // Text input — always flows right after the last chip
+            TextField(placeholder, text: $query)
+                .font(.system(size: 12))
+                .textFieldStyle(.plain)
+                .focused($fieldFocused)
+                .frame(minWidth: 80, idealWidth: 160, maxWidth: .infinity)
+                .onSubmit { addCurrentOrHighlighted() }
+                .onChange(of: query) { _, _ in
+                    dropdownDismissed = false
+                }
+                .onChange(of: fieldFocused) { _, focused in
+                    isFocused = focused
+                    if focused { dropdownDismissed = false }
+                    if !focused && !query.trimmingCharacters(in: .whitespaces).isEmpty {
+                        add(query)
+                    }
+                }
+
+            // Clear all button
+            if !items.isEmpty {
+                Button {
+                    items = []
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(NovaTheme.Colors.textTertiary)
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(fieldFocused ? NovaTheme.Colors.accent : NovaTheme.Colors.cardBorder, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .onTapGesture {
+            if showDropdown {
+                dropdownDismissed = true
+            } else if fieldFocused {
+                dropdownDismissed = false
+            }
+        }
+        .onKeyPress(.escape) {
+            if showDropdown {
+                dropdownDismissed = true
+                return .handled
+            }
+            return .ignored
+        }
+    }
+
+    private func tagChip(_ item: String) -> some View {
+        HStack(spacing: 3) {
+            Text(item)
+                .font(.system(size: 10))
+                .lineLimit(1)
+            Button {
+                remove(item)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 12, height: 12)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(NovaTheme.Colors.accent.opacity(0.15))
+        .overlay(Capsule().stroke(NovaTheme.Colors.accent.opacity(0.3), lineWidth: 0.5))
+        .clipShape(Capsule())
+    }
+
+    private var dropdown: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(filtered.enumerated()), id: \.offset) { index, item in
+                Button {
+                    add(item)
+                } label: {
+                    Text(item)
+                        .font(.system(size: 11))
+                        .foregroundColor(index == highlightIndex ? .white : NovaTheme.Colors.textPrimary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(index == highlightIndex ? NovaTheme.Colors.accent : Color.clear)
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    if hovering { highlightIndex = index }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(NovaTheme.Colors.cardBorder, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func add(_ item: String) {
+        let trimmed = item.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !items.contains(trimmed) else { return }
+        items.append(trimmed)
+        query = ""
+        highlightIndex = -1
+    }
+
+    private func remove(_ item: String) {
+        items.removeAll { $0 == item }
+    }
+
+    private func addCurrentOrHighlighted() {
+        if highlightIndex >= 0 && highlightIndex < filtered.count {
+            add(filtered[highlightIndex])
+        } else if !query.trimmingCharacters(in: .whitespaces).isEmpty {
+            add(query)
+        }
+    }
+}

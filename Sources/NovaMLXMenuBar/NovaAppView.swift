@@ -11,6 +11,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case tokenhub = "Tokenhub"
     case chat = "Playground"
     case cluster = "Cluster"
+    case apiKeys = "API Keys"
     case settings = "Settings"
 
     public var id: String { rawValue }
@@ -22,6 +23,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .models: return "cube.box"
         case .tokenhub: return "server.rack"
         case .chat: return "cpu"
+        case .apiKeys: return "key.fill"
         case .settings: return "gearshape"
         }
     }
@@ -247,9 +249,12 @@ public struct NovaAppView: View {
             TokenhubPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .tokenhub ? 1 : 0)
-            ChatPageView(appState: appState, inferenceService: inferenceService)
+            ChatPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
+            APIKeysPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .apiKeys ? 1 : 0)
             SettingsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .settings ? 1 : 0)
@@ -263,6 +268,7 @@ public struct NovaAppView: View {
         case .models: return l10n.tr("app.models")
         case .tokenhub: return l10n.tr("app.tokenhub")
         case .chat: return l10n.tr("app.chat")
+        case .apiKeys: return "API Keys"
         case .settings: return l10n.tr("app.settings")
         }
     }

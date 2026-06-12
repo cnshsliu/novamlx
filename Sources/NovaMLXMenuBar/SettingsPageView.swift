@@ -89,7 +89,6 @@ struct SettingsPageView: View {
             } else {
                 settingsRow(l10n.tr("settings.inferenceApi"), value: "http://127.0.0.1:\(String(appState.serverPort))")
                 settingsRow(l10n.tr("settings.adminApi"), value: "http://127.0.0.1:\(String(appState.adminPort))")
-                settingsRow(l10n.tr("settings.webChat"), value: "http://127.0.0.1:\(String(appState.serverPort))/chat")
                 settingsRow(l10n.tr("settings.adminDashboard"), value: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")
 
                 configPathRow
@@ -292,21 +291,9 @@ struct SettingsPageView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(l10n.tr("settings.apiKeys"))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                TextEditor(text: $cfgApiKeys)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(height: 60)
-                    .padding(4)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.gray.opacity(0.3)))
-            }
-
         }
     }
+
 
     private func configField(_ label: String, text: Binding<String>, width: CGFloat?, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -403,10 +390,8 @@ struct SettingsPageView: View {
         tknetApiKeyVerified = false
 
         do {
-            // Auto-trim API key to prevent whitespace issues from copy-paste
             let trimmedApiKey = tknetApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // Verify API key
             let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: trimmedApiKey)
             if !isValid {
                 tknetVerifyMessage = l10n.tr("settings.tknet.invalidKey")
@@ -414,29 +399,19 @@ struct SettingsPageView: View {
                 return
             }
 
-            // Fetch models
             let models = await CloudBackend.shared.fetchTknetModels(apiKey: trimmedApiKey)
 
-            // Provision providers
-            try TokenhubManager.shared.provisionTknetProviders(remoteModels: models)
-
-            // Save API key
-            try TokenhubManager.shared.saveTknetApiKey(trimmedApiKey)
             if models.isEmpty {
                 tknetVerifyMessage = l10n.tr("settings.tknet.noModels")
                 tknetVerifying = false
                 return
             }
 
-            // Provision providers
             try TokenhubManager.shared.provisionTknetProviders(remoteModels: models)
+            try TokenhubManager.shared.saveTknetApiKey(trimmedApiKey)
 
-            // Save API key
-            try TokenhubManager.shared.saveTknetApiKey(tknetApiKey)
-
-            // Update UI state
             tknetApiKeyVerified = true
-            tknetVerifyMessage = l10n.tr("settings.tknet.success", String(models.count))
+            tknetVerifyMessage = l10n.tr("settings.tknet.success", models.count)
         } catch {
             tknetVerifyMessage = "Error: \(error.localizedDescription)"
         }
@@ -1105,7 +1080,7 @@ struct SettingsPageView: View {
                         .padding(.trailing, 8)
                     }
 
-                    Button(l10n.tr("settings.tknet.verify")) {
+                    Button(l10n.tr("settings.tknet.verifyButton")) {
                         Task { await verifyAndFetchTknetModels() }
                     }
                     .buttonStyle(.borderedProminent)

@@ -90,6 +90,9 @@ struct TokenhubPageView: View {
     @State private var alertMessage = ""
     @State private var showAlert = false
 
+    // Provider limit alert
+    @State private var showProviderLimitAlert = false
+
     private let manager = TokenhubManager.shared
 
     enum RightPanelMode {
@@ -140,6 +143,16 @@ struct TokenhubPageView: View {
         } message: {
             Text(alertMessage)
         }
+        .alert("Provider Limit", isPresented: $showProviderLimitAlert) {
+            Button("OK", role: .cancel) {}
+            Button("Go to Settings") {
+                DispatchQueue.main.async {
+                    appState.requestedPage = .settings
+                }
+            }
+        } message: {
+            Text("Up to 3 custom providers allowed. To add more, enter your tknet.ai API Key in Settings to unlock unlimited providers.")
+        }
         .alert("Restart Codex?", isPresented: $showCodexRestartConfirm) {
             Button("Restart", role: .destructive) {
                 guard let pending = pendingCodexLaunch else { return }
@@ -182,13 +195,18 @@ struct TokenhubPageView: View {
 
     // MARK: - Helpers
 
-    /// Mask API Key in AWS format: first 4 chars + ... + last 3 chars
-    /// Example: "sk-abc123def456" → "sk-a...456"
+    /// Mask API Key: show prefix (7 if sk-*, else 4) + asterisks + last 3
+    /// Example: "sk-abc123def456" → "sk-abc1*****456"
+    /// Example: "ghp_x8z2mN4kR9" → "ghp_*****R9"
     private func maskApiKey(_ key: String) -> String {
-        if key.count < 7 { return "****" }
-        let prefix = String(key.prefix(4))
-        let suffix = String(key.suffix(3))
-        return "\(prefix)...\(suffix)"
+        if key.count <= 7 { return String(repeating: "*", count: key.count) }
+        let prefixLen = key.hasPrefix("sk-") ? 7 : 4
+        let suffixLen = 3
+        if key.count <= prefixLen + suffixLen { return String(repeating: "*", count: key.count) }
+        let prefix = String(key.prefix(prefixLen))
+        let suffix = String(key.suffix(suffixLen))
+        let starCount = key.count - prefixLen - suffixLen
+        return "\(prefix)\(String(repeating: "*", count: starCount))\(suffix)"
     }
 
     // MARK: - Left Panel (My Providers only)
@@ -199,7 +217,7 @@ struct TokenhubPageView: View {
                 Text("My Providers")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(NovaTheme.Colors.textSecondary)
-                if !CloudAuth.isSubscribed() {
+                if !manager.hasValidTknetKey() {
                     let userCount = providers.filter { !$0.isManaged }.count
                     Text("\(userCount)/\(TokenhubManager.freeProviderLimit)")
                         .font(.system(size: 9))
@@ -549,6 +567,17 @@ struct TokenhubPageView: View {
                     .buttonStyle(.plain)
                 }
                 detailRow(label: "Endpoint", value: provider.endpoint)
+                if !provider.apiKey.isEmpty {
+                    HStack(alignment: .top) {
+                        Text("API Key:")
+                            .font(.system(size: 10))
+                            .foregroundColor(NovaTheme.Colors.textTertiary)
+                            .frame(width: 60, alignment: .trailing)
+                        Text(maskApiKey(provider.apiKey))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(NovaTheme.Colors.textSecondary)
+                    }
+                }
                 detailRow(label: "Context", value: formatContext(provider.effectiveContextWindow))
                 if !provider.tags.isEmpty {
                     detailRow(label: "Tags", value: provider.tags.joined(separator: ", "))
@@ -572,18 +601,92 @@ struct TokenhubPageView: View {
 
             Divider()
 
+            // Test buttons (visible in detail view too)
+            if !provider.isManaged {
+                detailTestButtons(provider)
+                Divider()
+            }
+
             // Agent launcher
             let agent = selectedAgentPerProvider[provider.id] ?? AgentRegistry.all[0]
             agentLauncherRow(
                 agent: agent,
                 onAgentChange: { selectedAgentPerProvider[provider.id] = $0 },
-                modelName: provider.id,
+                modelName: provider.isLocal ? provider.remoteModel : "tknet:" + provider.id,
                 allProviders: providers
             )
         }
         .padding(14)
         .background(NovaTheme.Colors.cardBackground)
         .cornerRadius(8)
+    }
+
+    // MARK: - Detail Test Buttons (shared between detail and editing views)
+
+    private func detailTestButtons(_ provider: TokenhubProvider) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button(action: {
+                    loadFormFromProvider(provider)
+                    testProviderEndpoint()
+                    // Restore detail mode after test triggers
+                }) {
+                    HStack(spacing: 4) {
+                        if testEndpointRunning { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "antenna.radiowaves.left.and.right") }
+                        Text("Test Provider")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(provider.endpoint.isEmpty || provider.apiKey.isEmpty || testEndpointRunning)
+
+                if provider.endpoint.isEmpty {
+                    Text("Endpoint required")
+                        .font(.system(size: 10))
+                        .foregroundColor(NovaTheme.Colors.textTertiary)
+                } else if provider.apiKey.isEmpty {
+                    Text("API Key required")
+                        .font(.system(size: 10))
+                        .foregroundColor(NovaTheme.Colors.statusError)
+                } else if let result = testEndpointResult {
+                    Text(result)
+                        .font(.system(size: 11))
+                        .foregroundColor(result.hasPrefix("OK") ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button(action: {
+                    // Temporarily load form data so testViaNovaMLX can use it
+                    loadFormFromProvider(provider)
+                    testViaNovaMLX()
+                }) {
+                    HStack(spacing: 4) {
+                        if testProxyRunning { ProgressView().controlSize(.small) }
+                        else { Image(systemName: "arrow.triangle.2.circlepath") }
+                        Text("Test \(provider.isLocal ? provider.name : "tknet:\(provider.name)")")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(provider.name.isEmpty || provider.apiKey.isEmpty || provider.remoteModel.isEmpty || testProxyRunning)
+
+                if provider.apiKey.isEmpty {
+                    Text("API Key required")
+                        .font(.system(size: 10))
+                        .foregroundColor(NovaTheme.Colors.statusError)
+                } else if provider.remoteModel.isEmpty {
+                    Text("Model required")
+                        .font(.system(size: 10))
+                        .foregroundColor(NovaTheme.Colors.textTertiary)
+                } else if let result = testProxyResult {
+                    Text(result)
+                        .font(.system(size: 11))
+                        .foregroundColor(result.hasPrefix("OK") ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
+                }
+            }
+        }
     }
 
     private func detailRow(label: String, value: String) -> some View {
@@ -973,7 +1076,7 @@ struct TokenhubPageView: View {
                         .controlSize(.small)
                 } else {
                     Button(action: { saveProvider() }) {
-                        Text(isCreatingNew ? "Save" : "Update")
+                        Text("Save")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
@@ -1063,9 +1166,8 @@ struct TokenhubPageView: View {
     // MARK: - Actions
 
     private func startCreating() {
-        if !CloudAuth.isSubscribed() && manager.userProviderCount() >= TokenhubManager.freeProviderLimit {
-            alertMessage = "Free tier: max \(TokenhubManager.freeProviderLimit) providers. Subscribe for unlimited."
-            showAlert = true
+        if !manager.hasValidTknetKey() && manager.userProviderCount() >= TokenhubManager.freeProviderLimit {
+            showProviderLimitAlert = true
             return
         }
         isCreatingNew = true
@@ -1238,6 +1340,10 @@ struct TokenhubPageView: View {
 
     /// Duplicate a provider with a unique name suffix.
     private func duplicateProvider(_ provider: TokenhubProvider) {
+        if !manager.hasValidTknetKey() && manager.userProviderCount() >= TokenhubManager.freeProviderLimit {
+            showProviderLimitAlert = true
+            return
+        }
         var baseName = provider.name
         // Strip existing numeric suffix like "-2", "-3" etc.
         if let range = baseName.range(of: #"-\d+$"#, options: .regularExpression) {
@@ -1275,10 +1381,12 @@ struct TokenhubPageView: View {
         do {
             try manager.create(newProvider)
             reloadProviders()
-            // Select the new provider
+            // Enter edit mode with the new provider
             if let created = manager.get(candidate) {
-                selectedProvider = created
-                rightPanelMode = .detail
+                loadFormFromProvider(created)
+                isCreatingNew = false
+                editingProvider = created
+                rightPanelMode = .editing
             }
             agentToast = "Duplicated as \(candidate)"
             showAgentToast = true

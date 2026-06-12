@@ -1,7 +1,10 @@
 import SwiftUI
 import Foundation
+import AVFoundation
+import CoreMedia
 import NovaMLXCore
 import NovaMLXInference
+import NovaMLXModelManager
 import NovaMLXUtils
 import NovaMLXEngine
 
@@ -11,9 +14,14 @@ private enum ChatDisplayMode: String, CaseIterable {
     case rawStream = "Stream"
 }
 
+private enum PlaygroundMode {
+    case llm, asr, tts, image
+}
+
 struct ChatPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let inferenceService: InferenceService
+    let modelManager: ModelManager
 
     @EnvironmentObject var l10n: L10n
     @State private var messages: [ChatMessageRow] = []
@@ -45,6 +53,57 @@ struct ChatPageView: View {
     @State private var lastPayload: String?
     @State private var lastResponse: String?
 
+    // ASR recording (chat mic input)
+    @State private var isRecording = false
+    @State private var chatRecorder: AVAudioRecorder?
+    @State private var chatRecordingURL: URL?
+
+    // TTS playback
+    @State private var ttsPlayingMessageId: UUID?
+
+    // MARK: - ASR Playground State
+    @State private var selectedASRModel: String = ""
+    @State private var isASRRecording = false
+    @State private var asrRecorder: AVAudioRecorder?
+    @State private var asrRecordingURL: URL?
+    @State private var transcriptionText = ""
+    @State private var isTranscribing = false
+    @State private var isASRModelLoading = false
+    @State private var loadingASRModelName: String?
+    @State private var asrError: String?
+    @State private var uploadedFileName: String?
+    @State private var asrCodeTab: CodeTab = .curl
+
+    // MARK: - TTS Playground State
+    @State private var ttsText = ""
+    @State private var isSynthesizing = false
+    @State private var ttsError: String?
+    @State private var ttsSuccess: String?
+    @State private var isPlaying = false
+    @State private var synthesizedAudioURL: URL?
+    @State private var audioPlayer: AVAudioPlayer?
+    @State private var ttsEngine: TTSEngine = .neural
+    @State private var selectedSystemVoice: String = "Tingting"
+    @State private var macOSVoices: [MacOSVoice] = []
+    @State private var voiceProfiles: [VoiceProfile] = []
+    @State private var selectedProfileId: UUID? = nil
+    @State private var showCloneSheet = false
+    @State private var ttsCodeTab: CodeTab = .curl
+
+    // MARK: - Image Playground State
+    @State private var imagePrompt = ""
+    @State private var isGeneratingImage = false
+    @State private var generatedImage: NSImage?
+    @State private var imageError: String?
+    @State private var imageSize = "1024x1024"
+    @State private var imageSeed: String = ""
+    @State private var imageSteps: Int = 4
+    @State private var selectedImageModel: String = ""
+    @State private var imageCodeTab: CodeTab = .curl
+    @State private var isImageModelLoading = false
+    @State private var loadingImageModelName: String?
+    @State private var generatedImageData: Data?
+
     private let quickPrompts = [
         "2+2=? Please explain step by step",
         "Write a haiku about coding",
@@ -53,29 +112,92 @@ struct ChatPageView: View {
         "Debug this: why does my code return nil?"
     ]
 
+    // MARK: - Model Type Detection
+
+    private var playgroundMode: PlaygroundMode {
+        let model = selectedModel
+        if model.isEmpty || model == "tknet" || model.hasPrefix("tknet:") { return .llm }
+        guard let record = modelManager.getRecord(model) else { return .llm }
+        if record.family == .whisper || record.family == .qwen3Asr { return .asr }
+        if record.family == .dotsTts || record.family == .qwen3Tts { return .tts }
+        if record.family == .flux || record.family == .stableDiffusion { return .image }
+        return .llm
+    }
+
+    private var modelTypeIcon: String {
+        switch playgroundMode {
+        case .llm: return "info.circle"
+        case .asr: return "mic.fill"
+        case .tts: return "speaker.wave.2.fill"
+        case .image: return "photo.artframe"
+        }
+    }
+
+    private var modelTypeLabel: String {
+        switch playgroundMode {
+        case .llm: return l10n.tr("chat.rawOutput")
+        case .asr: return "ASR — Speech Recognition"
+        case .tts: return "TTS — Text to Speech"
+        case .image: return "Image Generation"
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             infoBanner
             chatToolbar
             Divider()
-            HStack(spacing: 0) {
-                // Left: chat area
-                VStack(spacing: 0) {
-                    messageList
-                    Divider()
-                    if inputText.isEmpty {
-                        suggestionsBar
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
-                    }
-                    inputBar
-                }
-                .frame(maxWidth: .infinity)
-
-                Divider()
-                rightParamsPanel
-                    .frame(width: 200)
+            switch playgroundMode {
+            case .llm:
+                llmContent
+            case .asr:
+                asrContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .tts:
+                ttsContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .image:
+                imageContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .onAppear {
+            autoSelectASRModel()
+            loadMacOSVoices()
+            loadVoiceProfiles()
+        }
+        .onChange(of: appState.loadedModels) { _, _ in
+            autoSelectASRModel()
+        }
+        .sheet(isPresented: $showCloneSheet) {
+            VoiceCloneSheet(l10n: l10n) {
+                loadVoiceProfiles()
+                if let newest = voiceProfiles.first {
+                    selectedProfileId = newest.id
+                }
+            }
+        }
+    }
+
+    // MARK: - LLM Content
+
+    private var llmContent: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                messageList
+                Divider()
+                if inputText.isEmpty {
+                    suggestionsBar
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                }
+                inputBar
+            }
+            .frame(maxWidth: .infinity)
+
+            Divider()
+            rightParamsPanel
+                .frame(width: 200)
         }
     }
 
@@ -120,92 +242,96 @@ struct ChatPageView: View {
                 .frame(width: 120)
             }
 
-            Picker("", selection: $displayMode) {
-                ForEach(ChatDisplayMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
+            if playgroundMode == .llm {
+                Picker("", selection: $displayMode) {
+                    ForEach(ChatDisplayMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .frame(width: 200)
             }
-            .pickerStyle(.segmented)
-            .frame(width: 200)
 
             Spacer()
 
-            if isLoading {
-                ProgressView()
+            if playgroundMode == .llm {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                    Button(action: { cancelCurrentInference() }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "stop.circle")
+                                .font(.system(size: 10))
+                            Text("Stop")
+                                .font(.system(size: 10))
+                        }
+                    }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
-                Button(action: { cancelCurrentInference() }) {
+                    .foregroundColor(.red)
+                }
+
+                Button {
+                    if let payload = lastPayload {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(payload, forType: .string)
+                    }
+                } label: {
                     HStack(spacing: 3) {
-                        Image(systemName: "stop.circle")
+                        Image(systemName: "doc.on.clipboard")
                             .font(.system(size: 10))
-                        Text("Stop")
-                            .font(.system(size: 10))
+                        Text("Copy Payload")
+                            .font(.system(size: 11))
                     }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .foregroundColor(.red)
-            }
+                .disabled(lastPayload == nil)
 
-            Button {
-                if let payload = lastPayload {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(payload, forType: .string)
+                Button {
+                    if let resp = lastResponse {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(resp, forType: .string)
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 10))
+                        Text("Copy Result")
+                            .font(.system(size: 11))
+                    }
                 }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "doc.on.clipboard")
-                        .font(.system(size: 10))
-                    Text("Copy Payload")
-                        .font(.system(size: 11))
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(lastPayload == nil)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(lastResponse == nil)
 
-            Button {
-                if let resp = lastResponse {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(resp, forType: .string)
+                Button {
+                    if let payload = lastPayload, let resp = lastResponse {
+                        let combined = "PAYLOAD:\n\(payload)\n\nRESULT:\n\(resp)"
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(combined, forType: .string)
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "doc.on.doc.on.clipboard")
+                            .font(.system(size: 10))
+                        Text("Copy Both")
+                            .font(.system(size: 11))
+                    }
                 }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "doc.on.clipboard")
-                        .font(.system(size: 10))
-                    Text("Copy Result")
-                        .font(.system(size: 11))
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(lastResponse == nil)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(lastPayload == nil || lastResponse == nil)
 
-            Button {
-                if let payload = lastPayload, let resp = lastResponse {
-                    let combined = "PAYLOAD:\n\(payload)\n\nRESULT:\n\(resp)"
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(combined, forType: .string)
+                Button(l10n.tr("chat.clear")) {
+                    cancelCurrentInference()
+                    messages.removeAll()
+                    lastPayload = nil
+                    lastResponse = nil
                 }
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "doc.on.doc.on.clipboard")
-                        .font(.system(size: 10))
-                    Text("Copy Both")
-                        .font(.system(size: 11))
-                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(lastPayload == nil || lastResponse == nil)
-
-            Button(l10n.tr("chat.clear")) {
-                cancelCurrentInference()
-                messages.removeAll()
-                lastPayload = nil
-                lastResponse = nil
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(12)
         .background(NovaTheme.Colors.cardBackground)
@@ -238,18 +364,13 @@ struct ChatPageView: View {
 
     private var infoBanner: some View {
         HStack(spacing: 8) {
-            Image(systemName: "info.circle")
+            Image(systemName: modelTypeIcon)
                 .foregroundColor(NovaTheme.Colors.accent)
                 .font(.system(size: 12))
-            Text(l10n.tr("chat.rawOutput"))
+            Text(modelTypeLabel)
                 .font(.system(size: 11))
                 .foregroundColor(NovaTheme.Colors.textSecondary)
             Spacer()
-            Button(l10n.tr("chat.webChat")) {
-                NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.serverPort))/chat")!)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -378,6 +499,19 @@ struct ChatPageView: View {
                             ? RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.3), lineWidth: 0.5)
                             : nil
                     )
+
+                    // TTS button on assistant messages
+                    if !msg.isUser && !isRaw {
+                        Button {
+                            speakMessage(msg)
+                        } label: {
+                            Image(systemName: ttsPlayingMessageId == msg.id ? "speaker.wave.2.fill" : "speaker.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(ttsPlayingMessageId == msg.id ? NovaTheme.Colors.accent : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Read aloud")
+                    }
                 }
             }
             if !msg.isUser { Spacer(minLength: 60) }
@@ -466,6 +600,19 @@ struct ChatPageView: View {
                 .buttonStyle(.plain)
                 .help("Stop inference")
             } else {
+                // Mic button for ASR
+                if hasLoadedASRModel {
+                    Button {
+                        toggleChatRecording()
+                    } label: {
+                        Image(systemName: isRecording ? "stop.circle.fill" : "mic.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(isRecording ? .red : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(isRecording ? "Stop recording" : "Voice input")
+                }
+
                 Button(action: { sendMessage() }) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
@@ -528,6 +675,7 @@ struct ChatPageView: View {
         let model = selectedModel
         let tag = (model == "tknet" && !selectedTag.isEmpty) ? selectedTag : nil
 
+        NovaMLXLog.info("[sendMessage] model=\(model) displayMode=\(displayMode.rawValue) isTknet=\(model == "tknet" || model.hasPrefix("tknet:"))")
         switch displayMode {
         case .pretty:
             sendPretty(model: model, text: text, assistantIdx: assistantIdx, tag: tag)
@@ -551,9 +699,15 @@ struct ChatPageView: View {
     // MARK: Pretty mode (existing InferenceService streaming)
 
     private func sendPretty(model: String, text: String, assistantIdx: Int, tag: String? = nil) {
-        // Tokenhub models route through API server
-        if model == "tknet" || model.hasPrefix("tknet:") {
-            sendPrettyTokenhub(model: model, text: text, assistantIdx: assistantIdx, tag: tag)
+        // Resolve model ID: strip "tknet:Local " prefix for local models
+        var resolvedModel = model
+        if resolvedModel.hasPrefix("tknet:Local ") {
+            resolvedModel = String(resolvedModel.dropFirst("tknet:Local ".count))
+        }
+
+        // Tokenhub cloud models route through API server (exclude tknet:Local)
+        if resolvedModel == "tknet" || (resolvedModel.hasPrefix("tknet:") && !resolvedModel.hasPrefix("tknet:Local")) {
+            sendPrettyTokenhub(model: resolvedModel, text: text, assistantIdx: assistantIdx, tag: tag)
             return
         }
 
@@ -564,13 +718,13 @@ struct ChatPageView: View {
                 currentRequestId = nil
             }
 
-            guard inferenceService.isModelLoaded(model) else {
-                messages[assistantIdx].content = l10n.tr("chat.error", "Model '\(model.components(separatedBy: "/").last ?? model)' is not loaded. Load it from the Models page first.")
+            guard inferenceService.isModelLoaded(resolvedModel) else {
+                messages[assistantIdx].content = l10n.tr("chat.error", "Model '\(resolvedModel.components(separatedBy: "/").last ?? resolvedModel)' is not loaded. Load it from the Models page first.")
                 return
             }
 
             let payload: [String: Any] = [
-                "model": model,
+                "model": resolvedModel,
                 "messages": [["role": "user", "content": text]],
                 "stream": true,
                 "temperature": paramTemp,
@@ -585,7 +739,7 @@ struct ChatPageView: View {
             }
 
             let request = InferenceRequest(
-                model: model,
+                model: resolvedModel,
                 messages: [ChatMessage(role: .user, content: text)],
                 temperature: paramTemp,
                 maxTokens: Int(paramMaxTokens),
@@ -599,12 +753,17 @@ struct ChatPageView: View {
 
             do {
                 // Detect if this is a thinking model and use ThinkingParser
-                let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: model)
+                let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: resolvedModel)
+                NovaMLXLog.info("[sendPretty] model=\(resolvedModel) isImplicit=\(isImplicitModel)")
                 let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
 
+                var tokenCount = 0
+                var nonEmptyTokens = 0
                 let tokenStream = inferenceService.stream(request)
                 for try await token in tokenStream {
                     if Task.isCancelled { break }
+                    tokenCount += 1
+                    if !token.text.isEmpty { nonEmptyTokens += 1 }
 
                     // Parse thinking vs content for thinking models
                     let parsed = thinkingParser.feed(token.text)
@@ -615,11 +774,13 @@ struct ChatPageView: View {
 
                 // Finalize thinking parser to flush any buffered content
                 let finalResult = thinkingParser.finalize()
+                NovaMLXLog.info("[sendPretty] tokens=\(tokenCount) nonEmpty=\(nonEmptyTokens) parserState=\(thinkingParser.isInThinkingBlock) finalResponse=\(finalResult.response.prefix(80)) finalThinking=\(finalResult.thinking.prefix(80))")
                 if !finalResult.response.isEmpty {
                     messages[assistantIdx].content += finalResult.response
                 }
 
                 if messages[assistantIdx].content.isEmpty {
+                    NovaMLXLog.warning("[sendPretty] EMPTY RESPONSE for model=\(resolvedModel)")
                     messages[assistantIdx].content = l10n.tr("chat.noResponse")
                 }
             } catch {
@@ -842,8 +1003,850 @@ struct ChatPageView: View {
         TokenhubManager.shared.list().filter { $0.isEnabled }.map(\.name)
     }
 
+    // MARK: - Chat Audio
+
+    private var hasLoadedASRModel: Bool {
+        appState.loadedModels.contains { modelId in
+            guard let record = modelManager.getRecord(modelId) else { return false }
+            return record.family == .whisper || record.family == .qwen3Asr
+        }
+    }
+
+    private var firstLoadedASRModel: String? {
+        appState.loadedModels.first { modelId in
+            guard let record = modelManager.getRecord(modelId) else { return false }
+            return record.family == .whisper || record.family == .qwen3Asr
+        }
+    }
+
+    private func toggleChatRecording() {
+        if isRecording {
+            chatRecorder?.stop()
+            isRecording = false
+            guard let url = chatRecordingURL else { return }
+            transcribeChatRecording(url: url)
+        } else {
+            let tempDir = FileManager.default.temporaryDirectory
+            let url = tempDir.appendingPathComponent("novamlx_chat_\(UUID().uuidString).wav")
+            let settings: [String: Any] = [
+                AVFormatIDKey: Int(kAudioFormatLinearPCM),
+                AVSampleRateKey: 16000.0,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+            do {
+                let recorder = try AVAudioRecorder(url: url, settings: settings)
+                recorder.record()
+                chatRecorder = recorder
+                chatRecordingURL = url
+                isRecording = true
+            } catch {
+                NovaMLXLog.error("Chat recording failed: \(error)")
+            }
+        }
+    }
+
+    private func transcribeChatRecording(url: URL) {
+        guard let modelId = firstLoadedASRModel else { return }
+        Task {
+            do {
+                let audioData = try Data(contentsOf: url)
+                let result = try await inferenceService.transcriptionService.transcribe(
+                    modelId: modelId,
+                    audioData: audioData
+                )
+                await MainActor.run {
+                    if !result.text.isEmpty {
+                        inputText = result.text
+                        isInputFocused = true
+                    }
+                }
+            } catch {
+                NovaMLXLog.error("Chat ASR failed: \(error)")
+            }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func speakMessage(_ msg: ChatMessageRow) {
+        if ttsPlayingMessageId == msg.id {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            proc.arguments = ["say"]
+            try? proc.run()
+            ttsPlayingMessageId = nil
+            return
+        }
+        ttsPlayingMessageId = msg.id
+        let text = msg.content
+        Task {
+            do {
+                let _ = try await inferenceService.ttsService.synthesize(text: text, voice: "Tingting")
+                await MainActor.run {
+                    ttsPlayingMessageId = nil
+                }
+            } catch {
+                await MainActor.run {
+                    ttsPlayingMessageId = nil
+                }
+            }
+        }
+    }
+
     private var availableTags: [String] {
         TokenhubManager.shared.allTags()
+    }
+
+    // MARK: - ASR Playground
+
+    private var asrContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Input controls
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        Button { toggleASRRecording() } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isASRRecording ? "stop.circle.fill" : "mic.circle.fill")
+                                    .font(.system(size: 20))
+                                Text(isASRRecording ? l10n.tr("audio.asr.stopRecording") : l10n.tr("audio.asr.startRecording"))
+                                    .font(.system(size: 13, weight: .medium))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(isASRRecording ? Color.red.opacity(0.2) : NovaTheme.Colors.accent.opacity(0.15))
+                            .foregroundColor(isASRRecording ? .red : NovaTheme.Colors.accent)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(selectedASRModel.isEmpty || isTranscribing)
+
+                        Button { uploadAudioFile() } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.badge.plus")
+                                    .font(.system(size: 20))
+                                Text(l10n.tr("audio.asr.uploadFile"))
+                                    .font(.system(size: 13, weight: .medium))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(NovaTheme.Colors.cardBackground)
+                            .foregroundColor(.secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(NovaTheme.Colors.cardBorder, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(selectedASRModel.isEmpty || isTranscribing)
+                    }
+
+                    if let name = uploadedFileName {
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.fill").font(.caption)
+                            Text(name).font(.caption).lineLimit(1)
+                            Spacer()
+                            if asrRecordingURL != nil {
+                                Button { downloadRecording() } label: {
+                                    Image(systemName: "arrow.down.circle.fill").font(.caption)
+                                        .foregroundColor(NovaTheme.Colors.accent)
+                                }.buttonStyle(.plain)
+                            }
+                            Button { uploadedFileName = nil; asrRecordingURL = nil } label: {
+                                Image(systemName: "xmark.circle.fill").font(.caption).foregroundColor(.secondary)
+                            }.buttonStyle(.plain)
+                        }.foregroundColor(.secondary)
+                    }
+                }
+
+                if isTranscribing {
+                    HStack(spacing: 8) {
+                        ProgressView().scaleEffect(0.8)
+                        Text(l10n.tr("audio.asr.transcribing")).font(.system(size: 12)).foregroundColor(.secondary)
+                    }
+                }
+
+                if let error = asrError {
+                    Text(error).font(.system(size: 12)).foregroundColor(.red).padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.red.opacity(0.1)).clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                if !transcriptionText.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(l10n.tr("audio.asr.result")).font(.system(size: 13, weight: .semibold))
+                            Spacer()
+                            Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(transcriptionText, forType: .string) } label: {
+                                Image(systemName: "doc.on.doc").font(.system(size: 11)).foregroundColor(.secondary)
+                            }.buttonStyle(.plain)
+                        }
+                        TextEditor(text: .constant(transcriptionText))
+                            .font(.system(size: 13)).frame(minHeight: 120).padding(8)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5))
+                    }
+                }
+
+                if !selectedASRModel.isEmpty { asrApiExamples }
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+        }
+    }
+
+    // MARK: - TTS Playground
+
+    private var ttsContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Engine picker
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(l10n.tr("audio.tts.model")).font(.system(size: 13, weight: .semibold))
+                    HStack(spacing: 0) {
+                        ForEach(TTSEngine.allCases, id: \.self) { engine in
+                            Button {
+                                ttsEngine = engine
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: engine == .neural ? "brain" : "speaker.wave.2.fill").font(.system(size: 11))
+                                    Text(engine.rawValue).font(.system(size: 12, weight: ttsEngine == engine ? .semibold : .regular))
+                                }
+                                .frame(maxWidth: .infinity).padding(.vertical, 6)
+                                .background(ttsEngine == engine ? NovaTheme.Colors.accent.opacity(0.15) : Color.clear)
+                                .foregroundColor(ttsEngine == engine ? NovaTheme.Colors.accent : .secondary)
+                                .clipShape(RoundedRectangle(cornerRadius: 6)).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(3).background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    if ttsEngine == .neural {
+                        if let ttsName = loadedTTSModelName {
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark.circle.fill").font(.system(size: 11)).foregroundColor(.green)
+                                Text(ttsName).font(.system(size: 11)).foregroundColor(.secondary)
+                            }.padding(6)
+                        } else {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundColor(.orange)
+                                Text(l10n.tr("audio.tts.noModel")).font(.system(size: 11)).foregroundColor(.secondary)
+                            }.padding(6)
+                        }
+                    }
+
+                    if ttsEngine == .neural {
+                        voiceProfileSection
+                    } else {
+                        if macOSVoices.isEmpty {
+                            Text("Loading voices...").font(.system(size: 11)).foregroundColor(.secondary)
+                        } else {
+                            Picker("Voice", selection: $selectedSystemVoice) {
+                                ForEach(macOSVoices) { voice in
+                                    Text("\(voice.name) (\(voice.locale))").tag(voice.name)
+                                }
+                            }
+                            .pickerStyle(.menu).frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+
+                // Text input
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(l10n.tr("audio.tts.input")).font(.system(size: 13, weight: .semibold))
+                    TextEditor(text: $ttsText)
+                        .font(.system(size: 13)).frame(minHeight: 120).padding(4)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5))
+                }
+
+                // Synthesize + Play
+                HStack(spacing: 12) {
+                    Button { synthesizeSpeech() } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "speaker.wave.2.fill").font(.system(size: 14))
+                            Text(l10n.tr("audio.tts.synthesize")).font(.system(size: 13, weight: .medium))
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 10)
+                        .background(NovaTheme.Colors.accent).foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(ttsText.isEmpty || isSynthesizing || (ttsEngine == .neural && loadedTTSModelName == nil))
+
+                    if synthesizedAudioURL != nil {
+                        Button { togglePlayback() } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isPlaying ? "pause.fill" : "play.fill").font(.system(size: 14))
+                                Text(isPlaying ? l10n.tr("audio.tts.pause") : l10n.tr("audio.tts.play")).font(.system(size: 13, weight: .medium))
+                            }
+                            .frame(maxWidth: .infinity).padding(.vertical, 10)
+                            .background(NovaTheme.Colors.accent.opacity(0.15))
+                            .foregroundColor(NovaTheme.Colors.accent)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if isSynthesizing {
+                    HStack(spacing: 8) {
+                        ProgressView().scaleEffect(0.8)
+                        Text(l10n.tr("audio.tts.synthesizing")).font(.system(size: 12)).foregroundColor(.secondary)
+                    }
+                }
+
+                if let error = ttsError {
+                    Text(error).font(.system(size: 12)).foregroundColor(.red).padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.red.opacity(0.1)).clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                if let success = ttsSuccess {
+                    Text(success).font(.system(size: 12)).foregroundColor(.green).padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.green.opacity(0.1)).clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                ttsApiExamples
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+        }
+    }
+
+    // MARK: - Voice Profile Section
+
+    private var voiceProfileSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "person.wave.2").font(.system(size: 11)).foregroundColor(.secondary)
+                Text(l10n.tr("audio.tts.voiceProfile")).font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Button { showCloneSheet = true } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus.circle.fill").font(.system(size: 11))
+                        Text(l10n.tr("audio.tts.cloneNew")).font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(NovaTheme.Colors.accent)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if voiceProfiles.isEmpty {
+                Text(l10n.tr("audio.tts.noVoiceProfiles")).font(.system(size: 11)).foregroundColor(.secondary)
+                    .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(voiceProfiles) { profile in
+                            VoiceProfileCard(profile: profile, isSelected: selectedProfileId == profile.id, l10n: l10n) {
+                                selectedProfileId = profile.id
+                            } onDelete: {
+                                VoiceProfileManager.shared.deleteProfile(profile.id)
+                                if selectedProfileId == profile.id {
+                                    selectedProfileId = voiceProfiles.first(where: { $0.id != profile.id })?.id
+                                }
+                                loadVoiceProfiles()
+                            }
+                        }
+                    }.padding(.vertical, 2)
+                }
+            }
+        }.padding(.horizontal, 6)
+    }
+
+    // MARK: - ASR/TTS Computed Properties
+
+    private var loadedTTSModelName: String? {
+        let ttsModels = appState.loadedModels.filter { modelId in
+            guard let record = modelManager.getRecord(modelId) else { return false }
+            return record.family == .dotsTts || record.family == .qwen3Tts
+        }
+        return ttsModels.first.map { shortModelLabel($0) }
+    }
+
+    private var loadedASRModels: [String] {
+        appState.loadedModels.filter { modelId in
+            guard let record = modelManager.getRecord(modelId) else { return false }
+            return record.family == .whisper || record.family == .qwen3Asr
+        }
+    }
+
+    private var downloadedASRModels: [(id: String, isLoaded: Bool)] {
+        modelManager.downloadedModels()
+            .filter { $0.family == .whisper || $0.family == .qwen3Asr }
+            .map { (id: $0.id, isLoaded: appState.loadedModels.contains($0.id)) }
+    }
+
+    private var realApiKey: String { appState.apiKey ?? "YOUR_API_KEY" }
+
+    // MARK: - ASR Actions
+
+    private func autoSelectASRModel() {
+        let asrModels = loadedASRModels
+        if asrModels.count == 1, selectedASRModel.isEmpty || !asrModels.contains(selectedASRModel) {
+            selectedASRModel = asrModels[0]
+        } else if !asrModels.contains(selectedASRModel) {
+            selectedASRModel = asrModels.first ?? ""
+        }
+    }
+
+    private func loadASRModel(_ modelId: String) {
+        isASRModelLoading = true
+        loadingASRModelName = modelId.components(separatedBy: "/").last ?? modelId
+        asrError = nil
+        Task {
+            do {
+                guard let record = modelManager.getRecord(modelId) else {
+                    throw NovaMLXError.modelNotFound(modelId)
+                }
+                let config = ModelConfig(
+                    identifier: ModelIdentifier(id: modelId, family: record.family),
+                    modelType: record.modelType
+                )
+                _ = try await inferenceService.transcriptionService.loadModel(from: record.localURL, config: config)
+                selectedASRModel = modelId
+                await MainActor.run { isASRModelLoading = false; loadingASRModelName = nil }
+            } catch {
+                await MainActor.run { asrError = error.localizedDescription; isASRModelLoading = false; loadingASRModelName = nil }
+            }
+        }
+    }
+
+    private func toggleASRRecording() {
+        if isASRRecording {
+            asrRecorder?.stop()
+            isASRRecording = false
+            uploadedFileName = "recording.wav"
+            guard let url = asrRecordingURL else { return }
+            transcribeAudio(url: url)
+        } else {
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .authorized: startASRRecording()
+            case .notDetermined:
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    DispatchQueue.main.async { if granted { self.startASRRecording() } else { self.asrError = "Microphone access denied." } }
+                }
+            case .denied, .restricted: asrError = "Microphone access denied. Please allow in System Settings."
+            @unknown default: startASRRecording()
+            }
+        }
+    }
+
+    private func startASRRecording() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("novamlx_asr_\(UUID().uuidString).wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM), AVSampleRateKey: 48000.0,
+            AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsFloatKey: false
+        ]
+        do {
+            let recorder = try AVAudioRecorder(url: url, settings: settings)
+            recorder.record()
+            asrRecorder = recorder
+            asrRecordingURL = url
+            isASRRecording = true
+            uploadedFileName = nil
+            asrError = nil
+        } catch {
+            asrError = "Recording failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func uploadAudioFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        uploadedFileName = url.lastPathComponent
+        asrRecordingURL = url
+        transcribeAudio(url: url)
+    }
+
+    private func downloadRecording() {
+        guard let srcURL = asrRecordingURL else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "recording.wav"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        try? FileManager.default.removeItem(at: dest)
+        do { try FileManager.default.copyItem(at: srcURL, to: dest) }
+        catch { asrError = "Download failed: \(error.localizedDescription)" }
+    }
+
+    private func transcribeAudio(url: URL) {
+        guard !selectedASRModel.isEmpty else {
+            asrError = l10n.tr("audio.asr.noModel"); return
+        }
+        let modelId = selectedASRModel
+        isTranscribing = true
+        transcriptionText = ""
+        asrError = nil
+        Task {
+            do {
+                let audioData = try Data(contentsOf: url)
+                let result = try await inferenceService.transcriptionService.transcribe(modelId: modelId, audioData: audioData, language: nil)
+                await MainActor.run { transcriptionText = result.text; isTranscribing = false }
+            } catch {
+                await MainActor.run { asrError = error.localizedDescription; isTranscribing = false }
+            }
+        }
+    }
+
+    // MARK: - TTS Actions
+
+    private func loadMacOSVoices() {
+        guard macOSVoices.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let voices = TTSService.listMacOSVoices()
+            DispatchQueue.main.async { macOSVoices = voices }
+        }
+    }
+
+    private func loadVoiceProfiles() {
+        voiceProfiles = VoiceProfileManager.shared.listProfiles()
+    }
+
+    private func synthesizeSpeech() {
+        guard !ttsText.isEmpty else { return }
+        isSynthesizing = true; ttsError = nil; ttsSuccess = nil
+        let profile = voiceProfiles.first { $0.id == selectedProfileId }
+        Task {
+            do {
+                let audioData = try await inferenceService.ttsService.synthesize(
+                    text: ttsText, voice: selectedSystemVoice, engine: ttsEngine, voiceProfile: profile
+                )
+                let ext = ttsEngine == .system ? "aiff" : "wav"
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("novamlx_tts_\(UUID().uuidString).\(ext)")
+                try audioData.write(to: url)
+                await MainActor.run { synthesizedAudioURL = url; isSynthesizing = false }
+            } catch {
+                await MainActor.run { ttsError = error.localizedDescription; isSynthesizing = false }
+            }
+        }
+    }
+
+    private func togglePlayback() {
+        if isPlaying { audioPlayer?.stop(); isPlaying = false; return }
+        guard let url = synthesizedAudioURL else { return }
+        do {
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.delegate = nil
+            audioPlayer = player
+            player.play()
+            isPlaying = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + player.duration) { isPlaying = false }
+        } catch { ttsError = "Playback failed: \(error.localizedDescription)" }
+    }
+
+    // MARK: - API Example Helpers
+
+    private enum CodeTab: String, CaseIterable { case curl, python, node }
+
+    private func codeBlock(_ code: String) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code).font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(Color(nsColor: .secondaryLabelColor)).textSelection(.enabled).padding(8)
+            }
+            Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string) } label: {
+                Image(systemName: "doc.on.doc").font(.system(size: 10)).foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain).padding(6)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5))
+    }
+
+    private func langTabs(_ selected: Binding<CodeTab>) -> some View {
+        HStack(spacing: 0) {
+            ForEach(CodeTab.allCases, id: \.self) { tab in
+                Button { selected.wrappedValue = tab } label: {
+                    Text(tab.rawValue.uppercased())
+                        .font(.system(size: 10, weight: selected.wrappedValue == tab ? .semibold : .regular))
+                        .frame(maxWidth: .infinity).padding(.vertical, 4)
+                        .background(selected.wrappedValue == tab ? NovaTheme.Colors.accent.opacity(0.15) : Color.clear)
+                        .foregroundColor(selected.wrappedValue == tab ? NovaTheme.Colors.accent : .secondary)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }.buttonStyle(.plain)
+            }
+        }.padding(2).background(Color(nsColor: .controlBackgroundColor)).clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private var asrApiExamples: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal").font(.system(size: 11))
+                Text("API Examples").font(.system(size: 12, weight: .semibold))
+                Spacer()
+                langTabs($asrCodeTab)
+            }.foregroundColor(.secondary)
+            let model = selectedASRModel; let key = realApiKey
+            switch asrCodeTab {
+            case .curl:
+                codeBlock("curl -X POST http://localhost:6590/v1/audio/transcriptions \\\n  -H \"Authorization: Bearer \(key)\" \\\n  -F \"file=@recording.wav\" \\\n  -F \"model=\(model)\"")
+            case .python:
+                codeBlock("import requests\n\nresp = requests.post(\n    \"http://localhost:6590/v1/audio/transcriptions\",\n    headers={\"Authorization\": \"Bearer \(key)\"},\n    files={\"file\": open(\"recording.wav\", \"rb\")},\n    data={\"model\": \"\(model)\"}\n)\nprint(resp.json())")
+            case .node:
+                codeBlock("const FormData = require(\"form-data\");\nconst fs = require(\"fs\");\nconst form = new FormData();\nform.append(\"file\", fs.createReadStream(\"recording.wav\"));\nform.append(\"model\", \"\(model)\");\nconst resp = await fetch(\"http://localhost:6590/v1/audio/transcriptions\", {\n  method: \"POST\",\n  headers: { Authorization: \"Bearer \(key)\", ...form.getHeaders() },\n  body: form\n});\nconsole.log(await resp.json());")
+            }
+        }.padding(10).background(Color(nsColor: .controlBackgroundColor).opacity(0.5)).clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var ttsApiExamples: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal").font(.system(size: 11))
+                Text("API Examples").font(.system(size: 12, weight: .semibold))
+                Spacer()
+                langTabs($ttsCodeTab)
+            }.foregroundColor(.secondary)
+            let key = realApiKey
+            let profileName = voiceProfiles.first(where: { $0.id == selectedProfileId })?.name ?? "MyVoice"
+            switch ttsCodeTab {
+            case .curl:
+                codeBlock("curl -X POST http://localhost:6590/v1/audio/speech \\\n  -H \"Authorization: Bearer \(key)\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"tts-1\",\"input\":\"Hello world\",\"voice\":\"\(profileName)\"}' \\\n  --output speech.wav")
+            case .python:
+                codeBlock("import requests\n\nresp = requests.post(\n    \"http://localhost:6590/v1/audio/speech\",\n    headers={\"Authorization\": \"Bearer \(key)\"},\n    json={\"model\": \"tts-1\", \"input\": \"Hello world\", \"voice\": \"\(profileName)\"}\n)\nwith open(\"speech.wav\", \"wb\") as f:\n    f.write(resp.content)")
+            case .node:
+                codeBlock("const resp = await fetch(\"http://localhost:6590/v1/audio/speech\", {\n  method: \"POST\",\n  headers: { \"Authorization\": \"Bearer \(key)\", \"Content-Type\": \"application/json\" },\n  body: JSON.stringify({ model: \"tts-1\", input: \"Hello world\", voice: \"\(profileName)\" })\n});\nconst buf = Buffer.from(await resp.arrayBuffer());\nrequire(\"fs\").writeFileSync(\"speech.wav\", buf);")
+            }
+        }.padding(10).background(Color(nsColor: .controlBackgroundColor).opacity(0.5)).clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - Image Playground
+
+    private var downloadedImageModels: [ModelRecord] {
+        modelManager.downloadedModels().filter { $0.modelType == .image }
+    }
+
+    private var loadedImageModels: [String] {
+        inferenceService.imageGenerationService.listLoadedModels()
+    }
+
+    private var imageContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Model picker
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Model").font(.system(size: 11, weight: .semibold)).foregroundColor(.secondary)
+                    Picker("Image Model", selection: $selectedImageModel) {
+                        Text("Select model...").tag("")
+                        ForEach(downloadedImageModels, id: \.id) { record in
+                            HStack {
+                                Text(record.id)
+                                if loadedImageModels.contains(record.id) {
+                                    Circle().fill(NovaTheme.Colors.statusOK).frame(width: 6, height: 6)
+                                }
+                            }.tag(record.id)
+                        }
+                    }
+                    .onChange(of: appState.loadedModels) { _, _ in
+                        if selectedImageModel.isEmpty, let first = downloadedImageModels.first {
+                            selectedImageModel = first.id
+                        }
+                    }
+                    .onAppear {
+                        if selectedImageModel.isEmpty, let first = downloadedImageModels.first {
+                            selectedImageModel = first.id
+                        }
+                    }
+                }
+
+                // Settings row
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Size").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        Picker("Size", selection: $imageSize) {
+                            Text("1024×1024").tag("1024x1024")
+                            Text("768×1344").tag("768x1344")
+                            Text("1344×768").tag("1344x768")
+                            Text("864×1152").tag("864x1152")
+                            Text("1152×864").tag("1152x864")
+                        }.frame(width: 140)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Steps").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        HStack(spacing: 4) {
+                            TextField("Steps", value: $imageSteps, format: .number)
+                                .textFieldStyle(.roundedBorder).frame(width: 50)
+                                .font(.system(size: 11, design: .monospaced))
+                            Text(isSchnellModel ? "(1-8)" : "(10-50)").font(.system(size: 9)).foregroundColor(Color(nsColor: .tertiaryLabelColor))
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Seed").font(.system(size: 10, weight: .medium)).foregroundColor(.secondary)
+                        TextField("Auto", text: $imageSeed)
+                            .textFieldStyle(.roundedBorder).frame(width: 80)
+                            .font(.system(size: 11, design: .monospaced))
+                    }
+                }
+
+                // Prompt
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Prompt").font(.system(size: 11, weight: .semibold)).foregroundColor(.secondary)
+                    TextEditor(text: $imagePrompt)
+                        .font(.system(size: 13))
+                        .frame(minHeight: 60, maxHeight: 100)
+                        .scrollContentBackground(.hidden)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5))
+                }
+
+                // Actions
+                HStack(spacing: 8) {
+                    Button {
+                        generateImage()
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isGeneratingImage { ProgressView().controlSize(.small) }
+                            Image(systemName: "photo")
+                            Text(isGeneratingImage ? "Generating..." : "Generate")
+                        }
+                    }
+                    .disabled(imagePrompt.isEmpty || selectedImageModel.isEmpty || isGeneratingImage || isImageModelLoading)
+                    .buttonStyle(.borderedProminent)
+
+                    if generatedImage != nil {
+                        Button { saveGeneratedImage() } label: {
+                            HStack(spacing: 4) { Image(systemName: "square.and.arrow.down"); Text("Save") }
+                        }.buttonStyle(.bordered)
+                    }
+
+                    if generatedImage != nil || imageError != nil {
+                        Button {
+                            generatedImage = nil; generatedImageData = nil; imageError = nil
+                        } label: {
+                            Text("Clear")
+                        }.buttonStyle(.bordered)
+                    }
+                }
+
+                // Loading state
+                if isImageModelLoading, let name = loadingImageModelName {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading \(name)...").font(.system(size: 12)).foregroundColor(.secondary)
+                    }.padding(8)
+                }
+
+                // Error
+                if let error = imageError {
+                    Text(error).font(.system(size: 11)).foregroundColor(.red).padding(8)
+                        .background(Color.red.opacity(0.1)).clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                // Result
+                if let image = generatedImage {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Result").font(.system(size: 11, weight: .semibold)).foregroundColor(.secondary)
+                        Image(nsImage: image)
+                            .resizable().aspectRatio(contentMode: .fit)
+                            .frame(maxHeight: 400)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .shadow(color: .black.opacity(0.1), radius: 4)
+                    }
+                }
+
+                // API Examples
+                if !selectedImageModel.isEmpty {
+                    imageApiExamples
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private var isSchnellModel: Bool {
+        guard let record = modelManager.getRecord(selectedImageModel) else { return true }
+        return record.id.lowercased().contains("schnell")
+    }
+
+    private var imageApiExamples: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal").font(.system(size: 11))
+                Text("API Examples").font(.system(size: 12, weight: .semibold))
+                Spacer()
+                langTabs($imageCodeTab)
+            }.foregroundColor(.secondary)
+            let model = selectedImageModel; let key = realApiKey
+            switch imageCodeTab {
+            case .curl:
+                codeBlock("curl -X POST http://localhost:6590/v1/images/generations \\\n  -H \"Authorization: Bearer \(key)\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"\(model)\",\"prompt\":\"\(imagePrompt.isEmpty ? "A sunset over mountains" : imagePrompt)\",\"size\":\"\(imageSize)\",\"steps\":\(imageSteps)}'")
+            case .python:
+                codeBlock("import openai\nclient = openai.OpenAI(base_url=\"http://localhost:6590/v1\", api_key=\"\(key)\")\nresponse = client.images.generate(\n    model=\"\(model)\",\n    prompt=\"\(imagePrompt.isEmpty ? "A sunset over mountains" : imagePrompt)\",\n    size=\"\(imageSize)\"\n)\nprint(response.data[0].b64_json[:100])")
+            case .node:
+                codeBlock("import OpenAI from 'openai';\nconst client = new OpenAI({ baseURL: 'http://localhost:6590/v1', apiKey: '\(key)' });\nconst response = await client.images.generate({\n  model: '\(model)',\n  prompt: '\(imagePrompt.isEmpty ? "A sunset over mountains" : imagePrompt)',\n  size: '\(imageSize)'\n});\nconsole.log(response.data[0].b64_json?.slice(0, 100));")
+            }
+        }.padding(10).background(Color(nsColor: .controlBackgroundColor).opacity(0.5)).clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func generateImage() {
+        guard !imagePrompt.isEmpty, !selectedImageModel.isEmpty else { return }
+        imageError = nil
+        isGeneratingImage = true
+
+        Task {
+            do {
+                // Auto-load model if needed
+                if !loadedImageModels.contains(selectedImageModel) {
+                    guard let record = modelManager.getRecord(selectedImageModel) else {
+                        throw NSError(domain: "NovaMLX", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model not found"])
+                    }
+                    let config = ModelConfig(identifier: ModelIdentifier(id: selectedImageModel, family: record.family), modelType: .image)
+                    isImageModelLoading = true
+                    loadingImageModelName = record.id
+                    _ = try await inferenceService.imageGenerationService.loadModel(
+                        from: record.localURL, config: config)
+                    isImageModelLoading = false
+                    loadingImageModelName = nil
+                }
+
+                let dims = imageSize.components(separatedBy: "x")
+                let w = Int(dims.first ?? "1024") ?? 1024
+                let h = Int(dims.last ?? "1024") ?? 1024
+                let seed = imageSeed.isEmpty ? nil : UInt64(imageSteps)
+
+                let result = try await inferenceService.imageGenerationService.generate(
+                    modelId: selectedImageModel,
+                    prompt: imagePrompt,
+                    width: w, height: h,
+                    seed: seed,
+                    steps: imageSteps
+                )
+
+                if let b64 = result.images.first,
+                   let data = Data(base64Encoded: b64) {
+                    generatedImageData = data
+                    generatedImage = NSImage(data: data)
+                }
+            } catch {
+                imageError = error.localizedDescription
+                isImageModelLoading = false
+                loadingImageModelName = nil
+            }
+            isGeneratingImage = false
+        }
+    }
+
+    private func saveGeneratedImage() {
+        guard let data = generatedImageData else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "flux_\(Int(Date().timeIntervalSince1970)).png"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                try? data.write(to: url)
+            }
+        }
     }
 }
 

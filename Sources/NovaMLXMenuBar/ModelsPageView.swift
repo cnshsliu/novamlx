@@ -19,14 +19,97 @@ struct ModelsPageView: View {
     @State private var modelToDelete: String?
     @State private var showDeleteConfirmation = false
     @State private var loadingModelId: String?
+    @State private var typeFilter: ModelTypeFilter = .all
 
     enum ModelsTab: String, CaseIterable {
         case local
         case downloads
     }
 
+    enum ModelTypeFilter: String, CaseIterable {
+        case all
+        case llm
+        case vlm
+        case embedding
+        case audio
+        case image
+
+        var label: String {
+            switch self {
+            case .all: return "All"
+            case .llm: return "LLM"
+            case .vlm: return "VLM"
+            case .embedding: return "Embed"
+            case .audio: return "Audio"
+            case .image: return "Image"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .all: return "square.grid.2x2"
+            case .llm: return "text.bubble"
+            case .vlm: return "eye"
+            case .embedding: return "vector"
+            case .audio: return "waveform"
+            case .image: return "photo"
+            }
+        }
+
+        func matches(_ modelType: ModelType) -> Bool {
+            switch self {
+            case .all: return true
+            case .llm: return modelType == .llm
+            case .vlm: return modelType == .vlm
+            case .embedding: return modelType == .embedding
+            case .audio: return modelType == .audio
+            case .image: return modelType == .image
+            }
+        }
+
+        var matchType: ModelType? {
+            switch self {
+            case .all: return nil
+            case .llm: return .llm
+            case .vlm: return .vlm
+            case .embedding: return .embedding
+            case .audio: return .audio
+            case .image: return .image
+            }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            // Category filter — shared across tabs, topmost
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(ModelTypeFilter.allCases, id: \.self) { filter in
+                        Button {
+                            typeFilter = filter
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: filter.icon)
+                                    .font(.system(size: 9))
+                                Text(filter.label)
+                                    .font(.system(size: 11, weight: typeFilter == filter ? .semibold : .regular))
+                            }
+                            .foregroundColor(typeFilter == filter ? .white : NovaTheme.Colors.accent)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(typeFilter == filter ? NovaTheme.Colors.accent : NovaTheme.Colors.accent.opacity(0.15))
+                            .overlay(Capsule().stroke(NovaTheme.Colors.accent.opacity(typeFilter == filter ? 0 : 0.3), lineWidth: 0.5))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 8)
+            }
+
+            Divider().padding(.horizontal, 24)
+
             // Tab bar
             HStack(spacing: 0) {
                 ForEach(ModelsTab.allCases, id: \.self) { tab in
@@ -74,7 +157,7 @@ struct ModelsPageView: View {
                 case .local:
                     localModelsContent
                 case .downloads:
-                    DownloadsPageView(appState: appState, modelManager: modelManager)
+                    DownloadsPageView(appState: appState, modelManager: modelManager, typeFilter: $typeFilter)
                         .environmentObject(l10n)
                 }
             }
@@ -111,23 +194,30 @@ struct ModelsPageView: View {
     }
 
     private var localModelsContent: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                loadedSection
-                downloadedSection
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: 20) {
+                    loadedSection
+                    downloadedSection
+                }
+                .padding(24)
             }
-            .padding(24)
         }
     }
 
     private var loadedSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(l10n.tr("status.activeModels"), icon: "bolt.fill", count: appState.loadedModels.count)
+        let loaded = appState.loadedModels.filter { id in
+            guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
+            return typeFilter.matches(record.modelType)
+        }
 
-            if appState.loadedModels.isEmpty {
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(l10n.tr("status.activeModels"), icon: "bolt.fill", count: loaded.count)
+
+            if loaded.isEmpty {
                 emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
             } else {
-                ForEach(appState.loadedModels, id: \.self) { modelId in
+                ForEach(loaded, id: \.self) { modelId in
                     modelRow(
                         modelId,
                         subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
@@ -206,7 +296,8 @@ struct ModelsPageView: View {
     private var downloadedSection: some View {
         let allDownloaded = modelManager.downloadedModels()
         let loaded = Set(inferenceService.listLoadedModels())
-        let downloaded = allDownloaded.filter { !loaded.contains($0.id) }
+        let downloaded = allDownloaded.filter { !loaded.contains($0.id) && typeFilter.matches($0.modelType) }
+        NovaMLXLog.info("[ModelsPage] downloadedSection: allDownloaded=\(allDownloaded.count), loaded=\(loaded.count), filtered=\(downloaded.count), typeFilter=\(typeFilter.rawValue)")
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -237,21 +328,26 @@ struct ModelsPageView: View {
                                 HStack(spacing: 8) {
                                     ProgressView()
                                         .controlSize(.small)
-                                    Text(l10n.tr("models.loading"))
+                                    Text(l10n.tr("models.loading") + " " + (record.id.components(separatedBy: "/").last ?? record.id))
                                         .font(.caption).foregroundColor(NovaTheme.Colors.accent)
+                                        .lineLimit(1)
                                 }
                             } else {
                                 Button(l10n.tr("models.load")) {
                                     loadingModelId = record.id
+                                    NovaMLXLog.info("[ModelsPage] User clicked Load for \(record.id), type=\(record.modelType), family=\(record.family), url=\(record.localURL.path)")
                                     Task {
                                         let config = ModelConfig(
                                             identifier: ModelIdentifier(id: record.id, family: record.family),
                                             modelType: record.modelType
                                         )
+                                        NovaMLXLog.info("[ModelsPage] Calling inferenceService.loadModel for \(record.id)")
                                         do {
                                             try await inferenceService.loadModel(at: record.localURL, config: config)
+                                            NovaMLXLog.info("[ModelsPage] Load succeeded for \(record.id)")
                                             refreshTrigger.toggle()
                                         } catch {
+                                            NovaMLXLog.error("[ModelsPage] Load FAILED for \(record.id): \(error)")
                                             alertMessage = error.localizedDescription
                                             showAlert = true
                                         }
