@@ -715,8 +715,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         progress?(.loadingWeights)
 
         // VLM models must be loaded via VLMModelFactory — they need vision tower
-        // and VLM-specific prepare()/callAsFunction implementations
+        // and VLM-specific prepare()/callAsFunction implementations.
+        // Audio/image models should never reach this path — they are routed to
+        // specialized services by InferenceService.loadModel() before getting here.
         let isVLM = config.modelType == .vlm
+        if config.modelType == .audio {
+            throw NovaMLXError.apiError("Audio models should be loaded via TranscriptionService, not MLXEngine. Model: \(config.identifier.id)")
+        }
+        if config.modelType == .image {
+            throw NovaMLXError.apiError("Image models should be loaded via ImageGenerationService, not MLXEngine. Model: \(config.identifier.id)")
+        }
         let mlxContainer: MLXLMCommon.ModelContainer
         if isVLM {
             mlxContainer = try await VLMModelFactory.shared.loadContainer(

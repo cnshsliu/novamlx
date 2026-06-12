@@ -115,11 +115,13 @@ public final class InferenceService: @unchecked Sendable {
         guard workerMode, let worker = worker else { return }
         worker.onCrash = { [weak self] in
             guard let self = self else { return }
-            NovaMLXLog.warning("[InferenceService] Worker crashed — clearing loaded models state")
+            NovaMLXLog.warning("[InferenceService] Worker crashed — clearing in-memory loaded models state")
             self.workerLoadedModels.removeAll()
             self.workerModelTypes.removeAll()
             self.workerHybridModels.removeAll()
-            self.saveLoadedModelsList()
+            // Do NOT saveLoadedModelsList() here — on crash/exit, the persisted file
+            // should keep the model list so restoreModels() can reload on next launch.
+            // The terminationHandler fires on normal app exit too, which would wipe the list.
         }
         try worker.start()
         NovaMLXLog.info("[InferenceService] Worker mode started")
@@ -419,6 +421,30 @@ public final class InferenceService: @unchecked Sendable {
     public func loadModel(at url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws {
         let modelId = config.identifier.id
 
+        // Audio models bypass engine entirely — route to specialized services
+        if config.modelType == .audio {
+            NovaMLXLog.info("[InferenceService] Loading audio model: \(modelId), family=\(config.identifier.family), url=\(url.path)")
+            try await loadDedup.ensureSingle(modelId: modelId) {
+                let family = config.identifier.family
+                if family == .qwen3Tts || family == .dotsTts {
+                    NovaMLXLog.info("[InferenceService] Routing to TTSService for \(modelId)")
+                    do {
+                        try await self.ttsService.loadModel(from: url)
+                        NovaMLXLog.info("[InferenceService] TTS model loaded successfully: \(modelId)")
+                    } catch {
+                        NovaMLXLog.error("[InferenceService] TTS model load FAILED for \(modelId): \(error)")
+                        throw error
+                    }
+                    self.saveLoadedModelsList()
+                    return
+                }
+                NovaMLXLog.info("[InferenceService] Routing to TranscriptionService for \(modelId)")
+                _ = try await self.transcriptionService.loadModel(from: url, config: config, progress: progress)
+                self.saveLoadedModelsList()
+            }
+            return
+        }
+
         try await loadDedup.ensureSingle(modelId: modelId) { [self] in
             if self.workerMode, let worker = self.worker {
                 let isHybrid = try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
@@ -439,6 +465,12 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) async {
+        // TTS models
+        if identifier.family == .qwen3Tts {
+            ttsService.unloadModel()
+            saveLoadedModelsList()
+            return
+        }
         if workerMode, let worker = worker {
             try? await worker.sendUnload(modelId: identifier.id)
             workerLoadedModels.remove(identifier.id)
@@ -455,8 +487,11 @@ public final class InferenceService: @unchecked Sendable {
         if workerMode {
             return workerLoadedModels.contains(resolvedId)
         }
-        guard let container = engine.getContainer(for: resolvedId) else { return false }
-        return container.isLoaded
+        if engine.getContainer(for: resolvedId)?.isLoaded == true { return true }
+        if transcriptionService.isLoaded(resolvedId) { return true }
+        if ttsService.listLoadedModels().contains(resolvedId) { return true }
+        if imageGenerationService.isLoaded(resolvedId) { return true }
+        return false
     }
 
     public func isHybridModel(_ modelId: String) -> Bool {
@@ -494,6 +529,12 @@ public final class InferenceService: @unchecked Sendable {
         } else {
             models = engine.listLoadedModels()
         }
+        // Include audio models loaded in transcriptionService
+        models.append(contentsOf: transcriptionService.listLoadedModels().filter { !models.contains($0) })
+        // Include TTS models
+        models.append(contentsOf: ttsService.listLoadedModels().filter { !models.contains($0) })
+        // Include image models
+        models.append(contentsOf: imageGenerationService.listLoadedModels().filter { !models.contains($0) })
         return models
     }
 
@@ -525,8 +566,8 @@ public final class InferenceService: @unchecked Sendable {
 
     // MARK: - Loaded Models Persistence
 
-    private func saveLoadedModelsList() {
-        let ids = workerMode ? Array(workerLoadedModels) : engine.pool.loadedModelIds
+    public func saveLoadedModelsList() {
+        let ids = listLoadedModels()
         guard let data = try? JSONEncoder().encode(ids) else { return }
         try? data.write(to: loadedModelsFile, options: .atomic)
     }
@@ -552,7 +593,7 @@ public final class InferenceService: @unchecked Sendable {
             )
             do {
                 try await loadModel(at: record.localURL, config: config)
-                NovaMLXLog.info("[InferenceService] Restored model: \(modelId)")
+                NovaMLXLog.info("[InferenceService] Restored model: \(modelId) (type: \(record.modelType))")
             } catch {
                 NovaMLXLog.warning("[InferenceService] Failed to restore model \(modelId): \(error)")
             }

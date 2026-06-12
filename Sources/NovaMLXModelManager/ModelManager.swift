@@ -292,22 +292,61 @@ public final class ModelManager: @unchecked Sendable {
         FileManager.default.directorySize(at: modelsDirectory)
     }
 
+    // MARK: - Suggested Models (Categorized)
+
+    public struct SuggestedModel: Sendable, Identifiable {
+        public let repo: String
+        public let name: String
+        public let description: String
+        public let size: String
+        public let tags: [String]
+        public let category: ModelType
+        public let sizeBytes: UInt64
+        public let family: ModelFamily
+
+        public var id: String { repo }
+    }
+
+    private static let suggestedModelsList: [SuggestedModel] = [
+        // LLM
+        SuggestedModel(repo: "mlx-community/Qwen3.6-27B-OptiQ-4bit", name: "Qwen3.6-27B-OptiQ", description: "Qwen 3.6 27B with OptiQ quantization, best quality-to-size ratio", size: "15.2 GB", tags: ["MLX", "4-bit", "OptiQ"], category: .llm, sizeBytes: 15_200_000_000, family: .qwen),
+        SuggestedModel(repo: "mlx-community/Qwen3.6-27B-4bit", name: "Qwen3.6-27B", description: "Latest Qwen 3.6 27B, excellent reasoning and coding", size: "16.8 GB", tags: ["MLX", "4-bit"], category: .llm, sizeBytes: 16_800_000_000, family: .qwen),
+        SuggestedModel(repo: "mlx-community/gemma-4-26b-a4b-it-4bit", name: "Gemma-4-26B-A4B", description: "Google Gemma 4 with 26B MoE, strong instruction following", size: "14.5 GB", tags: ["MLX", "4-bit", "MoE"], category: .llm, sizeBytes: 14_500_000_000, family: .gemma),
+
+        // VLM
+        SuggestedModel(repo: "mlx-community/gemma-4-26b-a4b-it-4bit", name: "Gemma-4-26B-A4B-VL", description: "Google Gemma 4 26B MoE with vision capabilities", size: "14.5 GB", tags: ["MLX", "4-bit", "Vision", "MoE"], category: .vlm, sizeBytes: 14_500_000_000, family: .gemma),
+
+        // Embedding
+        SuggestedModel(repo: "mlx-community/bge-large-en-v1.5", name: "BGE-Large-v1.5", description: "BAAI's high-quality English embedding model for RAG and search", size: "1.3 GB", tags: ["MLX", "Embedding"], category: .embedding, sizeBytes: 1_300_000_000, family: .other),
+        SuggestedModel(repo: "mlx-community/bge-m3", name: "BGE-M3", description: "Multilingual embedding model supporting 100+ languages", size: "2.2 GB", tags: ["MLX", "Embedding", "Multilingual"], category: .embedding, sizeBytes: 2_200_000_000, family: .other),
+        SuggestedModel(repo: "mlx-community/all-MiniLM-L6-v2", name: "MiniLM-L6-v2", description: "Compact sentence embedding model, fast and lightweight", size: "0.2 GB", tags: ["MLX", "Embedding", "Lightweight"], category: .embedding, sizeBytes: 200_000_000, family: .other),
+
+        // Audio
+        SuggestedModel(repo: "mlx-community/whisper-large-v3-turbo", name: "Whisper-Large-V3-Turbo", description: "OpenAI's fast ASR model, excellent transcription quality", size: "0.8 GB", tags: ["MLX", "ASR"], category: .audio, sizeBytes: 800_000_000, family: .whisper),
+        SuggestedModel(repo: "mlx-community/whisper-small", name: "Whisper-Small", description: "Lightweight ASR model for quick transcription", size: "0.24 GB", tags: ["MLX", "ASR"], category: .audio, sizeBytes: 244_000_000, family: .whisper),
+        SuggestedModel(repo: "smcleod/dots.tts-soar-mlx", name: "Dots.TTS", description: "Voice cloning TTS model for natural speech synthesis", size: "4.0 GB", tags: ["MLX", "TTS", "Voice Clone"], category: .audio, sizeBytes: 4_000_000_000, family: .dotsTts),
+        SuggestedModel(repo: "mlx-community/Qwen3-ASR-1.7B-8bit", name: "Qwen3-ASR-1.7B", description: "Larger Qwen3 ASR with better accuracy", size: "3.2 GB", tags: ["MLX", "8-bit", "ASR"], category: .audio, sizeBytes: 3_200_000_000, family: .qwen3Asr),
+
+        // Image
+        SuggestedModel(repo: "mzbac/flux1.schnell.4bit.mlx", name: "FLUX.1-schnell-4bit", description: "Fast 4-step image generation, quantized for Mac", size: "~6 GB", tags: ["MLX", "4-bit", "FLUX"], category: .image, sizeBytes: 6_000_000_000, family: .flux),
+        SuggestedModel(repo: "mzbac/flux1.dev.4bit.mlx", name: "FLUX.1-dev-4bit", description: "High-quality 28-step image generation, more detail than schnell", size: "~6 GB", tags: ["MLX", "4-bit", "FLUX"], category: .image, sizeBytes: 6_000_000_000, family: .flux),
+    ]
+
+    public func suggestedModels(forCategory category: ModelType?) -> [SuggestedModel] {
+        if let category {
+            return Self.suggestedModelsList.filter { $0.category == category }
+        }
+        return Self.suggestedModelsList
+    }
+
+    public func allSuggestedModels() -> [SuggestedModel] {
+        Self.suggestedModelsList
+    }
+
     public func registerPopularModels() {
-        let models: [(String, ModelFamily, ModelType, String, UInt64)] = [
-            ("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", .llama, .llm, "https://huggingface.co/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", 4_800_000_000),
-            ("mlx-community/Mistral-7B-Instruct-v0.3-4bit", .mistral, .llm, "https://huggingface.co/mlx-community/Mistral-7B-Instruct-v0.3-4bit", 4_100_000_000),
-            ("mlx-community/Phi-3.5-mini-instruct-4bit", .phi, .llm, "https://huggingface.co/mlx-community/Phi-3.5-mini-instruct-4bit", 2_200_000_000),
-            ("mlx-community/Qwen2.5-7B-Instruct-4bit", .qwen, .llm, "https://huggingface.co/mlx-community/Qwen2.5-7B-Instruct-4bit", 4_400_000_000),
-            ("mlx-community/gemma-2-9b-it-4bit", .gemma, .llm, "https://huggingface.co/mlx-community/gemma-2-9b-it-4bit", 5_200_000_000),
-            // Audio models
-            ("mlx-community/whisper-large-v3-turbo", .whisper, .audio, "https://huggingface.co/mlx-community/whisper-large-v3-turbo", 800_000_000),
-            ("mlx-community/whisper-small", .whisper, .audio, "https://huggingface.co/mlx-community/whisper-small", 244_000_000),
-            ("aufklarer/Qwen3-ASR-0.6B-MLX-4bit", .qwen3Asr, .audio, "https://huggingface.co/aufklarer/Qwen3-ASR-0.6B-MLX-4bit", 1_300_000_000),
-            ("mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit", .qwen3Tts, .audio, "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit", 2_500_000_000),
-        ]
-        for (id, family, type, url, size) in models {
-            if lock.withLock({ _registry[id] }) == nil {
-                register(id: id, family: family, modelType: type, remoteURL: url, sizeBytes: size)
+        for model in Self.suggestedModelsList {
+            if lock.withLock({ _registry[model.repo] }) == nil {
+                register(id: model.repo, family: model.family, modelType: model.category, remoteURL: "https://huggingface.co/\(model.repo)", sizeBytes: model.sizeBytes)
             }
         }
     }
@@ -375,11 +414,12 @@ public final class ModelManager: @unchecked Sendable {
                 let needsDownloadUpdate = currentRecord.downloadedAt == nil && model.isComplete
                 let needsCompletenessUpdate = currentRecord.downloadedAt != nil && !model.isComplete
                 let needsModelTypeUpdate = currentRecord.modelType != model.modelType
+                let needsFamilyUpdate = currentRecord.family != model.family
 
-                if needsURLUpdate || needsDownloadUpdate || needsCompletenessUpdate || needsModelTypeUpdate {
+                if needsURLUpdate || needsDownloadUpdate || needsCompletenessUpdate || needsModelTypeUpdate || needsFamilyUpdate {
                     let updatedRecord = ModelRecord(
                         id: currentRecord.id,
-                        family: currentRecord.family,
+                        family: model.family,
                         modelType: model.modelType,
                         source: currentRecord.source,
                         localURL: model.modelPath,

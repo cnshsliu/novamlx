@@ -90,18 +90,22 @@ public final class ModelDiscovery: Sendable {
     private static let audioModelTypes: Set<String> = [
         "whisper",
         "qwen3_asr",
-        "qwen3_tts",  // Qwen3-TTS model type
+        "qwen3_tts",
+        "dots_tts",
     ]
 
     private static let imageArchitectures: Set<String> = [
         "StableDiffusionXLPipeline",
         "StableDiffusionPipeline",
         "UNet2DConditionModel",
+        "FluxPipeline",
+        "FluxTransformer2DModel",
     ]
 
     private static let imageModelTypes: Set<String> = [
         "stable-diffusion-xl",
         "stable-diffusion",
+        "flux",
     ]
 
     private static let familyByModelType: [String: ModelFamily] = [
@@ -115,8 +119,12 @@ public final class ModelDiscovery: Sendable {
         "deepseek_v3": .qwen, "deepseek_v4": .qwen,
         "gpt_oss": .gptOss,
         "whisper": .whisper,
+        "qwen3_asr": .qwen3Asr,
+        "qwen3_tts": .qwen3Tts,
+        "dots_tts": .dotsTts,
         "stable-diffusion": .stableDiffusion, "stable_diffusion": .stableDiffusion,
         "stable-diffusion-xl": .stableDiffusion, "stable_diffusion_xl": .stableDiffusion,
+        "flux": .flux,
     ]
 
     private static let familyByArchitecture: [String: ModelFamily] = [
@@ -133,6 +141,11 @@ public final class ModelDiscovery: Sendable {
         "Gemma4ForConditionalGeneration": .gemma,
         "GptOssForCausalLM": .gptOss,
         "DeepseekV4ForCausalLM": .qwen,
+        "Qwen3ASRForConditionalGeneration": .qwen3Asr,
+        "Qwen3TTSForConditionalGeneration": .qwen3Tts,
+        "DotsTTSForConditionalGeneration": .dotsTts,
+        "FluxTransformer2DModel": .flux,
+        "FluxPipeline": .flux,
     ]
 
     public init() {}
@@ -167,7 +180,8 @@ public final class ModelDiscovery: Sendable {
                     guard child.directoryExists, !child.lastPathComponent.hasPrefix(".") else { continue }
                     let childConfig = child.appendingPathComponent("config.json")
                     let unetConfig = child.appendingPathComponent("unet/config.json")
-                    guard childConfig.fileExists || unetConfig.fileExists else { continue }
+                    let fluxTransformerConfig = child.appendingPathComponent("transformer/config.json")
+                    guard childConfig.fileExists || unetConfig.fileExists || fluxTransformerConfig.fileExists else { continue }
                     let adapterConfigPath = child.appendingPathComponent("adapter_config.json")
                     let adapterWeightsPath = child.appendingPathComponent("adapters.safetensors")
                     let isAdapter = adapterConfigPath.fileExists && adapterWeightsPath.fileExists
@@ -198,9 +212,15 @@ public final class ModelDiscovery: Sendable {
 
         // Diffusers-format models (SDXL-Turbo, etc.) have no root config.json
         // but have unet/config.json. Create a synthetic config for them.
+        // FLUX models have transformer/config.json + vae/ instead.
         if !configPath.fileExists {
             let unetConfig = path.appendingPathComponent("unet/config.json")
             if unetConfig.fileExists {
+                return registerDiffusersModel(at: path, id: id)
+            }
+            let transformerConfig = path.appendingPathComponent("transformer/config.json")
+            let vaeDir = path.appendingPathComponent("vae")
+            if transformerConfig.fileExists && vaeDir.directoryExists {
                 return registerDiffusersModel(at: path, id: id)
             }
             return nil
@@ -366,6 +386,13 @@ public final class ModelDiscovery: Sendable {
         // Heuristic: if unet/config.json exists in the directory, it's a diffusion model
         let unetConfig = path.appendingPathComponent("unet/config.json")
         if FileManager.default.fileExists(atPath: unetConfig.path) { return .image }
+        // Heuristic: FLUX models have transformer/ + vae/ directories
+        let transformerConfig = path.appendingPathComponent("transformer/config.json")
+        let vaeDir = path.appendingPathComponent("vae")
+        if FileManager.default.fileExists(atPath: transformerConfig.path)
+            && FileManager.default.fileExists(atPath: vaeDir.path) {
+            return .image
+        }
 
         if rawType == "qwen3" || rawType == "gemma3_text" || rawType == "gemma3-text" {
             let llmArchs: Set<String> = ["Qwen3ForCausalLM", "Gemma3ForCausalLM"]
