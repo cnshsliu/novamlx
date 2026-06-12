@@ -5,11 +5,16 @@ import NovaMLXAudio
 import NovaMLXCore
 import NovaMLXUtils
 
+public enum AudioModel: @unchecked Sendable {
+    case qwen3ASR(Qwen3ASRModel)
+    case whisper(WhisperModel)
+}
+
 public final class TranscriptionContainer: @unchecked Sendable {
     public let identifier: ModelIdentifier
     public let config: ModelConfig
     public private(set) var isLoaded: Bool
-    public var model: Qwen3ASRModel?
+    public var model: AudioModel?
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -17,7 +22,7 @@ public final class TranscriptionContainer: @unchecked Sendable {
         self.isLoaded = false
     }
 
-    public func setLoaded(model: Qwen3ASRModel) {
+    public func setLoaded(model: AudioModel) {
         self.model = model
         isLoaded = true
         NovaMLXLog.info("Audio model loaded: \(identifier.displayName)")
@@ -58,8 +63,19 @@ public final class TranscriptionService: @unchecked Sendable {
         )
         NovaMLXLog.info("Loading audio model from: \(url.path)")
 
-        let model = try await Qwen3ASRModel.fromModelDirectory(url)
-        container.setLoaded(model: model)
+        let family = config.identifier.family
+        if family == .qwen3Tts {
+            // TTS handled by TTSService, not TranscriptionService
+            throw NovaMLXError.apiError("TTS models should be loaded via TTSService, not TranscriptionService.")
+        } else if family == .whisper {
+            let model = try await WhisperModel.fromModelDirectory(url)
+            container.setLoaded(model: .whisper(model))
+        } else if family == .qwen3Asr {
+            let model = try await Qwen3ASRModel.fromModelDirectory(url)
+            container.setLoaded(model: .qwen3ASR(model))
+        } else {
+            throw NovaMLXError.apiError("Unknown audio model family: \(family.rawValue). Supported: whisper, qwen3Asr.")
+        }
 
         lock.withLock {
             containers[config.identifier.id] = container
@@ -81,6 +97,12 @@ public final class TranscriptionService: @unchecked Sendable {
         }
     }
 
+    public func listLoadedModels() -> [String] {
+        lock.withLock {
+            containers.filter { $0.value.isLoaded }.map { $0.key }
+        }
+    }
+
     public func transcribe(modelId: String, audioData: Data, language: String? = nil, responseFormat: String = "json") async throws -> TranscriptionResult {
         guard let container = lock.withLock({ containers[modelId] }),
               container.isLoaded,
@@ -94,14 +116,29 @@ public final class TranscriptionService: @unchecked Sendable {
 
         let (_, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
 
-        // Run Qwen3-ASR inference
         let startTime = Date()
-        let output = model.generate(
-            audio: audioArray,
-            maxTokens: 8192,
-            temperature: 0.0,
-            language: language
-        )
+        let output: STTOutput
+        switch model {
+        case .qwen3ASR(let asrModel):
+            output = asrModel.generate(
+                audio: audioArray,
+                maxTokens: 8192,
+                temperature: 0.0,
+                language: language
+            )
+        case .whisper(let whisperModel):
+            // Whisper needs mel spectrogram (n_fft=400, hop=160)
+            let mel = computeMelSpectrogram(audio: audioArray, sampleRate: 16000, nFft: 400, hopLength: 160, nMels: whisperModel.dims.nMels)
+            // Pad or trim to 3000 mel frames (30 seconds)
+            let padded = Self.padOrTrim2D(mel, length: 3000)
+            // MLX Conv1d uses NLC: [batch, length, channels] = [1, 3000, nMels]
+            let result = whisperModel.generate(mel: padded.reshaped([1, padded.dim(0), padded.dim(1)]), language: language, temperature: 0.0)
+            output = STTOutput(
+                text: result.text,
+                language: result.language,
+                generationTokens: result.tokens.count
+            )
+        }
         let elapsed = Date().timeIntervalSince(startTime)
 
         return TranscriptionResult(
@@ -130,12 +167,20 @@ public final class TranscriptionService: @unchecked Sendable {
                     defer { try? FileManager.default.removeItem(at: audioURL) }
                     let (_, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
 
-                    let sttStream = model.generateStream(
-                        audio: audioArray,
-                        maxTokens: 8192,
-                        temperature: 0.0,
-                        language: sendableLanguage
-                    )
+                    let sttStream: AsyncThrowingStream<STTGeneration, Error>
+                    switch model {
+                    case .qwen3ASR(let asrModel):
+                        sttStream = asrModel.generateStream(
+                            audio: audioArray,
+                            maxTokens: 8192,
+                            temperature: 0.0,
+                            language: sendableLanguage
+                        )
+                    case .whisper(let whisperModel):
+                        let mel = computeMelSpectrogram(audio: audioArray, sampleRate: 16000, nFft: 400, hopLength: 160, nMels: whisperModel.dims.nMels)
+                        let padded = TranscriptionService.padOrTrim2D(mel, length: 3000)
+                        sttStream = whisperModel.generateStream(mel: padded.reshaped([1, padded.dim(0), padded.dim(1)]), language: sendableLanguage, temperature: 0.0)
+                    }
 
                     for try await event in sttStream {
                         guard !Task.isCancelled else { break }
@@ -258,5 +303,17 @@ public final class TranscriptionService: @unchecked Sendable {
         try audioFile.write(from: buffer)
 
         return url
+    }
+
+    private static func padOrTrim2D(_ array: MLXArray, length: Int) -> MLXArray {
+        let currentLen = array.dim(0)
+        if currentLen > length {
+            return array[0..<length, 0...]
+        } else if currentLen < length {
+            let padSize = length - currentLen
+            let padding = MLXArray.zeros([padSize, array.dim(1)])
+            return concatenated([array, padding], axis: 0)
+        }
+        return array
     }
 }

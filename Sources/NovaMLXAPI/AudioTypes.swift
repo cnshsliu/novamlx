@@ -32,14 +32,23 @@ struct TTSRequest: Codable, Sendable {
     let voice: String?
     let responseFormat: String?
     let speed: Float?
+    let refAudio: String?
+    let refTranscript: String?
+    let numSteps: Int?
+    let guidance: Float?
+    let speakerScale: Float?
 
     enum CodingKeys: String, CodingKey {
         case model, input, voice, speed
         case responseFormat = "response_format"
+        case refAudio = "ref_audio"
+        case refTranscript = "ref_transcript"
+        case numSteps = "num_steps"
+        case guidance, speakerScale
     }
 
     var resolvedResponseFormat: String {
-        responseFormat ?? "mp3"
+        responseFormat ?? "wav"
     }
 }
 

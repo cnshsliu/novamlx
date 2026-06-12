@@ -8,6 +8,7 @@ import NovaMLXModelManager
 import NovaMLXAPI
 import NovaMLXMenuBar
 import NovaMLXDistributed
+import NovaMLXDB
 
 /// Early env-var setup: runs before any GPU work because the static
 /// initializer is triggered when the module is loaded.
@@ -114,6 +115,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let baseDir = NovaMLXPaths.baseDir
         let modelsDir = NovaMLXPaths.modelsDir
 
+        // Initialize SQLite databases (migrates legacy JSON if needed)
+        do {
+            try NovaDB.shared.setup(baseDir: baseDir)
+            NovaMLXLog.info("SQLite databases initialized")
+        } catch {
+            NovaMLXLog.error("Failed to initialize SQLite: \(error)")
+        }
+
         // Auto-migrate from old Application Support path if needed
         Self.migrateFromApplicationSupport(to: baseDir)
 
@@ -207,17 +216,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        // Validate configured paths — fatal if configured but inaccessible
+        // Log path validation issues but don't block startup
+        // (macOS may report external drives as unreadable even when accessible from shell)
         if !pathValidationErrors.isEmpty {
-            let alert = NSAlert()
-            alert.messageText = "NovaMLX: Configuration Error"
-            alert.informativeText = pathValidationErrors.joined(separator: "\n\n")
-            alert.alertStyle = .critical
-            alert.addButton(withTitle: "Quit")
-            NSApp.activate(ignoringOtherApps: true)
-            _ = alert.runModal()
-            NSApp.terminate(nil)
-            return
+            for err in pathValidationErrors {
+                NovaMLXLog.warning("[Paths] \(err)")
+            }
         }
 
         Task {
@@ -235,6 +239,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NovaMLXLog.error("Failed to load config: \(error)")
                 }
             }
+
+            // Load structured API keys (migrates from flat config if needed)
+            await config.loadAPIKeys()
 
             modelManager.registerPopularModels()
             modelManager.discoverModels()
