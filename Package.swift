@@ -23,19 +23,32 @@ let package = Package(
         .library(name: "NovaMLXMCP", targets: ["NovaMLXMCP"]),
         .library(name: "NovaMLXDistributed", targets: ["NovaMLXDistributed"]),
         .library(name: "NovaMLXMenuBar", targets: ["NovaMLXMenuBar"]),
+        .library(name: "NovaMLXDB", targets: ["NovaMLXDB"]),
     ],
     dependencies: [
         .package(path: "vendors/mlx-swift"),
+        .package(path: "vendors/mlx-swift-dots-tts"),
+        .package(path: "vendors/flux.swift"),
         .package(path: "mlx-swift-lm"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
+        .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
     ],
     targets: [
         .target(
+            name: "NovaMLXDB",
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .target(
             name: "NovaMLXCore",
             dependencies: [
+                "NovaMLXDB",
                 .product(name: "Logging", package: "swift-log"),
             ],
             swiftSettings: concurrencySettings
@@ -44,6 +57,7 @@ let package = Package(
             name: "NovaMLXUtils",
             dependencies: [
                 "NovaMLXCore",
+                "NovaMLXDB",
                 .product(name: "Logging", package: "swift-log"),
             ],
             resources: [.copy("Resources")],
@@ -78,6 +92,7 @@ let package = Package(
                 "NovaMLXCore",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "FluxSwift", package: "flux.swift"),
             ],
             swiftSettings: concurrencySettings
         ),
@@ -98,6 +113,7 @@ let package = Package(
                 .product(name: "MLXEmbedders", package: "mlx-swift-lm"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Hub", package: "swift-transformers"),
+                .product(name: "DotsTTS", package: "mlx-swift-dots-tts"),
             ],
             resources: [.copy("ChatTemplates")],
             swiftSettings: concurrencySettings
@@ -157,6 +173,7 @@ let package = Package(
                 "NovaMLXModelManager",
                 "NovaMLXAPI",
                 "NovaMLXDistributed",
+                "NovaMLXDB",
             ],
             resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
@@ -192,6 +209,7 @@ let package = Package(
                 "NovaMLXAPI",
                 "NovaMLXInference",
                 "NovaMLXModelManager",
+                "NovaMLXDB",
             ],
             swiftSettings: concurrencySettings
         ),

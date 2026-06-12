@@ -75,7 +75,8 @@ public final class L10n: ObservableObject {
         let template = strings[currentLanguage.rawValue]?[key]
             ?? strings["en"]?[key]
             ?? key
-        return String(format: template, arguments: args)
+        guard !args.isEmpty else { return template }
+        return String(format: template, args)
     }
 
     public func setLanguage(_ lang: AppLanguage) {

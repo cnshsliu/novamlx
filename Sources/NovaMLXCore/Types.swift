@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Logging
 
@@ -85,7 +86,9 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case whisper
     case qwen3Asr
     case qwen3Tts
+    case dotsTts
     case stableDiffusion
+    case flux
     case other
 
     public init(from decoder: Decoder) throws {
@@ -499,6 +502,150 @@ public struct MemoryFeasibility: Codable, Sendable {
             availableMB: availableMB,
             gpuBudgetMB: gpuMB
         )
+    }
+}
+
+// MARK: - API Key Management
+
+public enum UsageResetPeriod: String, Codable, Sendable, CaseIterable {
+    case daily
+    case weekly
+    case monthly
+    case never
+}
+
+public struct APIKey: Codable, Identifiable, Sendable, Equatable {
+    public let id: String
+    public var name: String
+    public let keyHash: String
+    public let keyPrefix: String
+    public let keySuffix: String
+    public let createdAt: Date
+    public var expiresAt: Date?
+    public var isEnabled: Bool
+
+    public var rateLimitPerSecond: Double?
+    public var rateLimitBurst: Int?
+    public var allowedModels: [String]?
+    public var allowedEndpoints: [String]?
+    public var maxTokensPerPeriod: Int64?
+    public var maxRequestsPerPeriod: Int64?
+    public var usageResetPeriod: UsageResetPeriod
+
+    public var usage: KeyUsage
+
+    public struct KeyUsage: Codable, Sendable, Equatable {
+        public var totalTokensUsed: Int64
+        public var totalRequests: Int64
+        public var lastUsedAt: Date?
+        public var periodTokens: Int64
+        public var periodRequests: Int64
+        public var periodResetDate: String?
+        public var perModelTokens: [String: Int64]
+
+        public init(
+            totalTokensUsed: Int64 = 0,
+            totalRequests: Int64 = 0,
+            lastUsedAt: Date? = nil,
+            periodTokens: Int64 = 0,
+            periodRequests: Int64 = 0,
+            periodResetDate: String? = nil,
+            perModelTokens: [String: Int64] = [:]
+        ) {
+            self.totalTokensUsed = totalTokensUsed
+            self.totalRequests = totalRequests
+            self.lastUsedAt = lastUsedAt
+            self.periodTokens = periodTokens
+            self.periodRequests = periodRequests
+            self.periodResetDate = periodResetDate
+            self.perModelTokens = perModelTokens
+        }
+    }
+
+    public init(
+        id: String = "key-\(UUID().uuidString)",
+        name: String,
+        keyHash: String,
+        keyPrefix: String,
+        keySuffix: String = "",
+        createdAt: Date = Date(),
+        expiresAt: Date? = nil,
+        isEnabled: Bool = true,
+        rateLimitPerSecond: Double? = nil,
+        rateLimitBurst: Int? = nil,
+        allowedModels: [String]? = nil,
+        allowedEndpoints: [String]? = nil,
+        maxTokensPerPeriod: Int64? = nil,
+        maxRequestsPerPeriod: Int64? = nil,
+        usageResetPeriod: UsageResetPeriod = .daily,
+        usage: KeyUsage = KeyUsage()
+    ) {
+        self.id = id
+        self.name = name
+        self.keyHash = keyHash
+        self.keyPrefix = keyPrefix
+        self.keySuffix = keySuffix
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.isEnabled = isEnabled
+        self.rateLimitPerSecond = rateLimitPerSecond
+        self.rateLimitBurst = rateLimitBurst
+        self.allowedModels = allowedModels
+        self.allowedEndpoints = allowedEndpoints
+        self.maxTokensPerPeriod = maxTokensPerPeriod
+        self.maxRequestsPerPeriod = maxRequestsPerPeriod
+        self.usageResetPeriod = usageResetPeriod
+        self.usage = usage
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, keyHash, keyPrefix, keySuffix, createdAt, expiresAt, isEnabled, rateLimitPerSecond, rateLimitBurst, allowedModels, allowedEndpoints, maxTokensPerPeriod, maxRequestsPerPeriod, usageResetPeriod, usage }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        keyHash = try c.decode(String.self, forKey: .keyHash)
+        keyPrefix = try c.decode(String.self, forKey: .keyPrefix)
+        keySuffix = (try? c.decode(String.self, forKey: .keySuffix)) ?? ""
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        expiresAt = try c.decodeIfPresent(Date.self, forKey: .expiresAt)
+        isEnabled = try c.decode(Bool.self, forKey: .isEnabled)
+        rateLimitPerSecond = try c.decodeIfPresent(Double.self, forKey: .rateLimitPerSecond)
+        rateLimitBurst = try c.decodeIfPresent(Int.self, forKey: .rateLimitBurst)
+        allowedModels = try c.decodeIfPresent([String].self, forKey: .allowedModels)
+        allowedEndpoints = try c.decodeIfPresent([String].self, forKey: .allowedEndpoints)
+        maxTokensPerPeriod = try c.decodeIfPresent(Int64.self, forKey: .maxTokensPerPeriod)
+        maxRequestsPerPeriod = try c.decodeIfPresent(Int64.self, forKey: .maxRequestsPerPeriod)
+        usageResetPeriod = try c.decode(UsageResetPeriod.self, forKey: .usageResetPeriod)
+        usage = try c.decode(KeyUsage.self, forKey: .usage)
+    }
+
+    public var isExpired: Bool {
+        guard let expiresAt else { return false }
+        return Date() > expiresAt
+    }
+
+    public var isActive: Bool { isEnabled && !isExpired }
+
+    public var maskedDisplay: String {
+        if keySuffix.isEmpty {
+            return keyPrefix + "••••••••••••••••••••"
+        }
+        let hexPart = String(keyPrefix.dropFirst(11))
+        let maskLen = max(0, 64 - hexPart.count - keySuffix.count)
+        return "sk-novamlx-" + hexPart + String(repeating: "•", count: maskLen) + keySuffix
+    }
+
+    public static func hashRawKey(_ rawKey: String) -> String {
+        let data = Data(rawKey.utf8)
+        let digest = SHA256.hash(data: data)
+        return digest.compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func generateRawKey() -> String {
+        let bytes = (0..<32).map { _ in UInt8.random(in: 0...255) }
+        let hex = bytes.compactMap { String(format: "%02x", $0) }.joined()
+        return "sk-novamlx-\(hex)"
     }
 }
 

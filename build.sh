@@ -203,6 +203,12 @@ done
 # Re-sign the bundle as a whole if any contained binary changed, so the
 # bundle's CodeResources stays consistent with the new mach-o hashes.
 if [ ${#UPDATED[@]} -gt 0 ]; then
+		# Inject privacy usage descriptions into Info.plist
+		INFOPLIST="dist/NovaMLX.app/Contents/Info.plist"
+		if [ -f "$INFOPLIST" ]; then
+			plutil -insert NSMicrophoneUsageDescription -string "NovaMLX needs microphone access to record audio for voice cloning and speech recognition." "$INFOPLIST" 2>/dev/null || true
+		fi
+
 	if [ -f "NovaMLX.entitlements" ]; then
 		codesign --force --deep --entitlements "NovaMLX.entitlements" \
 			--sign - "dist/NovaMLX.app" 2>/dev/null || true

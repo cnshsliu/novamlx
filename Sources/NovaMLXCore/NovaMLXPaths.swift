@@ -83,6 +83,13 @@ public enum NovaMLXPaths {
     public static var modelfilesDir: URL { baseDir.appendingPathComponent("modelfiles") }
     public static var tokenhubDir: URL { baseDir.appendingPathComponent("tokenhub") }
     public static var tokenhubProvidersFile: URL { tokenhubDir.appendingPathComponent("providers.json") }
+    public static var apiKeysFile: URL { baseDir.appendingPathComponent("api_keys.json") }
+
+    public static var voicesDir: URL {
+        let dir = baseDir.appendingPathComponent("voices")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
 
     // Auth & subscription
     public static var sessionFile: URL { baseDir.appendingPathComponent("session") }

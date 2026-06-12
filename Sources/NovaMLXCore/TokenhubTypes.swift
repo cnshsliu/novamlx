@@ -230,9 +230,7 @@ public final class TokenhubManager: @unchecked Sendable {
     public func enforceProviderLimits() -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        // tknet.ai users bypass provider limits
         if hasValidTknetKey() { return [] }
-        if isSubscribed() { return [] }
 
         var all = loadAll()
         let userProviders = all.filter { !$0.isManaged && $0.isEnabled }
@@ -491,7 +489,7 @@ public final class TokenhubManager: @unchecked Sendable {
         // Free-tier limit check (managed providers bypass this)
         if !provider.isManaged {
             let userCount = all.filter { !$0.isManaged }.count
-            if !isSubscribedLocked(all: all) && userCount >= Self.freeProviderLimit {
+            if !hasValidTknetKey() && userCount >= Self.freeProviderLimit {
                 throw TokenhubError.limitReached
             }
         }
