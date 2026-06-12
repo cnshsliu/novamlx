@@ -126,31 +126,24 @@ struct NovaMLXErrorMiddleware: RouterMiddleware {
 private struct AdminAuthMiddleware: RouterMiddleware {
     typealias Context = AppContext
 
-    let validKeys: [String]
+    let config: NovaMLXConfiguration
 
     func handle(
         _ request: Request,
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        if validKeys.isEmpty {
-            let detail = OpenAIErrorDetail(
-                message: "Admin API is disabled. Set apiKeys in ServerConfig to enable.",
-                type: "forbidden_error",
-                code: "admin_disabled"
-            )
-            return NovaMLXErrorMiddleware.jsonError(status: .forbidden, detail: detail)
+        let keys = await config.apiKeys
+        let serverCfg = await config.serverConfig
+        let hasAnyKeys = !keys.isEmpty || !serverCfg.apiKeys.isEmpty
+
+        // No keys configured → open mode, no auth required
+        if !hasAnyKeys {
+            return try await next(request, context)
         }
 
-        let authHeader = request.headers[.authorization]
-        let token: String?
-        if let authHeader, authHeader.hasPrefix("Bearer ") {
-            token = String(authHeader.dropFirst(7))
-        } else {
-            token = request.headers[fields: HTTPField.Name("x-admin-key")!].first?.value
-        }
-
-        guard let token, validKeys.contains(token) else {
+        let token = Self.extractToken(from: request)
+        guard let token else {
             let detail = OpenAIErrorDetail(
                 message: "Invalid or missing admin API key.",
                 type: "authentication_error",
@@ -159,14 +152,46 @@ private struct AdminAuthMiddleware: RouterMiddleware {
             return NovaMLXErrorMiddleware.jsonError(status: .unauthorized, detail: detail)
         }
 
-        return try await next(request, context)
+        // Try new structured key lookup
+        if let key = await config.findAPIKeyByRaw(token) {
+            guard key.isActive else {
+                let detail = OpenAIErrorDetail(
+                    message: "API key is disabled or expired.",
+                    type: "authentication_error",
+                    code: "key_inactive"
+                )
+                return NovaMLXErrorMiddleware.jsonError(status: .unauthorized, detail: detail)
+            }
+            return try await next(request, context)
+        }
+
+        // Legacy fallback: flat string keys
+        if serverCfg.apiKeys.contains(token) {
+            return try await next(request, context)
+        }
+
+        let detail = OpenAIErrorDetail(
+            message: "Invalid or missing admin API key.",
+            type: "authentication_error",
+            code: "invalid_api_key"
+        )
+        return NovaMLXErrorMiddleware.jsonError(status: .unauthorized, detail: detail)
+    }
+
+    private static func extractToken(from request: Request) -> String? {
+        let authHeader = request.headers[.authorization]
+        if let authHeader, authHeader.hasPrefix("Bearer ") {
+            return String(authHeader.dropFirst(7))
+        }
+        return request.headers[fields: HTTPField.Name("x-admin-key")!].first?.value
     }
 }
 
 private struct APIKeyAuthMiddleware: RouterMiddleware {
     typealias Context = AppContext
 
-    let validKeys: [String]
+    let config: NovaMLXConfiguration
+    let globalRateLimiter: RateLimiter
 
     private static let publicPaths: Set<String> = ["/", "/chat", "/health", "/v1/models", "/v1/stats", "/favicon.ico"]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
@@ -176,35 +201,105 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        if validKeys.isEmpty { return try await next(request, context) }
+        let keys = await config.apiKeys
+        let serverCfg = await config.serverConfig
+
+        // No keys at all — open mode
+        if keys.isEmpty && serverCfg.apiKeys.isEmpty {
+            return try await next(request, context)
+        }
 
         let path = request.uri.path
         if Self.publicPaths.contains(path) || Self.publicPrefixes.contains(where: { path.hasPrefix($0) }) {
             return try await next(request, context)
         }
 
-        // 1. Authorization: Bearer xxx (OpenAI / standard)
+        let token = Self.extractToken(from: request)
+        guard let token else {
+            return Self.unauthorized("Invalid or missing API key.")
+        }
+
+        // Try new structured key lookup
+        if let key = await config.findAPIKeyByRaw(token) {
+            // Check active
+            guard key.isActive else {
+                return Self.unauthorized("API key is disabled or expired.")
+            }
+
+            // Check daily limits
+            let withinLimits = await config.isWithinLimits(keyId: key.id)
+            guard withinLimits else {
+                let detail = OpenAIErrorDetail(
+                    message: "Daily usage limit exceeded for this API key.",
+                    type: "rate_limit_error",
+                    code: "daily_limit_exceeded"
+                )
+                return NovaMLXErrorMiddleware.jsonError(status: .tooManyRequests, detail: detail)
+            }
+
+            // Check endpoint access
+            if let allowedEndpoints = key.allowedEndpoints {
+                let allowed = allowedEndpoints.contains { path.hasPrefix($0) }
+                guard allowed else {
+                    return Self.unauthorized("This API key does not have access to endpoint: \(path)")
+                }
+            }
+
+            // Check rate limit (per-key or global)
+            let rateLimiter = key.rateLimitPerSecond.map { rps in
+                RateLimiter(config: RateLimitConfig(
+                    requestsPerSecond: rps,
+                    burstSize: key.rateLimitBurst ?? 20
+                ))
+            } ?? globalRateLimiter
+
+            let rateKey = "key:\(key.id)"
+            guard rateLimiter.allow(key: rateKey) else {
+                let detail = OpenAIErrorDetail(
+                    message: "Rate limit exceeded.",
+                    type: "rate_limit_error",
+                    code: "rate_limit_exceeded"
+                )
+                return NovaMLXErrorMiddleware.jsonError(status: .tooManyRequests, detail: detail)
+            }
+
+            return try await next(request, context)
+        }
+
+        // Legacy fallback: flat string keys
+        if serverCfg.apiKeys.contains(token) {
+            return try await next(request, context)
+        }
+
+        return Self.unauthorized("Invalid or missing API key.")
+    }
+
+    private static func extractToken(from request: Request) -> String? {
         let authHeader = request.headers[.authorization]
-        let token: String?
         if let authHeader, authHeader.hasPrefix("Bearer ") {
-            token = String(authHeader.dropFirst(7))
-        } else if let xApiKey = request.headers[HTTPField.Name("x-api-key")!] {
-            // 2. x-api-key header (Anthropic standard)
-            token = xApiKey
-        } else {
-            token = nil
+            return String(authHeader.dropFirst(7))
         }
-
-        guard let token, validKeys.contains(token) else {
-            let detail = OpenAIErrorDetail(
-                message: "Invalid or missing API key.",
-                type: "authentication_error",
-                code: "invalid_api_key"
-            )
-            return NovaMLXErrorMiddleware.jsonError(status: .unauthorized, detail: detail)
+        if let xApiKey = request.headers[HTTPField.Name("x-api-key")!] {
+            return xApiKey
         }
+        return nil
+    }
 
-        return try await next(request, context)
+    private static func unauthorized(_ message: String) -> Response {
+        let detail = OpenAIErrorDetail(
+            message: message,
+            type: "authentication_error",
+            code: "invalid_api_key"
+        )
+        return NovaMLXErrorMiddleware.jsonError(status: .unauthorized, detail: detail)
+    }
+
+    private static func extractBearerToken(from request: Request) -> String? {
+        let authHeader = request.headers[.authorization]
+        if let authHeader, authHeader.hasPrefix("Bearer ") {
+            return String(authHeader.dropFirst(7))
+        }
+        return request.headers[HTTPField.Name("x-api-key")!]
     }
 }
 
@@ -383,12 +478,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             securityHeaders
             requestSizeLimit
             rateLimitMiddleware
-            APIKeyAuthMiddleware(validKeys: cfg.apiKeys)
+            APIKeyAuthMiddleware(config: NovaMLXConfiguration.shared, globalRateLimiter: rateLimiter)
             NovaMLXErrorMiddleware()
             Get("/v1/models") { request, context in
                 let detector = self.capabilitiesDetector
                 let modelList = models.downloadedModels()
-                    .filter { inference.isModelLoaded($0.id) || embeddings.isLoaded($0.id) || inference.transcriptionService.isLoaded($0.id) || inference.imageGenerationService.isLoaded($0.id) }
+                    .filter { inference.isModelLoaded($0.id) || embeddings.isLoaded($0.id) || inference.transcriptionService.isLoaded($0.id) || inference.ttsService.listLoadedModels().contains($0.id) || inference.imageGenerationService.isLoaded($0.id) }
                     .map { record -> OpenAIModel in
                         let caps = detector.capabilities(
                             for: record.id,
@@ -552,10 +647,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     response.headers[.init("X-Model-Cold-Load")!] = "true"
                     response.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
                 }
+                if openAIReq.stream != true {
+                    // Non-streaming usage tracked via handleChat result
+                }
                 return response
             }
             Post("/v1/messages") { request, context in
                 let body = try await request.body.collect(upTo: .max)
+                let httpRequest = request  // capture before shadowing
                 let anthropicReq = try JSONDecoder().decode(AnthropicRequest.self, from: body)
 
                 NovaMLXLog.info("[API] POST /v1/messages — model=\(anthropicReq.model), stream=\(anthropicReq.stream ?? false), maxTokens=\(anthropicReq.maxTokens), msgs=\(anthropicReq.messages.count)")
@@ -714,6 +813,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     httpResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
                 }
                 Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
+                Self.recordTokenUsage(request: httpRequest, promptTokens: result.promptTokens, completionTokens: result.completionTokens, model: anthropicReq.model)
                 return httpResponse
             }
             Post("/v1/messages/count_tokens") { request, context in
@@ -890,6 +990,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let voice: String
                 let responseFormat: String
                 let speed: Float
+                var voiceProfile: VoiceProfile? = nil
 
                 if contentType.lowercased().contains("multipart/form-data") {
                     let parts = try MultipartParser.parse(body: Data(body.readableBytesView), contentType: contentType)
@@ -899,7 +1000,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     input = String(data: inputPart.body, encoding: .utf8) ?? ""
                     model = parts["model"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "tts"
                     voice = parts["voice"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "Tingting"
-                    responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "mp3"
+                    responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "wav"
                     speed = parts["speed"].flatMap { Float(String(data: $0.body, encoding: .utf8) ?? "") } ?? 1.0
                 } else {
                     let req = try JSONDecoder().decode(TTSRequest.self, from: body)
@@ -914,17 +1015,20 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.apiError("'input' is required and must be non-empty")
                 }
 
-                // Calculate speech rate from speed multiplier (default 175 * 1.0)
+                // Resolve voice profile by name
+                let profiles = VoiceProfileManager.shared.listProfiles()
+                voiceProfile = profiles.first { $0.name.lowercased() == voice.lowercased() }
+
                 let rate = Int(175.0 * Double(speed))
 
-                // Synthesize speech
                 let audioData = try await inference.ttsService.synthesize(
                     text: input,
                     voice: voice,
-                    rate: rate
+                    rate: rate,
+                    engine: nil,
+                    voiceProfile: voiceProfile
                 )
 
-                // Return audio based on response format
                 let mimeType = self.mimeType(forFormat: responseFormat)
                 var headers: HTTPFields = [.contentType: mimeType]
 
@@ -968,7 +1072,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     n: n,
                     width: width,
                     height: height,
-                    seed: req.seed.map { UInt64($0) }
+                    seed: req.seed.map { UInt64($0) },
+                    steps: req.steps
                 )
 
                 let imageData: [ImageData]
@@ -1500,7 +1605,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         }
 
         let adminRouter = RouterBuilder(context: AppContext.self) {
-            AdminAuthMiddleware(validKeys: cfg.apiKeys)
+            AdminAuthMiddleware(config: NovaMLXConfiguration.shared)
             securityHeaders
             requestSizeLimit
             NovaMLXErrorMiddleware()
@@ -1635,9 +1740,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 if record.modelType == .embedding {
                     _ = try await embeddings.loadModel(from: record.localURL, config: config)
                 } else if record.modelType == .audio {
-                    _ = try await inference.transcriptionService.loadModel(from: record.localURL, config: config)
+                    if record.family == .dotsTts || record.family == .qwen3Tts {
+                        try await inference.ttsService.loadModel(from: record.localURL)
+                    } else {
+                        _ = try await inference.transcriptionService.loadModel(from: record.localURL, config: config)
+                    }
+                    inference.saveLoadedModelsList()
                 } else if record.modelType == .image {
                     _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
+                    inference.saveLoadedModelsList()
                 } else {
                     try await inference.loadModel(at: record.localURL, config: config)
                 }
@@ -1668,10 +1779,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 if inference.transcriptionService.isLoaded(req.modelId) {
                     inference.transcriptionService.unload(modelId: req.modelId)
+                    inference.saveLoadedModelsList()
                 }
 
                 if inference.imageGenerationService.isLoaded(req.modelId) {
                     inference.imageGenerationService.unload(modelId: req.modelId)
+                    inference.saveLoadedModelsList()
                 }
 
                 return try Self.jsonResponse(AdminModelStatus(
@@ -2478,6 +2591,193 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
 
+            // MARK: - API Key Management
+
+            Get("/admin/keys") { _, _ in
+                let keys = await NovaMLXConfiguration.shared.apiKeys
+                let masked: [[String: Any]] = keys.map { key in
+                    var usage: [String: Any] = [
+                        "totalTokensUsed": key.usage.totalTokensUsed,
+                        "totalRequests": key.usage.totalRequests,
+                        "dailyTokens": key.usage.periodTokens,
+                        "dailyRequests": key.usage.periodRequests,
+                    ]
+                    if let lastUsed = key.usage.lastUsedAt {
+                        usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
+                    }
+                    var dict: [String: Any] = [
+                        "id": key.id,
+                        "name": key.name,
+                        "keyPrefix": key.keyPrefix,
+                        "createdAt": ISO8601DateFormatter().string(from: key.createdAt),
+                        "isEnabled": key.isEnabled,
+                        "isExpired": key.isExpired,
+                        "isActive": key.isActive,
+                        "usage": usage,
+                    ]
+                    if let exp = key.expiresAt { dict["expiresAt"] = ISO8601DateFormatter().string(from: exp) }
+                    if let rps = key.rateLimitPerSecond { dict["rateLimitPerSecond"] = rps }
+                    if let burst = key.rateLimitBurst { dict["rateLimitBurst"] = burst }
+                    if let models = key.allowedModels { dict["allowedModels"] = models }
+                    if let endpoints = key.allowedEndpoints { dict["allowedEndpoints"] = endpoints }
+                    if let maxTokens = key.maxTokensPerPeriod { dict["maxTokensPerPeriod"] = maxTokens }
+                    if let maxRequests = key.maxRequestsPerPeriod { dict["maxRequestsPerPeriod"] = maxRequests }
+                    return dict
+                }
+                let data = try JSONSerialization.data(withJSONObject: masked)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+
+            Post("/admin/keys") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                struct CreateKeyRequest: Decodable {
+                    let name: String?
+                    let rateLimitPerSecond: Double?
+                    let rateLimitBurst: Int?
+                    let allowedModels: [String]?
+                    let allowedEndpoints: [String]?
+                    let maxTokensPerPeriod: Int64?
+                    let maxRequestsPerPeriod: Int64?
+                    let usageResetPeriod: String?
+                }
+                let req = try JSONDecoder().decode(CreateKeyRequest.self, from: body)
+                let name = req.name ?? "API Key"
+                let period: UsageResetPeriod = req.usageResetPeriod.flatMap { UsageResetPeriod(rawValue: $0) } ?? .daily
+                let (apiKey, rawKey) = try await NovaMLXConfiguration.shared.createAPIKey(
+                    name: name,
+                    rateLimitPerSecond: req.rateLimitPerSecond,
+                    rateLimitBurst: req.rateLimitBurst,
+                    allowedModels: req.allowedModels,
+                    allowedEndpoints: req.allowedEndpoints,
+                    maxTokensPerPeriod: req.maxTokensPerPeriod,
+                    maxRequestsPerPeriod: req.maxRequestsPerPeriod,
+                    usageResetPeriod: period
+                )
+                let resp: [String: String] = [
+                    "id": apiKey.id,
+                    "name": apiKey.name,
+                    "key": rawKey,
+                    "keyPrefix": apiKey.keyPrefix,
+                    "createdAt": ISO8601DateFormatter().string(from: apiKey.createdAt),
+                ]
+                return try Self.jsonResponse(resp)
+            }
+
+            Get("/admin/keys/{id}") { request, context in
+                guard let id = context.parameters.get("id", as: String.self) else {
+                    throw NovaMLXError.apiError("Missing key ID")
+                }
+                guard let key = await NovaMLXConfiguration.shared.findAPIKeyById(id) else {
+                    return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
+                }
+                var usage: [String: Any] = [
+                    "totalTokensUsed": key.usage.totalTokensUsed,
+                    "totalRequests": key.usage.totalRequests,
+                    "periodTokens": key.usage.periodTokens,
+                    "periodRequests": key.usage.periodRequests,
+                ]
+                if let lastUsed = key.usage.lastUsedAt {
+                    usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
+                }
+                var dict: [String: Any] = [
+                    "id": key.id,
+                    "name": key.name,
+                    "keyPrefix": key.keyPrefix,
+                    "createdAt": ISO8601DateFormatter().string(from: key.createdAt),
+                    "isEnabled": key.isEnabled,
+                    "isExpired": key.isExpired,
+                    "isActive": key.isActive,
+                    "usage": usage,
+                ]
+                if let exp = key.expiresAt { dict["expiresAt"] = ISO8601DateFormatter().string(from: exp) }
+                if let rps = key.rateLimitPerSecond { dict["rateLimitPerSecond"] = rps }
+                if let burst = key.rateLimitBurst { dict["rateLimitBurst"] = burst }
+                if let models = key.allowedModels { dict["allowedModels"] = models }
+                if let endpoints = key.allowedEndpoints { dict["allowedEndpoints"] = endpoints }
+                if let maxTokens = key.maxTokensPerPeriod { dict["maxTokensPerPeriod"] = maxTokens }
+                if let maxRequests = key.maxRequestsPerPeriod { dict["maxRequestsPerPeriod"] = maxRequests }
+                let data = try JSONSerialization.data(withJSONObject: dict)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+
+            Put("/admin/keys/{id}") { request, context in
+                guard let id = context.parameters.get("id", as: String.self) else {
+                    throw NovaMLXError.apiError("Missing key ID")
+                }
+                let body = try await request.body.collect(upTo: .max)
+                struct UpdateKeyRequest: Decodable {
+                    let name: String?
+                    let isEnabled: Bool?
+                    let expiresAt: String?
+                    let rateLimitPerSecond: Double?
+                    let rateLimitBurst: Int?
+                    let allowedModels: [String]?
+                    let allowedEndpoints: [String]?
+                    let maxTokensPerPeriod: Int64?
+                    let maxRequestsPerPeriod: Int64?
+                    let usageResetPeriod: String?
+                }
+                let req = try JSONDecoder().decode(UpdateKeyRequest.self, from: body)
+                try await NovaMLXConfiguration.shared.updateAPIKey(id: id) { key in
+                    if let name = req.name { key.name = name }
+                    if let isEnabled = req.isEnabled { key.isEnabled = isEnabled }
+                    if let expiresAtStr = req.expiresAt {
+                        key.expiresAt = (expiresAtStr == "never") ? nil : ISO8601DateFormatter().date(from: expiresAtStr)
+                    }
+                    if let rps = req.rateLimitPerSecond { key.rateLimitPerSecond = rps }
+                    if let burst = req.rateLimitBurst { key.rateLimitBurst = burst }
+                    if let models = req.allowedModels { key.allowedModels = models.isEmpty ? nil : models }
+                    if let endpoints = req.allowedEndpoints { key.allowedEndpoints = endpoints.isEmpty ? nil : endpoints }
+                    if let maxTokens = req.maxTokensPerPeriod { key.maxTokensPerPeriod = maxTokens }
+                    if let maxRequests = req.maxRequestsPerPeriod { key.maxRequestsPerPeriod = maxRequests }
+                    if let periodStr = req.usageResetPeriod, let period = NovaMLXCore.UsageResetPeriod(rawValue: periodStr) {
+                        key.usageResetPeriod = period
+                    }
+                }
+                return try Self.jsonResponse(["status": "ok"])
+            }
+
+            Delete("/admin/keys/{id}") { request, context in
+                guard let id = context.parameters.get("id", as: String.self) else {
+                    throw NovaMLXError.apiError("Missing key ID")
+                }
+                try await NovaMLXConfiguration.shared.deleteAPIKey(id: id)
+                return try Self.jsonResponse(["status": "ok"])
+            }
+
+            Post("/admin/keys/{id}/rotate") { request, context in
+                guard let id = context.parameters.get("id", as: String.self) else {
+                    throw NovaMLXError.apiError("Missing key ID")
+                }
+                let (apiKey, rawKey) = try await NovaMLXConfiguration.shared.rotateAPIKey(id: id)
+                let resp: [String: String] = [
+                    "id": apiKey.id,
+                    "key": rawKey,
+                    "keyPrefix": apiKey.keyPrefix,
+                ]
+                return try Self.jsonResponse(resp)
+            }
+
+            Get("/admin/keys/{id}/usage") { request, context in
+                guard let id = context.parameters.get("id", as: String.self) else {
+                    throw NovaMLXError.apiError("Missing key ID")
+                }
+                guard let key = await NovaMLXConfiguration.shared.findAPIKeyById(id) else {
+                    return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
+                }
+                var usage: [String: Any] = [
+                    "totalTokensUsed": key.usage.totalTokensUsed,
+                    "totalRequests": key.usage.totalRequests,
+                    "periodTokens": key.usage.periodTokens,
+                    "periodRequests": key.usage.periodRequests,
+                ]
+                if let lastUsed = key.usage.lastUsedAt {
+                    usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
+                }
+                let data = try JSONSerialization.data(withJSONObject: usage)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+
             // Config file read/write
             Get("/admin/api/config") { _, _ in
                 let configURL = await NovaMLXConfiguration.shared.configFileURL
@@ -3097,6 +3397,25 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
             }
 
+            // Forward tool_choice — normalize Responses format to Chat Completions format
+            // Responses: {type:"function", name:"..."} → CC: {type:"function", function:{name:"..."}}
+            if let tc = req.toolChoice {
+                switch tc {
+                case .string(let s):
+                    body["tool_choice"] = s
+                case .dictionary(let dict):
+                    if case .string("function") = dict["type"],
+                       case .string(let name) = dict["name"] {
+                        body["tool_choice"] = ["type": "function", "function": ["name": name]]
+                    } else if let data = try? JSONEncoder().encode(dict),
+                              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        body["tool_choice"] = obj
+                    }
+                default:
+                    break
+                }
+            }
+
             // Convert text.format → response_format
             if let textFormat = req.text?.format {
                 var rf: [String: Any] = ["type": textFormat.type]
@@ -3175,10 +3494,45 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 "id": responseId,
                 "object": "response",
                 "created_at": Int(Date().timeIntervalSince1970),
+                "completed_at": Int(Date().timeIntervalSince1970),
                 "model": model,
                 "status": "completed",
                 "output": output
             ]
+            // Echo back request params per OpenAI spec
+            if let v = req.instructions { response["instructions"] = v }
+            if let v = req.maxOutputTokens { response["max_output_tokens"] = v }
+            if let v = req.temperature { response["temperature"] = v }
+            if let v = req.topP { response["top_p"] = v }
+            if let v = req.previousResponseId { response["previous_response_id"] = v }
+            if let v = req.metadata { response["metadata"] = v }
+            if let v = req.store { response["store"] = v }
+            if let v = req.truncation { response["truncation"] = v }
+            if let v = req.parallelToolCalls { response["parallel_tool_calls"] = v }
+            if let v = req.toolChoice {
+                if let data = try? JSONEncoder().encode(v),
+                   let obj = try? JSONSerialization.jsonObject(with: data) {
+                    response["tool_choice"] = obj
+                }
+            }
+            if let v = req.tools, !v.isEmpty {
+                if let data = try? JSONEncoder().encode(v),
+                   let obj = try? JSONSerialization.jsonObject(with: data) {
+                    response["tools"] = obj
+                }
+            }
+            if let v = req.reasoning {
+                if let data = try? JSONEncoder().encode(v),
+                   let obj = try? JSONSerialization.jsonObject(with: data) {
+                    response["reasoning"] = obj
+                }
+            }
+            if let v = req.text {
+                if let data = try? JSONEncoder().encode(v),
+                   let obj = try? JSONSerialization.jsonObject(with: data) {
+                    response["text"] = obj
+                }
+            }
             if let usage {
                 response["usage"] = [
                     "input_tokens": usage["prompt_tokens"] ?? 0,
@@ -3332,9 +3686,17 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let providerName = lastProvider.name
 
                 let responseBody = ResponseBody { writer in
+                    var sequenceNumber = 0
                     do {
                         func sse(_ event: String, _ data: Encodable) async throws {
-                            let jsonData = try JSONEncoder().encode(data)
+                            sequenceNumber += 1
+                            var jsonData = try JSONEncoder().encode(data)
+                            if var obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                                obj["sequence_number"] = sequenceNumber
+                                if let injected = try? JSONSerialization.data(withJSONObject: obj) {
+                                    jsonData = injected
+                                }
+                            }
                             try await writer.write(ByteBuffer(string: "event: \(event)\ndata: \(String(data: jsonData, encoding: .utf8) ?? "")\n\n"))
                         }
 
@@ -3500,12 +3862,21 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         allOutputItems.append(contentsOf: outputItems)
 
                         // Client sees only assistant output; store includes user input for multi-turn
-                        let clientResp = OpenAIResponseObject(id: responseId, model: model, output: outputItems)
+                        let clientResp = OpenAIResponseObject(id: responseId, model: model, output: outputItems).withRequestEcho(from: req)
                         try await sse("response.completed", ResponsesSSECompleted(response: clientResp))
                         let storeResp = OpenAIResponseObject(id: responseId, model: model, output: allOutputItems)
                         ResponseStore.shared.put(storeResp)
                         try await writer.finish(nil)
                     } catch {
+                        sequenceNumber += 1
+                        let errEvent = ResponsesSSEError(code: "ERR_UPSTREAM", message: error.localizedDescription)
+                        if let errData = try? JSONEncoder().encode(errEvent) {
+                            var obj = (try? JSONSerialization.jsonObject(with: errData) as? [String: Any]) ?? [:]
+                            obj["sequence_number"] = sequenceNumber
+                            if let finalData = try? JSONSerialization.data(withJSONObject: obj) {
+                                try? await writer.write(ByteBuffer(string: "event: error\ndata: \(String(data: finalData, encoding: .utf8) ?? "{}")\n\n"))
+                            }
+                        }
                         try? await writer.finish(nil)
                     }
                 }
@@ -3579,6 +3950,28 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     private static func applyKeepAlive(_ keepAlive: KeepAliveValue?, modelId: String, pool: EnginePool) {
         guard let ka = keepAlive else { return }
         pool.applyKeepAlive(modelId: modelId, deadline: ka.deadline())
+    }
+
+    // MARK: - API Key Usage Tracking
+
+    private static func recordTokenUsage(request: Request, promptTokens: Int, completionTokens: Int, model: String? = nil) {
+        let total = Int64(promptTokens) + Int64(completionTokens)
+        guard total > 0 else { return }
+        let token = extractRequestToken(request)
+        guard let token else { return }
+        Task {
+            if let key = await NovaMLXConfiguration.shared.findAPIKeyByRaw(token) {
+                try? await NovaMLXConfiguration.shared.recordUsage(keyId: key.id, tokens: total, model: model)
+            }
+        }
+    }
+
+    private static func extractRequestToken(_ request: Request) -> String? {
+        let authHeader = request.headers[.authorization]
+        if let authHeader, authHeader.hasPrefix("Bearer ") {
+            return String(authHeader.dropFirst(7))
+        }
+        return request.headers[HTTPField.Name("x-api-key")!]
     }
 
     // MARK: - Auto-Load Helpers
@@ -4616,7 +5009,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             model: result.model,
             output: outputItems,
             usage: ResponsesUsage(inputTokens: scaledInput, outputTokens: scaledOutput)
-        )
+        ).withRequestEcho(from: req)
         // Store with user messages prepended for previous_response_id multi-turn
         var storeOutputItems: [ResponseOutputItem] = []
         for msg in messages {
@@ -4703,9 +5096,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             var currentOutputIndex = 0
             var textMessageStarted = false
             var reasoningStarted = false
+            var sequenceNumber = 0
 
             func sse(_ event: String, _ data: Encodable) async throws {
-                let jsonData = try encoder.encode(data)
+                sequenceNumber += 1
+                var jsonData = try encoder.encode(data)
+                // Inject sequence_number into the JSON
+                if var obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    obj["sequence_number"] = sequenceNumber
+                    if let injected = try? JSONSerialization.data(withJSONObject: obj) {
+                        jsonData = injected
+                    }
+                }
                 try await writer.write(ByteBuffer(string: "event: \(event)\ndata: \(String(data: jsonData, encoding: .utf8) ?? "{}")\n\n"))
             }
 
@@ -4796,7 +5198,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 id: responseId, model: modelId,
                                 output: outputItems,
                                 usage: ResponsesUsage(inputTokens: pToks, outputTokens: cToks)
-                            )
+                            ).withRequestEcho(from: req)
                             try await sse("response.completed", ResponsesSSECompleted(response: completedResp))
                             // Store with user messages for previous_response_id multi-turn
                             var storeOutputItems: [ResponseOutputItem] = []
@@ -4817,6 +5219,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 try await writer.finish(nil)
             } catch {
                 NovaMLXLog.error("[SSE:\(reqTag)] Responses stream error: \(error)")
+                // Emit error event before closing stream
+                sequenceNumber += 1
+                let errEvent = ResponsesSSEError(code: "ERR_STREAM", message: error.localizedDescription)
+                if let errData = try? JSONEncoder().encode(errEvent) {
+                    var obj = (try? JSONSerialization.jsonObject(with: errData) as? [String: Any]) ?? [:]
+                    obj["sequence_number"] = sequenceNumber
+                    if let finalData = try? JSONSerialization.data(withJSONObject: obj) {
+                        try? await writer.write(ByteBuffer(string: "event: error\ndata: \(String(data: finalData, encoding: .utf8) ?? "{}")\n\n"))
+                    }
+                }
                 try? await writer.finish(nil)
             }
         }
@@ -4828,84 +5240,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         )
     }
 
-    private enum SSEKeepAliveEvent: Sendable {
-        case token(Token)
-        case keepAlive
-        case done
-    }
-
-    private static func withSSEKeepAlive(
-        _ stream: AsyncThrowingStream<Token, Error>,
-        interval: Duration = .seconds(10),
-        reqTag: String = "unknown"
-    ) -> AsyncThrowingStream<SSEKeepAliveEvent, Error> {
-        AsyncThrowingStream { continuation in
-            // Shared guard prevents double-yield/finish when onTermination
-            // races with the inference consumer or heartbeat tasks.
-            let guard_ = FinishGuard()
-
-            let task = Task {
-                do {
-                    guard !guard_.isDone else { return }
-                    continuation.yield(.keepAlive)
-                    for try await token in stream {
-                        if Task.isCancelled {
-                            NovaMLXLog.debug("[SSE:\(reqTag)] Inference stream consumer cancelled")
-                            break
-                        }
-                        guard !guard_.isDone else { return }
-                        continuation.yield(.token(token))
-                    }
-                    NovaMLXLog.debug("[SSE:\(reqTag)] Inference stream finished normally")
-                    if guard_.tryMarkFinished() {
-                        continuation.finish()
-                    }
-                } catch {
-                    NovaMLXLog.error("[SSE:\(reqTag)] Inference stream error: \(error)")
-                    if guard_.tryMarkFinished() {
-                        continuation.finish(throwing: error)
-                    }
-                }
-            }
-            let heartbeat = Task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: interval)
-                    guard !Task.isCancelled else { break }
-                    guard !guard_.isDone else { return }
-                    continuation.yield(.keepAlive)
-                }
-            }
-            continuation.onTermination = { reason in
-                // Command-009: finished(nil) is the normal AsyncThrowingStream completion
-                // (no error thrown). Only WARN on real failures; normal close is DEBUG.
-                if case .finished(let error?) = reason {
-                    NovaMLXLog.warning("[SSE:\(reqTag)] SSE connection terminated with error: \(error)")
-                } else {
-                    NovaMLXLog.debug("[SSE:\(reqTag)] SSE connection terminated: \(reason)")
-                }
-                task.cancel()
-                heartbeat.cancel()
-            }
-        }
-    }
-
-    private static func streamErrorFields(_ error: Error) -> (message: String, type: String, code: String) {
-        if let error = error as? NovaMLXError {
-            return (error.errorDescription ?? "Unknown error", error.apiErrorType, error.apiErrorCode)
-        }
-        return (error.localizedDescription, "internal_error", "internal_error")
-    }
-
-    /// Anthropic-format error fields for SSE error events.
-    /// Returns (message, type) matching the Anthropic API error schema.
-    private static func anthropicStreamErrorFields(_ error: Error) -> (message: String, type: String) {
-        if let error = error as? NovaMLXError {
-            return (error.errorDescription ?? "Unknown error", error.apiErrorType)
-        }
-        return (error.localizedDescription, "api_error")
-    }
-
-    private static let sessionIDHeader = HTTPField.Name("x-session-id")!
+    static let sessionIDHeader = HTTPField.Name("x-session-id")!
 
     private static func parseQuery(_ query: String) -> [String: String] {
         var result: [String: String] = [:]
