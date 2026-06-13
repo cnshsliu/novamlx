@@ -153,7 +153,10 @@ public final class NovaDB: @unchecked Sendable {
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(tableName)") ?? 0
         }
         guard count == 0 else {
-            try? migrateFile(file)
+            // Table already has rows from a prior import — leave the file on
+            // disk untouched. The SQLite store is the sole source of truth
+            // post-cutover; the JSON file is inert (and typically already
+            // renamed to .migrated on the first successful import).
             return
         }
 
