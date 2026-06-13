@@ -332,8 +332,10 @@ extension NovaMLXConfiguration {
     ///
     /// Bridge phase dual-write: prefer the store path (authoritative source
     /// of usage counters going forward), and mirror to JSON for safety so
-    /// legacy reads against `_apiKeys` stay consistent. Either path failing
-    /// is tolerated via `try?` so the other still completes.
+    /// legacy reads against `_apiKeys` stay consistent. The JSON write
+    /// throws (preserving legacy error semantics); the store write is
+    /// tolerated via `try?` so a DB hiccup doesn't lose usage data on the
+    /// JSON side.
     public func recordUsage(keyId: String, tokens: Int64, model: String? = nil) throws {
         // Mirror to JSON first so a store failure doesn't lose the update.
         if let idx = _apiKeys.firstIndex(where: { $0.id == keyId }) {

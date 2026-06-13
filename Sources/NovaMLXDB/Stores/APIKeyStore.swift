@@ -126,6 +126,13 @@ public final class APIKeyStore: Sendable {
         try db.write { db in
             guard var record = try APIKeyRecord.fetchOne(db, key: keyId) else { return }
 
+            let periodKey = Self.periodDate(for: record.usageResetPeriod)
+            if record.periodResetDate != periodKey {
+                record.periodTokens = 0
+                record.periodRequests = 0
+                record.periodResetDate = periodKey
+            }
+
             record.totalTokensUsed += tokens
             record.totalRequests += 1
             record.periodTokens += tokens
@@ -139,6 +146,27 @@ public final class APIKeyStore: Sendable {
             }
 
             try record.update(db)
+        }
+    }
+
+    /// Returns the period-date string (e.g. "2026-06-13") used to key usage-reset periods.
+    /// Mirrors `NovaMLXConfiguration.periodDate(for:)` so the store and legacy JSON paths agree.
+    private static func periodDate(for usageResetPeriod: String) -> String {
+        let calendar = Calendar(identifier: .gregorian)
+        let now = Date()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withFullDate]
+        switch usageResetPeriod {
+        case "daily", "never":
+            return formatter.string(from: now)
+        case "weekly":
+            let week = calendar.dateInterval(of: .weekOfYear, for: now)?.start ?? now
+            return formatter.string(from: week)
+        case "monthly":
+            let month = calendar.dateInterval(of: .month, for: now)?.start ?? now
+            return formatter.string(from: month)
+        default:
+            return formatter.string(from: now)
         }
     }
 
