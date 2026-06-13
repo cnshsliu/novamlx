@@ -82,7 +82,6 @@ public enum NovaMLXPaths {
     public static var chatHistoryDir: URL { baseDir.appendingPathComponent("chat_history") }
     public static var modelfilesDir: URL { baseDir.appendingPathComponent("modelfiles") }
     public static var tokenhubDir: URL { baseDir.appendingPathComponent("tokenhub") }
-    public static var tokenhubProvidersFile: URL { tokenhubDir.appendingPathComponent("providers.json") }
 
     public static var voicesDir: URL {
         let dir = baseDir.appendingPathComponent("voices")
