@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXDB
 import os.log
 
 // MARK: - TokenhubProvider
@@ -545,6 +546,36 @@ public final class TokenhubManager: @unchecked Sendable {
     private func saveAll(_ providers: [TokenhubProvider]) throws {
         let data = try encoder.encode(providers)
         try data.write(to: fileURL, options: .atomic)
+        // Bridge: shadow-write to SQLite. JSON stays authoritative; the DB is
+        // a validated shadow that the C3 cutover will flip to primary. A DB
+        // failure here is tolerated so a SQLite issue cannot break the
+        // primary JSON code path.
+        do {
+            try NovaDB.shared.tokenhubStore.replaceAll(with: providers)
+        } catch {
+            log.warning("[Tokenhub] DB shadow-write failed (Bridge tolerated): \(String(describing: error))")
+        }
+    }
+
+    // MARK: - DB Sync (Bridge Phase)
+
+    /// Shadow-write current in-memory provider list into the SQLite store.
+    /// JSON remains authoritative; the DB is a validated shadow that the C3
+    /// cutover will flip to primary. Errors are tolerated via try? so a DB
+    /// issue does not break the primary JSON code path.
+    public func syncToStore() {
+        let providers = loadAll()
+        do {
+            try NovaDB.shared.tokenhubStore.replaceAll(with: providers)
+        } catch {
+            log.warning("[Tokenhub] syncToStore failed (Bridge tolerated): \(String(describing: error))")
+        }
+    }
+
+    /// Read providers from the SQLite store. Used by the C3 cutover. Throws
+    /// on DB errors so the caller can decide policy.
+    public func loadFromStore() throws -> [TokenhubProvider] {
+        try NovaDB.shared.tokenhubStore.listAsProviders()
     }
 
     /// Subscription check for use inside an already-acquired lock.

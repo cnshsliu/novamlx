@@ -45,4 +45,13 @@ public final class TokenhubStore: Sendable {
             try record.update(db)
         }
     }
+
+    /// Internal-write passthrough for cross-module extensions.
+    /// The `TokenhubStore+Domain` extension lives in NovaMLXCore (a different
+    /// module), so it cannot see this class's private `db` pool. Exposing a
+    /// typed `write` helper lets that extension participate in GRDB
+    /// transactions (e.g. atomic set replacement) without leaking the pool.
+    public func write<T>(_ block: @Sendable (Database) throws -> T) throws -> T {
+        try db.write(block)
+    }
 }

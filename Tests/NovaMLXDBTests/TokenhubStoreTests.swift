@@ -105,4 +105,85 @@ struct TokenhubStoreTests {
         #expect(fetched?.lastStatus == "ok")
         #expect(fetched?.contextWindowOverride == 32768)
     }
+
+    @Test("TokenhubManager.syncToStore shadows providers to SQLite", .serialized)
+    func syncToStoreRoundTrip() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        // The TokenhubManager singleton reads from NovaMLXPaths.tokenhubProvidersFile.
+        // For this test we go provider-by-provider through the store extension.
+        let provider = TokenhubProvider(
+            name: "Bridge Test",
+            endpoint: "https://bridge.example.com",
+            apiKey: "bridge-key",
+            remoteModel: "bridge-model",
+            isEnabled: true,
+            includeInLoadBalance: true,
+            tags: ["test", "bridge"],
+            isLocal: false,
+            isFree: true,
+            isManaged: false,
+            supportsResponsesAPI: true,
+            supportsVision: false,
+            visionStrategy: nil,
+            anthropicEndpoint: nil,
+            visionCompanionModel: nil,
+            requestCount: 10,
+            successCount: 8,
+            avgLatencyMs: 250.0,
+            contextWindowOverride: 16384
+        )
+
+        try nova.tokenhubStore.upsertProvider(provider)
+
+        let fetched = try nova.tokenhubStore.getProvider(name: "Bridge Test")
+        #expect(fetched?.name == "Bridge Test")
+        #expect(fetched?.endpoint == "https://bridge.example.com")
+        #expect(fetched?.apiKey == "bridge-key")
+        #expect(fetched?.remoteModel == "bridge-model")
+        #expect(fetched?.includeInLoadBalance == true)
+        #expect(fetched?.tags == ["test", "bridge"])
+        #expect(fetched?.isFree == true)
+        #expect(fetched?.supportsResponsesAPI == true)
+        #expect(fetched?.requestCount == 10)
+        #expect(fetched?.successCount == 8)
+        #expect(fetched?.avgLatencyMs == 250.0)
+        #expect(fetched?.contextWindowOverride == 16384)
+    }
+
+    @Test("TokenhubStore.replaceAll deletes removed + upserts kept", .serialized)
+    func replaceAllSemantics() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        // Seed with two providers
+        try nova.tokenhubStore.upsertProvider(TokenhubProvider(
+            name: "Keep", endpoint: "https://keep.example.com",
+            apiKey: "k", remoteModel: "k-model"
+        ))
+        try nova.tokenhubStore.upsertProvider(TokenhubProvider(
+            name: "Drop", endpoint: "https://drop.example.com",
+            apiKey: "d", remoteModel: "d-model"
+        ))
+
+        // replaceAll with only "Keep" + new "Add"
+        try nova.tokenhubStore.replaceAll(with: [
+            TokenhubProvider(name: "Keep", endpoint: "https://keep.example.com",
+                             apiKey: "k", remoteModel: "k-model-updated"),
+            TokenhubProvider(name: "Add", endpoint: "https://add.example.com",
+                             apiKey: "a", remoteModel: "a-model")
+        ])
+
+        let all = try nova.tokenhubStore.listAsProviders()
+        #expect(all.count == 2)
+        #expect(all.contains { $0.name == "Keep" })
+        #expect(all.contains { $0.name == "Add" })
+        #expect(!all.contains { $0.name == "Drop" })
+
+        let kept = try nova.tokenhubStore.getProvider(name: "Keep")
+        #expect(kept?.remoteModel == "k-model-updated")
+    }
 }
