@@ -473,10 +473,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Fetch the raw plaintext of the first API key (by creation order) from
-    /// the SQLite store. Used to seed `appState.apiKey` so the menu bar UI's
-    /// internal Bearer-token calls to the local API server authenticate after
-    /// startup or restart. Returns nil if there are no keys (open mode).
+    /// Fetch the raw plaintext of the most recently created API key from the
+    /// SQLite store (`APIKeyStore.list()` orders by `created_at` DESC, so
+    /// `.first` is the newest key). Used to seed `appState.apiKey` so the menu
+    /// bar UI's internal Bearer-token calls to the local API server authenticate
+    /// after startup or restart. Returns nil if there are no keys (open mode).
     private static func firstRawAPIKey() -> String? {
         guard let first = (try? NovaDB.shared.apiKeyStore.list())?.first else { return nil }
         return try? NovaDB.shared.apiKeyStore.getRawKey(id: first.id)

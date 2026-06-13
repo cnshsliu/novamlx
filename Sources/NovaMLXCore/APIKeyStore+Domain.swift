@@ -75,22 +75,10 @@ extension APIKeyStore {
         return min(1.0, Double(tokens) / Double(max))
     }
 
-    /// Period-date string key, mirroring `APIKeyStore.periodDate(for:)` in
-    /// NovaMLXDB so the domain layer and DB agree on when a period resets.
+    /// Delegates to `APIKeyStore.periodDate(for:)` in NovaMLXDB so the domain
+    /// layer and DB agree exactly on when a period resets.
     private static func periodDate(for period: UsageResetPeriod) -> String {
-        let fmt = DateFormatter()
-        let date = Date()
-        switch period {
-        case .daily:
-            fmt.dateFormat = "yyyy-MM-dd"
-        case .weekly:
-            fmt.dateFormat = "yyyy-ww"
-        case .monthly:
-            fmt.dateFormat = "yyyy-MM"
-        case .never:
-            return "never"
-        }
-        return fmt.string(from: date)
+        APIKeyStore.periodDate(for: period.rawValue)
     }
 
     // MARK: - Conversion

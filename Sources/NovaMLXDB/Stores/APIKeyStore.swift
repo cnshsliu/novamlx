@@ -139,8 +139,8 @@ public final class APIKeyStore: Sendable {
     }
 
     /// Returns the period-date string (e.g. "2026-06-13") used to key usage-reset periods.
-    /// Mirrors `NovaMLXConfiguration.periodDate(for:)` so the store and legacy JSON paths agree.
-    private static func periodDate(for usageResetPeriod: String) -> String {
+    /// Canonical period-key implementation used by both the DB layer and the NovaMLXCore domain extension.
+    public static func periodDate(for usageResetPeriod: String) -> String {
         let calendar = Calendar(identifier: .gregorian)
         let now = Date()
         let formatter = ISO8601DateFormatter()

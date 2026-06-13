@@ -134,7 +134,18 @@ private struct AdminAuthMiddleware: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        let keys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
+        let keys: [APIKey]
+        do {
+            keys = try NovaDB.shared.apiKeyStore.listAsAPIKey()
+        } catch {
+            // Fail closed: never fall through to open mode on a DB error.
+            let detail = OpenAIErrorDetail(
+                message: "Key store unavailable.",
+                type: "server_error",
+                code: "key_store_unavailable"
+            )
+            return NovaMLXErrorMiddleware.jsonError(status: .serviceUnavailable, detail: detail)
+        }
 
         // No keys configured → open mode, no auth required
         if keys.isEmpty {
@@ -195,7 +206,18 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        let keys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
+        let keys: [APIKey]
+        do {
+            keys = try NovaDB.shared.apiKeyStore.listAsAPIKey()
+        } catch {
+            // Fail closed: never fall through to open mode on a DB error.
+            let detail = OpenAIErrorDetail(
+                message: "Key store unavailable.",
+                type: "server_error",
+                code: "key_store_unavailable"
+            )
+            return NovaMLXErrorMiddleware.jsonError(status: .serviceUnavailable, detail: detail)
+        }
 
         // No keys at all — open mode
         if keys.isEmpty {
