@@ -404,25 +404,51 @@ extension TokenhubProviderRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct ModelfileRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "modelfiles"
-    var name: String
-    var baseModel: String?
-    var systemPrompt: String?
-    var parameters: String?
-    var tools: String?
-    var createdAt: Date
-    var updatedAt: Date?
+    public var name: String
+    public var baseModel: String?
+    public var systemPrompt: String?
+    public var parameters: String?
+    public var tools: String?
+    public var description: String?
+    public var createdAt: Date
+    public var updatedAt: Date?
+
+    public init(
+        name: String,
+        baseModel: String? = nil,
+        systemPrompt: String? = nil,
+        parameters: String? = nil,
+        tools: String? = nil,
+        description: String? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date? = nil
+    ) {
+        self.name = name
+        self.baseModel = baseModel
+        self.systemPrompt = systemPrompt
+        self.parameters = parameters
+        self.tools = tools
+        self.description = description
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case name
         case baseModel = "base_model"
         case systemPrompt = "system_prompt"
         case parameters, tools
+        case description
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
 }
 
-extension ModelfileRecord: FetchableRecord, MutablePersistableRecord {}
+extension ModelfileRecord: FetchableRecord, MutablePersistableRecord {
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        // name is the primary key, no rowid to capture.
+    }
+}
 
 // MARK: - Auth Session Record
 

@@ -63,6 +63,9 @@ public final class NovaDB: @unchecked Sendable {
         configMigrator.registerMigration("v2_tokenhub_expand_columns") { db in
             try ConfigDBSchema.v2ExpandTokenhubColumns(in: db)
         }
+        configMigrator.registerMigration("v3_modelfile_add_description") { db in
+            try ConfigDBSchema.v3ModelfileAddDescription(in: db)
+        }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")
 

@@ -145,4 +145,13 @@ enum ConfigDBSchema {
             t.add(column: "context_window_override", .integer)
         }
     }
+
+    /// Adds a `description` column to `modelfiles` so the SQLite record can
+    /// represent the `Modelfile.description` field without overloading
+    /// `parameters`.
+    static func v3ModelfileAddDescription(in db: Database) throws {
+        try db.alter(table: "modelfiles") { t in
+            t.add(column: "description", .text)
+        }
+    }
 }
