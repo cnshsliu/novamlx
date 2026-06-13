@@ -3030,7 +3030,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     /// JSON-encode an optional Encodable value into a String for the store's
     /// JSON-string columns (`allowed_models`, `allowed_endpoints`). Returns nil
     /// for nil input or encode failures. Used by the admin key update route.
-    private static func encodeJSONField<T: Encodable>(_ value: T?) -> String? {
+    private nonisolated static func encodeJSONField<T: Encodable>(_ value: T?) -> String? {
         guard let value else { return nil }
         guard let data = try? JSONEncoder().encode(value) else { return nil }
         return String(data: data, encoding: .utf8)
