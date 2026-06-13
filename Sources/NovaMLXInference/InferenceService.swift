@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXUtils
 import NovaMLXEngine
 import NovaMLXModelManager
@@ -40,7 +41,6 @@ public final class InferenceService: @unchecked Sendable {
     public let transcriptionService: TranscriptionService
     public let ttsService: TTSService
     public let imageGenerationService: ImageGenerationService
-    private let loadedModelsFile: URL
 
     // Worker subprocess mode
     public let workerMode: Bool
@@ -63,7 +63,6 @@ public final class InferenceService: @unchecked Sendable {
         self.transcriptionService = TranscriptionService()
         self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
-        self.loadedModelsFile = NovaMLXPaths.loadedModelsFile
         self.workerMode = workerMode
         self.clusterMode = clusterMode
 
@@ -568,14 +567,11 @@ public final class InferenceService: @unchecked Sendable {
 
     public func saveLoadedModelsList() {
         let ids = listLoadedModels()
-        guard let data = try? JSONEncoder().encode(ids) else { return }
-        try? data.write(to: loadedModelsFile, options: .atomic)
+        try? NovaDB.shared.loadedModelsStore.replaceAll(with: ids)
     }
 
     private func loadLoadedModelsList() -> [String] {
-        guard let data = try? Data(contentsOf: loadedModelsFile),
-              let ids = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return ids
+        (try? NovaDB.shared.loadedModelsStore.list()) ?? []
     }
 
     public func restoreModels(modelManager: ModelManager) async {

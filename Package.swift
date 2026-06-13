@@ -122,6 +122,7 @@ let package = Package(
             name: "NovaMLXInference",
             dependencies: [
                 "NovaMLXCore",
+                "NovaMLXDB",
                 "NovaMLXUtils",
                 "NovaMLXEngine",
                 "NovaMLXDistributed",

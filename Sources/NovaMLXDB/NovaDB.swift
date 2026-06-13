@@ -264,6 +264,21 @@ public final class NovaDB: @unchecked Sendable {
         // chat history, worker deployments, auth, cluster policy will be imported
         // here once their stores replace the old JSON code paths.
 
+        // loaded_models.json — Phase D1, InferenceService.saveLoadedModelsList is wired to store
+        try maybeImportLegacy(
+            file: baseDir.appendingPathComponent("loaded_models.json"),
+            tableName: "loaded_models",
+            into: dataDB
+        ) { data in
+            guard let ids = try? JSONDecoder().decode([String].self, from: data) else { return }
+            try self.dataDB.write { db in
+                for id in ids {
+                    let record = LoadedModelRecord(modelId: id, loadedAt: Date())
+                    try record.insert(db, onConflict: .ignore)
+                }
+            }
+        }
+
         log.info("[NovaDB] Legacy JSON import complete")
     }
 
