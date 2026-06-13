@@ -48,29 +48,79 @@ extension ConfigRecord: FetchableRecord, MutablePersistableRecord {
 
 public struct APIKeyRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "api_keys"
-    var id: String
-    var name: String
-    var keyHash: String
-    var rawKey: String
-    var keyPrefix: String
-    var keySuffix: String
-    var createdAt: Date
-    var expiresAt: Date?
-    var isEnabled: Bool
-    var rateLimitPerSecond: Double?
-    var rateLimitBurst: Int?
-    var allowedModels: String? // JSON array
-    var allowedEndpoints: String? // JSON array
-    var maxTokensPerPeriod: Int64?
-    var maxRequestsPerPeriod: Int64?
-    var usageResetPeriod: String
-    var totalTokensUsed: Int64
-    var totalRequests: Int64
-    var lastUsedAt: Date?
-    var periodTokens: Int64
-    var periodRequests: Int64
-    var periodResetDate: String?
-    var perModelTokens: String? // JSON object
+    public var id: String
+    public var name: String
+    public var keyHash: String
+    public var rawKey: String
+    public var keyPrefix: String
+    public var keySuffix: String
+    public var createdAt: Date
+    public var expiresAt: Date?
+    public var isEnabled: Bool
+    public var rateLimitPerSecond: Double?
+    public var rateLimitBurst: Int?
+    public var allowedModels: String? // JSON array
+    public var allowedEndpoints: String? // JSON array
+    public var maxTokensPerPeriod: Int64?
+    public var maxRequestsPerPeriod: Int64?
+    public var usageResetPeriod: String
+    public var totalTokensUsed: Int64
+    public var totalRequests: Int64
+    public var lastUsedAt: Date?
+    public var periodTokens: Int64
+    public var periodRequests: Int64
+    public var periodResetDate: String?
+    public var perModelTokens: String? // JSON object
+
+    public init(
+        id: String,
+        name: String,
+        keyHash: String,
+        rawKey: String,
+        keyPrefix: String,
+        keySuffix: String,
+        createdAt: Date,
+        expiresAt: Date? = nil,
+        isEnabled: Bool = true,
+        rateLimitPerSecond: Double? = nil,
+        rateLimitBurst: Int? = nil,
+        allowedModels: String? = nil,
+        allowedEndpoints: String? = nil,
+        maxTokensPerPeriod: Int64? = nil,
+        maxRequestsPerPeriod: Int64? = nil,
+        usageResetPeriod: String = "daily",
+        totalTokensUsed: Int64 = 0,
+        totalRequests: Int64 = 0,
+        lastUsedAt: Date? = nil,
+        periodTokens: Int64 = 0,
+        periodRequests: Int64 = 0,
+        periodResetDate: String? = nil,
+        perModelTokens: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.keyHash = keyHash
+        self.rawKey = rawKey
+        self.keyPrefix = keyPrefix
+        self.keySuffix = keySuffix
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.isEnabled = isEnabled
+        self.rateLimitPerSecond = rateLimitPerSecond
+        self.rateLimitBurst = rateLimitBurst
+        self.allowedModels = allowedModels
+        self.allowedEndpoints = allowedEndpoints
+        self.maxTokensPerPeriod = maxTokensPerPeriod
+        self.maxRequestsPerPeriod = maxRequestsPerPeriod
+        self.usageResetPeriod = usageResetPeriod
+        self.totalTokensUsed = totalTokensUsed
+        self.totalRequests = totalRequests
+        self.lastUsedAt = lastUsedAt
+        self.periodTokens = periodTokens
+        self.periodRequests = periodRequests
+        self.periodResetDate = periodResetDate
+        self.perModelTokens = perModelTokens
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, name

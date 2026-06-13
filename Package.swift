@@ -240,6 +240,15 @@ let package = Package(
             swiftSettings: concurrencySettings
         ),
         .testTarget(
+            name: "NovaMLXDBTests",
+            dependencies: [
+                "NovaMLXDB",
+                "NovaMLXCore",
+            ],
+            path: "Tests/NovaMLXDBTests",
+            swiftSettings: concurrencySettings
+        ),
+        .testTarget(
             name: "NovaMLXEngineTests",
             dependencies: ["NovaMLXEngine", "NovaMLXInference", "NovaMLXCore"],
             swiftSettings: concurrencySettings

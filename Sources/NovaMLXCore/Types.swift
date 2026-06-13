@@ -534,6 +534,11 @@ public struct APIKey: Codable, Identifiable, Sendable, Equatable {
 
     public var usage: KeyUsage
 
+    /// Stored backing for `isLegacyImport`. Defaults to `false`.
+    /// Not included in `CodingKeys`, so existing JSON files decode without it
+    /// and the legacy custom decoder leaves this at its default.
+    public var isLegacyImportValue: Bool = false
+
     public struct KeyUsage: Codable, Sendable, Equatable {
         public var totalTokensUsed: Int64
         public var totalRequests: Int64
@@ -626,6 +631,10 @@ public struct APIKey: Codable, Identifiable, Sendable, Equatable {
     }
 
     public var isActive: Bool { isEnabled && !isExpired }
+
+    /// True if this key was imported from a legacy `api_keys.json` and has no
+    /// recoverable raw plaintext token (its `rawKey` was set to a placeholder).
+    public var isLegacyImport: Bool { isLegacyImportValue }
 
     public var maskedDisplay: String {
         if keySuffix.isEmpty {
