@@ -2829,24 +2829,21 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
 
-            // Config file read/write
+            // Config store read/write (backed by SQLite; JSON shape preserved for API compat)
             Get("/admin/api/config") { _, _ in
-                let configURL = await NovaMLXConfiguration.shared.configFileURL
-                guard let data = try? Data(contentsOf: configURL),
-                      let json = try? JSONSerialization.jsonObject(with: data) else {
-                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(string: "{}")))
-                }
-                let responseData = try JSONSerialization.data(withJSONObject: json)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: responseData)))
+                let data: Data = await {
+                    do { return try await NovaMLXConfiguration.shared.serializedConfigJSON() }
+                    catch { return Data("{}".utf8) }
+                }()
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
             Put("/admin/api/config") { request, _ in
                 let body = try await request.body.collect(upTo: .max)
-                guard let json = try? JSONSerialization.jsonObject(with: body) else {
-                    throw NovaMLXError.apiError("Invalid JSON")
+                do {
+                    try await NovaMLXConfiguration.shared.applySerializedConfigJSON(Data(body.readableBytesView))
+                } catch {
+                    throw NovaMLXError.apiError("Invalid config JSON: \(error)")
                 }
-                let configURL = await NovaMLXConfiguration.shared.configFileURL
-                let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-                try data.write(to: configURL, options: .atomic)
                 return try Self.jsonResponse(["status": "ok", "message": "Config saved. Restart required."])
             }
 

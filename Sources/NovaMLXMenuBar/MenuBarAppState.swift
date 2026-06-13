@@ -155,8 +155,7 @@ public final class MenuBarAppState: ObservableObject {
 
     public func setHuggingfaceEndpoint(_ endpoint: String?) async {
         await NovaMLXConfiguration.shared.setHuggingfaceEndpoint(endpoint)
-        let configFile = NovaMLXPaths.configFile
-        try? await NovaMLXConfiguration.shared.saveToFile(configFile)
+        await NovaMLXConfiguration.shared.syncToStore()
     }
 
     public func startDownload(repoId: String) {

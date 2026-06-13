@@ -134,7 +134,63 @@ public final class NovaDB: @unchecked Sendable {
             }
         }
 
-        // Phase 2+: Config, model settings, tokenhub providers, model registry,
+        // config.json — Phase B, store is wired and Configuration.loadFromStore is sole reader
+        try maybeImportLegacy(
+            file: baseDir.appendingPathComponent("config.json"),
+            tableName: "config",
+            into: configDB
+        ) { data in
+            // Best-effort parse using a permissive shape. We only extract the
+            // fields that ConfigRecord stores; unknown keys are ignored.
+            struct LegacyConfigImport: Decodable {
+                struct Server: Decodable {
+                    let host: String?
+                    let port: Int?
+                    let adminPort: Int?
+                    let maxConcurrentRequests: Int?
+                    let requestTimeout: Double?
+                    let contextScalingTarget: Int?
+                    let tlsCertPath: String?
+                    let tlsKeyPath: String?
+                    let tlsKeyPassword: String?
+                    let maxRequestSizeMB: Double?
+                    let maxProcessMemory: String?
+                    let prefixCacheEnabled: Bool?
+                }
+                let server: Server?
+                let defaultModel: String?
+                let modelsDirectory: String?
+                let huggingfaceEndpoint: String?
+            }
+            guard let parsed = try? JSONDecoder().decode(LegacyConfigImport.self, from: data) else { return }
+            try self.configDB.write { db in
+                let existing = try ConfigRecord.fetchOne(db, key: 1)
+                var record = existing ?? ConfigRecord(
+                    host: "127.0.0.1", port: 6590, adminPort: 6591, tlsEnabled: false,
+                    hfEndpoint: "https://huggingface.co"
+                )
+                if let s = parsed.server {
+                    if let v = s.host { record.host = v }
+                    if let v = s.port { record.port = v }
+                    if let v = s.adminPort { record.adminPort = v }
+                    if let v = s.maxConcurrentRequests { record.maxConcurrentRequests = v }
+                    if let v = s.requestTimeout { record.requestTimeout = v }
+                    if let v = s.contextScalingTarget { record.contextScalingTarget = v }
+                    if let v = s.tlsCertPath { record.tlsCertPath = v; record.tlsEnabled = !v.isEmpty }
+                    if let v = s.tlsKeyPath { record.tlsKeyPath = v }
+                    if let v = s.tlsKeyPassword { record.tlsKeyPassword = v }
+                    if let v = s.maxRequestSizeMB { record.maxRequestSizeMB = v }
+                    if let v = s.maxProcessMemory { record.maxProcessMemory = v }
+                    if let v = s.prefixCacheEnabled { record.prefixCacheEnabled = v }
+                }
+                if let v = parsed.defaultModel { record.defaultModel = v }
+                if let v = parsed.modelsDirectory { record.modelsDir = v }
+                if let v = parsed.huggingfaceEndpoint { record.hfEndpoint = v }
+                try record.save(db)
+            }
+        }
+
+        // Phase 2+: model settings, tokenhub providers, model registry,
         // loaded models, metrics, chat history, worker deployments, auth, cluster policy
         // will be imported here once their stores replace the old JSON code paths.
 

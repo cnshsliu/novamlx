@@ -229,15 +229,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             try? await config.initializeDirectories()
 
-            let configFile = NovaMLXPaths.configFile
-            if FileManager.default.fileExists(atPath: configFile.path) {
-                do {
-                    try await config.loadFromFile(configFile)
-                    let apiKeyCount = (try? NovaDB.shared.apiKeyStore.listAsAPIKey())?.count ?? 0
-                    NovaMLXLog.info("Loaded config from \(configFile.path) (apiKeys: \(apiKeyCount))")
-                } catch {
-                    NovaMLXLog.error("Failed to load config: \(error)")
-                }
+            // Config now lives in SQLite. Legacy config.json is auto-imported
+            // by NovaDB.setup on first run if the file still exists.
+            do {
+                try await config.loadFromStore()
+                let apiKeyCount = (try? NovaDB.shared.apiKeyStore.listAsAPIKey())?.count ?? 0
+                NovaMLXLog.info("Loaded config from SQLite store (apiKeys: \(apiKeyCount))")
+            } catch {
+                NovaMLXLog.error("Failed to load config from store: \(error)")
             }
 
             // API keys now live in SQLite (NovaDB.apiKeyStore); no JSON load step.
@@ -408,13 +407,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         serverTask = nil
 
         Task {
-            let configFile = await config.configFileURL
-            if FileManager.default.fileExists(atPath: configFile.path) {
-                do {
-                    try await config.loadFromFile(configFile)
-                } catch {
-                    NovaMLXLog.error("Failed to reload config: \(error)")
-                }
+            do {
+                try await config.loadFromStore()
+            } catch {
+                NovaMLXLog.error("Failed to reload config: \(error)")
             }
 
             let serverConfig = await config.serverConfig

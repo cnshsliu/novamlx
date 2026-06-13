@@ -96,4 +96,51 @@ struct ConfigStoreTests {
         #expect(record.modelsDir == "/tmp/models")
         #expect(record.hfEndpoint == "https://test.hf.co")
     }
+
+    @Test("Legacy config.json is imported into configStore on first run", .serialized)
+    func legacyConfigImport() async throws {
+        let tmp = try makeTmpDir()
+        let configURL = tmp.appendingPathComponent("config.json")
+
+        // Write a legacy config.json with the pre-DB shape
+        let legacyJSON = """
+        {
+            "server": {
+                "host": "9.8.7.6",
+                "port": 8888,
+                "adminPort": 8889,
+                "maxConcurrentRequests": 64,
+                "requestTimeout": 120,
+                "tlsCertPath": "/legacy/cert.pem",
+                "tlsKeyPath": "/legacy/key.pem",
+                "maxProcessMemory": "16G",
+                "prefixCacheEnabled": false
+            },
+            "defaultModel": "legacy-qwen",
+            "modelsDirectory": "/legacy/models",
+            "huggingfaceEndpoint": "https://legacy.hf.co"
+        }
+        """
+        try legacyJSON.write(to: configURL, atomically: true, encoding: .utf8)
+
+        // First setup → importer should run
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        let record = try nova.configStore.get()
+        #expect(record.host == "9.8.7.6")
+        #expect(record.port == 8888)
+        #expect(record.adminPort == 8889)
+        #expect(record.maxConcurrentRequests == 64)
+        #expect(record.tlsEnabled == true)
+        #expect(record.tlsCertPath == "/legacy/cert.pem")
+        #expect(record.maxProcessMemory == "16G")
+        #expect(record.prefixCacheEnabled == false)
+        #expect(record.defaultModel == "legacy-qwen")
+        #expect(record.modelsDir == "/legacy/models")
+        #expect(record.hfEndpoint == "https://legacy.hf.co")
+
+        // File should be renamed to .migrated
+        #expect(FileManager.default.fileExists(atPath: configURL.appendingPathExtension("migrated").path))
+    }
 }

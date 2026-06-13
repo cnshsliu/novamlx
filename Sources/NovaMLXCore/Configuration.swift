@@ -70,29 +70,30 @@ public actor NovaMLXConfiguration {
         try fm.createDirectory(at: _modelsDirectory, withIntermediateDirectories: true)
     }
 
-    public func loadFromFile(_ url: URL) throws {
-        let data = try Data(contentsOf: url)
-        let config = try JSONDecoder().decode(PersistedConfig.self, from: data)
-        _serverConfig = config.server
-        _defaultModel = config.defaultModel
-        if let modelsDir = config.modelsDirectory {
-            _modelsDirectory = URL(fileURLWithPath: modelsDir)
-        }
-        _huggingfaceEndpoint = config.huggingfaceEndpoint
-        syncToStore()  // Bridge: shadow-write to DB after JSON load
-    }
-
-    public func saveToFile(_ url: URL) throws {
-        let config = PersistedConfig(
+    /// Serialize current state to the same JSON shape config.json used.
+    /// Used by `/admin/api/config` GET to preserve API compatibility.
+    public func serializedConfigJSON() throws -> Data {
+        let persisted = PersistedConfig(
             server: _serverConfig,
             defaultModel: _defaultModel,
             modelsDirectory: _modelsDirectory.path,
             huggingfaceEndpoint: _huggingfaceEndpoint,
             language: nil
         )
-        let data = try JSONEncoder().encode(config)
-        try data.write(to: url, options: .atomic)
-        syncToStore()  // Bridge: shadow-write to DB after JSON save
+        return try JSONEncoder().encode(persisted)
+    }
+
+    /// Apply a PersistedConfig-shaped JSON blob to current state and persist
+    /// to the SQLite store. Used by `/admin/api/config` PUT.
+    public func applySerializedConfigJSON(_ data: Data) throws {
+        let persisted = try JSONDecoder().decode(PersistedConfig.self, from: data)
+        _serverConfig = persisted.server
+        _defaultModel = persisted.defaultModel
+        if let dir = persisted.modelsDirectory, !dir.isEmpty {
+            _modelsDirectory = URL(fileURLWithPath: dir)
+        }
+        _huggingfaceEndpoint = persisted.huggingfaceEndpoint
+        syncToStore()
     }
 
     /// Bridge Phase: shadow-write current state into the SQLite configStore.
@@ -163,16 +164,26 @@ public actor NovaMLXConfiguration {
         if let dir = record.modelsDir, !dir.isEmpty { _modelsDirectory = URL(fileURLWithPath: dir) }
         if !record.hfEndpoint.isEmpty { _huggingfaceEndpoint = record.hfEndpoint }
     }
-
-    public var configFileURL: URL {
-        NovaMLXPaths.configFile
-    }
 }
 
-private struct PersistedConfig: Codable {
-    let server: ServerConfig
-    let defaultModel: String?
-    let modelsDirectory: String?
-    let huggingfaceEndpoint: String?
-    let language: String?
+public struct PersistedConfig: Codable, Sendable {
+    public let server: ServerConfig
+    public let defaultModel: String?
+    public let modelsDirectory: String?
+    public let huggingfaceEndpoint: String?
+    public let language: String?
+
+    public init(
+        server: ServerConfig,
+        defaultModel: String?,
+        modelsDirectory: String?,
+        huggingfaceEndpoint: String?,
+        language: String?
+    ) {
+        self.server = server
+        self.defaultModel = defaultModel
+        self.modelsDirectory = modelsDirectory
+        self.huggingfaceEndpoint = huggingfaceEndpoint
+        self.language = language
+    }
 }
