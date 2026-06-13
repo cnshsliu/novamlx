@@ -5,16 +5,40 @@ import Foundation
 
 public struct ModelRegistryRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "model_registry"
-    var modelId: String
-    var family: String?
-    var modelType: String?
-    var source: String?
-    var localPath: String?
-    var remoteUrl: String?
-    var sizeBytes: Int64?
-    var downloadedAt: Date?
-    var version: String?
-    var architecture: String?
+    public var modelId: String
+    public var family: String?
+    public var modelType: String?
+    public var source: String?
+    public var localPath: String?
+    public var remoteUrl: String?
+    public var sizeBytes: Int64?
+    public var downloadedAt: Date?
+    public var version: String?
+    public var architecture: String?
+
+    public init(
+        modelId: String,
+        family: String? = nil,
+        modelType: String? = nil,
+        source: String? = nil,
+        localPath: String? = nil,
+        remoteUrl: String? = nil,
+        sizeBytes: Int64? = nil,
+        downloadedAt: Date? = nil,
+        version: String? = nil,
+        architecture: String? = nil
+    ) {
+        self.modelId = modelId
+        self.family = family
+        self.modelType = modelType
+        self.source = source
+        self.localPath = localPath
+        self.remoteUrl = remoteUrl
+        self.sizeBytes = sizeBytes
+        self.downloadedAt = downloadedAt
+        self.version = version
+        self.architecture = architecture
+    }
 
     enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
@@ -35,8 +59,13 @@ extension ModelRegistryRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct LoadedModelRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "loaded_models"
-    var modelId: String
-    var loadedAt: Date
+    public var modelId: String
+    public var loadedAt: Date
+
+    public init(modelId: String, loadedAt: Date = Date()) {
+        self.modelId = modelId
+        self.loadedAt = loadedAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case modelId = "model_id"

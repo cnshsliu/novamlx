@@ -1,5 +1,6 @@
 import Foundation
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXUtils
 import Logging
 import Hub
@@ -549,13 +550,62 @@ public final class ModelManager: @unchecked Sendable {
     }
 
     private func loadRegistry() {
-        guard let data = try? Data(contentsOf: registryFile),
-              let decoded = try? JSONDecoder().decode([String: ModelRecord].self, from: data) else { return }
-        lock.withLock { _registry = decoded }
+        // SQLite is the source of truth (Phase D4). The legacy JSON file at
+        // <modelsDir>/registry.json is imported once below on first run; after
+        // that, the file is renamed to .migrated and we never read it again.
+        importLegacyRegistryJSONIfNeeded()
+        if let stored = try? NovaDB.shared.modelRegistryStore.listAsRegistry() {
+            lock.withLock { _registry = stored }
+        }
     }
 
     private func saveRegistry() {
-        let data = lock.withLock { (try? JSONEncoder().encode(_registry)) ?? Data() }
-        try? data.write(to: registryFile, options: .atomic)
+        let snapshot = lock.withLock { _registry }
+        for (_, record) in snapshot {
+            try? NovaDB.shared.modelRegistryStore.upsertRecord(record, modelsDirectory: modelsDirectory)
+        }
+    }
+
+    /// One-shot import of `<modelsDir>/registry.json` into the SQLite store.
+    /// Idempotent: if the store already has rows, the file is left alone;
+    /// otherwise we parse, upsert, and rename to .migrated.
+    private func importLegacyRegistryJSONIfNeeded() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: registryFile.path) else { return }
+
+        // Skip if store already populated — SQLite is source of truth.
+        if let existing = try? NovaDB.shared.modelRegistryStore.list(), !existing.isEmpty {
+            return
+        }
+
+        guard let data = try? Data(contentsOf: registryFile),
+              let decoded = try? JSONDecoder().decode([String: ModelRecord].self, from: data) else {
+            NovaMLXLog.warning("[ModelManager] Failed to parse legacy registry.json; leaving file in place")
+            return
+        }
+
+        // Local URLs in the legacy file may point at an old directory; rewrite
+        // them to the current modelsDirectory before persisting so we don't
+        // carry stale paths into SQLite.
+        for (id, var record) in decoded {
+            if !record.localURL.path.hasPrefix(modelsDirectory.path) {
+                record = ModelRecord(
+                    id: record.id, family: record.family, modelType: record.modelType,
+                    source: record.source,
+                    localURL: modelsDirectory.appendingPathComponent(id.sanitized, isDirectory: true),
+                    remoteURL: record.remoteURL, sizeBytes: record.sizeBytes,
+                    downloadedAt: record.downloadedAt, version: record.version
+                )
+            }
+            try? NovaDB.shared.modelRegistryStore.upsertRecord(record, modelsDirectory: modelsDirectory)
+        }
+        NovaMLXLog.info("[ModelManager] Imported \(decoded.count) entries from legacy registry.json")
+
+        let migrated = registryFile.appendingPathExtension("migrated")
+        if fm.fileExists(atPath: migrated.path) {
+            try? fm.removeItem(at: registryFile)
+        } else {
+            try? fm.moveItem(at: registryFile, to: migrated)
+        }
     }
 }
