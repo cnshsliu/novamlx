@@ -31,4 +31,16 @@ public final class WorkerDeploymentStore: Sendable {
             try WorkerDeploymentRecord.deleteOne(db, key: hostname)
         }
     }
+
+    /// Atomically replace every row with the provided snapshot. Used by
+    /// the cutover path that holds an in-memory cache and writes the full
+    /// picture back to disk on each mutation.
+    public func replaceAll(_ records: [WorkerDeploymentRecord]) throws {
+        try db.write { db in
+            try WorkerDeploymentRecord.deleteAll(db)
+            for record in records {
+                try record.save(db)
+            }
+        }
+    }
 }

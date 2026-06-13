@@ -110,13 +110,31 @@ extension MetricsRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct WorkerDeploymentRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "worker_deployments"
-    var hostname: String
-    var phase: String
-    var username: String?
-    var version: String?
-    var startedAt: Date?
-    var updatedAt: Date?
-    var extraJson: String?
+    public var hostname: String
+    public var phase: String
+    public var username: String?
+    public var version: String?
+    public var startedAt: Date?
+    public var updatedAt: Date?
+    public var extraJson: String?
+
+    public init(
+        hostname: String,
+        phase: String,
+        username: String? = nil,
+        version: String? = nil,
+        startedAt: Date? = nil,
+        updatedAt: Date? = nil,
+        extraJson: String? = nil
+    ) {
+        self.hostname = hostname
+        self.phase = phase
+        self.username = username
+        self.version = version
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.extraJson = extraJson
+    }
 
     enum CodingKeys: String, CodingKey {
         case hostname, phase, username, version

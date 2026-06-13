@@ -1,5 +1,6 @@
 import Foundation
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXUtils
 
 // MARK: - Deploy Types
@@ -455,15 +456,50 @@ public final class WorkerDeployer: @unchecked Sendable {
 
     public func saveDeployments() throws {
         let snapshot = queue.sync { _deployments.filter { $0.key != "__global__" } }
-        let data = try JSONEncoder().encode(snapshot)
-        try data.write(to: deploymentsFile, options: .atomic)
+        try NovaDB.shared.workerDeploymentStore.replaceAllDeployments(snapshot)
     }
 
     public func loadDeployments() {
+        // One-shot import of the legacy JSON file. Done before reading the
+        // store so we never lose data on the first run after cutover.
+        importLegacyDeploymentsJSONIfNeeded()
+        if let stored = try? NovaDB.shared.workerDeploymentStore.listAsDeployments() {
+            queue.sync { _deployments.merge(stored) { _, new in new } }
+        }
+    }
+
+    /// One-shot import of `~/.nova/worker-deployments.json` into the store.
+    /// Idempotent: skipped when the store already has rows; on success the
+    /// file is renamed to `.migrated` so we never run again.
+    private func importLegacyDeploymentsJSONIfNeeded() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: deploymentsFile.path) else { return }
+
+        // Skip if store already populated — SQLite is source of truth.
+        if let existing = try? NovaDB.shared.workerDeploymentStore.list(), !existing.isEmpty {
+            return
+        }
+
         guard let data = try? Data(contentsOf: deploymentsFile),
-              let decoded = try? JSONDecoder().decode([String: WorkerDeployment].self, from: data)
-        else { return }
-        queue.sync { _deployments.merge(decoded) { _, new in new } }
+              let decoded = try? JSONDecoder().decode([String: WorkerDeployment].self, from: data) else {
+            NovaMLXLog.warning("[WorkerDeployer] Failed to parse legacy worker-deployments.json; leaving file in place")
+            return
+        }
+        let filtered = decoded.filter { $0.key != "__global__" }
+        do {
+            try NovaDB.shared.workerDeploymentStore.replaceAllDeployments(filtered)
+            NovaMLXLog.info("[WorkerDeployer] Imported \(filtered.count) deployments from legacy JSON")
+        } catch {
+            NovaMLXLog.error("[WorkerDeployer] Failed to import legacy deployments: \(error.localizedDescription)")
+            return
+        }
+
+        let migrated = deploymentsFile.appendingPathExtension("migrated")
+        if fm.fileExists(atPath: migrated.path) {
+            try? fm.removeItem(at: deploymentsFile)
+        } else {
+            try? fm.moveItem(at: deploymentsFile, to: migrated)
+        }
     }
 
     // MARK: - Helpers

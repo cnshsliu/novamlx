@@ -193,6 +193,7 @@ let package = Package(
             name: "NovaMLXDistributed",
             dependencies: [
                 "NovaMLXCore",
+                "NovaMLXDB",
                 "NovaMLXUtils",
                 "NovaMLXEngine",
                 .product(name: "MLX", package: "mlx-swift"),
