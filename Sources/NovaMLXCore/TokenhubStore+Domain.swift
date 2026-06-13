@@ -31,10 +31,9 @@ extension TokenhubStore {
     }
 
     /// Replace the entire provider set atomically: delete rows not in `providers`,
-    /// upsert the rest. Used by TokenhubManager.syncToStore during the Bridge
-    /// phase so the SQLite shadow stays in lock-step with the authoritative
-    /// JSON file. The whole replacement runs in a single GRDB write
-    /// transaction so a partial failure cannot leave the store half-migrated.
+    /// upsert the rest. Used by TokenhubManager.saveAll post-C3 cutover — SQLite
+    /// is the sole source of truth. The whole replacement runs in a single GRDB
+    /// write transaction so a partial failure cannot leave the store half-migrated.
     public func replaceAll(with providers: [TokenhubProvider]) throws {
         let desiredNames = Set(providers.map { $0.name })
         let existing = try list().map { $0.name }

@@ -106,8 +106,8 @@ struct TokenhubStoreTests {
         #expect(fetched?.contextWindowOverride == 32768)
     }
 
-    @Test("TokenhubManager.syncToStore shadows providers to SQLite", .serialized)
-    func syncToStoreRoundTrip() async throws {
+    @Test("tokenhubStore upsert + get round-trips domain provider", .serialized)
+    func domainProviderRoundTrip() async throws {
         let tmp = try makeTmpDir()
         let nova = NovaDB.shared
         try nova.setup(baseDir: tmp)
@@ -185,5 +185,56 @@ struct TokenhubStoreTests {
 
         let kept = try nova.tokenhubStore.getProvider(name: "Keep")
         #expect(kept?.remoteModel == "k-model-updated")
+    }
+
+    @Test("Legacy providers.json is imported into tokenhubStore on first run", .serialized)
+    func legacyProvidersImport() async throws {
+        let tmp = try makeTmpDir()
+        let providersDir = tmp.appendingPathComponent("tokenhub", isDirectory: true)
+        try FileManager.default.createDirectory(at: providersDir, withIntermediateDirectories: true)
+
+        let providersURL = providersDir.appendingPathComponent("providers.json")
+        let legacyJSON = """
+        [
+            {
+                "id": "legacy-1",
+                "name": "Legacy Provider",
+                "endpoint": "https://legacy.example.com",
+                "apiKey": "legacy-key",
+                "remoteModel": "legacy-model",
+                "isEnabled": true,
+                "includeInLoadBalance": true,
+                "tags": ["legacy", "test"],
+                "isLocal": false,
+                "isFree": true,
+                "isManaged": false,
+                "supportsResponsesAPI": true,
+                "supportsVision": false,
+                "requestCount": 100,
+                "successCount": 95,
+                "avgLatencyMs": 120.5,
+                "contextWindowOverride": 32768
+            }
+        ]
+        """
+        try legacyJSON.write(to: providersURL, atomically: true, encoding: .utf8)
+
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        let fetched = try nova.tokenhubStore.getProvider(name: "Legacy Provider")
+        #expect(fetched?.id == "legacy-1")
+        #expect(fetched?.endpoint == "https://legacy.example.com")
+        #expect(fetched?.apiKey == "legacy-key")
+        #expect(fetched?.remoteModel == "legacy-model")
+        #expect(fetched?.tags == ["legacy", "test"])
+        #expect(fetched?.isFree == true)
+        #expect(fetched?.supportsResponsesAPI == true)
+        #expect(fetched?.requestCount == 100)
+        #expect(fetched?.successCount == 95)
+        #expect(fetched?.avgLatencyMs == 120.5)
+        #expect(fetched?.contextWindowOverride == 32768)
+
+        #expect(FileManager.default.fileExists(atPath: providersURL.appendingPathExtension("migrated").path))
     }
 }

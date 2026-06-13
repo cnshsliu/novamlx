@@ -111,23 +111,8 @@ public final class TokenhubManager: @unchecked Sendable {
 
     private let log = Logger(subsystem: "com.novamlx", category: "Tokenhub")
     private let lock = NSLock()
-    private let fileURL: URL
-    private let encoder: JSONEncoder = {
-        let e = JSONEncoder()
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        e.dateEncodingStrategy = .iso8601
-        return e
-    }()
-    private let decoder: JSONDecoder = {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
-        return d
-    }()
 
-    private init(fileURL: URL = NovaMLXPaths.tokenhubProvidersFile) {
-        self.fileURL = fileURL
-        ensureDirectory()
-    }
+    private init() {}
 
     // MARK: - CRUD
 
@@ -251,17 +236,13 @@ public final class TokenhubManager: @unchecked Sendable {
         return disabled
     }
 
-    /// Load tknet.ai API Key from Settings config file.
-    /// Returns nil if not configured or on error.
+    /// Load tknet.ai API Key from the SQLite ConfigStore. Post-Phase-B
+    /// cutover: config.json is no longer the source of truth.
+    /// Returns nil if not configured.
     public func loadTknetApiKeyFromSettings() -> String? {
-        let configPath = NovaMLXPaths.configFile
-        guard let data = try? Data(contentsOf: configPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tknetConfig = json["tknet"] as? [String: Any],
-              let apiKey = tknetConfig["apiKey"] as? String else {
-            return nil
-        }
-        return apiKey
+        guard let record = try? NovaDB.shared.configStore.get(),
+              let key = record.tknetApiKey, !key.isEmpty else { return nil }
+        return key
     }
 
     /// Check if user has valid tknet.ai API Key configured in Settings.
@@ -361,28 +342,13 @@ public final class TokenhubManager: @unchecked Sendable {
         log.info("[Tokenhub] Provisioned \(remoteModels.count) nova providers, removed \(removed) stale")
     }
 
-    /// Save tknet.ai API Key to config file.
-    /// Creates/updates tknet.apiKey in the config JSON.
+    /// Save tknet.ai API Key to the SQLite ConfigStore. Post-Phase-B cutover:
+    /// config.json is no longer the source of truth.
     public func saveTknetApiKey(_ apiKey: String) throws {
-        let configPath = NovaMLXPaths.configFile
-
-        // Load existing config or create new
-        var config: [String: Any] = [:]
-        if let data = try? Data(contentsOf: configPath),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            config = json
+        try NovaDB.shared.configStore.update { rec in
+            rec.tknetApiKey = apiKey
         }
-
-        // Update tknet section
-        var tknetConfig = config["tknet"] as? [String: Any] ?? [:]
-        tknetConfig["apiKey"] = apiKey
-        config["tknet"] = tknetConfig
-
-        // Save back to file
-        let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: configPath, options: .atomic)
-
-        log.info("[Tokenhub] Saved tknet.ai API Key to config")
+        log.info("[Tokenhub] Saved tknet.ai API Key to ConfigStore")
     }
 
     /// Clear tknet.ai configuration: remove managed nova providers and tknet config.
@@ -402,15 +368,11 @@ public final class TokenhubManager: @unchecked Sendable {
             log.info("[Tokenhub] Removed \(removed) nova-managed providers")
         }
 
-        // Clear tknet config from file
-        let configPath = NovaMLXPaths.configFile
-        if let data = try? Data(contentsOf: configPath),
-           var config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            config.removeValue(forKey: "tknet")
-            let newData = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
-            try newData.write(to: configPath, options: .atomic)
-            log.info("[Tokenhub] Cleared tknet.ai config from settings")
+        // Clear tknet config from the SQLite ConfigStore
+        try? NovaDB.shared.configStore.update { rec in
+            rec.tknetApiKey = nil
         }
+        log.info("[Tokenhub] Cleared tknet.ai config from ConfigStore")
     }
 
     /// Remove all managed providers (on unsubscribe/logout).
@@ -539,57 +501,21 @@ public final class TokenhubManager: @unchecked Sendable {
     // MARK: - Private
 
     private func loadAll() -> [TokenhubProvider] {
-        guard let data = try? Data(contentsOf: fileURL) else { return [] }
-        return (try? decoder.decode([TokenhubProvider].self, from: data)) ?? []
+        (try? NovaDB.shared.tokenhubStore.listAsProviders()) ?? []
     }
 
     private func saveAll(_ providers: [TokenhubProvider]) throws {
-        let data = try encoder.encode(providers)
-        try data.write(to: fileURL, options: .atomic)
-        // Bridge: shadow-write to SQLite. JSON stays authoritative; the DB is
-        // a validated shadow that the C3 cutover will flip to primary. A DB
-        // failure here is tolerated so a SQLite issue cannot break the
-        // primary JSON code path.
-        do {
-            try NovaDB.shared.tokenhubStore.replaceAll(with: providers)
-        } catch {
-            log.warning("[Tokenhub] DB shadow-write failed (Bridge tolerated): \(String(describing: error))")
-        }
+        // Cutover: SQLite is the sole source of truth. JSON file is no longer
+        // written. Legacy providers.json is auto-imported by NovaDB on first run.
+        try NovaDB.shared.tokenhubStore.replaceAll(with: providers)
     }
 
-    // MARK: - DB Sync (Bridge Phase)
-
-    /// Shadow-write current in-memory provider list into the SQLite store.
-    /// JSON remains authoritative; the DB is a validated shadow that the C3
-    /// cutover will flip to primary. Errors are tolerated via try? so a DB
-    /// issue does not break the primary JSON code path.
-    public func syncToStore() {
-        let providers = loadAll()
-        do {
-            try NovaDB.shared.tokenhubStore.replaceAll(with: providers)
-        } catch {
-            log.warning("[Tokenhub] syncToStore failed (Bridge tolerated): \(String(describing: error))")
-        }
-    }
-
-    /// Read providers from the SQLite store. Used by the C3 cutover. Throws
-    /// on DB errors so the caller can decide policy.
-    public func loadFromStore() throws -> [TokenhubProvider] {
-        try NovaDB.shared.tokenhubStore.listAsProviders()
-    }
+    // MARK: - Private helpers
 
     /// Subscription check for use inside an already-acquired lock.
     private func isSubscribedLocked(all: [TokenhubProvider]) -> Bool {
         if let cache = AuthCache.load(), !cache.isExpired, cache.valid { return true }
         return false
-    }
-
-    private func ensureDirectory() {
-        let dir = fileURL.deletingLastPathComponent()
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: dir.path) {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
     }
 }
 

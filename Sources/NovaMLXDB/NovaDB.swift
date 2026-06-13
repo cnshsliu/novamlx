@@ -193,9 +193,76 @@ public final class NovaDB: @unchecked Sendable {
             }
         }
 
-        // Phase 2+: model settings, tokenhub providers, model registry,
-        // loaded models, metrics, chat history, worker deployments, auth, cluster policy
-        // will be imported here once their stores replace the old JSON code paths.
+        // providers.json — Phase C, TokenhubManager is wired to tokenhubStore
+        try maybeImportLegacy(
+            file: baseDir.appendingPathComponent("tokenhub/providers.json"),
+            tableName: "tokenhub_providers",
+            into: configDB
+        ) { data in
+            struct LegacyProvider: Decodable {
+                let id: String?
+                let name: String
+                let endpoint: String
+                let apiKey: String?
+                let remoteModel: String?
+                let isEnabled: Bool?
+                let includeInLoadBalance: Bool?
+                let tags: [String]?
+                let isLocal: Bool?
+                let isFree: Bool?
+                let isManaged: Bool?
+                let supportsResponsesAPI: Bool?
+                let supportsVision: Bool?
+                let visionStrategy: String?
+                let anthropicEndpoint: String?
+                let visionCompanionModel: String?
+                let requestCount: Int?
+                let successCount: Int?
+                let avgLatencyMs: Double?
+                let lastTestedAt: Date?
+                let lastStatus: String?
+                let contextWindowOverride: Int?
+            }
+            guard let parsed = try? JSONDecoder().decode([LegacyProvider].self, from: data) else { return }
+            try self.configDB.write { db in
+                for p in parsed {
+                    var record = TokenhubProviderRecord(
+                        name: p.name,
+                        endpoint: p.endpoint,
+                        apiKey: p.apiKey?.isEmpty == false ? p.apiKey : nil,
+                        remoteModel: p.remoteModel?.isEmpty == false ? p.remoteModel : nil,
+                        isEnabled: p.isEnabled ?? true,
+                        isManaged: p.isManaged ?? false,
+                        loadBalanceWeight: (p.includeInLoadBalance ?? true) ? 1.0 : 0.0,
+                        totalRequests: Int64(p.requestCount ?? 0),
+                        totalTokens: 0,
+                        avgLatencyMs: p.avgLatencyMs,
+                        lastUsedAt: p.lastTestedAt,
+                        extraConfig: nil
+                    )
+                    record.providerId = p.id
+                    record.includeInLoadBalance = p.includeInLoadBalance ?? true
+                    record.tags = (p.tags ?? []).isEmpty ? nil : (try? String(data: JSONEncoder().encode(p.tags), encoding: .utf8))
+                    record.isLocal = p.isLocal ?? false
+                    record.isFree = p.isFree ?? false
+                    record.supportsResponsesAPI = p.supportsResponsesAPI ?? false
+                    record.supportsVision = p.supportsVision ?? false
+                    record.visionStrategy = p.visionStrategy
+                    record.anthropicEndpoint = p.anthropicEndpoint
+                    record.visionCompanionModel = p.visionCompanionModel
+                    record.requestCount = p.requestCount ?? 0
+                    record.successCount = p.successCount ?? 0
+                    record.lastTestedAt = p.lastTestedAt
+                    record.lastStatus = p.lastStatus
+                    record.contextWindowOverride = p.contextWindowOverride
+                    try record.save(db)
+                }
+            }
+        }
+
+        // Phase 2+: model settings, model registry, loaded models, metrics,
+        // chat history, worker deployments, auth, cluster policy will be imported
+        // here once their stores replace the old JSON code paths.
 
         log.info("[NovaDB] Legacy JSON import complete")
     }
