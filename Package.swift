@@ -136,6 +136,7 @@ let package = Package(
             name: "NovaMLXModelManager",
             dependencies: [
                 "NovaMLXCore",
+                "NovaMLXDB",
                 "NovaMLXUtils",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Hub", package: "swift-transformers"),

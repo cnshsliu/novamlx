@@ -222,15 +222,37 @@ extension APIKeyRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct ModelSettingsRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "model_settings"
-    var modelId: String
-    var alias: String?
-    var isDefault: Bool
-    var isPinned: Bool
-    var samplingParams: String? // JSON
-    var ttlSeconds: Int?
-    var contextWindow: Int?
-    var draftModel: String?
-    var updatedAt: Date?
+    public var modelId: String
+    public var alias: String?
+    public var isDefault: Bool
+    public var isPinned: Bool
+    public var samplingParams: String? // JSON
+    public var ttlSeconds: Int?
+    public var contextWindow: Int?
+    public var draftModel: String?
+    public var updatedAt: Date?
+
+    public init(
+        modelId: String,
+        alias: String? = nil,
+        isDefault: Bool = false,
+        isPinned: Bool = false,
+        samplingParams: String? = nil,
+        ttlSeconds: Int? = nil,
+        contextWindow: Int? = nil,
+        draftModel: String? = nil,
+        updatedAt: Date? = nil
+    ) {
+        self.modelId = modelId
+        self.alias = alias
+        self.isDefault = isDefault
+        self.isPinned = isPinned
+        self.samplingParams = samplingParams
+        self.ttlSeconds = ttlSeconds
+        self.contextWindow = contextWindow
+        self.draftModel = draftModel
+        self.updatedAt = updatedAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case modelId = "model_id"

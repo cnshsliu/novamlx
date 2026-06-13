@@ -279,6 +279,12 @@ public final class NovaDB: @unchecked Sendable {
             }
         }
 
+        // model_settings.json — Phase D2
+        // Importer lives in ModelSettingsManager (NovaMLXModelManager) where the
+        // ModelSettings domain type is visible. NovaMLXDB cannot import
+        // NovaMLXCore without creating a circular dependency, so this table's
+        // legacy import is handled by the manager on first init.
+
         log.info("[NovaDB] Legacy JSON import complete")
     }
 
