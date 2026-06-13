@@ -78,7 +78,7 @@ public final class APIKeyStore: Sendable {
     }
 
     public func delete(id: String) throws {
-        try db.write { db in
+        _ = try db.write { db in
             try APIKeyRecord.deleteOne(db, key: id)
         }
         log.info("[APIKeyStore] Deleted key \(id)")
