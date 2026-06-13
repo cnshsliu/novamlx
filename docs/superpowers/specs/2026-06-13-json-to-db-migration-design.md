@@ -27,9 +27,10 @@ This duality has already caused real bugs: the API key "reveal" eye icon calls `
 
 **Pattern:** Direct store calls — no facade, no bridge layer in `NovaMLXConfiguration`.
 
-- UI and API server code calls `NovaDB.shared.<store>.<method>()` directly.
-- The existing `NovaMLXConfiguration` actor either gets deleted entirely (if all it does is JSON I/O) or thinned to a pure runtime state container (if it holds non-persistent state like the loaded inference engine).
-- Every method whose name reflects JSON-era semantics (`loadAPIKeys`, `saveAPIKeys`, `loadFromFile`, `saveToFile`, `findAPIKeyByRaw`, `recordUsage` on the actor, etc.) is removed. Equivalent operations move to stores.
+- Final state: UI and API server code calls `NovaDB.shared.<store>.<method>()` directly.
+- The existing `NovaMLXConfiguration` actor **gets deleted entirely** at the Final Cleanup phase. It currently holds only JSON-backed state (`_modelsDirectory`, `_serverConfig`, `_defaultModel`, `_huggingfaceEndpoint`, `_apiKeys`). After migration all of this lives in `configStore` / `apiKeyStore`; callers query the stores directly, no actor wrapper needed.
+- During the per-file Bridge and Cutover phases, `NovaMLXConfiguration` survives temporarily as the facade while each subsystem is migrated in turn. It is removed only at Final Cleanup.
+- Every method whose name reflects JSON-era semantics (`loadAPIKeys`, `saveAPIKeys`, `loadFromFile`, `saveToFile`, `findAPIKeyByRaw`, `recordUsage` on the actor, etc.) is removed when its host file reaches Phase 2 or 3.
 
 **Domain types:** Keep current public types (`APIKey`, `TokenhubProvider`, `ModelSettings`, `Modelfile`, etc.) as the API surface that stores return. Stores internally use `*Record` types and convert at the boundary. This avoids forcing every callsite to learn a new type, while keeping persistence details inside `NovaMLXDB`.
 
@@ -40,8 +41,8 @@ Each file follows the same three-phase pattern. Each phase is a discrete commit 
 ### Phase 1 — Bridge
 - Store becomes writable. `importLegacyJSON` importer for this file is wired (if not already) and runs on next startup, copying JSON data into the SQLite table.
 - JSON file is **still written** (dual-write) so any code still on the legacy path doesn't lose data.
-- All readers are switched to read from the store.
-- After this phase: DB is source of truth for reads; JSON is a write-only mirror kept as a safety net.
+- All read callsites for this file are switched to query the store instead of decoding JSON.
+- After this phase: DB is source of truth for reads; JSON file receives writes but is read by no one (kept as safety net + rollback buffer).
 
 ### Phase 2 — Cutover
 - Remove dual-write. All writers (UI save handlers, API endpoints, background savers) switch to store writes only.
@@ -94,12 +95,12 @@ This is the pilot. The pattern established here repeats for the other 11.
 - Add a `listAsAPIKey()` method to `APIKeyStore` that returns `[APIKey]` (converting from `APIKeyRecord`) so UI/API code can keep using the `APIKey` domain type.
 - Add `findAPIKeyByRawToken(_ raw: String) -> APIKey?` (hashes input, calls existing `findByHash`, converts to `APIKey`).
 
-**Readers switched:**
-- `NovaMLXConfiguration.apiKeys` getter → `NovaDB.shared.apiKeyStore.listAsAPIKey()`
-- `NovaMLXConfiguration.findAPIKeyByRaw(_:)` → `NovaDB.shared.apiKeyStore.findAPIKeyByRawToken(_:)`
-- `NovaMLXConfiguration.findAPIKeyById(_:)` → `NovaDB.shared.apiKeyStore.get(id:).map { record → APIKey }`
-- `NovaMLXConfiguration.isWithinLimits(keyId:)` / `periodUsageFraction(keyId:)` → query `apiKeyStore.get(id:)` and compute from record fields.
-- All external callsites (UI, API server) keep calling `NovaMLXConfiguration.*` for now — facade still works during Bridge phase.
+**Readers switched (internal to facade):**
+- `NovaMLXConfiguration.apiKeys` getter internally calls `NovaDB.shared.apiKeyStore.listAsAPIKey()`.
+- `NovaMLXConfiguration.findAPIKeyByRaw(_:)` internally calls `NovaDB.shared.apiKeyStore.findAPIKeyByRawToken(_:)`.
+- `NovaMLXConfiguration.findAPIKeyById(_:)` internally calls `NovaDB.shared.apiKeyStore.get(id:)` and converts to `APIKey`.
+- `NovaMLXConfiguration.isWithinLimits(keyId:)` / `periodUsageFraction(keyId:)` query `apiKeyStore.get(id:)` and compute from record fields.
+- External callsites still call `NovaMLXConfiguration.*` (unchanged) — this is the Bridge phase, the facade survives.
 
 **Dual-write:**
 - `createAPIKey`, `updateAPIKey`, `deleteAPIKey`, `rotateAPIKey`, `recordUsage` continue to write JSON (legacy). Additionally call the equivalent store method to write to DB.
@@ -129,14 +130,21 @@ This is the pilot. The pattern established here repeats for the other 11.
 After Phase 3 of file #12 completes:
 
 1. **Physically delete** all `~/.nova/*.json.migrated` files.
-2. **Delete `Sources/NovaMLXCore/Configuration.swift`** entirely if it's now empty; otherwise delete just the JSON-related parts and keep whatever runtime-state container remains.
+2. **Delete `Sources/NovaMLXCore/Configuration.swift` entirely.** After all 12 migrations, no state remains that isn't in a store. Move any residual non-persistent runtime helpers (e.g. `initializeDirectories`) to a more appropriate location if still needed, then delete the file.
 3. **Delete `NovaMLXPaths.apiKeysFile`**, `NovaMLXPaths.configFile`, `NovaMLXPaths.tokenhubProvidersFile`, `NovaMLXPaths.sessionFile`, `NovaMLXPaths.authCacheFile`, `NovaMLXPaths.loadedModelsFile`, `NovaMLXPaths.chatHistoryDir`, `NovaMLXPaths.metricsFile`, and any other path constants that point to JSON config files.
 4. **Delete `importLegacyJSON`** and all its helpers from `NovaDB.swift`.
 5. **Delete `migrateFile`** helper.
-6. **Delete the legacy JSON-shape types** (`LegacyAPIKeyImport`, `LegacyChatRecord`, etc.) once importers are gone.
-7. **Grep the entire `Sources/` for `.json"` path references and `File(contentsOf:)` / `data.write(to:)` patterns** to catch any remaining leaks. Review each one — keep only model-asset / user-content reads.
+6. **Delete the legacy JSON-shape types** (`LegacyAPIKeyImport`, `LegacyChatRecord`, `PersistedConfig`, etc.) once importers are gone.
+7. **Delete `Sources/NovaMLXCore/TokenhubTypes.swift`'s `TokenhubProviderStore`** legacy file-I/O methods (replaced by `tokenhubStore`).
+8. **Delete `Sources/NovaMLXUtils/MetricsStore.swift`** (legacy JSON class).
+9. **Delete `Sources/NovaMLXAPI/ChatHistoryStore.swift`** (replaced by `chatStore`).
+10. **Delete `Sources/NovaMLXCore/ModelfileManager.swift`** (replaced by `modelfileStore`).
+11. **Grep the entire `Sources/` for `.json"` path references and `File(contentsOf:)` / `data.write(to:)` patterns** to catch any remaining leaks. Review each one — keep only model-asset / user-content reads.
 
-**Acceptance criterion:** `rg -n "\.json\b" Sources/ | grep -v "\.build/" | grep -v "Model\|model\|asset\|template\|voice\|session"` returns nothing config-related.
+**Acceptance criteria:**
+- `rg -n "NovaMLXConfiguration" Sources/ | grep -v "\.build/"` returns zero hits.
+- `rg -n "\.json\b" Sources/ | grep -v "\.build/" | grep -vE "(model|asset|template|voice|session|chat_template|tokenizer|adapter|generation|config\.json|registry\.json)" | grep -vE "/(models|voices|sessions|templates|prefix_cache)/"` returns nothing.
+- App boots clean, all stores have data, no errors in `~/.nova/novamlx.log`.
 
 ## Special-Case Handling
 
