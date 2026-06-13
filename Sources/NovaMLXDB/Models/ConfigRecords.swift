@@ -251,18 +251,100 @@ extension ModelSettingsRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "tokenhub_providers"
-    var name: String
-    var endpoint: String
-    var apiKey: String?
-    var remoteModel: String?
-    var isEnabled: Bool
-    var isManaged: Bool
-    var loadBalanceWeight: Double
-    var totalRequests: Int64
-    var totalTokens: Int64
-    var avgLatencyMs: Double?
-    var lastUsedAt: Date?
-    var extraConfig: String?
+    public var name: String
+    public var endpoint: String
+    public var apiKey: String?
+    public var remoteModel: String?
+    public var isEnabled: Bool
+    public var isManaged: Bool
+    public var loadBalanceWeight: Double
+    public var totalRequests: Int64
+    public var totalTokens: Int64
+    public var avgLatencyMs: Double?
+    public var lastUsedAt: Date?
+    public var extraConfig: String?
+    // v2 tokenhub expand: fields that bring this record to parity with the
+    // JSON-shape `TokenhubProvider` struct (Sources/NovaMLXCore/TokenhubTypes.swift).
+    // Non-optional fields carry defaults so the synthesized memberwise init
+    // only requires the original v1 args; existing call sites keep compiling.
+    public var providerId: String? = nil
+    public var includeInLoadBalance: Bool = true
+    public var tags: String? = nil
+    public var isLocal: Bool = false
+    public var isFree: Bool = false
+    public var supportsResponsesAPI: Bool = false
+    public var supportsVision: Bool = false
+    public var visionStrategy: String? = nil
+    public var anthropicEndpoint: String? = nil
+    public var visionCompanionModel: String? = nil
+    public var requestCount: Int = 0
+    public var successCount: Int = 0
+    public var lastTestedAt: Date? = nil
+    public var lastStatus: String? = nil
+    public var contextWindowOverride: Int? = nil
+
+    /// Explicit public memberwise initializer (Swift does not synthesize
+    /// public inits for public structs). Only the original v1 args are
+    /// required; v2 fields all carry defaults so existing v1-era call sites
+    /// keep compiling. Callers wanting v2 values assign them post-construction
+    /// (e.g. `var rec = TokenhubProviderRecord(...); rec.tags = "[...]"`).
+    public init(
+        name: String,
+        endpoint: String,
+        apiKey: String? = nil,
+        remoteModel: String? = nil,
+        isEnabled: Bool = true,
+        isManaged: Bool = false,
+        loadBalanceWeight: Double = 1.0,
+        totalRequests: Int64 = 0,
+        totalTokens: Int64 = 0,
+        avgLatencyMs: Double? = nil,
+        lastUsedAt: Date? = nil,
+        extraConfig: String? = nil,
+        providerId: String? = nil,
+        includeInLoadBalance: Bool = true,
+        tags: String? = nil,
+        isLocal: Bool = false,
+        isFree: Bool = false,
+        supportsResponsesAPI: Bool = false,
+        supportsVision: Bool = false,
+        visionStrategy: String? = nil,
+        anthropicEndpoint: String? = nil,
+        visionCompanionModel: String? = nil,
+        requestCount: Int = 0,
+        successCount: Int = 0,
+        lastTestedAt: Date? = nil,
+        lastStatus: String? = nil,
+        contextWindowOverride: Int? = nil
+    ) {
+        self.name = name
+        self.endpoint = endpoint
+        self.apiKey = apiKey
+        self.remoteModel = remoteModel
+        self.isEnabled = isEnabled
+        self.isManaged = isManaged
+        self.loadBalanceWeight = loadBalanceWeight
+        self.totalRequests = totalRequests
+        self.totalTokens = totalTokens
+        self.avgLatencyMs = avgLatencyMs
+        self.lastUsedAt = lastUsedAt
+        self.extraConfig = extraConfig
+        self.providerId = providerId
+        self.includeInLoadBalance = includeInLoadBalance
+        self.tags = tags
+        self.isLocal = isLocal
+        self.isFree = isFree
+        self.supportsResponsesAPI = supportsResponsesAPI
+        self.supportsVision = supportsVision
+        self.visionStrategy = visionStrategy
+        self.anthropicEndpoint = anthropicEndpoint
+        self.visionCompanionModel = visionCompanionModel
+        self.requestCount = requestCount
+        self.successCount = successCount
+        self.lastTestedAt = lastTestedAt
+        self.lastStatus = lastStatus
+        self.contextWindowOverride = contextWindowOverride
+    }
 
     enum CodingKeys: String, CodingKey {
         case name, endpoint
@@ -276,6 +358,21 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
         case avgLatencyMs = "avg_latency_ms"
         case lastUsedAt = "last_used_at"
         case extraConfig = "extra_config"
+        case providerId = "provider_id"
+        case includeInLoadBalance = "include_in_load_balance"
+        case tags
+        case isLocal = "is_local"
+        case isFree = "is_free"
+        case supportsResponsesAPI = "supports_responses_api"
+        case supportsVision = "supports_vision"
+        case visionStrategy = "vision_strategy"
+        case anthropicEndpoint = "anthropic_endpoint"
+        case visionCompanionModel = "vision_companion_model"
+        case requestCount = "request_count"
+        case successCount = "success_count"
+        case lastTestedAt = "last_tested_at"
+        case lastStatus = "last_status"
+        case contextWindowOverride = "context_window_override"
     }
 }
 

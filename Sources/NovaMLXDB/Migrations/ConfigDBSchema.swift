@@ -119,4 +119,30 @@ enum ConfigDBSchema {
             t.add(column: "prefix_cache_enabled", .boolean).notNull().defaults(to: true)
         }
     }
+
+    /// Brings `tokenhub_providers` to parity with the JSON-shape
+    /// `TokenhubProvider` struct (Sources/NovaMLXCore/TokenhubTypes.swift).
+    /// Adds 15 new columns; existing v1 columns stay (some become deprecated
+    /// but remain for back-compat — Final Cleanup will drop them once C2-C4
+    /// finish). NOT NULL columns backfill with sensible defaults so existing
+    /// v1 rows upgrade cleanly.
+    static func v2ExpandTokenhubColumns(in db: Database) throws {
+        try db.alter(table: "tokenhub_providers") { t in
+            t.add(column: "provider_id", .text)
+            t.add(column: "include_in_load_balance", .boolean).notNull().defaults(to: true)
+            t.add(column: "tags", .text)
+            t.add(column: "is_local", .boolean).notNull().defaults(to: false)
+            t.add(column: "is_free", .boolean).notNull().defaults(to: false)
+            t.add(column: "supports_responses_api", .boolean).notNull().defaults(to: false)
+            t.add(column: "supports_vision", .boolean).notNull().defaults(to: false)
+            t.add(column: "vision_strategy", .text)
+            t.add(column: "anthropic_endpoint", .text)
+            t.add(column: "vision_companion_model", .text)
+            t.add(column: "request_count", .integer).notNull().defaults(to: 0)
+            t.add(column: "success_count", .integer).notNull().defaults(to: 0)
+            t.add(column: "last_tested_at", .datetime)
+            t.add(column: "last_status", .text)
+            t.add(column: "context_window_override", .integer)
+        }
+    }
 }
