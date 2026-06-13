@@ -47,7 +47,7 @@ public final class NovaDB: @unchecked Sendable {
             log.info("[NovaDB] Opened databases at \(baseDir.path)")
 
             try runMigrations()
-            try initStores()
+            initStores()
             try importLegacyJSON(baseDir: baseDir)
         }
     }
@@ -89,8 +89,6 @@ public final class NovaDB: @unchecked Sendable {
     // renamed to .migrated, breaking the old code path that still reads it.
 
     private func importLegacyJSON(baseDir: URL) throws {
-        let fm = FileManager.default
-
         // API keys — Phase 1, store is wired for plaintext display
         try maybeImportLegacy(
             file: baseDir.appendingPathComponent("api_keys.json"),
@@ -102,7 +100,7 @@ public final class NovaDB: @unchecked Sendable {
             if let keys = try? decoder.decode([LegacyAPIKeyImport].self, from: data) {
                 try self.configDB.write { db in
                     for key in keys {
-                        var record = APIKeyRecord(
+                        let record = APIKeyRecord(
                             id: key.id,
                             name: key.name,
                             keyHash: key.keyHash,
@@ -180,7 +178,7 @@ public final class NovaDB: @unchecked Sendable {
     private func importChatHistory(_ data: Data) throws {
         if let record = try? JSONDecoder().decode(LegacyChatRecord.self, from: data) {
             try dataDB.write { db in
-                var chat = ChatRecord(
+                let chat = ChatRecord(
                     id: record.id,
                     title: record.title,
                     model: record.model,
@@ -191,7 +189,7 @@ public final class NovaDB: @unchecked Sendable {
                 try chat.insert(db, onConflict: .ignore)
 
                 for (idx, msg) in record.messages.enumerated() {
-                    var message = ChatMessageRecord(
+                    let message = ChatMessageRecord(
                         id: msg.id ?? UUID().uuidString,
                         chatId: record.id,
                         role: msg.role,
