@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXUtils
 import NovaMLXEngine
 
@@ -13,8 +14,12 @@ struct NovaMLXWorker {
         let writer = LineWriter()
 
         // Workers read prefix-cache kill switch from the SQLite configStore.
+        // The worker process owns no other DB consumer, so we open the same
+        // ~/.nova SQLite files the host app uses (read-only access would be a
+        // future improvement; for now the worker is a trusted child process).
         // Legacy config.json is auto-imported by NovaDB.setup on first run.
         do {
+            try NovaDB.shared.setup(baseDir: NovaMLXPaths.baseDir)
             try await NovaMLXConfiguration.shared.loadFromStore()
             let cfg = await NovaMLXConfiguration.shared.serverConfig
             engine.setPrefixCacheEnabled(cfg.prefixCacheEnabled)
