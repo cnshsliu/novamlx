@@ -454,15 +454,37 @@ extension ModelfileRecord: FetchableRecord, MutablePersistableRecord {
 
 public struct AuthSessionRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "auth_session"
-    var id: Int = 1
-    var sessionToken: String
-    var authValid: Bool?
-    var authPlan: String?
-    var authStatus: String?
-    var authCancelAtPeriodEnd: Bool?
-    var authExpiresAt: Date?
-    var authCachedAt: Date?
-    var userEmail: String?
+    public var id: Int = 1
+    public var sessionToken: String
+    public var authValid: Bool?
+    public var authPlan: String?
+    public var authStatus: String?
+    public var authCancelAtPeriodEnd: Bool?
+    public var authExpiresAt: Date?
+    public var authCachedAt: Date?
+    public var userEmail: String?
+
+    public init(
+        id: Int = 1,
+        sessionToken: String,
+        authValid: Bool? = nil,
+        authPlan: String? = nil,
+        authStatus: String? = nil,
+        authCancelAtPeriodEnd: Bool? = nil,
+        authExpiresAt: Date? = nil,
+        authCachedAt: Date? = nil,
+        userEmail: String? = nil
+    ) {
+        self.id = id
+        self.sessionToken = sessionToken
+        self.authValid = authValid
+        self.authPlan = authPlan
+        self.authStatus = authStatus
+        self.authCancelAtPeriodEnd = authCancelAtPeriodEnd
+        self.authExpiresAt = authExpiresAt
+        self.authCachedAt = authCachedAt
+        self.userEmail = userEmail
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -483,9 +505,15 @@ extension AuthSessionRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct ClusterPolicyRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "cluster_policy"
-    var id: Int = 1
-    var policyJSON: String
-    var updatedAt: Date?
+    public var id: Int = 1
+    public var policyJSON: String
+    public var updatedAt: Date?
+
+    public init(id: Int = 1, policyJSON: String, updatedAt: Date? = nil) {
+        self.id = id
+        self.policyJSON = policyJSON
+        self.updatedAt = updatedAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case id

@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXDB
 import os.log
 
 // MARK: - Auth Client
@@ -181,35 +182,107 @@ public struct AuthCache: Codable, Sendable {
     }
 
     public static func loadSession() -> String? {
-        try? String(contentsOf: NovaMLXPaths.sessionFile, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.importLegacyAuthFilesIfNeeded()
+        let record: AuthSessionRecord?
+        do { record = try NovaDB.shared.authStore.getSession() } catch { return nil }
+        let token = record?.sessionToken ?? ""
+        return token.isEmpty ? nil : token
     }
 
     public static func saveSession(_ token: String) throws {
-        let dir = NovaMLXPaths.sessionFile.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try token.write(to: NovaMLXPaths.sessionFile, atomically: true, encoding: .utf8)
-        // Set file permission to 600 (owner read/write only)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: NovaMLXPaths.sessionFile.path
-        )
+        try NovaDB.shared.authStore.saveSession(token: token)
     }
 
     public static func load() -> AuthCache? {
-        guard let data = try? Data(contentsOf: NovaMLXPaths.authCacheFile) else { return nil }
-        return try? JSONDecoder().decode(AuthCache.self, from: data)
+        Self.importLegacyAuthFilesIfNeeded()
+        let record: AuthSessionRecord?
+        do { record = try NovaDB.shared.authStore.getSession() } catch { return nil }
+        guard let record, record.authValid != nil else { return nil }
+        let cachedAt = record.authCachedAt ?? Date()
+        return AuthCache(
+            valid: record.authValid ?? false,
+            plan: record.authPlan ?? "free",
+            status: record.authStatus ?? "inactive",
+            cancelAtPeriodEnd: record.authCancelAtPeriodEnd ?? false,
+            expiresAt: record.authExpiresAt.map { Self.formatISO8601($0) },
+            cachedAt: cachedAt.timeIntervalSince1970,
+            userEmail: record.userEmail ?? ""
+        )
     }
 
     public func save() throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(self)
-        try data.write(to: NovaMLXPaths.authCacheFile, options: .atomic)
+        let expiresDate = expiresAt.flatMap { Self.parseISO8601($0) }
+        try NovaDB.shared.authStore.saveAuthCache(
+            valid: valid,
+            plan: plan,
+            status: status,
+            cancelAtPeriodEnd: cancelAtPeriodEnd,
+            expiresAt: expiresDate,
+            cachedAt: Date(timeIntervalSince1970: cachedAt),
+            userEmail: userEmail
+        )
     }
 
     public static func clearAll() {
-        try? FileManager.default.removeItem(at: NovaMLXPaths.authCacheFile)
-        try? FileManager.default.removeItem(at: NovaMLXPaths.sessionFile)
+        try? NovaDB.shared.authStore.clear()
+    }
+
+    /// ISO8601 parse + format strategy. Sendable so it's safe to hold in a
+    /// static let. AuthCache.expiresAt is a server-provided ISO string; we
+    /// round-trip it through this style when persisting to/from SQLite.
+    private static let iso8601 = Date.ISO8601FormatStyle()
+
+    private static func parseISO8601(_ s: String) -> Date? {
+        try? Date(s, strategy: iso8601)
+    }
+
+    private static func formatISO8601(_ d: Date) -> String {
+        d.formatted(iso8601)
+    }
+
+    /// One-shot import of the legacy `~/.nova/session` + `~/.nova/auth_cache.json`
+    /// pair into authStore. Idempotent: skipped if the store already has a row
+    /// with a non-empty token; otherwise we read the files (if present),
+    /// upsert them as a single auth_session row, and rename both files to
+    /// `.migrated` so we never run again.
+    private static func importLegacyAuthFilesIfNeeded() {
+        let existing: AuthSessionRecord?
+        do { existing = try NovaDB.shared.authStore.getSession() } catch { return }
+        let token = existing?.sessionToken ?? ""
+        guard token.isEmpty else {
+            // Store already populated — leave any legacy files alone.
+            return
+        }
+
+        let fm = FileManager.default
+        let sessionToken = (try? String(contentsOf: NovaMLXPaths.sessionFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cache: AuthCache? = {
+            guard let data = try? Data(contentsOf: NovaMLXPaths.authCacheFile) else { return nil }
+            return try? JSONDecoder().decode(AuthCache.self, from: data)
+        }()
+
+        // Only persist if we have something to import.
+        guard !sessionToken.isEmpty || cache != nil else { return }
+
+        // Always ensure a row exists with the token, then layer cache fields on top.
+        if !sessionToken.isEmpty {
+            try? NovaDB.shared.authStore.saveSession(token: sessionToken)
+        }
+        if let cache {
+            try? cache.save()
+        }
+
+        // Rename legacy files to .migrated so the import never runs again.
+        for file in [NovaMLXPaths.sessionFile, NovaMLXPaths.authCacheFile] {
+            guard fm.fileExists(atPath: file.path) else { continue }
+            let migrated = file.appendingPathExtension("migrated")
+            if fm.fileExists(atPath: migrated.path) {
+                try? fm.removeItem(at: file)
+            } else {
+                try? fm.moveItem(at: file, to: migrated)
+            }
+        }
     }
 }
 
