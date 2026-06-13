@@ -180,4 +180,20 @@ struct APIKeyStoreTests {
         let domain = try store.getAsAPIKey(id: record.id)
         #expect(domain?.usageResetPeriod == .daily)
     }
+
+    @Test("malformed JSON string fields decode to nil/empty without throwing")
+    func malformedJSONFieldsDegradeGracefully() throws {
+        let store = try makeStore()
+        let (record, _) = try store.create(name: "malformed-test")
+        try store.update(id: record.id) { rec in
+            rec.allowedModels = "{not valid json"
+            rec.allowedEndpoints = ""
+            rec.perModelTokens = "<<<broken>>>"
+        }
+        let domain = try store.getAsAPIKey(id: record.id)
+        #expect(domain != nil)
+        #expect(domain?.allowedModels == nil)
+        #expect(domain?.allowedEndpoints == nil)
+        #expect(domain?.usage.perModelTokens == [:])
+    }
 }

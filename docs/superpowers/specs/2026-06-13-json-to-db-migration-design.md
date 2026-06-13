@@ -106,7 +106,7 @@ This is the pilot. The pattern established here repeats for the other 11.
 - `createAPIKey`, `updateAPIKey`, `deleteAPIKey`, `rotateAPIKey`, `recordUsage` continue to write JSON (legacy). Additionally call the equivalent store method to write to DB.
 
 **Legacy-key reveal handling:**
-- `APIKey` gets a computed `isLegacyImport: Bool` (true when rawKey equals the placeholder-zero pattern, or when rawKey is nil).
+- `APIKey` gets a computed `isLegacyImport: Bool` (true when rawKey equals the placeholder-zero pattern). The `raw_key` column is `NOT NULL` so the nil case is impossible at the type level.
 - `APIKeysPageView.swift:141` eye button: `if key.isLegacyImport { disable button; tooltip = "Pre-DB key — rotate to enable reveal" } else { reveal as before }`.
 
 ### Phase 2 — Cutover
