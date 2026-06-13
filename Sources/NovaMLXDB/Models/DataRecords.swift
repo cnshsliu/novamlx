@@ -79,16 +79,53 @@ extension LoadedModelRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct MetricsRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "metrics"
-    var id: Int = 1
-    var totalRequests: Int64
-    var totalTokens: Int64
-    var totalInferenceTimeMs: Int64
-    var cacheHits: Int64
-    var cacheMisses: Int64
-    var evictions: Int64
-    var perModelStats: String?
-    var perModelCache: String?
-    var updatedAt: Date?
+    public var id: Int = 1
+    public var totalRequests: Int64
+    public var totalTokens: Int64
+    public var totalInferenceTimeMs: Int64
+    public var cacheHits: Int64
+    public var cacheMisses: Int64
+    public var evictions: Int64
+    public var perModelStats: String?
+    public var perModelCache: String?
+    public var updatedAt: Date?
+    // v2 expand: 4 columns added to match PersistentMetrics exactly.
+    public var modelsLoaded: Int64 = 0
+    public var modelsUnloaded: Int64 = 0
+    public var ttlEvictions: Int64 = 0
+    public var memoryPressureEvictions: Int64 = 0
+
+    public init(
+        id: Int = 1,
+        totalRequests: Int64,
+        totalTokens: Int64,
+        totalInferenceTimeMs: Int64,
+        cacheHits: Int64,
+        cacheMisses: Int64,
+        evictions: Int64,
+        perModelStats: String? = "{}",
+        perModelCache: String? = "{}",
+        updatedAt: Date? = nil,
+        modelsLoaded: Int64 = 0,
+        modelsUnloaded: Int64 = 0,
+        ttlEvictions: Int64 = 0,
+        memoryPressureEvictions: Int64 = 0
+    ) {
+        self.id = id
+        self.totalRequests = totalRequests
+        self.totalTokens = totalTokens
+        self.totalInferenceTimeMs = totalInferenceTimeMs
+        self.cacheHits = cacheHits
+        self.cacheMisses = cacheMisses
+        self.evictions = evictions
+        self.perModelStats = perModelStats
+        self.perModelCache = perModelCache
+        self.updatedAt = updatedAt
+        self.modelsLoaded = modelsLoaded
+        self.modelsUnloaded = modelsUnloaded
+        self.ttlEvictions = ttlEvictions
+        self.memoryPressureEvictions = memoryPressureEvictions
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -101,6 +138,10 @@ public struct MetricsRecord: Codable, Sendable, PersistableRecord {
         case perModelStats = "per_model_stats"
         case perModelCache = "per_model_cache"
         case updatedAt = "updated_at"
+        case modelsLoaded = "models_loaded"
+        case modelsUnloaded = "models_unloaded"
+        case ttlEvictions = "ttl_evictions"
+        case memoryPressureEvictions = "memory_pressure_evictions"
     }
 }
 

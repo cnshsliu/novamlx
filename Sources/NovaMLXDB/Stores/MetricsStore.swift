@@ -50,6 +50,56 @@ public final class MetricsDBStore: Sendable {
         }
     }
 
+    /// Atomically apply a full PersistentMetrics snapshot. Used by the
+    /// MetricsStore cutover path that holds an in-memory cache and writes
+    /// the full picture back to disk on a debounced save tick.
+    public func replaceAll(_ snapshot: MetricsRecord) throws {
+        try db.write { db in
+            var record = snapshot
+            record.id = 1
+            record.updatedAt = Date()
+            try record.save(db)
+        }
+    }
+
+    public func incrementModelLoad(_ delta: Int64 = 1) throws {
+        try db.write { db in
+            var record = try MetricsRecord.fetchOne(db, key: 1) ?? MetricsRecord(
+                totalRequests: 0, totalTokens: 0, totalInferenceTimeMs: 0,
+                cacheHits: 0, cacheMisses: 0, evictions: 0
+            )
+            record.modelsLoaded += delta
+            record.updatedAt = Date()
+            try record.save(db)
+        }
+    }
+
+    public func incrementModelUnload(_ delta: Int64 = 1) throws {
+        try db.write { db in
+            var record = try MetricsRecord.fetchOne(db, key: 1) ?? MetricsRecord(
+                totalRequests: 0, totalTokens: 0, totalInferenceTimeMs: 0,
+                cacheHits: 0, cacheMisses: 0, evictions: 0
+            )
+            record.modelsUnloaded += delta
+            record.updatedAt = Date()
+            try record.save(db)
+        }
+    }
+
+    public func incrementEviction(ttl: Bool = false, memoryPressure: Bool = false) throws {
+        try db.write { db in
+            var record = try MetricsRecord.fetchOne(db, key: 1) ?? MetricsRecord(
+                totalRequests: 0, totalTokens: 0, totalInferenceTimeMs: 0,
+                cacheHits: 0, cacheMisses: 0, evictions: 0
+            )
+            record.evictions += 1
+            if ttl { record.ttlEvictions += 1 }
+            if memoryPressure { record.memoryPressureEvictions += 1 }
+            record.updatedAt = Date()
+            try record.save(db)
+        }
+    }
+
     public func reset() throws {
         try db.write { db in
             var record = try MetricsRecord.fetchOne(db, key: 1) ?? MetricsRecord(
@@ -62,6 +112,10 @@ public final class MetricsDBStore: Sendable {
             record.cacheHits = 0
             record.cacheMisses = 0
             record.evictions = 0
+            record.modelsLoaded = 0
+            record.modelsUnloaded = 0
+            record.ttlEvictions = 0
+            record.memoryPressureEvictions = 0
             record.perModelStats = "{}"
             record.perModelCache = "{}"
             record.updatedAt = Date()

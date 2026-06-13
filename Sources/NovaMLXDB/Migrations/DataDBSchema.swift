@@ -75,4 +75,16 @@ enum DataDBSchema {
                 """)
         }
     }
+
+    /// Brings `metrics` to parity with `PersistentMetrics`
+    /// (Sources/NovaMLXUtils/MetricsStore.swift). Adds four columns the v1
+    /// schema was missing; defaults to 0 so existing rows upgrade cleanly.
+    static func v2ExpandMetricsColumns(in db: Database) throws {
+        try db.alter(table: "metrics") { t in
+            t.add(column: "models_loaded", .integer).notNull().defaults(to: 0)
+            t.add(column: "models_unloaded", .integer).notNull().defaults(to: 0)
+            t.add(column: "ttl_evictions", .integer).notNull().defaults(to: 0)
+            t.add(column: "memory_pressure_evictions", .integer).notNull().defaults(to: 0)
+        }
+    }
 }

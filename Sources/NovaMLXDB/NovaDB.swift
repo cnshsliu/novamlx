@@ -73,6 +73,9 @@ public final class NovaDB: @unchecked Sendable {
         dataMigrator.registerMigration("v1_data_schema") { db in
             try DataDBSchema.v1.createAll(in: db)
         }
+        dataMigrator.registerMigration("v2_expand_metrics_columns") { db in
+            try DataDBSchema.v2ExpandMetricsColumns(in: db)
+        }
         try dataMigrator.migrate(dataDB)
         log.info("[NovaDB] Data DB migrations complete")
     }
