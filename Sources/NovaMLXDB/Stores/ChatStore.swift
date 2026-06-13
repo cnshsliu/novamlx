@@ -89,4 +89,37 @@ public final class ChatStore: Sendable {
             try ChatRecord.fetchCount(db)
         }
     }
+
+    /// Insert (or replace) a chat record and its messages atomically.
+    /// Used by the legacy JSON importer and the cutover ChatHistoryStore.save.
+    public func upsertChat(_ chat: ChatRecord, messages: [ChatMessageRecord]) throws {
+        try db.write { db in
+            try chat.save(db)
+            // Remove existing messages for this chat before reinserting so
+            // the operation is a true replace (idempotent on retry).
+            _ = try ChatMessageRecord
+                .filter(Column("chat_id") == chat.id)
+                .deleteAll(db)
+            for msg in messages {
+                try msg.insert(db)
+            }
+        }
+    }
+
+    /// All chats ordered by updated_at desc (no pagination).
+    public func listAll() throws -> [ChatRecord] {
+        try db.read { db in
+            try ChatRecord.order(Column("updated_at").desc).fetchAll(db)
+        }
+    }
+
+    /// All messages for a chat, ordered by sort_order.
+    public func messages(chatId: String) throws -> [ChatMessageRecord] {
+        try db.read { db in
+            try ChatMessageRecord
+                .filter(Column("chat_id") == chatId)
+                .order(Column("sort_order"))
+                .fetchAll(db)
+        }
+    }
 }

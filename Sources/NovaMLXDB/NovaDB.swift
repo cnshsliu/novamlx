@@ -327,35 +327,6 @@ public final class NovaDB: @unchecked Sendable {
         }
         try fm.moveItem(at: originalURL, to: migratedURL)
     }
-
-    private func importChatHistory(_ data: Data) throws {
-        if let record = try? JSONDecoder().decode(LegacyChatRecord.self, from: data) {
-            try dataDB.write { db in
-                let chat = ChatRecord(
-                    id: record.id,
-                    title: record.title,
-                    model: record.model,
-                    systemPrompt: record.systemPrompt,
-                    createdAt: record.createdAt,
-                    updatedAt: record.updatedAt
-                )
-                try chat.insert(db, onConflict: .ignore)
-
-                for (idx, msg) in record.messages.enumerated() {
-                    let message = ChatMessageRecord(
-                        id: msg.id ?? UUID().uuidString,
-                        chatId: record.id,
-                        role: msg.role,
-                        content: msg.content,
-                        thinkingContent: msg.thinkingContent,
-                        createdAt: msg.createdAt,
-                        sortOrder: idx
-                    )
-                    try message.insert(db, onConflict: .ignore)
-                }
-            }
-        }
-    }
 }
 
 private func encodeJSON<T: Encodable>(_ value: T?) -> String? {

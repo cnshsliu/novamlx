@@ -132,12 +132,28 @@ extension WorkerDeploymentRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct ChatRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "chats"
-    var id: String
-    var title: String?
-    var model: String
-    var systemPrompt: String?
-    var createdAt: Date
-    var updatedAt: Date
+    public var id: String
+    public var title: String?
+    public var model: String
+    public var systemPrompt: String?
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(
+        id: String,
+        title: String? = nil,
+        model: String,
+        systemPrompt: String? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.model = model
+        self.systemPrompt = systemPrompt
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt ?? createdAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, title, model
@@ -153,13 +169,31 @@ extension ChatRecord: FetchableRecord, MutablePersistableRecord {}
 
 public struct ChatMessageRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "chat_messages"
-    var id: String
-    var chatId: String
-    var role: String
-    var content: String?
-    var thinkingContent: String?
-    var createdAt: Date
-    var sortOrder: Int
+    public var id: String
+    public var chatId: String
+    public var role: String
+    public var content: String?
+    public var thinkingContent: String?
+    public var createdAt: Date
+    public var sortOrder: Int
+
+    public init(
+        id: String,
+        chatId: String,
+        role: String,
+        content: String? = nil,
+        thinkingContent: String? = nil,
+        createdAt: Date = Date(),
+        sortOrder: Int = 0
+    ) {
+        self.id = id
+        self.chatId = chatId
+        self.role = role
+        self.content = content
+        self.thinkingContent = thinkingContent
+        self.createdAt = createdAt
+        self.sortOrder = sortOrder
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
