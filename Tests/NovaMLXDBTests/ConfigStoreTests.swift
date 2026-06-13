@@ -55,4 +55,45 @@ struct ConfigStoreTests {
         #expect(fetched.maxProcessMemory == "12G")
         #expect(fetched.prefixCacheEnabled == false)
     }
+
+    @Test("Configuration.syncToStore round-trips through ConfigStore")
+    func syncToStoreRoundTrip() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        let config = NovaMLXConfiguration.shared
+        // Configure state directly via setters
+        await config.setServerConfig(ServerConfig(
+            host: "1.2.3.4", port: 7000, adminPort: 7001,
+            maxConcurrentRequests: 24, requestTimeout: 450,
+            contextScalingTarget: 4096,
+            tlsCertPath: "/tmp/cert.pem", tlsKeyPath: "/tmp/key.pem",
+            tlsKeyPassword: "secret",
+            maxRequestSizeMB: 150, maxProcessMemory: "8G",
+            prefixCacheEnabled: false
+        ))
+        await config.setDefaultModel("test-model")
+        await config.setHuggingfaceEndpoint("https://test.hf.co")
+        await config.setModelsDirectory(URL(fileURLWithPath: "/tmp/models"))
+
+        // Bridge: syncToStore pushes to configStore
+        await config.syncToStore()
+
+        // Verify by reading the store directly
+        let record = try nova.configStore.get()
+        #expect(record.host == "1.2.3.4")
+        #expect(record.port == 7000)
+        #expect(record.adminPort == 7001)
+        #expect(record.tlsEnabled == true)
+        #expect(record.tlsCertPath == "/tmp/cert.pem")
+        #expect(record.tlsKeyPassword == "secret")
+        #expect(record.maxConcurrentRequests == 24)
+        #expect(record.contextScalingTarget == 4096)
+        #expect(record.maxProcessMemory == "8G")
+        #expect(record.prefixCacheEnabled == false)
+        #expect(record.defaultModel == "test-model")
+        #expect(record.modelsDir == "/tmp/models")
+        #expect(record.hfEndpoint == "https://test.hf.co")
+    }
 }

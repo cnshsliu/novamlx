@@ -5,21 +5,21 @@ import Foundation
 
 public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     public static let databaseTableName = "config"
-    var id: Int = 1
-    var host: String
-    var port: Int
-    var adminPort: Int
-    var tlsEnabled: Bool
-    var tlsCertPath: String?
-    var tlsKeyPath: String?
-    var defaultModel: String?
-    var modelsDir: String?
-    var hfEndpoint: String
-    var authUrl: String?
-    var tknetApiKey: String?
-    var clusterConfig: String?
-    var autoLoad: String?
-    var logLevel: String?
+    public var id: Int = 1
+    public var host: String
+    public var port: Int
+    public var adminPort: Int
+    public var tlsEnabled: Bool
+    public var tlsCertPath: String?
+    public var tlsKeyPath: String?
+    public var defaultModel: String?
+    public var modelsDir: String?
+    public var hfEndpoint: String
+    public var authUrl: String?
+    public var tknetApiKey: String?
+    public var clusterConfig: String?
+    public var autoLoad: String?
+    public var logLevel: String?
     // v2: server fields that fully back ServerConfig (Types.swift).
     // Defaults satisfy memberwise init sites in ConfigStore without an
     // explicit init declaration.
@@ -30,6 +30,57 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     public var maxRequestSizeMB: Double = 100
     public var maxProcessMemory: String = "auto"
     public var prefixCacheEnabled: Bool = true
+
+    /// Explicit public memberwise initializer so cross-module callers
+    /// (NovaMLXCore/Configuration.swift) can construct records. The
+    /// synthesized memberwise init is internal-only for public structs.
+    public init(
+        id: Int = 1,
+        host: String,
+        port: Int,
+        adminPort: Int,
+        tlsEnabled: Bool,
+        tlsCertPath: String? = nil,
+        tlsKeyPath: String? = nil,
+        defaultModel: String? = nil,
+        modelsDir: String? = nil,
+        hfEndpoint: String,
+        authUrl: String? = nil,
+        tknetApiKey: String? = nil,
+        clusterConfig: String? = nil,
+        autoLoad: String? = nil,
+        logLevel: String? = nil,
+        maxConcurrentRequests: Int = 16,
+        requestTimeout: Double = 300,
+        contextScalingTarget: Int? = nil,
+        tlsKeyPassword: String? = nil,
+        maxRequestSizeMB: Double = 100,
+        maxProcessMemory: String = "auto",
+        prefixCacheEnabled: Bool = true
+    ) {
+        self.id = id
+        self.host = host
+        self.port = port
+        self.adminPort = adminPort
+        self.tlsEnabled = tlsEnabled
+        self.tlsCertPath = tlsCertPath
+        self.tlsKeyPath = tlsKeyPath
+        self.defaultModel = defaultModel
+        self.modelsDir = modelsDir
+        self.hfEndpoint = hfEndpoint
+        self.authUrl = authUrl
+        self.tknetApiKey = tknetApiKey
+        self.clusterConfig = clusterConfig
+        self.autoLoad = autoLoad
+        self.logLevel = logLevel
+        self.maxConcurrentRequests = maxConcurrentRequests
+        self.requestTimeout = requestTimeout
+        self.contextScalingTarget = contextScalingTarget
+        self.tlsKeyPassword = tlsKeyPassword
+        self.maxRequestSizeMB = maxRequestSizeMB
+        self.maxProcessMemory = maxProcessMemory
+        self.prefixCacheEnabled = prefixCacheEnabled
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, host, port
