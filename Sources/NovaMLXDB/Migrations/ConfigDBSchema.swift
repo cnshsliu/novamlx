@@ -104,4 +104,19 @@ enum ConfigDBSchema {
             }
         }
     }
+
+    /// Adds columns required to fully represent `ServerConfig` (see
+    /// Sources/NovaMLXCore/Types.swift). NOT NULL columns get defaults so
+    /// existing v1 rows upgrade cleanly.
+    static func v2AddServerFields(in db: Database) throws {
+        try db.alter(table: "config") { t in
+            t.add(column: "max_concurrent_requests", .integer).notNull().defaults(to: 16)
+            t.add(column: "request_timeout", .double).notNull().defaults(to: 300.0)
+            t.add(column: "context_scaling_target", .integer)
+            t.add(column: "tls_key_password", .text)
+            t.add(column: "max_request_size_mb", .double).notNull().defaults(to: 100.0)
+            t.add(column: "max_process_memory", .text).notNull().defaults(to: "auto")
+            t.add(column: "prefix_cache_enabled", .boolean).notNull().defaults(to: true)
+        }
+    }
 }

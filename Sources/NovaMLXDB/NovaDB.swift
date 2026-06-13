@@ -57,6 +57,9 @@ public final class NovaDB: @unchecked Sendable {
         configMigrator.registerMigration("v1_config_schema") { db in
             try ConfigDBSchema.v1.createAll(in: db)
         }
+        configMigrator.registerMigration("v2_config_add_server_fields") { db in
+            try ConfigDBSchema.v2AddServerFields(in: db)
+        }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")
 

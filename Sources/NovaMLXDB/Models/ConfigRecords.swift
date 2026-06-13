@@ -20,6 +20,16 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     var clusterConfig: String?
     var autoLoad: String?
     var logLevel: String?
+    // v2: server fields that fully back ServerConfig (Types.swift).
+    // Defaults satisfy memberwise init sites in ConfigStore without an
+    // explicit init declaration.
+    public var maxConcurrentRequests: Int = 16
+    public var requestTimeout: Double = 300
+    public var contextScalingTarget: Int? = nil
+    public var tlsKeyPassword: String? = nil
+    public var maxRequestSizeMB: Double = 100
+    public var maxProcessMemory: String = "auto"
+    public var prefixCacheEnabled: Bool = true
 
     enum CodingKeys: String, CodingKey {
         case id, host, port
@@ -35,6 +45,13 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         case clusterConfig = "cluster_config"
         case autoLoad = "auto_load"
         case logLevel = "log_level"
+        case maxConcurrentRequests = "max_concurrent_requests"
+        case requestTimeout = "request_timeout"
+        case contextScalingTarget = "context_scaling_target"
+        case tlsKeyPassword = "tls_key_password"
+        case maxRequestSizeMB = "max_request_size_mb"
+        case maxProcessMemory = "max_process_memory"
+        case prefixCacheEnabled = "prefix_cache_enabled"
     }
 }
 
