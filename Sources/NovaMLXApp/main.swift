@@ -65,7 +65,13 @@ struct NovaMLXApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = MenuBarAppState()
-    let engine = MLXEngine()
+    // Eagerly constructed, but kicks off NovaDB.shared.setup first so the
+    // MetricsStore init buried inside MLXEngine doesn't trap on a nil IUO.
+    // NovaDB.setup is idempotent; the explicit call in init() below is a no-op.
+    let engine: MLXEngine = {
+        try? NovaDB.shared.setup(baseDir: NovaMLXPaths.baseDir)
+        return MLXEngine()
+    }()
     let settingsManager: ModelSettingsManager
     let workerMode: Bool
 

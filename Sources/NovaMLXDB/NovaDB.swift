@@ -23,11 +23,20 @@ public final class NovaDB: @unchecked Sendable {
 
     private let log = Logger(label: "NovaMLXDB")
     private let queue = DispatchQueue(label: "com.novamlx.db.setup")
+    private var _isSetup = false
 
     private init() {}
 
+    /// Whether `setup(baseDir:)` has successfully completed at least once.
+    public var isSetup: Bool { queue.sync { _isSetup } }
+
+    /// Idempotent setup. Subsequent calls are no-ops (the existing DBs are
+    /// preserved). This lets eager property initializers in callers (e.g.
+    /// `MLXEngine` constructed as a stored property on AppDelegate) trigger
+    /// setup without coordinating with the init-body's explicit setup call.
     public func setup(baseDir: URL) throws {
         try queue.sync {
+            guard !_isSetup else { return }
             let fm = FileManager.default
             try fm.createDirectory(at: baseDir, withIntermediateDirectories: true)
 
@@ -49,6 +58,41 @@ public final class NovaDB: @unchecked Sendable {
             try runMigrations()
             initStores()
             try importLegacyJSON(baseDir: baseDir)
+            cleanupOrphanedLegacyFiles(baseDir: baseDir)
+            _isSetup = true
+        }
+    }
+
+    /// Rename any legacy JSON file that is still on disk but whose store
+    /// already has data (i.e. the import was skipped because the table had
+    /// rows from a prior run). This is the post-cutover cleanup pass — the
+    /// file is inert garbage and can be safely moved aside.
+    ///
+    /// Called after `importLegacyJSON`. Safe to call repeatedly.
+    private func cleanupOrphanedLegacyFiles(baseDir: URL) {
+        let fm = FileManager.default
+        // Only files NovaDB itself imports are safe to clean up here. Files
+        // owned by their manager (MetricsStore, ModelSettingsManager,
+        // AuthClient, WorkerDeployer, etc.) handle their own rename inside
+        // their importer; touching them here would race and lose data.
+        let novaDBOwned: [(file: String, table: String, db: DatabasePool)] = [
+            ("config.json", "config", configDB),
+            ("loaded_models.json", "loaded_models", dataDB),
+            ("cluster-policy.json", "cluster_policy", configDB)
+        ]
+        for entry in novaDBOwned {
+            let file = baseDir.appendingPathComponent(entry.file)
+            guard fm.fileExists(atPath: file.path) else { continue }
+            guard let count = try? entry.db.read({ db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(entry.table)")
+            }), count > 0 else { continue }
+            let migrated = file.appendingPathExtension("migrated")
+            if fm.fileExists(atPath: migrated.path) {
+                try? fm.removeItem(at: file)
+            } else {
+                try? fm.moveItem(at: file, to: migrated)
+            }
+            log.info("[NovaDB] Cleaned up orphan legacy file: \(entry.file)")
         }
     }
 

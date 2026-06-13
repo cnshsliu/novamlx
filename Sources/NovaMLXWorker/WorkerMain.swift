@@ -8,18 +8,27 @@ import NovaMLXEngine
 @main
 struct NovaMLXWorker {
     static func main() async {
-        let engine = MLXEngine()
-        let batcher = ContinuousBatcher(engine: engine, maxBatchSize: 8)
-        let fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
-        let writer = LineWriter()
-
         // Workers read prefix-cache kill switch from the SQLite configStore.
         // The worker process owns no other DB consumer, so we open the same
         // ~/.nova SQLite files the host app uses (read-only access would be a
         // future improvement; for now the worker is a trusted child process).
         // Legacy config.json is auto-imported by NovaDB.setup on first run.
+        //
+        // NovaDB MUST be set up BEFORE constructing MLXEngine — MetricsStore
+        // (created inside MLXEngine.init) reads from NovaDB.shared.metricsStore
+        // during its own init, and would otherwise trap on the nil IUO.
         do {
             try NovaDB.shared.setup(baseDir: NovaMLXPaths.baseDir)
+        } catch {
+            NovaMLXLog.warning("[Worker] failed to init NovaDB (\(error))")
+        }
+
+        let engine = MLXEngine()
+        let batcher = ContinuousBatcher(engine: engine, maxBatchSize: 8)
+        let fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
+        let writer = LineWriter()
+
+        do {
             try await NovaMLXConfiguration.shared.loadFromStore()
             let cfg = await NovaMLXConfiguration.shared.serverConfig
             engine.setPrefixCacheEnabled(cfg.prefixCacheEnabled)
