@@ -1,5 +1,6 @@
 import SwiftUI
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXModelManager
 import NovaMLXUtils
 
@@ -878,14 +879,18 @@ struct DownloadsPageView: View {
     }
 
     private func saveApiKeyAndRestart() {
-        let key = newApiKey.trimmingCharacters(in: .whitespaces)
-        guard !key.isEmpty else { return }
+        // Bootstrap flow: when no API key is configured, create a managed key
+        // in the SQLite store so internal UI→server calls can authenticate.
+        // The user-edited `newApiKey` text field is ignored — the store
+        // generates a cryptographically-random raw key. We surface that raw
+        // key via `appState.apiKey` for the local Bearer-token calls.
         isSavingApiKey = true
         Task {
             do {
-                let configFile = await NovaMLXConfiguration.shared.configFileURL
-                try await NovaMLXConfiguration.shared.updateApiKeys([key], file: configFile)
-                appState.apiKey = key
+                let (_, raw) = try NovaDB.shared.apiKeyStore.create(
+                    name: "Local UI (auto-created)"
+                )
+                appState.apiKey = raw
                 NotificationCenter.default.post(name: .restartNovaMLXServer, object: nil)
                 try? await Task.sleep(for: .milliseconds(500))
                 showApiKeyPrompt = false

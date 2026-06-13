@@ -805,7 +805,6 @@ public struct ServerConfig: Codable, Sendable {
     public let host: String
     public let port: Int
     public let adminPort: Int
-    public let apiKeys: [String]
     public let maxConcurrentRequests: Int
     public let requestTimeout: TimeInterval
     public let contextScalingTarget: Int?
@@ -847,7 +846,7 @@ public struct ServerConfig: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case host, port, adminPort, apiKeys, maxConcurrentRequests
+        case host, port, adminPort, maxConcurrentRequests
         case requestTimeout, contextScalingTarget
         case tlsCertPath, tlsKeyPath, tlsKeyPassword, maxRequestSizeMB
         case maxProcessMemory
@@ -860,7 +859,6 @@ public struct ServerConfig: Codable, Sendable {
         host: String = "127.0.0.1",
         port: Int = 6590,
         adminPort: Int = 6591,
-        apiKeys: [String] = [],
         maxConcurrentRequests: Int = 16,
         requestTimeout: TimeInterval = 300,
         contextScalingTarget: Int? = nil,
@@ -876,7 +874,6 @@ public struct ServerConfig: Codable, Sendable {
         self.host = host
         self.port = port
         self.adminPort = adminPort
-        self.apiKeys = apiKeys
         self.maxConcurrentRequests = maxConcurrentRequests
         self.requestTimeout = requestTimeout
         self.contextScalingTarget = contextScalingTarget
@@ -897,7 +894,6 @@ public struct ServerConfig: Codable, Sendable {
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 6590
         adminPort = try container.decodeIfPresent(Int.self, forKey: .adminPort) ?? 6591
-        apiKeys = try container.decodeIfPresent([String].self, forKey: .apiKeys) ?? []
         maxConcurrentRequests = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentRequests) ?? 16
         requestTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .requestTimeout) ?? 300
         contextScalingTarget = try container.decodeIfPresent(Int.self, forKey: .contextScalingTarget)

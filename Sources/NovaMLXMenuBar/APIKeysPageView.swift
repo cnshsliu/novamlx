@@ -146,10 +146,15 @@ struct APIKeysPageView: View {
                     } label: {
                         Image(systemName: revealedKeyIds.contains(key.id) ? "eye.slash" : "eye")
                             .font(.system(size: 9))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(key.isLegacyImport ? .secondary.opacity(0.4) : .secondary)
                     }
                     .buttonStyle(.plain)
-                    .help(revealedKeyIds.contains(key.id) ? "Hide key" : "Reveal plaintext key")
+                    .disabled(key.isLegacyImport)
+                    .help(revealedKeyIds.contains(key.id)
+                          ? "Hide key"
+                          : (key.isLegacyImport
+                             ? "Pre-DB key — rotate to enable reveal"
+                             : "Reveal plaintext key"))
                 }
 
                 Spacer()
@@ -505,15 +510,15 @@ struct APIKeysPageView: View {
         EditKeySheet(key: key, appState: appState, onSave: { updated in
             Task {
                 do {
-                    try await NovaMLXConfiguration.shared.updateAPIKey(id: key.id) { k in
-                        k.name = updated.name
-                        k.rateLimitPerSecond = updated.rateLimitPerSecond
-                        k.rateLimitBurst = updated.rateLimitBurst
-                        k.allowedModels = updated.allowedModels
-                        k.allowedEndpoints = updated.allowedEndpoints
-                        k.maxTokensPerPeriod = updated.maxTokensPerPeriod
-                        k.maxRequestsPerPeriod = updated.maxRequestsPerPeriod
-                        k.usageResetPeriod = updated.usageResetPeriod
+                    try NovaDB.shared.apiKeyStore.update(id: key.id) { rec in
+                        rec.name = updated.name
+                        rec.rateLimitPerSecond = updated.rateLimitPerSecond
+                        rec.rateLimitBurst = updated.rateLimitBurst
+                        rec.allowedModels = Self.encodeJSONField(updated.allowedModels)
+                        rec.allowedEndpoints = Self.encodeJSONField(updated.allowedEndpoints)
+                        rec.maxTokensPerPeriod = updated.maxTokensPerPeriod
+                        rec.maxRequestsPerPeriod = updated.maxRequestsPerPeriod
+                        rec.usageResetPeriod = updated.usageResetPeriod.rawValue
                     }
                     editingKey = nil
                     loadManagedKeys()
@@ -530,7 +535,7 @@ struct APIKeysPageView: View {
 
     private func loadManagedKeys() {
         Task {
-            managedKeys = await NovaMLXConfiguration.shared.apiKeys
+            managedKeys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
         }
     }
 
@@ -539,7 +544,7 @@ struct APIKeysPageView: View {
         guard !name.isEmpty else { return }
         Task {
             do {
-                let (_, raw) = try await NovaMLXConfiguration.shared.createAPIKey(
+                let (_, raw) = try NovaDB.shared.apiKeyStore.create(
                     name: name,
                     rateLimitPerSecond: newKeyRateLimit,
                     rateLimitBurst: newKeyRateBurst,
@@ -547,7 +552,7 @@ struct APIKeysPageView: View {
                     allowedEndpoints: newKeyAllowedEndpoints.isEmpty ? nil : newKeyAllowedEndpoints,
                     maxTokensPerPeriod: newKeyMaxTokens,
                     maxRequestsPerPeriod: newKeyMaxRequests,
-                    usageResetPeriod: newKeyResetPeriod
+                    usageResetPeriod: newKeyResetPeriod.rawValue
                 )
                 createdRawKey = raw
                 loadManagedKeys()
@@ -560,8 +565,8 @@ struct APIKeysPageView: View {
     private func toggleKey(_ id: String) {
         Task {
             do {
-                try await NovaMLXConfiguration.shared.updateAPIKey(id: id) { key in
-                    key.isEnabled.toggle()
+                try NovaDB.shared.apiKeyStore.update(id: id) { rec in
+                    rec.isEnabled.toggle()
                 }
                 loadManagedKeys()
             } catch {
@@ -573,7 +578,7 @@ struct APIKeysPageView: View {
     private func deleteKey(_ id: String) {
         Task {
             do {
-                try await NovaMLXConfiguration.shared.deleteAPIKey(id: id)
+                try NovaDB.shared.apiKeyStore.delete(id: id)
                 if expandedKeyId == id { expandedKeyId = nil }
                 showDeleteConfirm = nil
                 loadManagedKeys()
@@ -586,7 +591,7 @@ struct APIKeysPageView: View {
     private func rotateKey(_ id: String) {
         Task {
             do {
-                let (_, raw) = try await NovaMLXConfiguration.shared.rotateAPIKey(id: id)
+                let (_, raw) = try NovaDB.shared.apiKeyStore.rotate(id: id)
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(raw, forType: .string)
                 loadManagedKeys()
@@ -597,6 +602,15 @@ struct APIKeysPageView: View {
     }
 
     // MARK: - Helpers
+
+    /// JSON-encode an optional Encodable value into a String for the store's
+    /// JSON-string columns (`allowed_models`, `allowed_endpoints`). Returns nil
+    /// for nil input or encode failures — matching how the importer writes them.
+    private static func encodeJSONField<T: Encodable>(_ value: T?) -> String? {
+        guard let value else { return nil }
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
 
     private func shortMaskedKey(_ key: APIKey) -> String {
         if key.keySuffix.isEmpty {

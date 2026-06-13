@@ -277,10 +277,9 @@ struct APITypesTests {
         #expect(config.adminPort == 6591)
         #expect(config.port == 6590)
 
-        let custom = ServerConfig(port: 9090, adminPort: 9091, apiKeys: ["secret"])
+        let custom = ServerConfig(port: 9090, adminPort: 9091)
         #expect(custom.port == 9090)
         #expect(custom.adminPort == 9091)
-        #expect(custom.apiKeys == ["secret"])
     }
 
     @Test("Embedding input decoding from string")

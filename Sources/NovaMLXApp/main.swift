@@ -233,15 +233,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if FileManager.default.fileExists(atPath: configFile.path) {
                 do {
                     try await config.loadFromFile(configFile)
-                    let cfg = await config.serverConfig
-                    NovaMLXLog.info("Loaded config from \(configFile.path) (apiKeys: \(cfg.apiKeys.count))")
+                    let apiKeyCount = (try? NovaDB.shared.apiKeyStore.listAsAPIKey())?.count ?? 0
+                    NovaMLXLog.info("Loaded config from \(configFile.path) (apiKeys: \(apiKeyCount))")
                 } catch {
                     NovaMLXLog.error("Failed to load config: \(error)")
                 }
             }
 
-            // Load structured API keys (migrates from flat config if needed)
-            await config.loadAPIKeys()
+            // API keys now live in SQLite (NovaDB.apiKeyStore); no JSON load step.
 
             modelManager.registerPopularModels()
             modelManager.discoverModels()
@@ -273,7 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.isServerRunning = true
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
-            appState.apiKey = serverConfig.apiKeys.first
+            appState.apiKey = Self.firstRawAPIKey()
 
             NovaMLXLog.info("NovaMLX v\(NovaMLXCore.version) started")
 
@@ -429,9 +428,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
-            appState.apiKey = serverConfig.apiKeys.first
+            appState.apiKey = Self.firstRawAPIKey()
 
-            NovaMLXLog.info("Server restarted (apiKeys: \(serverConfig.apiKeys.count))")
+            NovaMLXLog.info("Server restarted (apiKeys: \((try? NovaDB.shared.apiKeyStore.listAsAPIKey())?.count ?? 0))")
 
             // Re-initialize cluster on config change
             if let cluster = serverConfig.cluster {
@@ -472,6 +471,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// Fetch the raw plaintext of the first API key (by creation order) from
+    /// the SQLite store. Used to seed `appState.apiKey` so the menu bar UI's
+    /// internal Bearer-token calls to the local API server authenticate after
+    /// startup or restart. Returns nil if there are no keys (open mode).
+    private static func firstRawAPIKey() -> String? {
+        guard let first = (try? NovaDB.shared.apiKeyStore.list())?.first else { return nil }
+        return try? NovaDB.shared.apiKeyStore.getRawKey(id: first.id)
     }
 
     /// Remove the old ~/Library/Application Support/NovaMLX/ directory if it exists

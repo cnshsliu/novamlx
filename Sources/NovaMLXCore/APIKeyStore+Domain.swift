@@ -28,6 +28,71 @@ extension APIKeyStore {
         return Self.toDomain(record)
     }
 
+    // MARK: - Limit Checks
+
+    /// Check if a key has exceeded its period (daily/weekly/monthly) token or
+    /// request limits. Returns `true` if the key is within limits OR if the
+    /// key uses the `.never` reset period (no limits). Returns `false` if the
+    /// key is unknown (conservative deny).
+    public func isWithinLimits(keyId: String) -> Bool {
+        guard let key = (try? getAsAPIKey(id: keyId)) ?? nil else { return false }
+        return Self.computeIsWithinLimits(key)
+    }
+
+    /// Get the period usage as a fraction (0.0 - 1.0) for progress display.
+    /// Returns 0 if the key is unknown or has no token cap configured.
+    public func periodUsageFraction(keyId: String) -> Double {
+        guard let key = (try? getAsAPIKey(id: keyId)) ?? nil else { return 0 }
+        return Self.computePeriodUsageFraction(key)
+    }
+
+    /// Pure rate-limit computation. "never" means no limits. Period counters
+    /// are treated as zero if the stored period-reset date no longer matches
+    /// the current period (i.e. the period rolled over since last write).
+    private static func computeIsWithinLimits(_ key: APIKey) -> Bool {
+        if key.usageResetPeriod == .never { return true }
+
+        let periodKey = periodDate(for: key.usageResetPeriod)
+        var periodTokens = key.usage.periodTokens
+        var periodRequests = key.usage.periodRequests
+        if key.usage.periodResetDate != periodKey {
+            periodTokens = 0
+            periodRequests = 0
+        }
+
+        if let maxTokens = key.maxTokensPerPeriod, periodTokens >= maxTokens { return false }
+        if let maxRequests = key.maxRequestsPerPeriod, periodRequests >= maxRequests { return false }
+        return true
+    }
+
+    private static func computePeriodUsageFraction(_ key: APIKey) -> Double {
+        guard let max = key.maxTokensPerPeriod, max > 0 else { return 0 }
+
+        let periodKey = periodDate(for: key.usageResetPeriod)
+        var tokens = key.usage.periodTokens
+        if key.usage.periodResetDate != periodKey { tokens = 0 }
+
+        return min(1.0, Double(tokens) / Double(max))
+    }
+
+    /// Period-date string key, mirroring `APIKeyStore.periodDate(for:)` in
+    /// NovaMLXDB so the domain layer and DB agree on when a period resets.
+    private static func periodDate(for period: UsageResetPeriod) -> String {
+        let fmt = DateFormatter()
+        let date = Date()
+        switch period {
+        case .daily:
+            fmt.dateFormat = "yyyy-MM-dd"
+        case .weekly:
+            fmt.dateFormat = "yyyy-ww"
+        case .monthly:
+            fmt.dateFormat = "yyyy-MM"
+        case .never:
+            return "never"
+        }
+        return fmt.string(from: date)
+    }
+
     // MARK: - Conversion
 
     /// Convert a DB-layer `APIKeyRecord` into the domain `APIKey`.

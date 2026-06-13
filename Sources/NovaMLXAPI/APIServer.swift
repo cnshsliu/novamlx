@@ -5,6 +5,7 @@ import HummingbirdRouter
 import ImageIO
 import Logging
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXDistributed
 import NovaMLXEngine
 import NovaMLXInference
@@ -133,12 +134,10 @@ private struct AdminAuthMiddleware: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        let keys = await config.apiKeys
-        let serverCfg = await config.serverConfig
-        let hasAnyKeys = !keys.isEmpty || !serverCfg.apiKeys.isEmpty
+        let keys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
 
         // No keys configured → open mode, no auth required
-        if !hasAnyKeys {
+        if keys.isEmpty {
             return try await next(request, context)
         }
 
@@ -152,8 +151,8 @@ private struct AdminAuthMiddleware: RouterMiddleware {
             return NovaMLXErrorMiddleware.jsonError(status: .unauthorized, detail: detail)
         }
 
-        // Try new structured key lookup
-        if let key = await config.findAPIKeyByRaw(token) {
+        // Structured key lookup via SQLite store
+        if let key = (try? NovaDB.shared.apiKeyStore.findAPIKeyByRawToken(token)) ?? nil {
             guard key.isActive else {
                 let detail = OpenAIErrorDetail(
                     message: "API key is disabled or expired.",
@@ -162,11 +161,6 @@ private struct AdminAuthMiddleware: RouterMiddleware {
                 )
                 return NovaMLXErrorMiddleware.jsonError(status: .unauthorized, detail: detail)
             }
-            return try await next(request, context)
-        }
-
-        // Legacy fallback: flat string keys
-        if serverCfg.apiKeys.contains(token) {
             return try await next(request, context)
         }
 
@@ -201,11 +195,10 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
-        let keys = await config.apiKeys
-        let serverCfg = await config.serverConfig
+        let keys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
 
         // No keys at all — open mode
-        if keys.isEmpty && serverCfg.apiKeys.isEmpty {
+        if keys.isEmpty {
             return try await next(request, context)
         }
 
@@ -219,15 +212,15 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
             return Self.unauthorized("Invalid or missing API key.")
         }
 
-        // Try new structured key lookup
-        if let key = await config.findAPIKeyByRaw(token) {
+        // Structured key lookup via SQLite store
+        if let key = (try? NovaDB.shared.apiKeyStore.findAPIKeyByRawToken(token)) ?? nil {
             // Check active
             guard key.isActive else {
                 return Self.unauthorized("API key is disabled or expired.")
             }
 
             // Check daily limits
-            let withinLimits = await config.isWithinLimits(keyId: key.id)
+            let withinLimits = NovaDB.shared.apiKeyStore.isWithinLimits(keyId: key.id)
             guard withinLimits else {
                 let detail = OpenAIErrorDetail(
                     message: "Daily usage limit exceeded for this API key.",
@@ -263,11 +256,6 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
                 return NovaMLXErrorMiddleware.jsonError(status: .tooManyRequests, detail: detail)
             }
 
-            return try await next(request, context)
-        }
-
-        // Legacy fallback: flat string keys
-        if serverCfg.apiKeys.contains(token) {
             return try await next(request, context)
         }
 
@@ -1371,6 +1359,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let body: [String: Any] = ["object": "list", "data": items]
                 let data = try JSONSerialization.data(withJSONObject: body)
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+            Post("/v1/responses/compact") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(CompactRequest.self, from: body)
+                return try await Self.handleCompactRequest(req: req, inference: inference)
+            }
+            Post("/v1/responses/input_tokens") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(InputTokensRequest.self, from: body)
+                return try await Self.handleInputTokensRequest(req: req, inference: inference)
             }
             Get("/health") { _, _ in
                 let stats = inference.stats
@@ -2621,7 +2619,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             // MARK: - API Key Management
 
             Get("/admin/keys") { _, _ in
-                let keys = await NovaMLXConfiguration.shared.apiKeys
+                let keys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
                 let masked: [[String: Any]] = keys.map { key in
                     var usage: [String: Any] = [
                         "totalTokensUsed": key.usage.totalTokensUsed,
@@ -2670,7 +2668,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let req = try JSONDecoder().decode(CreateKeyRequest.self, from: body)
                 let name = req.name ?? "API Key"
                 let period: UsageResetPeriod = req.usageResetPeriod.flatMap { UsageResetPeriod(rawValue: $0) } ?? .daily
-                let (apiKey, rawKey) = try await NovaMLXConfiguration.shared.createAPIKey(
+                let (record, rawKey) = try NovaDB.shared.apiKeyStore.create(
                     name: name,
                     rateLimitPerSecond: req.rateLimitPerSecond,
                     rateLimitBurst: req.rateLimitBurst,
@@ -2678,14 +2676,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     allowedEndpoints: req.allowedEndpoints,
                     maxTokensPerPeriod: req.maxTokensPerPeriod,
                     maxRequestsPerPeriod: req.maxRequestsPerPeriod,
-                    usageResetPeriod: period
+                    usageResetPeriod: period.rawValue
                 )
                 let resp: [String: String] = [
-                    "id": apiKey.id,
-                    "name": apiKey.name,
+                    "id": record.id,
+                    "name": record.name,
                     "key": rawKey,
-                    "keyPrefix": apiKey.keyPrefix,
-                    "createdAt": ISO8601DateFormatter().string(from: apiKey.createdAt),
+                    "keyPrefix": record.keyPrefix,
+                    "createdAt": ISO8601DateFormatter().string(from: record.createdAt),
                 ]
                 return try Self.jsonResponse(resp)
             }
@@ -2694,7 +2692,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 guard let id = context.parameters.get("id", as: String.self) else {
                     throw NovaMLXError.apiError("Missing key ID")
                 }
-                guard let key = await NovaMLXConfiguration.shared.findAPIKeyById(id) else {
+                guard let key = (try? NovaDB.shared.apiKeyStore.getAsAPIKey(id: id)) ?? nil else {
                     return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
                 }
                 var usage: [String: Any] = [
@@ -2745,20 +2743,24 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let usageResetPeriod: String?
                 }
                 let req = try JSONDecoder().decode(UpdateKeyRequest.self, from: body)
-                try await NovaMLXConfiguration.shared.updateAPIKey(id: id) { key in
-                    if let name = req.name { key.name = name }
-                    if let isEnabled = req.isEnabled { key.isEnabled = isEnabled }
+                try NovaDB.shared.apiKeyStore.update(id: id) { rec in
+                    if let name = req.name { rec.name = name }
+                    if let isEnabled = req.isEnabled { rec.isEnabled = isEnabled }
                     if let expiresAtStr = req.expiresAt {
-                        key.expiresAt = (expiresAtStr == "never") ? nil : ISO8601DateFormatter().date(from: expiresAtStr)
+                        rec.expiresAt = (expiresAtStr == "never") ? nil : ISO8601DateFormatter().date(from: expiresAtStr)
                     }
-                    if let rps = req.rateLimitPerSecond { key.rateLimitPerSecond = rps }
-                    if let burst = req.rateLimitBurst { key.rateLimitBurst = burst }
-                    if let models = req.allowedModels { key.allowedModels = models.isEmpty ? nil : models }
-                    if let endpoints = req.allowedEndpoints { key.allowedEndpoints = endpoints.isEmpty ? nil : endpoints }
-                    if let maxTokens = req.maxTokensPerPeriod { key.maxTokensPerPeriod = maxTokens }
-                    if let maxRequests = req.maxRequestsPerPeriod { key.maxRequestsPerPeriod = maxRequests }
-                    if let periodStr = req.usageResetPeriod, let period = NovaMLXCore.UsageResetPeriod(rawValue: periodStr) {
-                        key.usageResetPeriod = period
+                    if let rps = req.rateLimitPerSecond { rec.rateLimitPerSecond = rps }
+                    if let burst = req.rateLimitBurst { rec.rateLimitBurst = burst }
+                    if let models = req.allowedModels {
+                        rec.allowedModels = Self.encodeJSONField(models.isEmpty ? nil : models)
+                    }
+                    if let endpoints = req.allowedEndpoints {
+                        rec.allowedEndpoints = Self.encodeJSONField(endpoints.isEmpty ? nil : endpoints)
+                    }
+                    if let maxTokens = req.maxTokensPerPeriod { rec.maxTokensPerPeriod = maxTokens }
+                    if let maxRequests = req.maxRequestsPerPeriod { rec.maxRequestsPerPeriod = maxRequests }
+                    if let periodStr = req.usageResetPeriod {
+                        rec.usageResetPeriod = periodStr
                     }
                 }
                 return try Self.jsonResponse(["status": "ok"])
@@ -2768,7 +2770,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 guard let id = context.parameters.get("id", as: String.self) else {
                     throw NovaMLXError.apiError("Missing key ID")
                 }
-                try await NovaMLXConfiguration.shared.deleteAPIKey(id: id)
+                try NovaDB.shared.apiKeyStore.delete(id: id)
                 return try Self.jsonResponse(["status": "ok"])
             }
 
@@ -2776,11 +2778,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 guard let id = context.parameters.get("id", as: String.self) else {
                     throw NovaMLXError.apiError("Missing key ID")
                 }
-                let (apiKey, rawKey) = try await NovaMLXConfiguration.shared.rotateAPIKey(id: id)
+                let (record, rawKey) = try NovaDB.shared.apiKeyStore.rotate(id: id)
                 let resp: [String: String] = [
-                    "id": apiKey.id,
+                    "id": record.id,
                     "key": rawKey,
-                    "keyPrefix": apiKey.keyPrefix,
+                    "keyPrefix": record.keyPrefix,
                 ]
                 return try Self.jsonResponse(resp)
             }
@@ -2789,7 +2791,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 guard let id = context.parameters.get("id", as: String.self) else {
                     throw NovaMLXError.apiError("Missing key ID")
                 }
-                guard let key = await NovaMLXConfiguration.shared.findAPIKeyById(id) else {
+                guard let key = (try? NovaDB.shared.apiKeyStore.getAsAPIKey(id: id)) ?? nil else {
                     return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
                 }
                 var usage: [String: Any] = [
@@ -3025,14 +3027,23 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
     // MARK: - API Key Usage Tracking
 
+    /// JSON-encode an optional Encodable value into a String for the store's
+    /// JSON-string columns (`allowed_models`, `allowed_endpoints`). Returns nil
+    /// for nil input or encode failures. Used by the admin key update route.
+    private static func encodeJSONField<T: Encodable>(_ value: T?) -> String? {
+        guard let value else { return nil }
+        guard let data = try? JSONEncoder().encode(value) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     private static func recordTokenUsage(request: Request, promptTokens: Int, completionTokens: Int, model: String? = nil) {
         let total = Int64(promptTokens) + Int64(completionTokens)
         guard total > 0 else { return }
         let token = extractRequestToken(request)
         guard let token else { return }
         Task {
-            if let key = await NovaMLXConfiguration.shared.findAPIKeyByRaw(token) {
-                try? await NovaMLXConfiguration.shared.recordUsage(keyId: key.id, tokens: total, model: model)
+            if let key = (try? NovaDB.shared.apiKeyStore.findAPIKeyByRawToken(token)) ?? nil {
+                try? NovaDB.shared.apiKeyStore.recordUsage(keyId: key.id, tokens: total, model: model)
             }
         }
     }

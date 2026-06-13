@@ -77,17 +77,6 @@ public final class APIKeyStore: Sendable {
         }
     }
 
-    /// Bridge-phase helper: insert (or replace) a fully-specified record,
-    /// including a caller-provided `id`. Used by `NovaMLXConfiguration`'s
-    /// dual-write so the store copy shares the JSON key's id, keeping
-    /// subsequent `update`/`delete`/`rotate` calls consistent across both
-    /// stores. Task A3 will retire this once JSON is read-only.
-    public func upsert(_ record: APIKeyRecord) throws {
-        try db.write { db in
-            try record.save(db)
-        }
-    }
-
     public func delete(id: String) throws {
         try db.write { db in
             try APIKeyRecord.deleteOne(db, key: id)

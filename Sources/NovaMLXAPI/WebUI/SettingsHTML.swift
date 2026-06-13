@@ -19,7 +19,6 @@ enum SettingsHTML {
                             <div><label class="metric-label">Max Concurrent</label><input type="number" class="input-field" id="cfgMaxConcurrent" min="1" max="128"></div>
                             <div><label class="metric-label">Timeout (s)</label><input type="number" class="input-field" id="cfgTimeout" min="10" max="3600"></div>
                             <div><label class="metric-label">Max Request Size (MB)</label><input type="number" class="input-field" id="cfgMaxBody" min="1" max="1024"></div>
-                            <div style="grid-column:1/-1"><label class="metric-label">API Keys (one per line)</label><textarea class="input-field" id="cfgApiKeys" rows="3" style="resize:vertical"></textarea></div>
                         </div>
                         <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
                             <button class="btn-secondary" onclick="SettingsPage.toggleEdit()">Cancel</button>
@@ -89,7 +88,6 @@ enum SettingsHTML {
                 if(s.maxConcurrentRequests)document.getElementById('cfgMaxConcurrent').value=s.maxConcurrentRequests;
                 if(s.requestTimeoutSeconds)document.getElementById('cfgTimeout').value=s.requestTimeoutSeconds;
                 if(s.maxRequestSizeMB)document.getElementById('cfgMaxBody').value=s.maxRequestSizeMB;
-                if(this.config.apiKeys)document.getElementById('cfgApiKeys').value=this.config.apiKeys.join('\\n');
             },
 
             toggleEdit(){
@@ -108,9 +106,8 @@ enum SettingsHTML {
                     requestTimeoutSeconds:parseInt(document.getElementById('cfgTimeout').value),
                     maxRequestSizeMB:parseFloat(document.getElementById('cfgMaxBody').value),
                 };
-                const keys=document.getElementById('cfgApiKeys').value.trim().split('\\n').filter(k=>k.trim());
                 try{
-                    await Nova.api('/admin/api/config',{method:'PUT',body:JSON.stringify({server:cfg,apiKeys:keys})});
+                    await Nova.api('/admin/api/config',{method:'PUT',body:JSON.stringify({server:cfg})});
                     showToast('Config saved. Restart required.','success');
                     this.editing=false;
                     this.loadConfig();

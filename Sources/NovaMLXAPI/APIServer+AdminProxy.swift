@@ -3,6 +3,7 @@ import HTTPTypes
 import Hummingbird
 import ImageIO
 import NovaMLXCore
+import NovaMLXDB
 
 // MARK: - Admin Proxy & Dashboard
 // Extracted from APIServer.swift for modularity.
@@ -41,8 +42,9 @@ extension NovaMLXAPIServer {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = method
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let apiKey = cfg.apiKeys.first {
-            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if let firstRecord = (try? NovaDB.shared.apiKeyStore.list())?.first,
+           let raw = try? NovaDB.shared.apiKeyStore.getRawKey(id: firstRecord.id) {
+            urlRequest.setValue("Bearer \(raw)", forHTTPHeaderField: "Authorization")
         }
         if let body {
             urlRequest.httpBody = Data(buffer: body)

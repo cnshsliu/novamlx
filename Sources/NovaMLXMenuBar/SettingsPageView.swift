@@ -489,11 +489,6 @@ struct SettingsPageView: View {
             return
         }
 
-        let apiKeysArray = cfgApiKeys
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-
         var serverDict: [String: Any] = [
             "host": cfgHost,
             "port": cfgPort,
@@ -503,9 +498,6 @@ struct SettingsPageView: View {
             "maxRequestSizeMB": cfgMaxBodyMB,
             "maxProcessMemory": buildMemoryLimitString()
         ]
-        if !apiKeysArray.isEmpty {
-            serverDict["apiKeys"] = apiKeysArray
-        }
 
         // Cluster settings — nested inside server dict so ServerConfig.Codable can decode it
         if clusterEnabled {
@@ -561,7 +553,6 @@ struct SettingsPageView: View {
                     host: cfgHost,
                     port: cfgPort,
                     adminPort: cfgAdminPort,
-                    apiKeys: apiKeysArray,
                     maxConcurrentRequests: cfgMaxConcurrent,
                     requestTimeout: TimeInterval(cfgTimeout),
                     maxRequestSizeMB: cfgMaxBodyMB,
@@ -742,7 +733,6 @@ struct SettingsPageView: View {
                 host: currentServer.host,
                 port: currentServer.port,
                 adminPort: currentServer.adminPort,
-                apiKeys: currentServer.apiKeys,
                 maxConcurrentRequests: currentServer.maxConcurrentRequests,
                 requestTimeout: currentServer.requestTimeout,
                 maxRequestSizeMB: currentServer.maxRequestSizeMB,

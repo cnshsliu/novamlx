@@ -81,7 +81,6 @@ struct CoreTypesTests {
         let config = ServerConfig()
         #expect(config.host == "127.0.0.1")
         #expect(config.port == 6590)
-        #expect(config.apiKeys.isEmpty)
         #expect(config.maxConcurrentRequests == 16)
     }
 
