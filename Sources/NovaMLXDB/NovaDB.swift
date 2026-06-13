@@ -291,6 +291,29 @@ public final class NovaDB: @unchecked Sendable {
         // NovaMLXCore without creating a circular dependency, so this table's
         // legacy import is handled by the manager on first init.
 
+        // cluster-policy.json — Phase F, clusterPolicyStore is the sole reader.
+        try maybeImportLegacy(
+            file: baseDir.appendingPathComponent("cluster-policy.json"),
+            tableName: "cluster_policy",
+            into: configDB
+        ) { data in
+            // Re-serialize through JSONSerialization to canonicalise whitespace
+            // and ignore trailing junk. The schema only stores the raw string;
+            // we don't need a typed Decodable here.
+            guard let obj = try? JSONSerialization.jsonObject(with: data),
+                  let canonical = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
+            let json = String(data: canonical, encoding: .utf8) ?? "{}"
+            try self.configDB.write { db in
+                var record = try ClusterPolicyRecord.fetchOne(db, key: 1) ?? ClusterPolicyRecord(policyJSON: "{}")
+                // Only overwrite if the DB still holds the placeholder.
+                if record.policyJSON == "{}" {
+                    record.policyJSON = json
+                    record.updatedAt = Date()
+                    try record.save(db)
+                }
+            }
+        }
+
         log.info("[NovaDB] Legacy JSON import complete")
     }
 

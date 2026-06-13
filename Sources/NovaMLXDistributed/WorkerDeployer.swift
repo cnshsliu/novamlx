@@ -506,11 +506,18 @@ public final class WorkerDeployer: @unchecked Sendable {
 
     // Returns the current authoritative cluster policy as JSON string (for pushing to workers)
     private func currentClusterPolicyJSON() -> String {
-        let policyPath = ("~/.nova/cluster-policy.json" as NSString).expandingTildeInPath
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)),
-           let jsonObject = try? JSONSerialization.jsonObject(with: data),
-           let jsonData = try? JSONSerialization.data(withJSONObject: jsonObject, options: [.prettyPrinted]) {
-            return String(data: jsonData, encoding: .utf8) ?? "{}"
+        // Read from clusterPolicyStore (Phase F). Workers that still expect
+        // the file will get it via the SSH cat command below; their own
+        // NovaMLX process imports it on next restart.
+        if let json = try? NovaDB.shared.clusterPolicyStore.get(),
+           !json.isEmpty, json != "{}" {
+            // Re-serialise for stable, pretty-printed output.
+            if let data = json.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data),
+               let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted]) {
+                return String(data: pretty, encoding: .utf8) ?? json
+            }
+            return json
         }
         // Fallback: minimal policy if none exists locally
         return """

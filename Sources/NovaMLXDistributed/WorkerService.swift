@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import Logging
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXUtils
 
 // MARK: - DiscoveredService
@@ -128,13 +129,10 @@ public final class WorkerService: @unchecked Sendable {
         return "\(version)-\(time)"
     }
 
-    /// Computes a hash of the authoritative cluster policy file if it exists.
+    /// Computes a hash of the authoritative cluster policy (from clusterPolicyStore).
     static func computeConfigHash() -> String? {
-        let policyPath = ("~/.nova/cluster-policy.json" as NSString).expandingTildeInPath
-        guard FileManager.default.fileExists(atPath: policyPath),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)) else {
-            return nil
-        }
+        guard let json = try? NovaDB.shared.clusterPolicyStore.get(),
+              let data = json.data(using: .utf8) else { return nil }
         let hash = SHA256.hash(data: data)
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }

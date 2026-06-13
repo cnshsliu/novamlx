@@ -1,6 +1,7 @@
 import SwiftUI
 import CryptoKit
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXDistributed
 import NovaMLXUtils
 
@@ -185,13 +186,10 @@ struct ClusterPageView: View {
         return "\(version)-\(Int(modDate.timeIntervalSince1970))"
     }
 
-    /// Coordinator's current config hash (from cluster-policy.json if present).
+    /// Coordinator's current config hash (from clusterPolicyStore).
     private var localConfigHash: String? {
-        let policyPath = ("~/.nova/cluster-policy.json" as NSString).expandingTildeInPath
-        guard FileManager.default.fileExists(atPath: policyPath),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)) else {
-            return nil
-        }
+        let json = (try? NovaDB.shared.clusterPolicyStore.get()) ?? "{}"
+        guard let data = json.data(using: .utf8) else { return nil }
         let hash = SHA256.hash(data: data)
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
@@ -1507,12 +1505,12 @@ struct ClusterPageView: View {
     }
 
     /// Load authoritative Thunderbolt subnet policy.
-    /// Prefers ~/.nova/cluster-policy.json, then config.json.
+    /// Prefers clusterPolicyStore (SQLite), then configStore.
     /// If nothing is explicitly configured, auto-detect from the local Thunderbolt Bridge IP (very useful after manual 10.42 setup).
     nonisolated private func loadThunderboltPolicy() -> (subnet: String, enforce: Bool, prefix: String) {
-        // 1. Authoritative: cluster-policy.json
-        let policyPath = ("~/.nova/cluster-policy.json" as NSString).expandingTildeInPath
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: policyPath)),
+        // 1. Authoritative: clusterPolicyStore (was cluster-policy.json)
+        if let policyJSON = try? NovaDB.shared.clusterPolicyStore.get(),
+           let data = policyJSON.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let tb = json["thunderbolt"] as? [String: Any],
            let subnet = tb["subnet"] as? String, !subnet.isEmpty {
@@ -1521,8 +1519,10 @@ struct ClusterPageView: View {
             return (subnet, enforce, prefix)
         }
 
-        // 2. config.json
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: ("~/.nova/config.json" as NSString).expandingTildeInPath)),
+        // 2. configStore (was config.json)
+        if let record = try? NovaDB.shared.configStore.get(),
+           let raw = record.clusterConfig,
+           let data = raw.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let cluster = json["cluster"] as? [String: Any],
            let tb = cluster["thunderbolt"] as? [String: Any],
