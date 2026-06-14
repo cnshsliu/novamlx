@@ -2352,11 +2352,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     apiKey: provider.apiKey,
                     remoteModel: provider.remoteModel,
                     isEnabled: provider.isEnabled,
-                    includeInLoadBalance: provider.includeInLoadBalance,
                     tags: provider.tags,
-                    isLocal: provider.isLocal,
-                    isFree: provider.isFree,
-                    isManaged: provider.isManaged
+                    isFree: provider.isFree
                 )
                 try tokenhubMgr.create(provider)
                 return try Self.jsonResponse(provider, httpStatus: .created)
@@ -2371,11 +2368,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     apiKey: provider.apiKey,
                     remoteModel: provider.remoteModel,
                     isEnabled: provider.isEnabled,
-                    includeInLoadBalance: provider.includeInLoadBalance,
                     tags: provider.tags,
-                    isLocal: provider.isLocal,
-                    isFree: provider.isFree,
-                    isManaged: provider.isManaged
+                    isFree: provider.isFree
                 )
                 try tokenhubMgr.update(provider)
                 return try Self.jsonResponse(provider)
@@ -2400,8 +2394,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             endpoint: updated.endpoint,
                             apiKey: updated.apiKey,
                             remoteModel: updated.remoteModel,
-                            isEnabled: updated.isEnabled,
-                            includeInLoadBalance: updated.includeInLoadBalance
+                            isEnabled: updated.isEnabled
                         )
                         // Preserve test result timestamps
                         _ = try? tokenhubMgr.update(updated)

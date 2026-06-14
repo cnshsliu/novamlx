@@ -62,11 +62,8 @@ extension TokenhubStore {
             apiKey: record.apiKey ?? "",
             remoteModel: record.remoteModel ?? "",
             isEnabled: record.isEnabled,
-            includeInLoadBalance: record.includeInLoadBalance,
             tags: decodeTags(record.tags),
-            isLocal: record.isLocal,
             isFree: record.isFree,
-            isManaged: record.isManaged,
             supportsResponsesAPI: record.supportsResponsesAPI,
             supportsVision: record.supportsVision,
             visionStrategy: record.visionStrategy,
@@ -96,8 +93,7 @@ extension TokenhubStore {
             apiKey: provider.apiKey.isEmpty ? nil : provider.apiKey,
             remoteModel: provider.remoteModel.isEmpty ? nil : provider.remoteModel,
             isEnabled: provider.isEnabled,
-            isManaged: provider.isManaged,
-            loadBalanceWeight: provider.includeInLoadBalance ? 1.0 : 0.0,
+            loadBalanceWeight: 1.0,
             totalRequests: Int64(provider.requestCount),
             totalTokens: 0,
             avgLatencyMs: provider.avgLatencyMs == 0 ? nil : provider.avgLatencyMs,
@@ -105,9 +101,7 @@ extension TokenhubStore {
             extraConfig: nil
         )
         record.providerId = provider.id
-        record.includeInLoadBalance = provider.includeInLoadBalance
         record.tags = encodeTags(provider.tags)
-        record.isLocal = provider.isLocal
         record.isFree = provider.isFree
         record.supportsResponsesAPI = provider.supportsResponsesAPI
         record.supportsVision = provider.supportsVision

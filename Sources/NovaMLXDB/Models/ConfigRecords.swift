@@ -278,7 +278,6 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
     public var apiKey: String?
     public var remoteModel: String?
     public var isEnabled: Bool
-    public var isManaged: Bool
     public var loadBalanceWeight: Double
     public var totalRequests: Int64
     public var totalTokens: Int64
@@ -289,10 +288,14 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
     // JSON-shape `TokenhubProvider` struct (Sources/NovaMLXCore/TokenhubTypes.swift).
     // Non-optional fields carry defaults so the synthesized memberwise init
     // only requires the original v1 args; existing call sites keep compiling.
+    //
+    // Task 6 (TokenHub cleanup): dropped `is_managed`, `include_in_load_balance`,
+    // and `is_local` from both the struct and the runtime schema (v4 migration).
+    // Cloud/nova/local distinction is now via the `tags` column. The historical
+    // schema definitions in ConfigDBSchema.swift are left untouched as records
+    // of what the v1/v2 migrations did.
     public var providerId: String? = nil
-    public var includeInLoadBalance: Bool = true
     public var tags: String? = nil
-    public var isLocal: Bool = false
     public var isFree: Bool = false
     public var supportsResponsesAPI: Bool = false
     public var supportsVision: Bool = false
@@ -316,7 +319,6 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
         apiKey: String? = nil,
         remoteModel: String? = nil,
         isEnabled: Bool = true,
-        isManaged: Bool = false,
         loadBalanceWeight: Double = 1.0,
         totalRequests: Int64 = 0,
         totalTokens: Int64 = 0,
@@ -324,9 +326,7 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
         lastUsedAt: Date? = nil,
         extraConfig: String? = nil,
         providerId: String? = nil,
-        includeInLoadBalance: Bool = true,
         tags: String? = nil,
-        isLocal: Bool = false,
         isFree: Bool = false,
         supportsResponsesAPI: Bool = false,
         supportsVision: Bool = false,
@@ -344,7 +344,6 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
         self.apiKey = apiKey
         self.remoteModel = remoteModel
         self.isEnabled = isEnabled
-        self.isManaged = isManaged
         self.loadBalanceWeight = loadBalanceWeight
         self.totalRequests = totalRequests
         self.totalTokens = totalTokens
@@ -352,9 +351,7 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
         self.lastUsedAt = lastUsedAt
         self.extraConfig = extraConfig
         self.providerId = providerId
-        self.includeInLoadBalance = includeInLoadBalance
         self.tags = tags
-        self.isLocal = isLocal
         self.isFree = isFree
         self.supportsResponsesAPI = supportsResponsesAPI
         self.supportsVision = supportsVision
@@ -373,7 +370,6 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
         case apiKey = "api_key"
         case remoteModel = "remote_model"
         case isEnabled = "is_enabled"
-        case isManaged = "is_managed"
         case loadBalanceWeight = "load_balance_weight"
         case totalRequests = "total_requests"
         case totalTokens = "total_tokens"
@@ -381,9 +377,7 @@ public struct TokenhubProviderRecord: Codable, Sendable, PersistableRecord {
         case lastUsedAt = "last_used_at"
         case extraConfig = "extra_config"
         case providerId = "provider_id"
-        case includeInLoadBalance = "include_in_load_balance"
         case tags
-        case isLocal = "is_local"
         case isFree = "is_free"
         case supportsResponsesAPI = "supports_responses_api"
         case supportsVision = "supports_vision"

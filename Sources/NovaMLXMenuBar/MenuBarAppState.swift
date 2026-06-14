@@ -79,8 +79,6 @@ public final class MenuBarAppState: ObservableObject {
                 self.inferenceStats = currentStats
                 self.currentInferenceModel = CurrentInferenceModel.shared.modelID
                 self.loadedModels = inferenceService.listLoadedModels()
-                // Sync local model providers in Token Hub
-                TokenhubManager.shared.provisionLocalProviders(loadedModels: self.loadedModels)
                 self.uptime = SystemMonitor.shared.uptime
                 self.totalTokensGenerated = currentStats.totalTokensGenerated
                 // Trim consecutive zeros: allow at most 1 zero data point (~2s) between

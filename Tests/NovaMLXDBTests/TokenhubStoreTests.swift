@@ -20,22 +20,21 @@ struct TokenhubStoreTests {
         let nova = NovaDB.shared
         try nova.setup(baseDir: tmp)
 
-        // Insert a baseline row (uses only v1 columns) to verify defaults backfill
+        // Insert a baseline row (uses only v1 columns) to verify defaults backfill.
+        // Note: is_managed/include_in_load_balance/is_local are dropped at runtime
+        // by the v4 migration (Task 6), so they're not in the INSERT.
         _ = try await nova.configDB.write { db in
             try db.execute(sql: """
-                INSERT INTO tokenhub_providers (name, endpoint, is_enabled, is_managed, load_balance_weight)
-                VALUES ('test-provider', 'https://example.com', 1, 0, 1.0)
+                INSERT INTO tokenhub_providers (name, endpoint, is_enabled, load_balance_weight)
+                VALUES ('test-provider', 'https://example.com', 1, 1.0)
                 """)
             return 0
         }
 
         let record = try nova.tokenhubStore.get(name: "test-provider")
         #expect(record != nil)
-        #expect(record?.includeInLoadBalance == true)
         #expect(record?.tags == nil)
-        #expect(record?.isLocal == false)
         #expect(record?.isFree == false)
-        #expect(record?.isManaged == false)
         #expect(record?.supportsResponsesAPI == false)
         #expect(record?.supportsVision == false)
         #expect(record?.visionStrategy == nil)
@@ -61,7 +60,6 @@ struct TokenhubStoreTests {
             apiKey: "secret",
             remoteModel: "gpt-rt",
             isEnabled: true,
-            isManaged: false,
             loadBalanceWeight: 1.0,
             totalRequests: 0,
             totalTokens: 0,
@@ -70,9 +68,7 @@ struct TokenhubStoreTests {
             extraConfig: nil
         )
         record.providerId = "round-trip"
-        record.includeInLoadBalance = true
         record.tags = "[\"local\",\"fast\"]"
-        record.isLocal = true
         record.isFree = true
         record.supportsResponsesAPI = true
         record.supportsVision = true
@@ -91,9 +87,7 @@ struct TokenhubStoreTests {
         #expect(fetched?.endpoint == "https://rt.example.com")
         #expect(fetched?.apiKey == "secret")
         #expect(fetched?.remoteModel == "gpt-rt")
-        #expect(fetched?.includeInLoadBalance == true)
         #expect(fetched?.tags == "[\"local\",\"fast\"]")
-        #expect(fetched?.isLocal == true)
         #expect(fetched?.isFree == true)
         #expect(fetched?.supportsResponsesAPI == true)
         #expect(fetched?.supportsVision == true)
@@ -120,11 +114,8 @@ struct TokenhubStoreTests {
             apiKey: "bridge-key",
             remoteModel: "bridge-model",
             isEnabled: true,
-            includeInLoadBalance: true,
             tags: ["test", "bridge"],
-            isLocal: false,
             isFree: true,
-            isManaged: false,
             supportsResponsesAPI: true,
             supportsVision: false,
             visionStrategy: nil,
@@ -143,7 +134,6 @@ struct TokenhubStoreTests {
         #expect(fetched?.endpoint == "https://bridge.example.com")
         #expect(fetched?.apiKey == "bridge-key")
         #expect(fetched?.remoteModel == "bridge-model")
-        #expect(fetched?.includeInLoadBalance == true)
         #expect(fetched?.tags == ["test", "bridge"])
         #expect(fetched?.isFree == true)
         #expect(fetched?.supportsResponsesAPI == true)

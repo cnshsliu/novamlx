@@ -83,7 +83,9 @@ public enum ModelSpecs {
     }
 
     public static func lbContextWindow(from providers: [TokenhubProvider]) -> (window: Int, mixed: Bool) {
-        let lbProviders = providers.filter { $0.isEnabled && $0.includeInLoadBalance }
+        // Post-Task-6: includeInLoadBalance flag is gone — every enabled
+        // provider is a candidate for the LB pool.
+        let lbProviders = providers.filter { $0.isEnabled }
         guard !lbProviders.isEmpty else { return (defaultContextWindow, false) }
 
         let windows = lbProviders.map { $0.effectiveContextWindow }

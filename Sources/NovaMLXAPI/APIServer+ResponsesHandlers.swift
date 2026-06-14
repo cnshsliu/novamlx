@@ -37,6 +37,15 @@ extension NovaMLXAPIServer {
             NovaMLXLog.info("[Tokenhub/Responses] RAW JSON: no tools field found in request body")
         }
 
+        // TODO(Task 7): plain "tknet" LB dispatch should go through LBProxy.
+        // Until then, reject LB requests with a clear error.
+        if req.model.lowercased() == "tknet" {
+            return try Self.jsonResponse(
+                ["error": ["message": "Load-balanced 'tknet' dispatch is being migrated to LBProxy (Task 7). Use 'tknet:<provider-name>' for now.", "type": "invalid_request_error"]],
+                httpStatus: .badRequest
+            )
+        }
+
         guard let provider = TokenhubManager.shared.resolve(modelName: req.model, tag: nil) else {
             return try Self.jsonResponse(
                 ["error": ["message": "Unknown tokenhub provider: \(req.model)", "type": "invalid_request_error"]],
@@ -44,13 +53,13 @@ extension NovaMLXAPIServer {
             )
         }
 
-        let isLB = req.model.lowercased() == "tknet"
+        let isLB = false  // LB dispatch disabled until Task 7 (LBProxy)
         let maxRetries = isLB ? 2 : 0
         var triedProviders = Set<String>()
         var lastProvider = provider
 
         func effectiveApiKey(_ p: TokenhubProvider) -> String {
-            if p.isManaged { return AuthCache.loadSession() ?? "" }
+            if p.tags.contains("managed") { return AuthCache.loadSession() ?? "" }
             return p.apiKey
         }
 

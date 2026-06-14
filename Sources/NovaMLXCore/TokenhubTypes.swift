@@ -11,11 +11,8 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
     public var apiKey: String
     public var remoteModel: String
     public var isEnabled: Bool
-    public var includeInLoadBalance: Bool
     public var tags: [String]
-    public var isLocal: Bool
     public var isFree: Bool
-    public var isManaged: Bool
     public var supportsResponsesAPI: Bool
     public var supportsVision: Bool
     public var visionStrategy: String?
@@ -39,11 +36,8 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
         apiKey: String,
         remoteModel: String,
         isEnabled: Bool = true,
-        includeInLoadBalance: Bool = true,
         tags: [String] = [],
-        isLocal: Bool = false,
         isFree: Bool = false,
-        isManaged: Bool = false,
         supportsResponsesAPI: Bool = false,
         supportsVision: Bool = false,
         visionStrategy: String? = nil,
@@ -60,11 +54,8 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
         self.apiKey = apiKey
         self.remoteModel = remoteModel
         self.isEnabled = isEnabled
-        self.includeInLoadBalance = includeInLoadBalance
         self.tags = tags
-        self.isLocal = isLocal
         self.isFree = isFree
-        self.isManaged = isManaged
         self.supportsResponsesAPI = supportsResponsesAPI
         self.supportsVision = supportsVision
         self.visionStrategy = visionStrategy
@@ -85,11 +76,8 @@ public struct TokenhubProvider: Codable, Sendable, Identifiable, Equatable {
         apiKey = try c.decode(String.self, forKey: .apiKey)
         remoteModel = try c.decode(String.self, forKey: .remoteModel)
         isEnabled = try c.decode(Bool.self, forKey: .isEnabled)
-        includeInLoadBalance = try c.decode(Bool.self, forKey: .includeInLoadBalance)
         tags = (try? c.decode([String].self, forKey: .tags)) ?? []
-        isLocal = (try? c.decode(Bool.self, forKey: .isLocal)) ?? false
         isFree = (try? c.decode(Bool.self, forKey: .isFree)) ?? false
-        isManaged = (try? c.decode(Bool.self, forKey: .isManaged)) ?? false
         supportsResponsesAPI = (try? c.decode(Bool.self, forKey: .supportsResponsesAPI)) ?? false
         supportsVision = (try? c.decode(Bool.self, forKey: .supportsVision)) ?? false
         visionStrategy = try? c.decode(String.self, forKey: .visionStrategy)
@@ -139,30 +127,14 @@ public final class TokenhubManager: @unchecked Sendable {
         return false
     }
 
-    /// Resolve a model name to a provider for proxying.
-    /// - "tknet" → random pick from enabled+LB providers, optionally filtered by tag
+    /// Resolve a "tknet:" prefixed model name to its exact provider for proxying.
     /// - "tknet:provider-name" → exact provider match
     /// Returns nil if no match.
+    ///
+    /// Note: bare "tknet" LB dispatch is handled by LBProxy (Task 7). Until that
+    /// lands, requests to plain "tknet" should not be routed through this method.
     public func resolve(modelName: String, tag: String? = nil) -> TokenhubProvider? {
         let lower = modelName.lowercased()
-
-        // Load-balance: pick from pool by priority (local+free > local > free > paid)
-        if lower == "tknet" {
-            var pool = list().filter { $0.isEnabled && $0.includeInLoadBalance }
-            if let tag, !tag.isEmpty {
-                pool = pool.filter { $0.tags.contains(tag) }
-            }
-            if pool.isEmpty { return nil }
-
-            // Priority tiers: local+free(3) > local(2) > free(1) > paid(0)
-            let tiered = pool.map { p -> (TokenhubProvider, Int) in
-                let score = (p.isLocal ? 2 : 0) + (p.isFree ? 1 : 0)
-                return (p, score)
-            }
-            let maxTier = tiered.map(\.1).max()!
-            let topTier = tiered.filter { $0.1 == maxTier }
-            return topTier.randomElement()!.0
-        }
 
         // "tknet:provider-name" → exact provider match
         if lower.hasPrefix("tknet:") {
@@ -171,7 +143,6 @@ public final class TokenhubManager: @unchecked Sendable {
         }
 
         // Direct model name → check if it matches any provider's remoteModel
-        // For local models: model name = provider.remoteModel (e.g., "mlx-community/Qwen3.6-35B-A3B-4bit")
         if let provider = list().first(where: { $0.remoteModel == modelName }) {
             return provider
         }
@@ -203,11 +174,13 @@ public final class TokenhubManager: @unchecked Sendable {
         return false
     }
 
-    /// Count of user-created (non-managed) providers.
+    /// Count of user-created providers. Post-Task-6 all providers are user-created
+    /// (locals are gone, cloud-managed providers are added via provisionManagedProviders
+    /// with the "managed" tag — those still count here since they share the user's quota).
     public func userProviderCount() -> Int {
         lock.lock()
         defer { lock.unlock() }
-        return loadAll().filter { !$0.isManaged }.count
+        return loadAll().count
     }
 
     /// Enforce free-tier limits: disable excess user providers beyond 3.
@@ -219,7 +192,7 @@ public final class TokenhubManager: @unchecked Sendable {
         if hasValidTknetKey() { return [] }
 
         var all = loadAll()
-        let userProviders = all.filter { !$0.isManaged && $0.isEnabled }
+        let userProviders = all.filter { $0.isEnabled }
         guard userProviders.count > Self.freeProviderLimit else { return [] }
 
         let excess = userProviders.count - Self.freeProviderLimit
@@ -255,13 +228,15 @@ public final class TokenhubManager: @unchecked Sendable {
         return true
     }
 
-    // MARK: - Managed Provider Provisioning
+    // MARK: - Cloud Provider Provisioning
 
-    /// Cloud model endpoint for managed providers.
+    /// Cloud model endpoint for cloud-managed providers.
     private static let tknetBaseURL = "https://api.tknet.ai/v1"
 
-    /// Provision managed providers from cloud model discovery.
-    /// Creates/updates providers for each model. Removes stale managed providers.
+    /// Provision cloud providers from cloud model discovery.
+    /// Creates/updates providers for each model. Removes stale cloud providers.
+    /// Providers are tagged "cloud"+"managed" so they can be cleaned up later
+    /// without a separate isManaged flag.
     // TODO(tknet): Change data source to tknet.ai with tag-based filtering.
     public func provisionManagedProviders(remoteModels: [(id: String, name: String)]) throws {
         lock.lock()
@@ -284,9 +259,7 @@ public final class TokenhubManager: @unchecked Sendable {
                     apiKey: "",
                     remoteModel: model.id,
                     isEnabled: true,
-                    includeInLoadBalance: true,
-                    tags: ["cloud", "managed"],
-                    isManaged: true
+                    tags: ["cloud", "managed"]
                 )
                 provider.id = managedId
                 all.append(provider)
@@ -294,14 +267,14 @@ public final class TokenhubManager: @unchecked Sendable {
         }
 
         let before = all.count
-        all.removeAll { $0.isManaged && !desiredIds.contains($0.id) }
+        all.removeAll { $0.tags.contains("cloud") && $0.tags.contains("managed") && !desiredIds.contains($0.id) }
         let removed = before - all.count
 
         try saveAll(all)
-        log.info("[Tokenhub] Provisioned \(remoteModels.count) managed providers, removed \(removed) stale")
+        log.info("[Tokenhub] Provisioned \(remoteModels.count) cloud providers, removed \(removed) stale")
     }
 
-    /// Provision managed tknet.ai providers from cloud model discovery.
+    /// Provision tknet.ai providers from cloud model discovery.
     /// Creates/updates providers for each nova-tagged model. Removes stale nova providers.
     /// Each provider inherits the API Key from Settings (auto-populated, not stored).
     public func provisionTknetProviders(remoteModels: [TknetModel]) throws {
@@ -325,9 +298,7 @@ public final class TokenhubManager: @unchecked Sendable {
                     apiKey: "",  // API Key inherited from Settings
                     remoteModel: model.id,
                     isEnabled: true,
-                    includeInLoadBalance: true,
-                    tags: ["nova", "managed"],
-                    isManaged: true
+                    tags: ["nova", "managed"]
                 )
                 provider.id = managedId
                 all.append(provider)
@@ -335,7 +306,7 @@ public final class TokenhubManager: @unchecked Sendable {
         }
 
         let before = all.count
-        all.removeAll { $0.isManaged && $0.tags.contains("nova") && !desiredIds.contains($0.id) }
+        all.removeAll { $0.tags.contains("nova") && $0.tags.contains("managed") && !desiredIds.contains($0.id) }
         let removed = before - all.count
 
         try saveAll(all)
@@ -351,21 +322,21 @@ public final class TokenhubManager: @unchecked Sendable {
         log.info("[Tokenhub] Saved tknet.ai API Key to ConfigStore")
     }
 
-    /// Clear tknet.ai configuration: remove managed nova providers and tknet config.
+    /// Clear tknet.ai configuration: remove nova providers and tknet config.
     /// Clears verification cache. Called when user clears API Key.
     public func clearTknetConfig() throws {
         lock.lock()
         defer { lock.unlock() }
 
-        // Remove all nova-managed providers
+        // Remove all nova-managed providers (identified by tags post-Task-6)
         var all = loadAll()
         let before = all.count
-        all.removeAll { $0.isManaged && $0.tags.contains("nova") }
+        all.removeAll { $0.tags.contains("nova") && $0.tags.contains("managed") }
         let removed = before - all.count
 
         if removed > 0 {
             try saveAll(all)
-            log.info("[Tokenhub] Removed \(removed) nova-managed providers")
+            log.info("[Tokenhub] Removed \(removed) nova providers")
         }
 
         // Clear tknet config from the SQLite ConfigStore
@@ -375,57 +346,14 @@ public final class TokenhubManager: @unchecked Sendable {
         log.info("[Tokenhub] Cleared tknet.ai config from ConfigStore")
     }
 
-    /// Remove all managed providers (on unsubscribe/logout).
+    /// Remove all cloud providers (on unsubscribe/logout).
     public func deprovisionManagedProviders() {
         lock.lock()
         defer { lock.unlock() }
         var all = loadAll()
-        all.removeAll { $0.isManaged && $0.tags.contains("cloud") }
+        all.removeAll { $0.tags.contains("cloud") && $0.tags.contains("managed") }
         try? saveAll(all)
-        log.info("[Tokenhub] Deprovisioned cloud managed providers")
-    }
-
-    /// Auto-provision local model providers for currently loaded models.
-    /// Adds new, removes stale. Endpoint points to local API server.
-    public func provisionLocalProviders(loadedModels: [String]) {
-        lock.lock()
-        defer { lock.unlock() }
-        var all = loadAll()
-        let localBaseURL = "http://127.0.0.1:6590/v1"
-        var desiredIds = Set<String>()
-
-        for modelId in loadedModels {
-            let localId = "local-\(modelId.lowercased().replacingOccurrences(of: "/", with: "-"))"
-            desiredIds.insert(localId)
-
-            if let idx = all.firstIndex(where: { $0.id == localId }) {
-                all[idx].remoteModel = modelId
-            } else {
-                var provider = TokenhubProvider(
-                    name: "Local \(modelId)",
-                    endpoint: localBaseURL,
-                    apiKey: "",
-                    remoteModel: modelId,
-                    isEnabled: true,
-                    includeInLoadBalance: true,
-                    tags: ["local", "managed"],
-                    isLocal: true,
-                    isManaged: true
-                )
-                provider.id = localId
-                all.append(provider)
-            }
-        }
-
-        // Remove local managed providers for models no longer loaded
-        let before = all.count
-        all.removeAll { $0.isManaged && $0.tags.contains("local") && !desiredIds.contains($0.id) }
-        let removed = before - all.count
-
-        if removed > 0 || !desiredIds.isEmpty {
-            try? saveAll(all)
-            log.info("[Tokenhub] Local providers synced: \(desiredIds.count) active, \(removed) removed")
-        }
+        log.info("[Tokenhub] Deprovisioned cloud providers")
     }
 
     /// Record a request result for a provider (updates metrics).
@@ -449,9 +377,10 @@ public final class TokenhubManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var all = loadAll()
-        // Free-tier limit check (managed providers bypass this)
-        if !provider.isManaged {
-            let userCount = all.filter { !$0.isManaged }.count
+        // Free-tier limit check (cloud-managed providers bypass this via tags)
+        let isManaged = provider.tags.contains("managed")
+        if !isManaged {
+            let userCount = all.filter { !$0.tags.contains("managed") }.count
             if !hasValidTknetKey() && userCount >= Self.freeProviderLimit {
                 throw TokenhubError.limitReached
             }

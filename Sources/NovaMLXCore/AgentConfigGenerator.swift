@@ -87,8 +87,10 @@ public enum AgentConfigGenerator {
 
         var warning: String?
 
-        // Generate model catalog
-        let lbProviders = enabledProviders.filter { $0.includeInLoadBalance }
+        // Generate model catalog. Post-Task-6: any enabled provider is eligible
+        // for the LB pool — the includeInLoadBalance flag is gone, and LB
+        // membership is now an explicit LB entity (Tasks 7-11).
+        let lbProviders = enabledProviders
         let (lbCtx, mixed) = ModelSpecs.lbContextWindow(from: enabledProviders)
         if mixed {
             let minK = lbCtx / 1024

@@ -265,6 +265,11 @@ public final class NovaDB: @unchecked Sendable {
                 let apiKey: String?
                 let remoteModel: String?
                 let isEnabled: Bool?
+                // Task 6: includeInLoadBalance/isLocal/isManaged are decoded for
+                // backwards compat with old config.json but no longer written
+                // to the record — the underlying columns were dropped by the
+                // v4 migration. isLocal/isManaged signals now live in `tags`
+                // ("local", "managed", "cloud", "nova").
                 let includeInLoadBalance: Bool?
                 let tags: [String]?
                 let isLocal: Bool?
@@ -291,8 +296,7 @@ public final class NovaDB: @unchecked Sendable {
                         apiKey: p.apiKey?.isEmpty == false ? p.apiKey : nil,
                         remoteModel: p.remoteModel?.isEmpty == false ? p.remoteModel : nil,
                         isEnabled: p.isEnabled ?? true,
-                        isManaged: p.isManaged ?? false,
-                        loadBalanceWeight: (p.includeInLoadBalance ?? true) ? 1.0 : 0.0,
+                        loadBalanceWeight: 1.0,
                         totalRequests: Int64(p.requestCount ?? 0),
                         totalTokens: 0,
                         avgLatencyMs: p.avgLatencyMs,
@@ -300,9 +304,7 @@ public final class NovaDB: @unchecked Sendable {
                         extraConfig: nil
                     )
                     record.providerId = p.id
-                    record.includeInLoadBalance = p.includeInLoadBalance ?? true
                     record.tags = (p.tags ?? []).isEmpty ? nil : (try? String(data: JSONEncoder().encode(p.tags), encoding: .utf8))
-                    record.isLocal = p.isLocal ?? false
                     record.isFree = p.isFree ?? false
                     record.supportsResponsesAPI = p.supportsResponsesAPI ?? false
                     record.supportsVision = p.supportsVision ?? false

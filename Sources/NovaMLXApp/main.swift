@@ -293,11 +293,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await inferenceService.restoreModels(modelManager: modelManager)
                 appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
                 appState.resumeIncompleteDownloads()
-
-                // Sync local model providers after models finish loading
-                let loaded = inferenceService.listLoadedModels()
-                TokenhubManager.shared.provisionLocalProviders(loadedModels: loaded)
-                NovaMLXLog.info("Local managed providers synced: \(loaded.count) models")
             }
 
             appState.startStatsMonitoring(inferenceService: inferenceService)

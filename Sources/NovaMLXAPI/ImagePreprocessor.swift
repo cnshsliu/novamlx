@@ -50,7 +50,7 @@ enum ImagePreprocessor {
         // Tier 2: Anthropic proxy (provider's own internal routing, e.g., Zhipu GLM)
         if provider.visionStrategy == "anthropic-proxy",
            let endpoint = provider.anthropicEndpoint {
-            let apiKey = provider.isManaged ? (AuthCache.loadSession() ?? "") : provider.apiKey
+            let apiKey = provider.tags.contains("managed") ? (AuthCache.loadSession() ?? "") : provider.apiKey
             NovaMLXLog.info("[ImagePreprocessor] Using anthropic-proxy: \(endpoint)")
             return .anthropicProxy(endpoint: endpoint, apiKey: apiKey, model: provider.remoteModel)
         }
@@ -58,7 +58,7 @@ enum ImagePreprocessor {
         // Tier 3: Companion vision model
         if provider.visionStrategy == "companion",
            let companionModel = provider.visionCompanionModel {
-            let apiKey = provider.isManaged ? (AuthCache.loadSession() ?? "") : provider.apiKey
+            let apiKey = provider.tags.contains("managed") ? (AuthCache.loadSession() ?? "") : provider.apiKey
             NovaMLXLog.info("[ImagePreprocessor] Using companion model: \(companionModel)")
             return .companion(endpoint: provider.endpoint, apiKey: apiKey, model: companionModel)
         }

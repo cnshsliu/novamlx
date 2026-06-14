@@ -16,7 +16,10 @@ extension NovaMLXAPIServer {
     }
 
     static func pickRetryProvider(modelName: String, tag: String?, exclude: Set<String>) -> TokenhubProvider? {
-        let pool = TokenhubManager.shared.list().filter { $0.isEnabled && $0.includeInLoadBalance && !exclude.contains($0.name) }
+        // TODO(Task 7): replace this with LBProxy dispatch via LBRouter.plan().
+        // For now it just picks a random enabled provider matching the tag,
+        // which is the legacy fallback used by the retry loop below.
+        let pool = TokenhubManager.shared.list().filter { $0.isEnabled && !exclude.contains($0.name) }
         var filtered = pool
         if let tag, !tag.isEmpty {
             filtered = filtered.filter { $0.tags.contains(tag) }
@@ -35,6 +38,17 @@ extension NovaMLXAPIServer {
         inference: InferenceService,
         tag: String? = nil
     ) async throws -> Response {
+        // TODO(Task 7): plain "tknet" LB dispatch should go through LBProxy
+        // (LBRouter.plan + per-strategy selection). Until then, reject LB
+        // requests with a clear error so callers know to either pick a
+        // specific provider via "tknet:provider-name" or wait for Task 7.
+        if modelName.lowercased() == "tknet" {
+            return try Self.jsonResponse(
+                ["error": ["message": "Load-balanced 'tknet' dispatch is being migrated to LBProxy (Task 7). Use 'tknet:<provider-name>' for now.", "type": "invalid_request_error"]],
+                httpStatus: .badRequest
+            )
+        }
+
         guard let provider = TokenhubManager.shared.resolve(modelName: modelName, tag: tag) else {
             return try Self.jsonResponse(
                 ["error": ["message": "Unknown tokenhub provider: \(modelName)", "type": "invalid_request_error"]],
@@ -47,21 +61,22 @@ extension NovaMLXAPIServer {
         bodyDict["model"] = provider.remoteModel
         _ = try JSONSerialization.data(withJSONObject: bodyDict)
         let isStreaming = (bodyDict["stream"] as? Bool) ?? false
-        let isLB = modelName.lowercased() == "tknet"
+        let isLB = false  // LB dispatch disabled until Task 7 (LBProxy)
         let maxRetries = isLB ? 2 : 0
 
         var triedProviders = Set<String>()
         var lastProvider = provider
 
-        // Resolve effective API key: managed providers use session token
+        // Resolve effective API key: cloud-managed providers (tagged "managed")
+        // inherit the user's session token; all others use their own API key.
         func effectiveApiKey(_ p: TokenhubProvider) -> String {
-            if p.isManaged { return AuthCache.loadSession() ?? "" }
+            if p.tags.contains("managed") { return AuthCache.loadSession() ?? "" }
             return p.apiKey
         }
 
         for attempt in 0...maxRetries {
             triedProviders.insert(lastProvider.name)
-            NovaMLXLog.info("[Tokenhub] -> \(lastProvider.name) (\(lastProvider.endpoint)/\(path)) remoteModel=\(lastProvider.remoteModel) managed=\(lastProvider.isManaged)\(attempt > 0 ? " retry#\(attempt)" : "")")
+            NovaMLXLog.info("[Tokenhub] -> \(lastProvider.name) (\(lastProvider.endpoint)/\(path)) remoteModel=\(lastProvider.remoteModel) managed=\(lastProvider.tags.contains("managed"))\(attempt > 0 ? " retry#\(attempt)" : "")")
 
             // Build request for current provider
             var bodyForThis = bodyDict

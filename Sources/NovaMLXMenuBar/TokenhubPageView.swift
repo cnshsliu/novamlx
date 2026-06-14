@@ -66,7 +66,6 @@ struct TokenhubPageView: View {
     @State private var formApiKey = ""
     @State private var formRemoteModel = ""
     @State private var formEnabled = false
-    @State private var formIncludeInLB = false
     @State private var formIsFree = false
     @State private var formSupportsResponses = false
     @State private var formTags = ""
@@ -105,8 +104,11 @@ struct TokenhubPageView: View {
         rightPanelMode == .editing
     }
 
+    /// True when the form is editing a cloud-managed provider (one tagged
+    /// "managed"). Post-Task-6 this replaces the old `isManaged` struct field;
+    /// the form shows read-only fields for managed providers.
     private var isEditingManaged: Bool {
-        editingProvider?.isManaged == true
+        editingProvider?.tags.contains("managed") == true
     }
 
     var body: some View {
@@ -218,7 +220,7 @@ struct TokenhubPageView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(NovaTheme.Colors.textSecondary)
                 if !manager.hasValidTknetKey() {
-                    let userCount = providers.filter { !$0.isManaged }.count
+                    let userCount = providers.filter { !$0.tags.contains("managed") }.count
                     Text("\(userCount)/\(TokenhubManager.freeProviderLimit)")
                         .font(.system(size: 9))
                         .foregroundColor(NovaTheme.Colors.textTertiary)
@@ -254,11 +256,9 @@ struct TokenhubPageView: View {
                 }
 
                 Button(action: {
-                    // Re-sync local model providers
-                    let loaded = appState.loadedModels
-                    TokenhubManager.shared.provisionLocalProviders(loadedModels: loaded)
+                    // Refresh provider list (locals now live in ModelManager)
                     reloadProviders()
-                    agentToast = "Refreshed: \(loaded.count) local models"
+                    agentToast = "Refreshed providers"
                     showAgentToast = true
                 }) {
                     Image(systemName: "arrow.clockwise.circle.fill")
@@ -266,7 +266,7 @@ struct TokenhubPageView: View {
                         .foregroundColor(NovaTheme.Colors.textSecondary)
                 }
                 .buttonStyle(.plain)
-                .help("Sync local model providers")
+                .help("Refresh providers")
                 .onHover { isHovering in
                     if isHovering { NSCursor.pointingHand.push() }
                     else { NSCursor.pop() }
@@ -291,9 +291,8 @@ struct TokenhubPageView: View {
             } else {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
-                        // Sort: local models first, then enabled, then disabled
+                        // Sort: enabled first, then disabled, then by name
                         let sorted = providers.sorted { a, b in
-                            if a.isLocal != b.isLocal { return a.isLocal }
                             if a.isEnabled != b.isEnabled { return a.isEnabled }
                             return a.name < b.name
                         }
@@ -310,12 +309,7 @@ struct TokenhubPageView: View {
     private func myProviderRow(_ provider: TokenhubProvider) -> some View {
         Button(action: { selectMyProvider(provider) }) {
             HStack(spacing: 0) {
-                // LB indicator: 4px vertical bar
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(provider.includeInLoadBalance ? NovaTheme.Colors.accent.opacity(0.7) : Color.clear)
-                    .frame(width: 4)
-
-                Spacer().frame(width: 6)
+                Spacer().frame(width: 10)
 
                 // Free indicator: fixed-width slot, visible dot when free
                 Group {
@@ -389,21 +383,22 @@ struct TokenhubPageView: View {
             } label: {
                 Label("Duplicate", systemImage: "doc.on.doc")
             }
-            if !provider.isLocal {
-                Button(role: .destructive) {
-                    pendingDeleteProvider = provider
-                    showDeleteConfirm = true
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
+            Button(role: .destructive) {
+                pendingDeleteProvider = provider
+                showDeleteConfirm = true
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
 
     // MARK: - Right Panel
 
+    /// Providers shown in the top "Load Balance" section. Post-Task-6 this is
+    /// just enabled providers (Task 7+ will replace this with the LB entity's
+    /// actual member list). Kept here so the LB header section still renders.
     private var lbProviders: [TokenhubProvider] {
-        providers.filter { $0.isEnabled && $0.includeInLoadBalance }
+        providers.filter { $0.isEnabled }
     }
 
     private var rightPanel: some View {
@@ -491,15 +486,7 @@ struct TokenhubPageView: View {
                 Text(provider.name)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(NovaTheme.Colors.textPrimary)
-                if provider.isLocal {
-                    Label("Local", systemImage: "internaldrive")
-                        .font(.system(size: 9))
-                        .foregroundColor(NovaTheme.Colors.accent)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(NovaTheme.Colors.accentDim)
-                        .clipShape(Capsule())
-                } else if provider.isManaged {
+                if provider.tags.contains("managed") {
                     Label("Managed", systemImage: "lock.fill")
                         .font(.system(size: 9))
                         .foregroundColor(NovaTheme.Colors.accent)
@@ -529,17 +516,15 @@ struct TokenhubPageView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                if !provider.isLocal {
-                    Button(role: .destructive) {
-                        pendingDeleteProvider = provider
-                        showDeleteConfirm = true
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 10))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                Button(role: .destructive) {
+                    pendingDeleteProvider = provider
+                    showDeleteConfirm = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10))
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
 
             // Info grid
@@ -550,12 +535,12 @@ struct TokenhubPageView: View {
                         .font(.system(size: 10))
                         .foregroundColor(NovaTheme.Colors.textTertiary)
                         .frame(width: 80, alignment: .trailing)
-                    Text(provider.isLocal ? provider.remoteModel : "tknet:" + provider.id)
+                    Text("tknet:" + provider.id)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(NovaTheme.Colors.textSecondary)
                     Button {
                         NSPasteboard.general.clearContents()
-                        let copyValue = provider.isLocal ? provider.remoteModel : "tknet:" + provider.id
+                        let copyValue = "tknet:" + provider.id
                         NSPasteboard.general.setString(copyValue, forType: .string)
                         agentToast = "Copied: " + copyValue
                         showAgentToast = true
@@ -602,7 +587,7 @@ struct TokenhubPageView: View {
             Divider()
 
             // Test buttons (visible in detail view too)
-            if !provider.isManaged {
+            if !provider.tags.contains("managed") {
                 detailTestButtons(provider)
                 Divider()
             }
@@ -612,7 +597,7 @@ struct TokenhubPageView: View {
             agentLauncherRow(
                 agent: agent,
                 onAgentChange: { selectedAgentPerProvider[provider.id] = $0 },
-                modelName: provider.isLocal ? provider.remoteModel : "tknet:" + provider.id,
+                modelName: "tknet:" + provider.id,
                 allProviders: providers
             )
         }
@@ -665,7 +650,7 @@ struct TokenhubPageView: View {
                     HStack(spacing: 4) {
                         if testProxyRunning { ProgressView().controlSize(.small) }
                         else { Image(systemName: "arrow.triangle.2.circlepath") }
-                        Text("Test \(provider.isLocal ? provider.name : "tknet:\(provider.name)")")
+                        Text("Test tknet:\(provider.name)")
                     }
                 }
                 .buttonStyle(.bordered)
@@ -992,9 +977,6 @@ struct TokenhubPageView: View {
                 Toggle("Enabled", isOn: $formEnabled)
                     .controlSize(.small)
                     .onChange(of: formEnabled) { saveManagedToggles() }
-                Toggle("Load Balance", isOn: $formIncludeInLB)
-                    .controlSize(.small)
-                    .onChange(of: formIncludeInLB) { saveManagedToggles() }
                 if !isEditingManaged {
                     Toggle("Free", isOn: $formIsFree)
                         .controlSize(.small)
@@ -1040,7 +1022,7 @@ struct TokenhubPageView: View {
                             HStack(spacing: 4) {
                                 if testProxyRunning { ProgressView().controlSize(.small) }
                                 else { Image(systemName: "arrow.triangle.2.circlepath") }
-                                Text("Test \(isLocalEndpoint(formEndpoint) ? formName : "tknet:\(formName)")")
+                                Text("Test tknet:\(formName)")
                             }
                         }
                         .buttonStyle(.bordered)
@@ -1082,7 +1064,7 @@ struct TokenhubPageView: View {
                     .controlSize(.small)
                     .disabled(formName.isEmpty || formEndpoint.isEmpty)
 
-                    if let editing = editingProvider, !editing.isLocal {
+                    if let editing = editingProvider {
                         Button(role: .destructive, action: {
                             pendingDeleteProvider = editing
                             showDeleteConfirm = true
@@ -1179,7 +1161,6 @@ struct TokenhubPageView: View {
         formApiKey = ""
         formRemoteModel = ""
         formEnabled = false
-        formIncludeInLB = false
         formIsFree = false
         formSupportsResponses = false
         formTags = ""
@@ -1212,11 +1193,10 @@ struct TokenhubPageView: View {
         formApiKey = provider.apiKey
         formRemoteModel = provider.remoteModel
         formEnabled = provider.isEnabled
-        formIncludeInLB = provider.includeInLoadBalance
         formIsFree = provider.isFree
         formSupportsResponses = provider.supportsResponsesAPI
         formTags = provider.tags.joined(separator: ", ")
-        isVerified = provider.isEnabled || provider.includeInLoadBalance
+        isVerified = provider.isEnabled
         availableModels = []
         queryError = nil
         saveError = nil
@@ -1232,7 +1212,6 @@ struct TokenhubPageView: View {
         formApiKey = ""
         formRemoteModel = ""
         formEnabled = false
-        formIncludeInLB = false
         formIsFree = false
         formSupportsResponses = false
         formTags = ""
@@ -1251,18 +1230,11 @@ struct TokenhubPageView: View {
             .filter { !$0.isEmpty }
     }
 
-    /// Auto-detect if an endpoint points to a local server.
-    private func isLocalEndpoint(_ endpoint: String) -> Bool {
-        let lower = endpoint.lowercased()
-        return lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("::1")
-    }
-
-    /// Save Enabled/LB/Free toggles for any provider (auto-saved on toggle change).
+    /// Save Enabled/Free/Responses toggles for any provider (auto-saved on toggle change).
     private func saveManagedToggles() {
         guard let editing = editingProvider else { return }
         var updated = editing
         updated.isEnabled = formEnabled
-        updated.includeInLoadBalance = formIncludeInLB
         updated.isFree = formIsFree
         updated.supportsResponsesAPI = formSupportsResponses
         try? manager.update(updated)
@@ -1286,9 +1258,7 @@ struct TokenhubPageView: View {
             apiKey: trimmedApiKey,
             remoteModel: trimmedRemoteModel,
             isEnabled: formEnabled,
-            includeInLoadBalance: formIncludeInLB,
             tags: parseTags(trimmedTags),
-            isLocal: isLocalEndpoint(trimmedEndpoint),
             isFree: formIsFree,
             supportsResponsesAPI: formSupportsResponses
         )
@@ -1364,9 +1334,7 @@ struct TokenhubPageView: View {
             apiKey: provider.apiKey,
             remoteModel: provider.remoteModel,
             isEnabled: provider.isEnabled,
-            includeInLoadBalance: provider.includeInLoadBalance,
             tags: provider.tags,
-            isLocal: provider.isLocal,
             isFree: provider.isFree,
             supportsResponsesAPI: provider.supportsResponsesAPI,
             visionStrategy: provider.visionStrategy,
@@ -1447,10 +1415,10 @@ struct TokenhubPageView: View {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
+        // Cloud-managed providers (tagged "managed") inherit the session token;
+        // all others use their own API key.
         let effectiveKey: String
-        if provider.isLocal {
-            effectiveKey = localApiKey ?? ""
-        } else if provider.isManaged {
+        if provider.tags.contains("managed") {
             effectiveKey = AuthCache.loadSession() ?? ""
         } else {
             effectiveKey = provider.apiKey
@@ -1572,9 +1540,7 @@ struct TokenhubPageView: View {
                 apiKey: formApiKey,
                 remoteModel: formRemoteModel,
                 isEnabled: true,
-                includeInLoadBalance: formIncludeInLB,
                 tags: parseTags(formTags),
-                isLocal: isLocalEndpoint(formEndpoint),
                 isFree: formIsFree,
                 supportsResponsesAPI: formSupportsResponses
             )
@@ -1600,7 +1566,7 @@ struct TokenhubPageView: View {
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             }
 
-            let modelName = provider.isLocal ? providerName : "tknet:\(providerName)"
+            let modelName = "tknet:\(providerName)"
             let body: [String: Any]
             if useResponses {
                 body = [
