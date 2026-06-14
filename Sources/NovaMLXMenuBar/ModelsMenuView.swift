@@ -9,7 +9,7 @@ struct ModelsMenuView: View {
     var body: some View {
         let l10n = L10n.shared
         VStack(alignment: .leading, spacing: 8) {
-            Text(l10n.tr("app.models"))
+            Text(l10n.tr("app.local_inference"))
                 .font(.headline)
 
             Divider()

@@ -20,6 +20,8 @@ enum LocalizationStrings {
         // App / Navigation
         "app.status": "Status",
         "app.models": "Models",
+        "app.local_inference": "Local Inference",
+        "app.load_balancers": "Load Balancers",
         "app.downloads": "Downloads",
         "app.chat": "Playground",
         "app.agents": "Agents",
@@ -351,6 +353,8 @@ enum LocalizationStrings {
     private static let zhHans: [String: String] = [
         "app.status": "状态",
         "app.models": "模型",
+        "app.local_inference": "本地推理",
+        "app.load_balancers": "负载均衡",
         "app.chat": "Playground",
         "app.agents": "智能体",
         "app.settings": "设置",
@@ -673,6 +677,8 @@ enum LocalizationStrings {
     private static let zhHantHK: [String: String] = [
         "app.status": "狀態",
         "app.models": "模型",
+        "app.local_inference": "本地推理",
+        "app.load_balancers": "負載均衡",
         "app.chat": "Playground",
         "app.agents": "智能體",
         "app.settings": "設定",
@@ -987,6 +993,8 @@ enum LocalizationStrings {
     private static let zhHantTW: [String: String] = [
         "app.status": "狀態",
         "app.models": "模型",
+        "app.local_inference": "本地推理",
+        "app.load_balancers": "負載均衡",
         "app.chat": "Playground",
         "app.agents": "智慧代理",
         "app.settings": "設定",
@@ -1294,6 +1302,8 @@ enum LocalizationStrings {
     private static let ja: [String: String] = [
         "app.status": "ステータス",
         "app.models": "モデル",
+        "app.local_inference": "ローカル推論",
+        "app.load_balancers": "ロードバランサー",
         "app.chat": "Playground",
         "app.agents": "エージェント",
         "app.settings": "設定",
@@ -1607,6 +1617,8 @@ enum LocalizationStrings {
     private static let ko: [String: String] = [
         "app.status": "상태",
         "app.models": "모델",
+        "app.local_inference": "로컬 추론",
+        "app.load_balancers": "로드 밸런서",
         "app.chat": "Playground",
         "app.agents": "에이전트",
         "app.settings": "설정",
@@ -1920,6 +1932,8 @@ enum LocalizationStrings {
     private static let fr: [String: String] = [
         "app.status": "Statut",
         "app.models": "Modèles",
+        "app.local_inference": "Inférence Locale",
+        "app.load_balancers": "Équilibreurs de Charge",
         "app.chat": "Playground",
         "app.agents": "Agents",
         "app.settings": "Paramètres",
@@ -2232,6 +2246,8 @@ enum LocalizationStrings {
     private static let de: [String: String] = [
         "app.status": "Status",
         "app.models": "Modelle",
+        "app.local_inference": "Lokale Inferenz",
+        "app.load_balancers": "Lastverteiler",
         "app.chat": "Playground",
         "app.agents": "Agenten",
         "app.settings": "Einstellungen",
@@ -2545,6 +2561,8 @@ enum LocalizationStrings {
     private static let ru: [String: String] = [
         "app.status": "Статус",
         "app.models": "Модели",
+        "app.local_inference": "Локальный вывод",
+        "app.load_balancers": "Балансировщики",
         "app.chat": "Playground",
         "app.agents": "Агенты",
         "app.settings": "Настройки",

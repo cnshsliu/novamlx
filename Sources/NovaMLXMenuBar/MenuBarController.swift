@@ -44,7 +44,7 @@ public struct MenuBarContentView: View {
                     .tag(0)
 
                 ModelsMenuView(appState: appState, modelManager: modelManager)
-                    .tabItem { Label(l10n.tr("app.models"), systemImage: "cube.box") }
+                    .tabItem { Label(l10n.tr("app.local_inference"), systemImage: "cube.box") }
                     .tag(1)
             }
             .frame(width: 280, height: 200)

@@ -37,7 +37,7 @@ struct NovaMLXApp: App {
                 Label(l10n.tr("app.status"), systemImage: "gauge.with.dots.needle.bottom.50percent")
             }
             Button { appDelegate.openMainWindow(to: .localInference) } label: {
-                Label(l10n.tr("app.models"), systemImage: "cube.box")
+                Label(l10n.tr("app.local_inference"), systemImage: "cube.box")
             }
             Button { appDelegate.openMainWindow(to: .tokenhub) } label: {
                 Label(l10n.tr("app.tokenhub"), systemImage: "server.rack")

@@ -269,9 +269,9 @@ public struct NovaAppView: View {
         switch page {
         case .status: return l10n.tr("app.status")
         case .cluster: return l10n.tr("app.cluster")
-        case .localInference: return l10n.tr("app.models")  // i18n key rename deferred to Task 12
+        case .localInference: return l10n.tr("app.local_inference")
         case .tokenhub: return l10n.tr("app.tokenhub")
-        case .loadBalancers: return "Load Balancers"  // TODO(Task 12): l10n.tr("app.load_balancers")
+        case .loadBalancers: return l10n.tr("app.load_balancers")
         case .chat: return l10n.tr("app.chat")
         case .apiKeys: return "API Keys"
         case .settings: return l10n.tr("app.settings")
