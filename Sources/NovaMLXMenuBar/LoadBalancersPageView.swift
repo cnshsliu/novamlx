@@ -27,10 +27,10 @@ struct LoadBalancersPageView: View {
             .padding(24)
         }
         .navigationTitle("Load Balancers")
-        .sheet(item: $editing) { lb in
+        .sheet(item: $editing, onDismiss: { Task { await reload() } }) { lb in
             LBEditView(lbId: lb.id)
         }
-        .sheet(isPresented: $creating) {
+        .sheet(isPresented: $creating, onDismiss: { Task { await reload() } }) {
             LBEditView(lbId: nil)
         }
         .task { await reload() }
@@ -251,10 +251,14 @@ struct LBEditView: View {
     }
 
     private func reload() async {
-        guard let lbId else { return }
+        // Resolve live ID: for the edit path, `lbId` is non-nil; for the create
+        // path, `lbId` is nil but `self.lb?.id` is set after `.task` creates
+        // the new row. Use whichever is available so both paths can re-fetch
+        // members after the picker sheet adds rows.
+        guard let liveId = lbId ?? self.lb?.id else { return }
         do {
-            lb = try NovaDB.shared.loadBalancerStore.getLB(lbId)
-            members = try NovaDB.shared.lbMemberStore.listMembers(lbId: lbId)
+            lb = try NovaDB.shared.loadBalancerStore.getLB(liveId)
+            members = try NovaDB.shared.lbMemberStore.listMembers(lbId: liveId)
             var statsMap: [UUID: LBMemberStats] = [:]
             for m in members {
                 if let s = try NovaDB.shared.lbMemberStatsStore.getStats(m.id) {

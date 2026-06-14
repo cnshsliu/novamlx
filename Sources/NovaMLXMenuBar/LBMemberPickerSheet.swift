@@ -28,15 +28,38 @@ struct LBMemberPickerSheet: View {
     @State private var remoteProviders: [(name: String, ref: String)] = []
     @State private var existingMemberRefs: Set<String> = []
     @State private var selected: Set<String> = []
+    @State private var searchText: String = ""
 
     enum Tab: String, CaseIterable, Identifiable {
         case local = "Local", remote = "Remote"
         var id: String { rawValue }
     }
 
+    /// Case-insensitive substring match against the search field. Empty query
+    /// matches everything. Applies to whichever tab is active so the single
+    /// search bar above the segmented control filters Local and Remote alike.
+    private func matchesSearch(_ candidate: String) -> Bool {
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        if q.isEmpty { return true }
+        return candidate.lowercased().contains(q)
+    }
+
+    private var filteredLocalModels: [String] {
+        localModels.filter { matchesSearch($0) }
+    }
+
+    private var filteredRemoteProviders: [(name: String, ref: String)] {
+        remoteProviders.filter { matchesSearch($0.name) || matchesSearch($0.ref) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Add members").font(.title3.bold())
+
+            // Single shared search bar — filters whichever tab is active.
+            TextField("Search local models and remote providers…", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled()
 
             Picker("", selection: $selectedTab) {
                 ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
@@ -70,8 +93,10 @@ struct LBMemberPickerSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 if localModels.isEmpty {
                     emptyHint("No downloaded local models. Use the Local Inference page to download one first.")
+                } else if filteredLocalModels.isEmpty {
+                    emptyHint("No local models match \"\(searchText)\".")
                 } else {
-                    ForEach(localModels, id: \.self) { modelId in
+                    ForEach(filteredLocalModels, id: \.self) { modelId in
                         memberRow(
                             title: modelId,
                             subtitle: nil,
@@ -92,8 +117,10 @@ struct LBMemberPickerSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 if remoteProviders.isEmpty {
                     emptyHint("No enabled remote providers. Add one on the TokenHub page first.")
+                } else if filteredRemoteProviders.isEmpty {
+                    emptyHint("No remote providers match \"\(searchText)\".")
                 } else {
-                    ForEach(remoteProviders, id: \.ref) { p in
+                    ForEach(filteredRemoteProviders, id: \.ref) { p in
                         memberRow(
                             title: p.name,
                             subtitle: p.ref,
