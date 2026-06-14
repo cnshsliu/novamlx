@@ -37,11 +37,14 @@ extension NovaMLXAPIServer {
             NovaMLXLog.info("[Tokenhub/Responses] RAW JSON: no tools field found in request body")
         }
 
-        // TODO(Task 7): plain "tknet" LB dispatch should go through LBProxy.
-        // Until then, reject LB requests with a clear error.
+        // Plain "tknet" (no provider) used to mean "load-balance across all
+        // providers". That path is now superseded by named LBs via LBProxy
+        // (use `model = "lb:<slug>"`). Reject bare tknet so callers migrate.
+        // The LB dispatch for the Responses API happens upstream in
+        // APIServer.swift (look for `Self.isLBModel(req.model)`).
         if req.model.lowercased() == "tknet" {
             return try Self.jsonResponse(
-                ["error": ["message": "Load-balanced 'tknet' dispatch is being migrated to LBProxy (Task 7). Use 'tknet:<provider-name>' for now.", "type": "invalid_request_error"]],
+                ["error": ["message": "Bare 'tknet' load-balanced dispatch has been replaced by named LBs. Use 'lb:<slug>' (e.g. 'lb:coding-pool') or 'tknet:<provider-name>' for a specific provider.", "type": "invalid_request_error"]],
                 httpStatus: .badRequest
             )
         }

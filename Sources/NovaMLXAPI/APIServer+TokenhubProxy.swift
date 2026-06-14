@@ -16,9 +16,10 @@ extension NovaMLXAPIServer {
     }
 
     static func pickRetryProvider(modelName: String, tag: String?, exclude: Set<String>) -> TokenhubProvider? {
-        // TODO(Task 7): replace this with LBProxy dispatch via LBRouter.plan().
-        // For now it just picks a random enabled provider matching the tag,
-        // which is the legacy fallback used by the retry loop below.
+        // Legacy retry helper. LBProxy now owns LB dispatch + retry, so this
+        // is only used by the "tknet:" prefix passthrough path as an internal
+        // fallback (currently unreachable: `isLB` is hard-coded false below).
+        // Retained for future re-wiring if tknet: ever gains tag-based LB.
         let pool = TokenhubManager.shared.list().filter { $0.isEnabled && !exclude.contains($0.name) }
         var filtered = pool
         if let tag, !tag.isEmpty {
@@ -38,13 +39,12 @@ extension NovaMLXAPIServer {
         inference: InferenceService,
         tag: String? = nil
     ) async throws -> Response {
-        // TODO(Task 7): plain "tknet" LB dispatch should go through LBProxy
-        // (LBRouter.plan + per-strategy selection). Until then, reject LB
-        // requests with a clear error so callers know to either pick a
-        // specific provider via "tknet:provider-name" or wait for Task 7.
+        // Plain "tknet" (no provider) used to mean "load-balance across all
+        // providers". That path is now superseded by named LBs via LBProxy
+        // (use `model = "lb:<slug>"`). Reject bare tknet so callers migrate.
         if modelName.lowercased() == "tknet" {
             return try Self.jsonResponse(
-                ["error": ["message": "Load-balanced 'tknet' dispatch is being migrated to LBProxy (Task 7). Use 'tknet:<provider-name>' for now.", "type": "invalid_request_error"]],
+                ["error": ["message": "Bare 'tknet' load-balanced dispatch has been replaced by named LBs. Use 'lb:<slug>' (e.g. 'lb:coding-pool') or 'tknet:<provider-name>' for a specific provider.", "type": "invalid_request_error"]],
                 httpStatus: .badRequest
             )
         }

@@ -584,6 +584,39 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     messages = OCROptimizer.applyPrompt(messages: messages, modelName: openAIReq.model)
                 }
 
+                // LB routing: model name is "lb:<slug>"
+                if Self.isLBModel(openAIReq.model), let slug = Self.lbSlug(from: openAIReq.model) {
+                    let proxy = Self.makeLBProxy(inference: inference)
+                    // Snapshot Sendable values for capture by the @Sendable closure.
+                    let lbTag = openAIReq.tag
+                    let lbRequest = request
+                    let outcome = await proxy.handle(
+                        slug: slug, rawBody: Data(buffer: body), path: "chat/completions"
+                    ) { member, memberBody, memberPath in
+                        switch member.kind {
+                        case .local:
+                            // Rewrite model field and re-dispatch via local chat handler.
+                            let rewritten = Self.rewriteModel(in: memberBody, to: member.ref)
+                            return try await Self.dispatchLocalChat(
+                                rawBody: rewritten, path: memberPath,
+                                inference: inference, cfg: cfg,
+                                clientType: ClientDetector.detect(request: lbRequest),
+                                coordinator: coordinator
+                            )
+                        case .remote:
+                            return try await Self.handleTokenhubPassthrough(
+                                modelName: "tknet:" + member.ref,
+                                rawBody: memberBody, path: memberPath,
+                                inference: inference, tag: lbTag
+                            )
+                        }
+                    }
+                    if case .success(let resp) = outcome { return resp }
+                    if let errResp = try Self.lbOutcomeToResponse(outcome, slug: slug) {
+                        return errResp
+                    }
+                }
+
                 // Tokenhub routing: model name is "tknet" or "tknet:<provider>"
                 if TokenhubManager.shared.isTokenhubModel(openAIReq.model) {
                     return try await Self.handleTokenhubPassthrough(
@@ -674,6 +707,38 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     messages = try mapAnthropicMessages(anthropicReq.messages, system: anthropicReq.system)
                 } catch let err as AnthropicMappingError {
                     throw NovaMLXError.apiError(String(describing: err))
+                }
+
+                // LB routing for Anthropic requests: model name is "lb:<slug>"
+                if Self.isLBModel(anthropicReq.model), let slug = Self.lbSlug(from: anthropicReq.model) {
+                    let proxy = Self.makeLBProxy(inference: inference)
+                    let lbRequest = request
+                    let outcome = await proxy.handle(
+                        slug: slug, rawBody: Data(buffer: body), path: "messages"
+                    ) { member, memberBody, memberPath in
+                        switch member.kind {
+                        case .local:
+                            let rewritten = Self.rewriteModel(in: memberBody, to: member.ref)
+                            return try await Self.dispatchLocalMessages(
+                                rawBody: rewritten, path: memberPath,
+                                inference: inference, cfg: cfg,
+                                clientType: ClientDetector.detect(request: lbRequest),
+                                coordinator: coordinator
+                            )
+                        case .remote:
+                            let rawDict = try JSONSerialization.jsonObject(with: memberBody) as? [String: Any]
+                            let tag = rawDict?["tag"] as? String
+                            return try await Self.handleTokenhubPassthrough(
+                                modelName: "tknet:" + member.ref,
+                                rawBody: memberBody, path: memberPath,
+                                inference: inference, tag: tag
+                            )
+                        }
+                    }
+                    if case .success(let resp) = outcome { return resp }
+                    if let errResp = try Self.lbOutcomeToResponse(outcome, slug: slug) {
+                        return errResp
+                    }
                 }
 
                 // Tokenhub routing for Anthropic requests
@@ -1298,6 +1363,37 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 } catch {
                     NovaMLXLog.error("[Tokenhub/Responses] DECODE FAILED: \(error)")
                     throw error
+                }
+
+                // LB routing: model name is "lb:<slug>"
+                if Self.isLBModel(req.model), let slug = Self.lbSlug(from: req.model) {
+                    let proxy = Self.makeLBProxy(inference: inference)
+                    let lbRequest = request
+                    let outcome = await proxy.handle(
+                        slug: slug, rawBody: rawBody, path: "responses"
+                    ) { member, memberBody, memberPath in
+                        switch member.kind {
+                        case .local:
+                            let rewritten = Self.rewriteModel(in: memberBody, to: member.ref)
+                            return try await Self.dispatchLocalResponses(
+                                rawBody: rewritten, path: memberPath,
+                                inference: inference, cfg: cfg,
+                                clientType: ClientDetector.detect(request: lbRequest),
+                                coordinator: coordinator
+                            )
+                        case .remote:
+                            // Reuse the Responses-API passthrough; it decodes
+                            // the body itself so memberBody is what it wants.
+                            let memberReq = try JSONDecoder().decode(OpenAIResponseRequest.self, from: memberBody)
+                            return try await Self.handleTokenhubResponsesPassthrough(
+                                req: memberReq, rawBody: memberBody, inference: inference
+                            )
+                        }
+                    }
+                    if case .success(let resp) = outcome { return resp }
+                    if let errResp = try Self.lbOutcomeToResponse(outcome, slug: slug) {
+                        return errResp
+                    }
                 }
 
                 // Tokenhub passthrough: convert Responses API → Chat Completions, forward, convert back
