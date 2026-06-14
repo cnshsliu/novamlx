@@ -2072,6 +2072,60 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 return try Self.jsonResponse(AdminModelSettingsResponse(modelId: modelId, settings: settings))
             }
+            // MARK: - Load Balancers
+            // CRUD + member management for multi-provider routing. Handler
+            // logic lives in APIServer+LoadBalancerAdmin.swift.
+            Get("/admin/load-balancers") { _, _ in
+                let dtos = try Self.lbAdminList()
+                return try Self.jsonResponse(dtos)
+            }
+            Post("/admin/load-balancers") { request, _ in
+                let body = try await request.body.collect(upTo: .max)
+                let input = try JSONDecoder().decode(CreateLBInput.self, from: body)
+                let dto = try Self.lbAdminCreate(input: input)
+                return try Self.jsonResponse(dto, httpStatus: .created)
+            }
+            Get("/admin/load-balancers/{id}") { _, context in
+                let id = try context.parameters.require("id", as: UUID.self)
+                let dto = try Self.lbAdminDetail(id: id)
+                return try Self.jsonResponse(dto)
+            }
+            Patch("/admin/load-balancers/{id}") { request, context in
+                let id = try context.parameters.require("id", as: UUID.self)
+                let body = try await request.body.collect(upTo: .max)
+                let patch = try JSONDecoder().decode(PatchLBInput.self, from: body)
+                let dto = try Self.lbAdminUpdate(id: id, patch: patch)
+                return try Self.jsonResponse(dto)
+            }
+            Delete("/admin/load-balancers/{id}") { _, context in
+                let id = try context.parameters.require("id", as: UUID.self)
+                try Self.lbAdminDelete(id: id)
+                return try Self.jsonResponse(["ok": true])
+            }
+            Post("/admin/load-balancers/{id}/members") { request, context in
+                let id = try context.parameters.require("id", as: UUID.self)
+                let body = try await request.body.collect(upTo: .max)
+                let input = try JSONDecoder().decode(AddMemberInput.self, from: body)
+                let dto = try Self.lbAdminAddMember(lbId: id, input: input)
+                return try Self.jsonResponse(dto, httpStatus: .created)
+            }
+            Patch("/admin/load-balancers/{id}/members/{memberId}") { request, context in
+                let memberId = try context.parameters.require("memberId", as: UUID.self)
+                let body = try await request.body.collect(upTo: .max)
+                let patch = try JSONDecoder().decode(PatchMemberInput.self, from: body)
+                let dto = try Self.lbAdminUpdateMember(memberId: memberId, patch: patch)
+                return try Self.jsonResponse(dto)
+            }
+            Delete("/admin/load-balancers/{id}/members/{memberId}") { _, context in
+                let memberId = try context.parameters.require("memberId", as: UUID.self)
+                try Self.lbAdminDeleteMember(memberId: memberId)
+                return try Self.jsonResponse(["ok": true])
+            }
+            Post("/admin/load-balancers/{id}/test") { _, context in
+                let id = try context.parameters.require("id", as: UUID.self)
+                let trace = try Self.lbAdminTest(id: id, inference: inference)
+                return try Self.jsonResponse(trace)
+            }
             Get("/admin/sessions") { request, context in
                 let sessions = inference.engine.sessionManager.listSessions()
                 return try Self.jsonResponse(sessions)
