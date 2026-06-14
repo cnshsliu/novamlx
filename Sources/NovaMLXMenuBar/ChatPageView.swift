@@ -219,19 +219,13 @@ struct ChatPageView: View {
                 if !appState.loadedModels.isEmpty {
                     Section("LOCAL — DIRECT IN-PROCESS") {
                         ForEach(appState.loadedModels, id: \.self) { model in
-                            Text(shortModelLabel(model)).tag(model)
-                        }
-                    }
-                }
-                if !loadBalancerEntries.isEmpty {
-                    Section("LOAD BALANCE — NAMED POOLS") {
-                        ForEach(loadBalancerEntries, id: \.slug) { lb in
-                            HStack {
-                                Image(systemName: "scalemass")
+                            HStack(spacing: 6) {
+                                Image(systemName: modelTypeIcon(modelType(for: model)))
+                                    .foregroundColor(modelTypeColor(modelType(for: model)))
                                     .font(.system(size: 10))
-                                Text("\(lb.name)  ·  lb:\(lb.slug)")
+                                Text(shortModelName(model))
                             }
-                            .tag("lb:\(lb.slug)")
+                            .tag(model)
                         }
                     }
                 }
@@ -244,6 +238,18 @@ struct ChatPageView: View {
                                 Text(model)
                             }
                             .tag("tknet:\(model)")
+                        }
+                    }
+                }
+                if !loadBalancerEntries.isEmpty {
+                    Section("LOAD BALANCE — NAMED POOLS") {
+                        ForEach(loadBalancerEntries, id: \.slug) { lb in
+                            HStack {
+                                Image(systemName: "scalemass")
+                                    .font(.system(size: 10))
+                                Text("\(lb.name)  ·  lb:\(lb.slug)")
+                            }
+                            .tag("lb:\(lb.slug)")
                         }
                     }
                 }
@@ -976,10 +982,23 @@ struct ChatPageView: View {
     }
 
     private func shortModelLabel(_ modelId: String) -> String {
-        let shortName = modelId.components(separatedBy: "/").last ?? modelId
-        let mType = inferenceService.engine.getContainer(for: modelId)?.config.modelType ?? .llm
-        let tag = modelTypeShort(mType)
+        let shortName = shortModelName(modelId)
+        let tag = modelTypeShort(modelType(for: modelId))
         return "[\(tag)] \(shortName)"
+    }
+
+    /// Last path component of a model id — e.g. "mlx-community/Qwen3-4B-4bit" → "Qwen3-4B-4bit".
+    /// Used by the picker (where the type prefix is rendered as a separate icon)
+    /// and by `shortModelLabel` (which still emits the textual tag for non-picker callers).
+    private func shortModelName(_ modelId: String) -> String {
+        modelId.components(separatedBy: "/").last ?? modelId
+    }
+
+    /// Live model type from the loaded container, defaulting to LLM if the
+    /// container isn't built yet (shouldn't happen for items in `loadedModels`,
+    /// but defensive against UI flashes during load).
+    private func modelType(for modelId: String) -> ModelType {
+        inferenceService.engine.getContainer(for: modelId)?.config.modelType ?? .llm
     }
 
     private func modelTypeShort(_ type: ModelType) -> String {
@@ -989,6 +1008,18 @@ struct ChatPageView: View {
         case .embedding: return "EMB"
         case .audio: return "ASR"
         case .image: return "IMG"
+        }
+    }
+
+    /// SF Symbol per model type. Keeps the same semantic color mapping as
+    /// `modelTypeColor` so icon + color reinforce the type at a glance.
+    private func modelTypeIcon(_ type: ModelType) -> String {
+        switch type {
+        case .llm: return "text.bubble"
+        case .vlm: return "eye"
+        case .embedding: return "scope"
+        case .audio: return "waveform"
+        case .image: return "photo"
         }
     }
 
