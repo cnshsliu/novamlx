@@ -114,6 +114,10 @@ struct LBEditView: View {
     @State private var stats: [UUID: LBMemberStats] = [:]
     @State private var showAddMember = false
     @State private var errorMsg: String?
+    @State private var showEmptyMembersWarning = false
+    /// Snapshot of the LB as it was when the edit sheet opened. Used to roll
+    /// back changes on "Cancel edit" (Edit path: restore; New path: delete).
+    @State private var originalLB: LoadBalancer?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -141,14 +145,31 @@ struct LBEditView: View {
                 Text("Save the LB first.").padding()
             }
         }
+        .alert("Add at least one member", isPresented: $showEmptyMembersWarning) {
+            // OK: just dismiss the alert, stay in the form for further editing.
+            Button("OK", role: .cancel) {}
+            // Cancel edit: rollback + close.
+            Button("Cancel edit", role: .destructive) { cancelEdit() }
+        } message: {
+            Text("This load balancer has no members. Requests to it will fail with 503 until you add at least one. Click \"OK\" to keep editing, or \"Cancel edit\" to \(lbId == nil ? "discard this LB" : "revert your changes").")
+        }
         .task {
-            if lbId != nil {
+            if let lbId {
                 await reload()
+                // Edit path: snapshot the original so Cancel can revert.
+                originalLB = lb
             } else {
-                // Create new LB with default values
-                let new = LoadBalancer(name: "New LB", slug: "new-lb")
-                try? NovaDB.shared.loadBalancerStore.upsertLB(new)
-                self.lb = new
+                // New path: mint a unique default slug so the second consecutive
+                // "New LB" doesn't trip UNIQUE(slug). originalLB stays nil so
+                // Cancel knows to DELETE the row we're about to create.
+                let slug = makeUniqueDefaultSlug()
+                let new = LoadBalancer(name: "New LB", slug: slug)
+                do {
+                    try NovaDB.shared.loadBalancerStore.upsertLB(new)
+                    self.lb = new
+                } catch {
+                    self.errorMsg = friendlyLBError(error)
+                }
             }
         }
     }
@@ -158,7 +179,13 @@ struct LBEditView: View {
             Text(lbId == nil ? "New Load Balancer" : "Edit Load Balancer")
                 .font(.title2.bold())
             Spacer()
-            Button("Done") { dismiss() }
+            Button("Done") {
+                if members.isEmpty {
+                    showEmptyMembersWarning = true
+                } else {
+                    dismiss()
+                }
+            }
         }
     }
 
@@ -185,7 +212,7 @@ struct LBEditView: View {
                     get: { self.lb?.slug ?? "" },
                     set: { newSlug in
                         guard isValidLBSlug(newSlug) else {
-                            self.errorMsg = "slug must match ^[a-z0-9-]+$"
+                            self.errorMsg = "Slug must match ^[a-z0-9-]+$ and be 1-64 chars."
                             return
                         }
                         self.errorMsg = nil
@@ -245,9 +272,33 @@ struct LBEditView: View {
         do {
             try NovaDB.shared.loadBalancerStore.upsertLB(updated)
             self.lb = updated
+            self.errorMsg = nil
         } catch {
-            self.errorMsg = String(describing: error)
+            self.errorMsg = friendlyLBError(error)
         }
+    }
+
+    /// Roll back any unsaved-as-final edits and close the sheet.
+    /// - Edit path (`originalLB != nil`): restore the LB to its pre-edit state.
+    /// - New path (`originalLB == nil`): delete the row created by `.task`.
+    private func cancelEdit() {
+        if let original = originalLB {
+            // Edit: revert to the snapshot taken on `.task`.
+            do {
+                try NovaDB.shared.loadBalancerStore.upsertLB(original)
+            } catch {
+                NovaMLXLog.error("[LBEdit] revert failed: \(error)")
+            }
+        } else if let created = lb {
+            // New: delete the placeholder row we created in `.task`. Cascades
+            // to lb_members + lb_member_stats so nothing leaks.
+            do {
+                try NovaDB.shared.loadBalancerStore.deleteLB(created.id)
+            } catch {
+                NovaMLXLog.error("[LBEdit] delete failed: \(error)")
+            }
+        }
+        dismiss()
     }
 
     private func reload() async {
@@ -270,6 +321,31 @@ struct LBEditView: View {
             NovaMLXLog.error("[LBEdit] reload failed: \(error)")
         }
     }
+}
+
+/// Mint a slug that doesn't collide with any existing LB's slug.
+/// Tries `new-lb`, then `new-lb-2`, `new-lb-3`, …
+private func makeUniqueDefaultSlug() -> String {
+    let existing = (try? NovaDB.shared.loadBalancerStore.listLBs()) ?? []
+    let taken = Set(existing.map(\.slug))
+    if !taken.contains("new-lb") { return "new-lb" }
+    var i = 2
+    while taken.contains("new-lb-\(i)") { i += 1 }
+    return "new-lb-\(i)"
+}
+
+/// Translate a GRDB/SQLite error into a human-readable message. Falls back
+/// to the raw error description for anything we don't recognize.
+private func friendlyLBError(_ error: Error) -> String {
+    let raw = String(describing: error)
+    // GRDB surfaces UNIQUE violations as "SQLite error 19: UNIQUE constraint failed: <table>.<col>"
+    if raw.contains("UNIQUE constraint failed: load_balancers.slug") {
+        return "A load balancer with this slug already exists. Choose a different slug."
+    }
+    if raw.contains("UNIQUE constraint failed") && raw.contains("slug") {
+        return "A load balancer with this slug already exists. Choose a different slug."
+    }
+    return raw
 }
 
 // MARK: - LBMemberRow
@@ -297,8 +373,17 @@ struct LBMemberRow: View {
 
             // Status
             if member.kind == .local {
-                Text("see Local Inference page")  // MLXEngine.shared.isModelLoaded not accessible here
-                    .font(.caption2).foregroundColor(.secondary)
+                // Query the loaded_models table (the same store InferenceService
+                // writes to on every load/unload) to reflect live MLXEngine state
+                // without needing the InferenceService instance threaded in.
+                let loaded = isLocalModelLoaded(member.ref)
+                if loaded {
+                    Text("✓ loaded")
+                        .font(.caption2).foregroundColor(.green)
+                } else {
+                    Text("⚠ not loaded")
+                        .font(.caption2).foregroundColor(.orange)
+                }
             } else if let stats {
                 Text("\(stats.avgLatencyMs)ms avg")
                     .font(.caption2).foregroundColor(.secondary)
@@ -354,4 +439,13 @@ private func isValidLBSlug(_ s: String) -> Bool {
     return s.allSatisfy { c in
         (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "-"
     }
+}
+
+/// True if the model is currently loaded in MLXEngine. Reads the same
+/// `loaded_models` SQLite table that `InferenceService.saveLoadedModelsList`
+/// writes to on every load/unload, so it reflects live state without
+/// needing the InferenceService instance threaded through the view hierarchy.
+private func isLocalModelLoaded(_ modelId: String) -> Bool {
+    let loaded = (try? NovaDB.shared.loadedModelsStore.list()) ?? []
+    return loaded.contains(modelId)
 }
