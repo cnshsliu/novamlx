@@ -2,6 +2,37 @@
 
 All notable changes to NovaMLX will be documented in this file.
 
+## [Unreleased] - 2026-06-14
+
+### ⚠ Breaking Changes
+- **TokenHub is now remote-providers-only.** Local models no longer appear in the TokenHub provider list. Local inference remains in the renamed **Local Inference** page (formerly "Models").
+- **`includeInLoadBalance` toggle removed** from provider cards. Multi-provider routing is now expressed via named Load Balancers, not via the per-provider LB flag.
+- **Bare `tknet` dispatch rejected.** Requests with `model = "tknet"` now return 400 with a migration hint. Use `lb:<slug>` for load-balanced dispatch or `tknet:<provider-name>` for direct provider dispatch.
+- **Implicit global LB removed.** Requests that previously fell through to the implicit global LB (every provider with `includeInLoadBalance=true`) now return 404. Create an explicit LB via the new **Load Balancers** page or `/admin/load-balancers` API.
+- **`is_managed` column dropped.** Cloud-managed status is now expressed via the `"managed"` tag on the provider.
+
+### Added
+- **First-class Load Balancer entity** with its own SQLite tables (`load_balancers`, `lb_members`, `lb_member_stats`) and admin REST API at `/admin/load-balancers`.
+- **Named LB dispatch** via `model = "lb:<slug>"` prefix. LBs support 5 selection strategies: `tiered` (default), `round_robin`, `weighted`, `lowest_latency`, `random`.
+- **Per-member statistics**: request/success/failure counts, 5xx counter, latency average, last error — exposed via `/admin/load-balancers/:id`.
+- **Auto-retry on member failure**: LBProxy retries up to `maxRetries` (default 3) on timeout/5xx, only before first byte for streaming requests.
+- **Load Balancers page** in sidebar (sibling of TokenHub) with list + edit views, member picker (Local + Remote tabs), and per-strategy weight input.
+- **`/admin/load-balancers/:id/test`** endpoint for invoking an LB with a sample payload and inspecting the chosen candidate trace.
+- Localized "Local Inference" + "Load Balancers" sidebar/menu labels across all 9 languages.
+
+### Changed
+- Sidebar entry "Models" renamed to **"Local Inference"**.
+- `LBStrategy` JSON wire format uses snake_case (`round_robin`, `lowest_latency`) to match the admin API contract; Swift enum case names stay camelCase.
+
+### Removed
+- Dead `pickRetryProvider` retry branches from tokenhub passthrough handlers (superseded by LBProxy).
+- `provisionLocalProviders()` virtual-provider wrapping (locals are now referenced directly by model_id from LB members).
+- Priority-tiered `TokenhubManager.resolve()` LB dispatch path.
+
+### Migration
+- On startup, `v4_load_balancers` migration creates the new tables, deletes rows where `is_managed = 1` from `tokenhub_providers`, and drops the legacy columns. Local model files in `~/.nova/models/` are untouched.
+- Users who relied on the implicit global LB must create explicit LBs to restore multi-provider routing.
+
 ## [1.0.8] - 2026-05-08
 
 ### Added
