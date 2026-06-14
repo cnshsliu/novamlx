@@ -251,14 +251,8 @@ public struct NovaAppView: View {
             TokenhubPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .tokenhub ? 1 : 0)
-            // Placeholder — replaced by LoadBalancersPageView in Task 10
-            VStack(spacing: 8) {
-                Text("Load Balancers")
-                    .font(.title2.bold())
-                Text("Coming in Task 10")
-                    .foregroundColor(.secondary)
-            }
-            .opacity(selectedPage == .loadBalancers ? 1 : 0)
+            LoadBalancersPageView()
+                .opacity(selectedPage == .loadBalancers ? 1 : 0)
             ChatPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
