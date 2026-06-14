@@ -89,7 +89,6 @@ struct SettingsPageView: View {
             } else {
                 settingsRow(l10n.tr("settings.inferenceApi"), value: "http://127.0.0.1:\(String(appState.serverPort))")
                 settingsRow(l10n.tr("settings.adminApi"), value: "http://127.0.0.1:\(String(appState.adminPort))")
-                settingsRow(l10n.tr("settings.adminDashboard"), value: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")
 
                 configPathRow
             }
@@ -134,18 +133,6 @@ struct SettingsPageView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                 } else {
-                    Button(l10n.tr("settings.openChat")) {
-                        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.serverPort))/chat")!)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Button(l10n.tr("settings.openDashboard")) {
-                        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(String(appState.adminPort))/admin/dashboard")!)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
                     Spacer()
 
                     Button(l10n.tr("settings.openConfig")) {

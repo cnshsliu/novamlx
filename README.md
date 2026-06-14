@@ -321,11 +321,6 @@ When you start `NovaMLX`, a menu bar icon appears showing:
 
 Click the icon to open the **Dashboard** window for detailed monitoring.
 
-### Built-in Web UIs
-
-- **Chat**: [http://localhost:8080/chat](http://localhost:8080/chat) — Chat with your models in the browser
-- **Admin Dashboard**: [http://localhost:8081/admin/dashboard](http://localhost:8081/admin/dashboard) — Monitor and manage everything
-
 ---
 
 ## What Can NovaMLX Do?

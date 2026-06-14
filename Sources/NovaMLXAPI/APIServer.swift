@@ -198,7 +198,7 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
     let config: NovaMLXConfiguration
     let globalRateLimiter: RateLimiter
 
-    private static let publicPaths: Set<String> = ["/", "/chat", "/health", "/v1/models", "/v1/stats", "/favicon.ico"]
+    private static let publicPaths: Set<String> = ["/health", "/v1/models", "/v1/stats"]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
     func handle(
@@ -1413,14 +1413,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let data = try JSONSerialization.data(withJSONObject: body)
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
-            Get("/chat") { _, _ in
-                let html = ChatHTML.render()
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "text/html"],
-                    body: .init(byteBuffer: ByteBuffer(string: html))
-                )
-            }
             Get("/v1/chat/history") { _, _ in
                 let summaries = ChatHistoryStore.shared.list()
                 return try Self.jsonResponse(summaries)
@@ -1518,27 +1510,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let data = try JSONSerialization.data(withJSONObject: body)
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
-            // SPA root — serves the full web UI
-            Get("/") { _, _ in
-                let html = WebUIBuilder.render()
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "text/html"],
-                    body: .init(byteBuffer: ByteBuffer(string: html))
-                )
-            }
-
-            Get("/favicon.ico") { _, _ in
-                let svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%238b5cf6'/><text x='16' y='23' text-anchor='middle' font-size='20' fill='white' font-family='sans-serif' font-weight='bold'>N</text></svg>"
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "image/svg+xml"],
-                    body: .init(byteBuffer: ByteBuffer(string: svg))
-                )
-            }
 
             // Admin API proxy — forwards /admin/* to the admin server on localhost:{adminPort}
-            // This lets the web UI (on port 6590) reach admin endpoints without CORS issues
+            // This lets the main API server reach admin endpoints without a second client.
             Get("/admin/**") { request, context in
                 let path = "/admin/" + context.parameters.getCatchAll().joined(separator: "/")
                 let query = request.uri.query ?? ""
@@ -2983,15 +2957,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
                 return Response(status: .ok, headers: [.contentType: "application/json"],
                                 body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
-            }
-
-            Get("/admin/dashboard") { _, _ in
-                let html = Self.dashboardHTML()
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "text/html"],
-                    body: .init(byteBuffer: ByteBuffer(string: html))
-                )
             }
         }
 
