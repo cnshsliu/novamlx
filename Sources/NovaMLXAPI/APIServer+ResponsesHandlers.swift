@@ -22,7 +22,7 @@ extension NovaMLXAPIServer {
         // DEBUG: dump raw request
         let debugRawURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("tokenhub_raw_request.json")
         try? rawBody.write(to: debugRawURL)
-        NovaMLXLog.info("[Tokenhub/Responses] RAW REQUEST dumped to \(debugRawURL.path) prevId=\(req.previousResponseId ?? "none") input=\(req.input)")
+        NovaMLXLog.info("[Tokenhub/Responses] RAW REQUEST dumped to \(debugRawURL.path) prevId=\(req.previousResponseId ?? "none") input=\(String(describing: req.input ?? .none))")
         NovaMLXLog.info("[Tokenhub/Responses] TOOLS after Codable decode: \(req.tools?.count ?? -1) tools, stream=\(req.stream ?? false)")
         // Also dump raw JSON tools for comparison
         if let rawObj = try? JSONSerialization.jsonObject(with: rawBody) as? [String: Any],
@@ -56,11 +56,8 @@ extension NovaMLXAPIServer {
             )
         }
 
-        let isLB = false  // LB dispatch disabled until Task 7 (LBProxy)
-        let maxRetries = isLB ? 2 : 0
-        var triedProviders = Set<String>()
-        var lastProvider = provider
-
+        // Single-attempt passthrough. LB-style multi-provider dispatch lives in LBProxy
+        // (invoked via `lb:<slug>` upstream); this handler is for `tknet:<provider-name>`.
         func effectiveApiKey(_ p: TokenhubProvider) -> String {
             if p.tags.contains("managed") { return AuthCache.loadSession() ?? "" }
             return p.apiKey
@@ -108,9 +105,9 @@ extension NovaMLXAPIServer {
                         let (text, imageURLs) = ImagePreprocessor.extractContent(msg.content)
                         if imageURLs.isEmpty {
                             messages.append(["role": role, "content": text])
-                        } else if lastProvider.supportsVision {
+                        } else if provider.supportsVision {
                             // Provider supports vision — forward images natively
-                            NovaMLXLog.info("[Tokenhub/Responses] Provider \(lastProvider.name) supports vision, forwarding \(imageURLs.count) images natively")
+                            NovaMLXLog.info("[Tokenhub/Responses] Provider \(provider.name) supports vision, forwarding \(imageURLs.count) images natively")
                             var contentParts: [[String: Any]] = []
                             if !text.isEmpty {
                                 contentParts.append(["type": "text", "text": text])
@@ -121,7 +118,7 @@ extension NovaMLXAPIServer {
                             messages.append(["role": role, "content": contentParts])
                         } else {
                             // Text-only provider — collect images for OCR preprocessing
-                            NovaMLXLog.info("[Tokenhub/Responses] Provider \(lastProvider.name) does NOT support vision, queuing \(imageURLs.count) images for OCR fallback")
+                            NovaMLXLog.info("[Tokenhub/Responses] Provider \(provider.name) does NOT support vision, queuing \(imageURLs.count) images for OCR fallback")
                             messageImageBlocks[messages.count] = imageURLs
                             messages.append(["role": role, "content": text])
                         }
@@ -198,8 +195,8 @@ extension NovaMLXAPIServer {
             messages = merged
 
             // Image preprocessing: convert images to text descriptions for text-only providers
-            if !messageImageBlocks.isEmpty && !lastProvider.supportsVision {
-                let backend = ImagePreprocessor.resolveBackend(provider: lastProvider, inference: inference)
+            if !messageImageBlocks.isEmpty && !provider.supportsVision {
+                let backend = ImagePreprocessor.resolveBackend(provider: provider, inference: inference)
                 let result = await ImagePreprocessor.preprocess(
                     messages: messages,
                     imageBlocks: messageImageBlocks,
@@ -208,7 +205,7 @@ extension NovaMLXAPIServer {
                 )
                 messages = result.messages
                 if result.imagesProcessed > 0 {
-                    NovaMLXLog.info("[Tokenhub/Responses] Preprocessed \(result.imagesProcessed) images for text-only provider \(lastProvider.name)")
+                    NovaMLXLog.info("[Tokenhub/Responses] Preprocessed \(result.imagesProcessed) images for text-only provider \(provider.name)")
                 }
             }
 
@@ -476,24 +473,23 @@ extension NovaMLXAPIServer {
             return try? JSONSerialization.data(withJSONObject: response)
         }
 
-        for attempt in 0...maxRetries {
-            triedProviders.insert(lastProvider.name)
+        for _ in 0...0 {  // single iteration; LB retry lives in LBProxy
             let isStreaming = req.stream ?? false
 
             // Provider natively supports /v1/responses → raw passthrough, no conversion
-            if lastProvider.supportsResponsesAPI {
-                NovaMLXLog.info("[Tokenhub/Responses] -> \(lastProvider.name) RAW PASSTHROUGH streaming=\(isStreaming)\(attempt > 0 ? " retry#\(attempt)" : "")")
+            if provider.supportsResponsesAPI {
+                NovaMLXLog.info("[Tokenhub/Responses] -> \(provider.name) RAW PASSTHROUGH streaming=\(isStreaming)")
 
                 var rawObj = (try? JSONSerialization.jsonObject(with: rawBody)) as? [String: Any] ?? [:]
-                rawObj["model"] = lastProvider.remoteModel
+                rawObj["model"] = provider.remoteModel
                 let forwardBody = try? JSONSerialization.data(withJSONObject: rawObj)
 
-                let baseURL = URL(string: lastProvider.endpoint)!
+                let baseURL = URL(string: provider.endpoint)!
                 var urlRequest = URLRequest(url: baseURL.appendingPathComponent("responses"))
                 urlRequest.httpMethod = "POST"
                 urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                if !effectiveApiKey(lastProvider).isEmpty {
-                    urlRequest.setValue("Bearer \(effectiveApiKey(lastProvider))", forHTTPHeaderField: "Authorization")
+                if !effectiveApiKey(provider).isEmpty {
+                    urlRequest.setValue("Bearer \(effectiveApiKey(provider))", forHTTPHeaderField: "Authorization")
                 }
                 urlRequest.timeoutInterval = 120
                 urlRequest.httpBody = forwardBody
@@ -503,19 +499,15 @@ extension NovaMLXAPIServer {
                     let (bytes, urlResponse) = try await URLSession.shared.bytes(for: urlRequest)
                     guard let http = urlResponse as? HTTPURLResponse, http.statusCode == 200 else {
                         let statusCode = (urlResponse as? HTTPURLResponse)?.statusCode ?? 502
-                        NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) raw passthrough streaming failed HTTP \(statusCode)")
+                        NovaMLXLog.warning("[Tokenhub/Responses] \(provider.name) raw passthrough streaming failed HTTP \(statusCode)")
                         let elapsed = ContinuousClock.now - start
-                        TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: durationToMs(elapsed))
-                        if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
-                            lastProvider = next
-                            continue
-                        }
+                        TokenhubManager.shared.recordMetric(providerId: provider.id, success: false, latencyMs: durationToMs(elapsed))
                         return Response(status: .init(integerLiteral: statusCode))
                     }
                     let elapsed = ContinuousClock.now - start
-                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: true, latencyMs: durationToMs(elapsed))
+                    TokenhubManager.shared.recordMetric(providerId: provider.id, success: true, latencyMs: durationToMs(elapsed))
 
-                    let providerName = lastProvider.name
+                    let providerName = provider.name
                     let responseBody = ResponseBody { writer in
                         do {
                             for try await line in bytes.lines {
@@ -534,33 +526,29 @@ extension NovaMLXAPIServer {
                     let statusCode = (urlResponse as? HTTPURLResponse)?.statusCode ?? 502
                     let elapsed = ContinuousClock.now - start
                     let success = (200...299).contains(statusCode)
-                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: success, latencyMs: durationToMs(elapsed))
+                    TokenhubManager.shared.recordMetric(providerId: provider.id, success: success, latencyMs: durationToMs(elapsed))
 
                     if !success {
-                        NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) raw passthrough failed HTTP \(statusCode)")
-                        if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
-                            lastProvider = next
-                            continue
-                        }
+                        NovaMLXLog.warning("[Tokenhub/Responses] \(provider.name) raw passthrough failed HTTP \(statusCode)")
                         return Response(status: .init(integerLiteral: statusCode), body: ResponseBody(byteBuffer: ByteBuffer(data: data)))
                     }
 
                     var hdrs = HTTPFields()
-                    hdrs[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    hdrs[.init("X-Tokenhub-Provider")!] = provider.name
                     return Response(status: .ok, headers: hdrs, body: ResponseBody(byteBuffer: ByteBuffer(data: data)))
                 }
             }
 
             // Provider does NOT support /v1/responses → convert Responses→ChatCompletions
-            NovaMLXLog.info("[Tokenhub/Responses] -> \(lastProvider.name) remoteModel=\(lastProvider.remoteModel) streaming=\(isStreaming)\(attempt > 0 ? " retry#\(attempt)" : "")")
+            NovaMLXLog.info("[Tokenhub/Responses] -> \(provider.name) remoteModel=\(provider.remoteModel) streaming=\(isStreaming)")
 
-            let bodyData = try await buildChatCompletionsBody(remoteModel: lastProvider.remoteModel)
-            let baseURL = URL(string: lastProvider.endpoint)!
+            let bodyData = try await buildChatCompletionsBody(remoteModel: provider.remoteModel)
+            let baseURL = URL(string: provider.endpoint)!
             var urlRequest = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
             urlRequest.httpMethod = "POST"
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            if !effectiveApiKey(lastProvider).isEmpty {
-                urlRequest.setValue("Bearer \(effectiveApiKey(lastProvider))", forHTTPHeaderField: "Authorization")
+            if !effectiveApiKey(provider).isEmpty {
+                urlRequest.setValue("Bearer \(effectiveApiKey(provider))", forHTTPHeaderField: "Authorization")
             }
             urlRequest.timeoutInterval = 120
             urlRequest.httpBody = bodyData
@@ -570,22 +558,18 @@ extension NovaMLXAPIServer {
                 let (bytes, urlResponse) = try await URLSession.shared.bytes(for: urlRequest)
                 guard let http = urlResponse as? HTTPURLResponse, http.statusCode == 200 else {
                     let statusCode = (urlResponse as? HTTPURLResponse)?.statusCode ?? 502
-                    NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) streaming failed HTTP \(statusCode)")
+                    NovaMLXLog.warning("[Tokenhub/Responses] \(provider.name) streaming failed HTTP \(statusCode)")
                     let elapsed = ContinuousClock.now - start
-                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: durationToMs(elapsed))
-                    if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
-                        lastProvider = next
-                        continue
-                    }
+                    TokenhubManager.shared.recordMetric(providerId: provider.id, success: false, latencyMs: durationToMs(elapsed))
                     return Response(status: .init(integerLiteral: statusCode))
                 }
                 let elapsed = ContinuousClock.now - start
-                TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: true, latencyMs: durationToMs(elapsed))
+                TokenhubManager.shared.recordMetric(providerId: provider.id, success: true, latencyMs: durationToMs(elapsed))
 
                 let responseId = "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
                 let msgId = "msg_\(responseId.suffix(12))"
-                let model = lastProvider.remoteModel
-                let providerName = lastProvider.name
+                let model = provider.remoteModel
+                let providerName = provider.name
 
                 let responseBody = ResponseBody { writer in
                     var sequenceNumber = 0
@@ -785,35 +769,27 @@ extension NovaMLXAPIServer {
                 let elapsed = ContinuousClock.now - start
                 let latencyMs = durationToMs(elapsed)
                 guard let http = urlResponse as? HTTPURLResponse else {
-                    TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: false, latencyMs: latencyMs)
-                    if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
-                        lastProvider = next
-                        continue
-                    }
+                    TokenhubManager.shared.recordMetric(providerId: provider.id, success: false, latencyMs: latencyMs)
                     return Response(status: .internalServerError)
                 }
                 let success = http.statusCode < 400
-                TokenhubManager.shared.recordMetric(providerId: lastProvider.id, success: success, latencyMs: latencyMs)
+                TokenhubManager.shared.recordMetric(providerId: provider.id, success: success, latencyMs: latencyMs)
 
                 if http.statusCode >= 400 {
                     let body = String(data: data, encoding: .utf8)?.prefix(300) ?? "nil"
-                    NovaMLXLog.warning("[Tokenhub/Responses] \(lastProvider.name) error HTTP \(http.statusCode): \(body)")
-                    if isLB, let next = pickRetryProvider(modelName: req.model, tag: nil, exclude: triedProviders) {
-                        lastProvider = next
-                        continue
-                    }
+                    NovaMLXLog.warning("[Tokenhub/Responses] \(provider.name) error HTTP \(http.statusCode): \(body)")
                     var headers: HTTPFields = [.contentType: "application/json"]
-                    headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    headers[.init("X-Tokenhub-Provider")!] = provider.name
                     return Response(status: .init(integerLiteral: http.statusCode), headers: headers, body: .init(byteBuffer: ByteBuffer(data: data)))
                 }
 
                 if let convertedData = convertToResponsesResponse(data, model: req.model) {
                     var headers: HTTPFields = [.contentType: "application/json"]
-                    headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    headers[.init("X-Tokenhub-Provider")!] = provider.name
                     return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: convertedData)))
                 } else {
                     var headers: HTTPFields = [.contentType: "application/json"]
-                    headers[.init("X-Tokenhub-Provider")!] = lastProvider.name
+                    headers[.init("X-Tokenhub-Provider")!] = provider.name
                     return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: data)))
                 }
             }
