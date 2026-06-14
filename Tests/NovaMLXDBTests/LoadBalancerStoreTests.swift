@@ -90,4 +90,110 @@ struct LoadBalancerStoreTests {
         }
         #expect(tableCount == 3)
     }
+
+    // MARK: - Domain-level CRUD tests (Task 4)
+
+    @Test("Upsert + get LoadBalancer by id and slug")
+    func upsertAndGet() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        let lb = LoadBalancer(name: "Coding Pool", slug: "coding-pool", strategy: .roundRobin)
+        try nova.loadBalancerStore.upsertLB(lb)
+
+        let byId = try nova.loadBalancerStore.getLB(lb.id)
+        #expect(byId?.slug == "coding-pool")
+        #expect(byId?.strategy == .roundRobin)
+
+        let bySlug = try nova.loadBalancerStore.getLBBySlug("coding-pool")
+        #expect(bySlug?.id == lb.id)
+    }
+
+    @Test("Delete LoadBalancer cascades to members + stats")
+    func deleteCascades() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        let lb = LoadBalancer(name: "X", slug: "x")
+        try nova.loadBalancerStore.upsertLB(lb)
+
+        let m = LBMember(lbId: lb.id, kind: .remote, ref: "provider-1")
+        try nova.lbMemberStore.upsertMember(m)
+        try nova.lbMemberStatsStore.recordRequest(
+            memberId: m.id, succeeded: true, latencyMs: 50,
+            httpStatus: 200, errorMessage: nil
+        )
+
+        // Sanity
+        let membersBefore = try nova.lbMemberStore.listMembers(lbId: lb.id)
+        #expect(membersBefore.count == 1)
+        let statsBefore = try nova.lbMemberStatsStore.getStats(m.id)
+        #expect(statsBefore?.requestCount == 1)
+
+        try nova.loadBalancerStore.deleteLB(lb.id)
+
+        // Cascade
+        let membersAfter = try nova.lbMemberStore.listMembers(lbId: lb.id)
+        #expect(membersAfter.isEmpty)
+        let statsAfter = try nova.lbMemberStatsStore.getStats(m.id)
+        #expect(statsAfter == nil)
+    }
+
+    @Test("recordRequest lazily creates stats row and aggregates correctly")
+    func recordRequestAggregation() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        // lb_member_stats.member_id has a FK -> lb_members.id, so we must
+        // create a parent LB + member first. Once the member exists, the
+        // stats row is still lazily created on the first recordRequest call
+        // (no explicit insert step), which is what this test exercises.
+        let lb = LoadBalancer(name: "Stats", slug: "stats")
+        try nova.loadBalancerStore.upsertLB(lb)
+        let member = LBMember(lbId: lb.id, kind: .remote, ref: "prov-stats")
+        try nova.lbMemberStore.upsertMember(member)
+        let memberId = member.id
+
+        try nova.lbMemberStatsStore.recordRequest(
+            memberId: memberId, succeeded: true, latencyMs: 100,
+            httpStatus: 200, errorMessage: nil
+        )
+        try nova.lbMemberStatsStore.recordRequest(
+            memberId: memberId, succeeded: true, latencyMs: 200,
+            httpStatus: 200, errorMessage: nil
+        )
+        try nova.lbMemberStatsStore.recordRequest(
+            memberId: memberId, succeeded: false, latencyMs: 0,
+            httpStatus: 503, errorMessage: "timeout"
+        )
+
+        let stats = try nova.lbMemberStatsStore.getStats(memberId)
+        #expect(stats?.requestCount == 3)
+        #expect(stats?.successCount == 2)
+        #expect(stats?.failureCount == 1)
+        #expect(stats?.count5xx == 1)
+        #expect(stats?.totalLatencyMs == 300)
+        #expect(stats?.avgLatencyMs == 150)  // 300 / 2 successes
+        #expect(stats?.lastError == "timeout")
+    }
+
+    @Test("incrementLBRequestCount bumps counter atomically")
+    func incrementLBRequestCount() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+
+        let lb = LoadBalancer(name: "Counter", slug: "counter")
+        try nova.loadBalancerStore.upsertLB(lb)
+
+        try nova.loadBalancerStore.incrementLBRequestCount(lb.id)
+        try nova.loadBalancerStore.incrementLBRequestCount(lb.id)
+        try nova.loadBalancerStore.incrementLBRequestCount(lb.id)
+
+        let after = try nova.loadBalancerStore.getLB(lb.id)
+        #expect(after?.requestCount == 3)
+    }
 }
