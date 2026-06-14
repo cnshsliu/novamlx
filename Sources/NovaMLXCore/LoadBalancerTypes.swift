@@ -6,11 +6,11 @@ public enum LBStrategy: String, Codable, Sendable, CaseIterable {
     /// Priority tiers: local+free > local > free > paid. Round-robin within tier. (default)
     case tiered
     /// Equal rotation across all healthy members.
-    case roundRobin
+    case roundRobin = "round_robin"
     /// Probability proportional to member.weight. Treats nil weight as 1.
     case weighted
     /// Lowest avg_latency_ms over last 20 successes. Cold-start (no successes) treated as latency=0.
-    case lowestLatency
+    case lowestLatency = "lowest_latency"
     /// Uniform random across healthy members.
     case random
 }

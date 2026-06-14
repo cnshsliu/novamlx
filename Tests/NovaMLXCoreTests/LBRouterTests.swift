@@ -150,4 +150,35 @@ struct LBRouterTests {
         )
         #expect(LBRouter.plan(input).first?.id == members[1].id)
     }
+
+    @Suite("LBStrategy wire format")
+    struct LBStrategyWireFormatTests {
+        @Test("snake_case raw values match admin API contract")
+        func snakeCaseRawValues() {
+            // Spec contract: tiered | round_robin | weighted | lowest_latency | random
+            #expect(LBStrategy.tiered.rawValue == "tiered")
+            #expect(LBStrategy.roundRobin.rawValue == "round_robin")
+            #expect(LBStrategy.weighted.rawValue == "weighted")
+            #expect(LBStrategy.lowestLatency.rawValue == "lowest_latency")
+            #expect(LBStrategy.random.rawValue == "random")
+        }
+
+        @Test("JSON decode accepts snake_case strings from admin API")
+        func decodeSnakeCase() throws {
+            let json = """
+            {"id":"00000000-0000-0000-0000-000000000001","name":"X","slug":"x","strategy":"round_robin","maxRetries":3,"isEnabled":true,"requestCount":0,"createdAt":0,"updatedAt":0}
+            """.data(using: .utf8)!
+            let lb = try JSONDecoder().decode(LoadBalancer.self, from: json)
+            #expect(lb.strategy == .roundRobin)
+        }
+
+        @Test("JSON encode emits snake_case strings for admin API consumers")
+        func encodeSnakeCase() throws {
+            let lb = LoadBalancer(name: "X", slug: "x", strategy: .lowestLatency)
+            let data = try JSONEncoder().encode(lb)
+            let s = String(data: data, encoding: .utf8) ?? ""
+            #expect(s.contains("\"strategy\":\"lowest_latency\""))
+            #expect(!s.contains("lowestLatency"))
+        }
+    }
 }
