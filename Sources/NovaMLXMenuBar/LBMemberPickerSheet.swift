@@ -27,8 +27,16 @@ struct LBMemberPickerSheet: View {
     @State private var localModels: [String] = []                       // downloaded model IDs
     @State private var remoteProviders: [(name: String, ref: String)] = []
     @State private var existingMemberRefs: Set<String> = []
-    @State private var selected: Set<String> = []
+    /// Per-tab selection. Critical: a single shared `Set<String>` would
+    /// conflate local model_ids with remote provider names and stamp them
+    /// all with the active tab's `kind` on Add (bug: switching Local→Remote
+    /// and adding would mark all prior local picks as `.remote`).
+    @State private var selectedByTab: [Tab: Set<String>] = [.local: [], .remote: []]
     @State private var searchText: String = ""
+
+    private var selectedCount: Int {
+        (selectedByTab[.local]?.count ?? 0) + (selectedByTab[.remote]?.count ?? 0)
+    }
 
     enum Tab: String, CaseIterable, Identifiable {
         case local = "Local", remote = "Remote"
@@ -75,9 +83,9 @@ struct LBMemberPickerSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("Add \(selected.count)") { addSelected() }
+                Button("Add \(selectedCount)") { addSelected() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(selected.isEmpty)
+                    .disabled(selectedCount == 0)
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -142,7 +150,7 @@ struct LBMemberPickerSheet: View {
         badgeColor: Color, badgeText: String
     ) -> some View {
         let isExisting = existingMemberRefs.contains(key)
-        let isSelected = selected.contains(key)
+        let isSelected = selectedByTab[selectedTab]?.contains(key) ?? false
 
         HStack(spacing: 10) {
             Image(systemName: isSelected ? "checkmark.square" : "square")
@@ -176,7 +184,13 @@ struct LBMemberPickerSheet: View {
         .opacity(isExisting ? 0.6 : 1.0)
         .onTapGesture {
             guard !isExisting else { return }
-            if isSelected { selected.remove(key) } else { selected.insert(key) }
+            var current = selectedByTab[selectedTab] ?? []
+            if current.contains(key) {
+                current.remove(key)
+            } else {
+                current.insert(key)
+            }
+            selectedByTab[selectedTab] = current
         }
     }
 
@@ -190,15 +204,28 @@ struct LBMemberPickerSheet: View {
     // MARK: - Actions
 
     private func addSelected() {
-        let kind: MemberKind = (selectedTab == .local) ? .local : .remote
+        // Each tab's picks get that tab's kind. Picks made in the *other*
+        // tab (still in selectedByTab) are also added with their own kind,
+        // so cross-tab selection is preserved without the kind-stamping bug.
         var added: [LBMember] = []
-        for ref in selected {
-            let m = LBMember(lbId: lbId, kind: kind, ref: ref)
+        let locals = selectedByTab[.local] ?? []
+        let remotes = selectedByTab[.remote] ?? []
+        for ref in locals {
+            let m = LBMember(lbId: lbId, kind: .local, ref: ref)
             do {
                 try NovaDB.shared.lbMemberStore.upsertMember(m)
                 added.append(m)
             } catch {
-                NovaMLXLog.error("[LBMemberPicker] add failed: \(error)")
+                NovaMLXLog.error("[LBMemberPicker] add local failed: \(error)")
+            }
+        }
+        for ref in remotes {
+            let m = LBMember(lbId: lbId, kind: .remote, ref: ref)
+            do {
+                try NovaDB.shared.lbMemberStore.upsertMember(m)
+                added.append(m)
+            } catch {
+                NovaMLXLog.error("[LBMemberPicker] add remote failed: \(error)")
             }
         }
         onAdded(added)
