@@ -12,6 +12,9 @@ public final class NovaDB: @unchecked Sendable {
     public private(set) var configStore: ConfigStore!
     public private(set) var modelSettingsStore: ModelSettingsStore!
     public private(set) var tokenhubStore: TokenhubStore!
+    public private(set) var loadBalancerStore: LoadBalancerStore!
+    public private(set) var lbMemberStore: LBMemberStore!
+    public private(set) var lbMemberStatsStore: LBMemberStatsStore!
     public private(set) var modelfileStore: ModelfileStore!
     public private(set) var authStore: AuthStore!
     public private(set) var clusterPolicyStore: ClusterPolicyStore!
@@ -129,6 +132,9 @@ public final class NovaDB: @unchecked Sendable {
         self.configStore = ConfigStore(db: configDB)
         self.modelSettingsStore = ModelSettingsStore(db: configDB)
         self.tokenhubStore = TokenhubStore(db: configDB)
+        self.loadBalancerStore = LoadBalancerStore(db: configDB)
+        self.lbMemberStore = LBMemberStore(db: configDB)
+        self.lbMemberStatsStore = LBMemberStatsStore(db: configDB)
         self.modelfileStore = ModelfileStore(db: configDB)
         self.authStore = AuthStore(db: configDB)
         self.clusterPolicyStore = ClusterPolicyStore(db: configDB)
