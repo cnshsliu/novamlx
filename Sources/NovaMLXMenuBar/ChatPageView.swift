@@ -49,6 +49,13 @@ struct ChatPageView: View {
     @State private var paramTopK: Double = 0
     @State private var paramMinP: Double = 0
     @State private var paramRepeatPenalty: Double = 1.0
+    /// When true, sends `enable_thinking: false` on every outbound request.
+    /// The field is forwarded to the engine for models that support it
+    /// (Qwen3 / DashScope via `enable_thinking`, vLLM via
+    /// `chat_template_kwargs.enable_thinking`) and silently ignored by
+    /// models that don't (DeepSeek-R1 still reasons by default, but at
+    /// least we won't waste tokens thinking on models that DO honor it).
+    @State private var paramDisableThinking: Bool = false
 
     // Copy buffers
     @State private var lastPayload: String?
@@ -411,6 +418,14 @@ struct ChatPageView: View {
             ParamSlider(label: "Max Tokens", value: $paramMaxTokens, min: 64, max: 32768, step: 64)
             ParamSlider(label: "Repeat Penalty", value: $paramRepeatPenalty, min: 1.0, max: 2.0, step: 0.05)
 
+            Divider().padding(.vertical, 2)
+
+            Toggle("Disable Thinking", isOn: $paramDisableThinking)
+                .font(.system(size: 11))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("Send enable_thinking=false on every request. Honored by Qwen3 / DashScope; ignored by models without a thinking switch.")
+
             Spacer()
 
             Button("Reset Defaults") {
@@ -748,7 +763,7 @@ struct ChatPageView: View {
                 return
             }
 
-            let payload: [String: Any] = [
+            var payload: [String: Any] = [
                 "model": resolvedModel,
                 "messages": [["role": "user", "content": text]],
                 "stream": true,
@@ -759,6 +774,7 @@ struct ChatPageView: View {
                 "min_p": paramMinP,
                 "repetition_penalty": paramRepeatPenalty
             ]
+            if paramDisableThinking { payload["enable_thinking"] = false }
             if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
                 lastPayload = String(data: data, encoding: .utf8)
             }
@@ -772,7 +788,8 @@ struct ChatPageView: View {
                 topK: Int(paramTopK),
                 minP: Float(paramMinP),
                 repetitionPenalty: Float(paramRepeatPenalty),
-                stream: true
+                stream: true,
+                enableThinking: paramDisableThinking ? false : nil
             )
             currentRequestId = request.id
 
@@ -846,6 +863,7 @@ struct ChatPageView: View {
                     "temperature": paramTemp,
                     "max_tokens": Int(paramMaxTokens)
                 ]
+                if paramDisableThinking { body["enable_thinking"] = false }
                 if let tag { body["tag"] = tag }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -937,6 +955,7 @@ struct ChatPageView: View {
                     "min_p": paramMinP,
                     "repetition_penalty": paramRepeatPenalty
                 ]
+                if paramDisableThinking { body["enable_thinking"] = false }
                 if let tag { body["tag"] = tag }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
                 if let prettyBody = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) {
@@ -986,6 +1005,7 @@ struct ChatPageView: View {
                     "min_p": paramMinP,
                     "repetition_penalty": paramRepeatPenalty
                 ]
+                if paramDisableThinking { body["enable_thinking"] = false }
                 if let tag { body["tag"] = tag }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
                 if let prettyBody = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) {
