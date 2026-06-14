@@ -191,6 +191,8 @@ struct ChatPageView: View {
     private var llmContent: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
+                llmToolbarStrip
+                Divider()
                 messageList
                 Divider()
                 if inputText.isEmpty {
@@ -206,6 +208,103 @@ struct ChatPageView: View {
             rightParamsPanel
                 .frame(width: 200)
         }
+    }
+
+    /// LLM-only toolbar strip: DisplayMode segmented picker on the left,
+    /// Stop / Copy / Clear on the right. Lives inside `llmContent` (not the
+    /// global `chatToolbar`) because every control here is meaningful only
+    /// for LLM chat — keeps the top toolbar focused on Model + Mode.
+    private var llmToolbarStrip: some View {
+        HStack(spacing: 8) {
+            Picker("", selection: $displayMode) {
+                ForEach(ChatDisplayMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 200)
+
+            Spacer()
+
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                Button(action: { cancelCurrentInference() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "stop.circle")
+                            .font(.system(size: 10))
+                        Text("Stop")
+                            .font(.system(size: 10))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .foregroundColor(.red)
+            }
+
+            Button {
+                if let payload = lastPayload {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(payload, forType: .string)
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 10))
+                    Text("Copy Payload")
+                        .font(.system(size: 11))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(lastPayload == nil)
+
+            Button {
+                if let resp = lastResponse {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(resp, forType: .string)
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 10))
+                    Text("Copy Result")
+                        .font(.system(size: 11))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(lastResponse == nil)
+
+            Button {
+                if let payload = lastPayload, let resp = lastResponse {
+                    let combined = "PAYLOAD:\n\(payload)\n\nRESULT:\n\(resp)"
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(combined, forType: .string)
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "doc.on.doc.on.clipboard")
+                        .font(.system(size: 10))
+                    Text("Copy Both")
+                        .font(.system(size: 11))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(lastPayload == nil || lastResponse == nil)
+
+            Button(l10n.tr("chat.clear")) {
+                cancelCurrentInference()
+                messages.removeAll()
+                lastPayload = nil
+                lastResponse = nil
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 
     // MARK: - Toolbar
@@ -263,99 +362,10 @@ struct ChatPageView: View {
                 Text("Image").tag(PlaygroundMode.image)
             }
             .pickerStyle(.menu)
-            .frame(width: 90)
+            .frame(width: 110)
             .help("Override playground type")
 
-            if playgroundMode == .llm {
-                Picker("", selection: $displayMode) {
-                    ForEach(ChatDisplayMode.allCases, id: \.self) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 200)
-            }
-
             Spacer()
-
-            if playgroundMode == .llm {
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                    Button(action: { cancelCurrentInference() }) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "stop.circle")
-                                .font(.system(size: 10))
-                            Text("Stop")
-                                .font(.system(size: 10))
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .foregroundColor(.red)
-                }
-
-                Button {
-                    if let payload = lastPayload {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(payload, forType: .string)
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 10))
-                        Text("Copy Payload")
-                            .font(.system(size: 11))
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(lastPayload == nil)
-
-                Button {
-                    if let resp = lastResponse {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(resp, forType: .string)
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 10))
-                        Text("Copy Result")
-                            .font(.system(size: 11))
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(lastResponse == nil)
-
-                Button {
-                    if let payload = lastPayload, let resp = lastResponse {
-                        let combined = "PAYLOAD:\n\(payload)\n\nRESULT:\n\(resp)"
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(combined, forType: .string)
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "doc.on.doc.on.clipboard")
-                            .font(.system(size: 10))
-                        Text("Copy Both")
-                            .font(.system(size: 11))
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(lastPayload == nil || lastResponse == nil)
-
-                Button(l10n.tr("chat.clear")) {
-                    cancelCurrentInference()
-                    messages.removeAll()
-                    lastPayload = nil
-                    lastResponse = nil
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
         }
         .padding(12)
         .background(NovaTheme.Colors.cardBackground)
