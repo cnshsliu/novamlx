@@ -113,6 +113,9 @@ public final class NovaDB: @unchecked Sendable {
         configMigrator.registerMigration("v3_modelfile_add_description") { db in
             try ConfigDBSchema.v3ModelfileAddDescription(in: db)
         }
+        configMigrator.registerMigration("v4_load_balancers") { db in
+            try LBMigration.v4LoadBalancers(in: db)
+        }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")
 
