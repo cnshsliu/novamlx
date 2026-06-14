@@ -724,8 +724,14 @@ struct ChatPageView: View {
             resolvedModel = String(resolvedModel.dropFirst("tknet:Local ".count))
         }
 
-        // Tokenhub cloud models route through API server (exclude tknet:Local)
-        if resolvedModel == "tknet" || (resolvedModel.hasPrefix("tknet:") && !resolvedModel.hasPrefix("tknet:Local")) {
+        // Anything that needs the API server to route it (rather than the
+        // in-process engine) goes through the HTTP path. That covers:
+        //   - "tknet" / "tknet:<provider>"  → tokenhub passthrough
+        //   - "lb:<slug>"                   → LBProxy picks a member
+        // Local models fall through and use inferenceService.stream() below.
+        if resolvedModel.hasPrefix("lb:")
+            || resolvedModel == "tknet"
+            || (resolvedModel.hasPrefix("tknet:") && !resolvedModel.hasPrefix("tknet:Local")) {
             sendPrettyTokenhub(model: resolvedModel, text: text, assistantIdx: assistantIdx, tag: tag)
             return
         }
