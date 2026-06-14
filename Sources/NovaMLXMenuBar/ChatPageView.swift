@@ -850,6 +850,16 @@ struct ChatPageView: View {
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                 let (bytes, _) = try await URLSession.shared.bytes(for: req)
+                // Thinking models split output across `delta.reasoning_content`
+                // and `delta.content`. A short max_tokens budget can exhaust
+                // before the model finishes thinking and emits any `content`
+                // — without this accumulation the message would render as
+                // "(no response)" even though real reasoning happened.
+                // Render as `<think>...</think>` + visible content so the
+                // user sees what the model produced.
+                var reasoning = ""
+                var reasoningClosed = false
+                var visible = ""
                 for try await line in bytes.lines {
                     if Task.isCancelled { break }
                     guard line.hasPrefix("data: ") else { continue }
@@ -858,13 +868,32 @@ struct ChatPageView: View {
                     guard let data = payload.data(using: .utf8),
                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                           let choices = json["choices"] as? [[String: Any]],
-                          let delta = choices.first?["delta"] as? [String: Any],
-                          let content = delta["content"] as? String
+                          let delta = choices.first?["delta"] as? [String: Any]
                     else { continue }
-                    messages[assistantIdx].content += content
+                    if let r = delta["reasoning_content"] as? String, !r.isEmpty {
+                        reasoning += r
+                    }
+                    if let c = delta["content"] as? String, !c.isEmpty {
+                        if !reasoning.isEmpty && !reasoningClosed {
+                            reasoningClosed = true
+                        }
+                        visible += c
+                    }
+                    // Render: open `<think>` if reasoning started; close it
+                    // once content arrives (or stream ends); append visible.
+                    var rendered = ""
+                    if !reasoning.isEmpty {
+                        rendered += "<think>" + reasoning + (reasoningClosed ? "</think>\n" : "")
+                    }
+                    rendered += visible
+                    messages[assistantIdx].content = rendered
                 }
                 if messages[assistantIdx].content.isEmpty {
                     messages[assistantIdx].content = "(no response)"
+                } else if !reasoning.isEmpty && !reasoningClosed {
+                    // Stream ended mid-thinking — close the tag so the UI
+                    // doesn't show an unclosed `<think>`.
+                    messages[assistantIdx].content = "<think>" + reasoning + "</think>"
                 }
             } catch {
                 if messages[assistantIdx].content.isEmpty {
