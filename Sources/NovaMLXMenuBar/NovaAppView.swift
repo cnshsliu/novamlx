@@ -7,8 +7,9 @@ import NovaMLXUtils
 
 public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
-    case models = "Models"
+    case localInference = "Local Inference"   // was: models = "Models"
     case tokenhub = "Tokenhub"
+    case loadBalancers = "Load Balancers"     // NEW — placeholder until Task 10
     case chat = "Playground"
     case cluster = "Cluster"
     case apiKeys = "API Keys"
@@ -19,10 +20,11 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     public var icon: String {
         switch self {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
-        case .cluster: return "xserve"
-        case .models: return "cube.box"
+        case .localInference: return "cube.box"
         case .tokenhub: return "server.rack"
+        case .loadBalancers: return "scalemass"
         case .chat: return "cpu"
+        case .cluster: return "xserve"
         case .apiKeys: return "key.fill"
         case .settings: return "gearshape"
         }
@@ -103,7 +105,7 @@ public struct NovaAppView: View {
 
                 Spacer()
 
-                if page == .models && appState.activeDownloadCount > 0 {
+                if page == .localInference && appState.activeDownloadCount > 0 {
                     Text("\(appState.activeDownloadCount)")
                         .font(.caption2)
                         .foregroundColor(.white)
@@ -245,10 +247,18 @@ public struct NovaAppView: View {
                 .opacity(selectedPage == .cluster ? 1 : 0)
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .models ? 1 : 0)
+                .opacity(selectedPage == .localInference ? 1 : 0)
             TokenhubPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .tokenhub ? 1 : 0)
+            // Placeholder — replaced by LoadBalancersPageView in Task 10
+            VStack(spacing: 8) {
+                Text("Load Balancers")
+                    .font(.title2.bold())
+                Text("Coming in Task 10")
+                    .foregroundColor(.secondary)
+            }
+            .opacity(selectedPage == .loadBalancers ? 1 : 0)
             ChatPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
@@ -265,8 +275,9 @@ public struct NovaAppView: View {
         switch page {
         case .status: return l10n.tr("app.status")
         case .cluster: return l10n.tr("app.cluster")
-        case .models: return l10n.tr("app.models")
+        case .localInference: return l10n.tr("app.models")  // i18n key rename deferred to Task 12
         case .tokenhub: return l10n.tr("app.tokenhub")
+        case .loadBalancers: return "Load Balancers"  // TODO(Task 12): l10n.tr("app.load_balancers")
         case .chat: return l10n.tr("app.chat")
         case .apiKeys: return "API Keys"
         case .settings: return l10n.tr("app.settings")
