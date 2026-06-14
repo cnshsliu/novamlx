@@ -1,0 +1,210 @@
+import SwiftUI
+import NovaMLXCore
+import NovaMLXDB
+import NovaMLXModelManager
+import NovaMLXUtils
+
+// MARK: - LBMemberPickerSheet (Task 11)
+
+/// Multi-select sheet for adding members to an LB.
+///
+/// Two tabs:
+/// - **Local** — models whose weights are on disk (read from `ModelRegistryStore`,
+///   the same source `ModelManager.loadRegistry()` reads at startup and writes back
+///   to on every change, so the picker sees fresh state without depending on the
+///   `ModelManager` instance owned by `NovaAppView`).
+/// - **Remote** — enabled `TokenhubProvider`s. Stores `provider.name` as the ref
+///   because `LBProxy` dispatches remote members as `"tknet:" + ref`, and
+///   `TokenhubManager.resolve(modelName:)` looks providers up by name.
+///
+/// Members already attached to this LB are shown greyed-out and unselectable.
+struct LBMemberPickerSheet: View {
+    let lbId: UUID
+    let onAdded: ([LBMember]) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedTab: Tab = .local
+    @State private var localModels: [String] = []                       // downloaded model IDs
+    @State private var remoteProviders: [(name: String, ref: String)] = []
+    @State private var existingMemberRefs: Set<String> = []
+    @State private var selected: Set<String> = []
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case local = "Local", remote = "Remote"
+        var id: String { rawValue }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add members").font(.title3.bold())
+
+            Picker("", selection: $selectedTab) {
+                ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+
+            switch selectedTab {
+            case .local:  localList
+            case .remote: remoteList
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add \(selected.count)") { addSelected() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selected.isEmpty)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 500, minHeight: 400)
+        .task { await reload() }
+    }
+
+    // MARK: - Local tab
+
+    private var localList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                if localModels.isEmpty {
+                    emptyHint("No downloaded local models. Use the Local Inference page to download one first.")
+                } else {
+                    ForEach(localModels, id: \.self) { modelId in
+                        memberRow(
+                            title: modelId,
+                            subtitle: nil,
+                            key: modelId,
+                            badgeColor: .green,
+                            badgeText: "LOCAL"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Remote tab
+
+    private var remoteList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                if remoteProviders.isEmpty {
+                    emptyHint("No enabled remote providers. Add one on the TokenHub page first.")
+                } else {
+                    ForEach(remoteProviders, id: \.ref) { p in
+                        memberRow(
+                            title: p.name,
+                            subtitle: p.ref,
+                            key: p.ref,
+                            badgeColor: .orange,
+                            badgeText: "REMOTE"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Row view
+
+    @ViewBuilder
+    private func memberRow(
+        title: String, subtitle: String?, key: String,
+        badgeColor: Color, badgeText: String
+    ) -> some View {
+        let isExisting = existingMemberRefs.contains(key)
+        let isSelected = selected.contains(key)
+
+        HStack(spacing: 10) {
+            Image(systemName: isSelected ? "checkmark.square" : "square")
+                .foregroundColor(isExisting ? .secondary : .accentColor)
+
+            Text(badgeText)
+                .font(.caption2.bold())
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(badgeColor.opacity(0.15))
+                .foregroundColor(badgeColor)
+                .clipShape(Capsule())
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption)
+                if let subtitle, !subtitle.isEmpty, subtitle != title {
+                    Text(subtitle).font(.caption2.monospaced()).foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if isExisting {
+                Text("already added")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(isExisting ? Color.gray.opacity(0.15) : Color.clear)
+        .contentShape(Rectangle())
+        .opacity(isExisting ? 0.6 : 1.0)
+        .onTapGesture {
+            guard !isExisting else { return }
+            if isSelected { selected.remove(key) } else { selected.insert(key) }
+        }
+    }
+
+    private func emptyHint(_ text: String) -> some View {
+        Text(text)
+            .font(.caption).foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 40)
+    }
+
+    // MARK: - Actions
+
+    private func addSelected() {
+        let kind: MemberKind = (selectedTab == .local) ? .local : .remote
+        var added: [LBMember] = []
+        for ref in selected {
+            let m = LBMember(lbId: lbId, kind: kind, ref: ref)
+            do {
+                try NovaDB.shared.lbMemberStore.upsertMember(m)
+                added.append(m)
+            } catch {
+                NovaMLXLog.error("[LBMemberPicker] add failed: \(error)")
+            }
+        }
+        onAdded(added)
+        dismiss()
+    }
+
+    private func reload() async {
+        // Local: ModelRegistryStore is SQLite — the same source ModelManager reads
+        // at startup and writes to on every registry mutation. Filter to records
+        // that have completed downloads (downloadedAt != nil), matching
+        // ModelManager.downloadedModels() but without needing the ModelManager
+        // instance threaded through the view hierarchy.
+        if let registry = try? NovaDB.shared.modelRegistryStore.listAsRegistry() {
+            localModels = registry.values
+                .filter { $0.downloadedAt != nil }
+                .map { $0.id }
+                .sorted()
+        }
+
+        // Remote: enabled providers. ref = provider.name because LBProxy dispatches
+        // remote members as "tknet:<ref>" and TokenhubManager.resolve() looks
+        // providers up by name (get(name:) → record keyed on the name column).
+        let allProviders = (try? NovaDB.shared.tokenhubStore.listAsProviders()) ?? []
+        remoteProviders = allProviders
+            .filter { $0.isEnabled }
+            .map { (name: $0.name, ref: $0.name) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+        // Existing members (to grey out in the picker). Match on ref across both
+        // kinds — a local model id and a remote provider name could in principle
+        // collide, but in practice they don't (model ids are repo paths like
+        // "org/model"; provider names are short display names like "OpenAI").
+        let existing = (try? NovaDB.shared.lbMemberStore.listMembers(lbId: lbId)) ?? []
+        existingMemberRefs = Set(existing.map(\.ref))
+    }
+}

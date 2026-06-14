@@ -130,9 +130,16 @@ struct LBEditView: View {
         .padding(24)
         .frame(minWidth: 600, minHeight: 500)
         .sheet(isPresented: $showAddMember) {
-            // Task 11 will provide LBMemberPickerSheet; for now, a placeholder
-            Text("Add-member picker (Task 11)")
-                .padding()
+            if let liveId = self.lb?.id {
+                LBMemberPickerSheet(lbId: liveId) { _ in
+                    Task { await reload() }
+                }
+            } else {
+                // Defensive: the "+ Add member" button is disabled until self.lb
+                // is set, so this branch should be unreachable. Show a hint anyway
+                // rather than silently doing nothing if the invariant ever slips.
+                Text("Save the LB first.").padding()
+            }
         }
         .task {
             if lbId != nil {
@@ -219,7 +226,7 @@ struct LBEditView: View {
                 Text("Members (\(members.count))").font(.headline)
                 Spacer()
                 Button("+ Add member") { showAddMember = true }
-                    .disabled(true)  // Task 11 enables this
+                    .disabled(self.lb?.id == nil)  // disabled until the LB is saved
             }
             ForEach(members) { m in
                 LBMemberRow(
