@@ -97,6 +97,8 @@ enum ImagePreprocessor {
                 let desc = await describeImage(url: url, backend: backend, inference: inference)
                 if !desc.isEmpty {
                     descriptions.append(desc)
+                } else {
+                    NovaMLXLog.warning("[ImagePreprocessor] Empty description returned for \(truncateURL(url))")
                 }
                 processed += 1
             }

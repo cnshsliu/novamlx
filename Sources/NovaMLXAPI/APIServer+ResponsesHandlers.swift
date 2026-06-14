@@ -97,7 +97,8 @@ extension NovaMLXAPIServer {
                         if imageURLs.isEmpty {
                             messages.append(["role": role, "content": text])
                         } else if lastProvider.supportsVision {
-                            // Provider supports vision — build multimodal content parts
+                            // Provider supports vision — forward images natively
+                            NovaMLXLog.info("[Tokenhub/Responses] Provider \(lastProvider.name) supports vision, forwarding \(imageURLs.count) images natively")
                             var contentParts: [[String: Any]] = []
                             if !text.isEmpty {
                                 contentParts.append(["type": "text", "text": text])
@@ -107,7 +108,8 @@ extension NovaMLXAPIServer {
                             }
                             messages.append(["role": role, "content": contentParts])
                         } else {
-                            // Text-only provider — collect images for preprocessing
+                            // Text-only provider — collect images for OCR preprocessing
+                            NovaMLXLog.info("[Tokenhub/Responses] Provider \(lastProvider.name) does NOT support vision, queuing \(imageURLs.count) images for OCR fallback")
                             messageImageBlocks[messages.count] = imageURLs
                             messages.append(["role": role, "content": text])
                         }
@@ -240,6 +242,7 @@ extension NovaMLXAPIServer {
             if let topP = req.topP { body["top_p"] = topP }
             if let maxTokens = req.maxOutputTokens { body["max_tokens"] = maxTokens }
             if let stream = req.stream { body["stream"] = stream }
+            if let serviceTier = req.serviceTier { body["service_tier"] = serviceTier }
 
             // Convert tools — only forward function-type tools with valid names
             if let rawTools = (try? JSONSerialization.jsonObject(with: rawBody)) as? [String: Any],
@@ -1140,5 +1143,131 @@ extension NovaMLXAPIServer {
             headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive", .init("X-Accel-Buffering")!: "no"],
             body: body
         )
+    }
+
+    // MARK: - Compact Endpoint
+
+    static func handleCompactRequest(
+        req: CompactRequest,
+        inference: InferenceService
+    ) async throws -> Response {
+        // Flatten input items to text for summarization
+        let textContent = Self.flattenInputToText(req.input)
+
+        guard !textContent.isEmpty else {
+            return try Self.jsonResponse(
+                ["error": ["message": "No input provided for compaction", "type": "invalid_request_error"]],
+                httpStatus: .badRequest
+            )
+        }
+
+        // Use local model to summarize
+        let summaryPrompt = """
+        Summarize the following conversation concisely, preserving all key facts, decisions, and context. \
+        The summary will replace the original conversation to save context space.
+
+        \(textContent)
+        """
+        let request = InferenceRequest(
+            model: req.model,
+            messages: [ChatMessage(role: .system, content: "You are a conversation compaction assistant. Produce dense, information-rich summaries."),
+                       ChatMessage(role: .user, content: summaryPrompt)],
+            maxTokens: 2048,
+            stream: false
+        )
+
+        let result: InferenceResult
+        do {
+            result = try await inference.generate(request)
+        } catch {
+            NovaMLXLog.error("[Compact] Model generation failed: \(error)")
+            return try Self.jsonResponse(
+                ["error": ["message": "Compaction failed: \(error.localizedDescription)", "type": "server_error"]],
+                httpStatus: .internalServerError
+            )
+        }
+
+        let summary = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Encode as base64 to mimic encrypted_content
+        guard let summaryData = summary.data(using: .utf8) else {
+            return try Self.jsonResponse(
+                ["error": ["message": "Failed to encode summary", "type": "server_error"]],
+                httpStatus: .internalServerError
+            )
+        }
+        let encryptedContent = summaryData.base64EncodedString()
+
+        let compactId = "cmp_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
+        let msgId = "msg_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))"
+
+        let output: [CompactedOutputItem] = [
+            CompactedOutputItem(id: msgId, encryptedContent: nil),
+            CompactedOutputItem(id: compactId, encryptedContent: encryptedContent)
+        ]
+
+        let usage = ResponsesUsage(
+            inputTokens: result.promptTokens,
+            outputTokens: result.completionTokens
+        )
+
+        let response = CompactedResponse(
+            id: "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(24))",
+            model: req.model,
+            output: output,
+            usage: usage
+        )
+
+        return try Self.jsonResponse(response)
+    }
+
+    // MARK: - Input Tokens Endpoint
+
+    static func handleInputTokensRequest(
+        req: InputTokensRequest,
+        inference: InferenceService
+    ) async throws -> Response {
+        let textContent = Self.flattenInputToText(req.input)
+        // Approximate token count: ~4 chars per token for English text
+        // For accuracy, tokenize via the model's tokenizer if loaded
+        var tokenCount: Int
+
+        if inference.isModelLoaded(req.model),
+           let container = inference.engine.pool.get(req.model),
+           let tokenizer = container.tokenizer {
+            // Use the real tokenizer
+            tokenCount = tokenizer.encode(textContent).count
+        } else {
+            // Fallback: rough estimate
+            tokenCount = max(1, textContent.count / 4)
+        }
+
+        let response = InputTokensResponse(inputTokens: tokenCount)
+        return try Self.jsonResponse(response)
+    }
+
+    // MARK: - Helpers
+
+    private static func flattenInputToText(_ input: ResponseInput?) -> String {
+        guard let input else { return "" }
+        switch input {
+        case .text(let str):
+            return str
+        case .items(let items):
+            return items.compactMap { item -> String? in
+                switch item {
+                case .message(let msg):
+                    return "[\(msg.role)] \(msg.content.textValue)"
+                case .functionCall(let fc):
+                    return "[assistant/tool_call] \(fc.name)(\(fc.arguments))"
+                case .functionCallOutput(let fco):
+                    return "[tool] \(fco.output)"
+                case .reasoning(let r):
+                    return (r.summary ?? []).map { $0.text }.joined(separator: " ")
+                case .skipped:
+                    return nil
+                }
+            }.joined(separator: "\n")
+        }
     }
 }

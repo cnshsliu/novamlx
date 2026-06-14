@@ -114,37 +114,43 @@ struct ChatPageView: View {
 
     // MARK: - Model Type Detection
 
-    private var playgroundMode: PlaygroundMode {
-        let model = selectedModel
-        if model.isEmpty || model == "tknet" || model.hasPrefix("tknet:") { return .llm }
-        guard let record = modelManager.getRecord(model) else { return .llm }
-        if record.family == .whisper || record.family == .qwen3Asr { return .asr }
-        if record.family == .dotsTts || record.family == .qwen3Tts { return .tts }
-        if record.family == .flux || record.family == .stableDiffusion { return .image }
+    @State private var playgroundMode: PlaygroundMode = .llm
+
+    private func autoDetectMode(_ model: String) -> PlaygroundMode {
+        if model.isEmpty || model == "tknet" { return .llm }
+        if model.hasPrefix("tknet:") {
+            let name = String(model.dropFirst("tknet:".count))
+            return inferModeFromName(name)
+        }
+        if let record = modelManager.getRecord(model) {
+            if record.family == .whisper || record.family == .qwen3Asr { return .asr }
+            if record.family == .dotsTts || record.family == .qwen3Tts { return .tts }
+            if record.family == .flux || record.family == .stableDiffusion { return .image }
+            return .llm
+        }
+        return inferModeFromName(model)
+    }
+
+    private func inferModeFromName(_ name: String) -> PlaygroundMode {
+        let lower = name.lowercased()
+        if lower.contains("whisper") || lower.contains("asr")
+            || lower.contains("speech-to-text") || lower.contains("transcrib") {
+            return .asr
+        }
+        if lower.contains("tts") || lower.contains("speech-synthesis")
+            || lower.contains("dots-tts") || lower.contains("voice-clone") {
+            return .tts
+        }
+        if lower.contains("flux") || lower.contains("stable-diffusion")
+            || lower.contains("sdxl") || lower.contains("dall-e")
+            || lower.contains("imagen") || lower.contains("midjourney") {
+            return .image
+        }
         return .llm
-    }
-
-    private var modelTypeIcon: String {
-        switch playgroundMode {
-        case .llm: return "info.circle"
-        case .asr: return "mic.fill"
-        case .tts: return "speaker.wave.2.fill"
-        case .image: return "photo.artframe"
-        }
-    }
-
-    private var modelTypeLabel: String {
-        switch playgroundMode {
-        case .llm: return l10n.tr("chat.rawOutput")
-        case .asr: return "ASR — Speech Recognition"
-        case .tts: return "TTS — Text to Speech"
-        case .image: return "Image Generation"
-        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            infoBanner
             chatToolbar
             Divider()
             switch playgroundMode {
@@ -209,28 +215,43 @@ struct ChatPageView: View {
                 if appState.loadedModels.isEmpty && tokenhubModels.isEmpty {
                     Text(l10n.tr("chat.noModels")).tag("")
                 }
-                ForEach(appState.loadedModels, id: \.self) { model in
-                    Text(shortModelLabel(model)).tag(model)
+                if !appState.loadedModels.isEmpty {
+                    Section("LOCAL — DIRECT IN-PROCESS") {
+                        ForEach(appState.loadedModels, id: \.self) { model in
+                            Text(shortModelLabel(model)).tag(model)
+                        }
+                    }
                 }
                 if !tokenhubModels.isEmpty {
-                    Divider()
-                    HStack {
-                        Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 10))
-                        Text("Tokenhub LB")
-                    }
-                    .tag("tknet")
-                    ForEach(tokenhubModels, id: \.self) { model in
+                    Section("TOKENHUB — HTTP ROUTING") {
                         HStack {
-                            Image(systemName: "server.rack")
+                            Image(systemName: "arrow.triangle.branch")
                                 .font(.system(size: 10))
-                            Text(model)
+                            Text("Tokenhub LB")
                         }
-                        .tag("tknet:\(model)")
+                        .tag("tknet")
+                        ForEach(tokenhubModels, id: \.self) { model in
+                            HStack {
+                                Image(systemName: "server.rack")
+                                    .font(.system(size: 10))
+                                Text(model)
+                            }
+                            .tag("tknet:\(model)")
+                        }
                     }
                 }
             }
             .frame(width: 200)
+
+            Picker("Mode", selection: $playgroundMode) {
+                Text("LLM").tag(PlaygroundMode.llm)
+                Text("ASR").tag(PlaygroundMode.asr)
+                Text("TTS").tag(PlaygroundMode.tts)
+                Text("Image").tag(PlaygroundMode.image)
+            }
+            .pickerStyle(.menu)
+            .frame(width: 90)
+            .help("Override playground type")
 
             if selectedModel == "tknet" {
                 Picker("Tag", selection: $selectedTag) {
@@ -343,6 +364,7 @@ struct ChatPageView: View {
                     loadDefaultsFromModel(first)
                 }
             }
+            playgroundMode = autoDetectMode(selectedModel)
         }
         .onChange(of: appState.loadedModels) { _, newModels in
             let isTokenhub = selectedModel == "tknet" || selectedModel.hasPrefix("tknet:")
@@ -357,24 +379,8 @@ struct ChatPageView: View {
             if !newModel.isEmpty && newModel != "tknet" && !newModel.hasPrefix("tknet:") {
                 loadDefaultsFromModel(newModel)
             }
+            playgroundMode = autoDetectMode(newModel)
         }
-    }
-
-    // MARK: - Banner
-
-    private var infoBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: modelTypeIcon)
-                .foregroundColor(NovaTheme.Colors.accent)
-                .font(.system(size: 12))
-            Text(modelTypeLabel)
-                .font(.system(size: 11))
-                .foregroundColor(NovaTheme.Colors.textSecondary)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(NovaTheme.Colors.accentDim)
     }
 
     // MARK: - Right Params Panel

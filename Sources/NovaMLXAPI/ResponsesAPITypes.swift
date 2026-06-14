@@ -22,6 +22,7 @@ public struct OpenAIResponseRequest: Codable, Sendable {
     public let truncation: String?
     public let parallelToolCalls: Bool?
     public let conversation: ResponsesConversationRef?
+    public let serviceTier: String?
 
     private enum CodingKeys: String, CodingKey {
         case model, input, instructions, tools, temperature, stream, text, reasoning, metadata, store, truncation, conversation
@@ -31,6 +32,7 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         case previousResponseId = "previous_response_id"
         case keepAlive = "keep_alive"
         case parallelToolCalls = "parallel_tool_calls"
+        case serviceTier = "service_tier"
     }
 
     public init(
@@ -51,7 +53,8 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         store: Bool? = nil,
         truncation: String? = nil,
         parallelToolCalls: Bool? = nil,
-        conversation: ResponsesConversationRef? = nil
+        conversation: ResponsesConversationRef? = nil,
+        serviceTier: String? = nil
     ) {
         self.model = model
         self.input = input
@@ -71,6 +74,7 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         self.truncation = truncation
         self.parallelToolCalls = parallelToolCalls
         self.conversation = conversation
+        self.serviceTier = serviceTier
     }
 
     /// Resolve conversation.id → previous_response_id. If both are set, previousResponseId wins.
@@ -883,6 +887,82 @@ public struct ResponsesSSEReasoningDone: Codable, Sendable {
         self.itemId = itemId
         self.outputIndex = outputIndex
         self.summary = summary
+    }
+}
+
+// MARK: - Compact Endpoint Types
+
+public struct CompactRequest: Codable, Sendable {
+    public let model: String
+    public let input: ResponseInput?
+
+    public init(model: String, input: ResponseInput? = nil) {
+        self.model = model
+        self.input = input
+    }
+}
+
+public struct CompactedResponse: Codable, Sendable {
+    public let id: String
+    public let object: String
+    public let createdAt: Int
+    public let model: String
+    public let output: [CompactedOutputItem]
+    public let usage: ResponsesUsage?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, object, model, output, usage
+        case createdAt = "created_at"
+    }
+
+    public init(id: String, model: String, output: [CompactedOutputItem], usage: ResponsesUsage? = nil) {
+        self.id = id
+        self.object = "response.compaction"
+        self.createdAt = Int(Date().timeIntervalSince1970)
+        self.model = model
+        self.output = output
+        self.usage = usage
+    }
+}
+
+public struct CompactedOutputItem: Codable, Sendable {
+    public let type: String
+    public let id: String
+    public let encryptedContent: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case type, id
+        case encryptedContent = "encrypted_content"
+    }
+
+    public init(id: String, encryptedContent: String?) {
+        self.type = "compaction"
+        self.id = id
+        self.encryptedContent = encryptedContent
+    }
+}
+
+// MARK: - Input Tokens Endpoint Types
+
+public struct InputTokensRequest: Codable, Sendable {
+    public let model: String
+    public let input: ResponseInput?
+
+    public init(model: String, input: ResponseInput? = nil) {
+        self.model = model
+        self.input = input
+    }
+}
+
+public struct InputTokensResponse: Codable, Sendable {
+    public let inputTokens: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+    }
+
+    public init(inputTokens: Int) {
+        self.inputTokens = inputTokens
     }
 }
 

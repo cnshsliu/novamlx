@@ -114,6 +114,9 @@ struct DownloadsPageView: View {
         .sheet(item: $selectedModelCard) { card in
             modelCardSheet(card)
         }
+        .task {
+            await modelManager.fetchSuggestedModels()
+        }
     }
 
     // MARK: - Search
@@ -214,14 +217,18 @@ struct DownloadsPageView: View {
 
     private var suggestedModelsSection: some View {
         let models = modelManager.suggestedModels(forCategory: typeFilter.matchType)
-        let downloadedIds = Set(modelManager.downloadedModels().map(\.id))
-        let notDownloaded = models.filter { !downloadedIds.contains($0.repo) }
 
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("Suggested", icon: "star.fill", count: notDownloaded.count)
+            VStack(alignment: .leading, spacing: 4) {
+                sectionHeader("Suggested", icon: "star.fill", count: models.count)
+                Text("Reference picks — use the search above to find and download any model from Hugging Face.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
 
-            if notDownloaded.isEmpty {
-                Text(l10n.tr("models.allDownloaded"))
+            if models.isEmpty {
+                // Remote catalog not loaded yet (or fetch failed). Per spec: suggest nothing.
+                Text("Loading catalog…")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
             } else {
@@ -229,7 +236,7 @@ struct DownloadsPageView: View {
                     GridItem(.flexible(), spacing: 12),
                     GridItem(.flexible(), spacing: 12),
                 ], spacing: 12) {
-                    ForEach(notDownloaded) { model in
+                    ForEach(models) { model in
                         suggestedModelCard(model)
                     }
                 }

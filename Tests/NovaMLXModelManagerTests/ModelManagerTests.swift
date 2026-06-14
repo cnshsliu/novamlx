@@ -74,12 +74,12 @@ struct ModelManagerTests {
         #expect(manager.getRecord("test") == nil)
     }
 
-    @Test("Register popular models")
-    func registerPopularModels() {
+    @Test("Register popular models is a no-op until remote list is fetched")
+    func registerPopularModelsEmptyWithoutFetch() {
         let manager = makeTempManager()
         manager.registerPopularModels()
         let models = manager.allRegisteredModels()
-        #expect(models.count >= 5)
+        #expect(models.isEmpty)
     }
 
     @Test("Model record properties")
