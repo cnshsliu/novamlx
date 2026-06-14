@@ -3,6 +3,7 @@ import Foundation
 import AVFoundation
 import CoreMedia
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
@@ -212,7 +213,7 @@ struct ChatPageView: View {
     private var chatToolbar: some View {
         HStack(spacing: 12) {
             Picker(l10n.tr("chat.model"), selection: $selectedModel) {
-                if appState.loadedModels.isEmpty && tokenhubModels.isEmpty {
+                if appState.loadedModels.isEmpty && tokenhubModels.isEmpty && loadBalancerEntries.isEmpty {
                     Text(l10n.tr("chat.noModels")).tag("")
                 }
                 if !appState.loadedModels.isEmpty {
@@ -222,14 +223,20 @@ struct ChatPageView: View {
                         }
                     }
                 }
+                if !loadBalancerEntries.isEmpty {
+                    Section("LOAD BALANCE — NAMED POOLS") {
+                        ForEach(loadBalancerEntries, id: \.slug) { lb in
+                            HStack {
+                                Image(systemName: "scalemass")
+                                    .font(.system(size: 10))
+                                Text("\(lb.name)  ·  lb:\(lb.slug)")
+                            }
+                            .tag("lb:\(lb.slug)")
+                        }
+                    }
+                }
                 if !tokenhubModels.isEmpty {
                     Section("TOKENHUB — HTTP ROUTING") {
-                        HStack {
-                            Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 10))
-                            Text("Tokenhub LB")
-                        }
-                        .tag("tknet")
                         ForEach(tokenhubModels, id: \.self) { model in
                             HStack {
                                 Image(systemName: "server.rack")
@@ -241,7 +248,7 @@ struct ChatPageView: View {
                     }
                 }
             }
-            .frame(width: 200)
+            .frame(width: 240)
 
             Picker("Mode", selection: $playgroundMode) {
                 Text("LLM").tag(PlaygroundMode.llm)
@@ -252,16 +259,6 @@ struct ChatPageView: View {
             .pickerStyle(.menu)
             .frame(width: 90)
             .help("Override playground type")
-
-            if selectedModel == "tknet" {
-                Picker("Tag", selection: $selectedTag) {
-                    Text("All").tag("")
-                    ForEach(availableTags, id: \.self) { tag in
-                        Text(tag).tag(tag)
-                    }
-                }
-                .frame(width: 120)
-            }
 
             if playgroundMode == .llm {
                 Picker("", selection: $displayMode) {
@@ -1007,6 +1004,14 @@ struct ChatPageView: View {
 
     private var tokenhubModels: [String] {
         TokenhubManager.shared.list().filter { $0.isEnabled }.map(\.name)
+    }
+
+    /// Enabled Load Balancers from SQLite. Reads the same `load_balancers` table
+    /// `LoadBalancersPageView` shows, so the picker sees fresh state without the
+    /// page being open. Disabled LBs are hidden — they can't accept requests.
+    private var loadBalancerEntries: [LoadBalancer] {
+        (try? NovaDB.shared.loadBalancerStore.listLBs())?
+            .filter { $0.isEnabled } ?? []
     }
 
     // MARK: - Chat Audio

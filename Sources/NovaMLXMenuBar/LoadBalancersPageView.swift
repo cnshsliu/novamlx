@@ -9,6 +9,11 @@ struct LoadBalancersPageView: View {
     @State private var lbs: [LoadBalancer] = []
     @State private var editing: LoadBalancer?
     @State private var creating = false
+    /// Accordion state: UUID of the currently-expanded LB, or nil if all collapsed.
+    /// At most one LB's members panel is open at a time. Clicking the expanded
+    /// row again collapses it (toggle); clicking a different row collapses the
+    /// current one and expands the new one (mutual exclusion).
+    @State private var expandedId: UUID?
 
     var body: some View {
         ScrollView {
@@ -19,7 +24,7 @@ struct LoadBalancersPageView: View {
                 } else {
                     LazyVStack(spacing: 8) {
                         ForEach(lbs) { lb in
-                            LBRow(lb: lb) { editing = lb }
+                            lbCard(lb)
                         }
                     }
                 }
@@ -34,6 +39,31 @@ struct LoadBalancersPageView: View {
             LBEditView(lbId: nil)
         }
         .task { await reload() }
+    }
+
+    /// One accordion card: header row + collapsible read-only members panel.
+    @ViewBuilder
+    private func lbCard(_ lb: LoadBalancer) -> some View {
+        let isExpanded = expandedId == lb.id
+        VStack(spacing: 0) {
+            LBRow(
+                lb: lb,
+                isExpanded: isExpanded,
+                onEdit: { editing = lb },
+                onToggle: {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        expandedId = isExpanded ? nil : lb.id
+                    }
+                }
+            )
+            if isExpanded {
+                LBMembersPreviewPanel(lbId: lb.id)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
+                    .transition(.opacity)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .opacity(lb.isEnabled ? 1.0 : 0.5)
     }
 
     private var header: some View {
@@ -69,14 +99,22 @@ struct LoadBalancersPageView: View {
     }
 }
 
-// MARK: - LBRow (list card)
+// MARK: - LBRow (list card header — tap toggles member panel, Edit opens sheet)
 
 struct LBRow: View {
     let lb: LoadBalancer
+    let isExpanded: Bool
     let onEdit: () -> Void
+    let onToggle: () -> Void
 
     var body: some View {
         HStack {
+            // Chevron that flips when expanded — visual cue that the row is tappable.
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .font(.caption.bold())
+                .foregroundColor(.secondary)
+                .frame(width: 12)
+
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(lb.name).font(.headline)
@@ -94,12 +132,93 @@ struct LBRow: View {
             Circle()
                 .fill(lb.isEnabled ? Color.green : Color.gray.opacity(0.4))
                 .frame(width: 10, height: 10)
+            // Edit button stays independent of the row's tap gesture so the
+            // outer contentShape doesn't swallow its click.
             Button("Edit", action: onEdit)
+                .buttonStyle(.bordered)
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .opacity(lb.isEnabled ? 1.0 : 0.5)
+        .contentShape(Rectangle())
+        .onTapGesture { onToggle() }
+    }
+}
+
+// MARK: - LBMembersPreviewPanel (read-only member list shown when row is expanded)
+
+/// Read-only member list. Loads members + stats on appear and renders one row
+/// per member with its kind badge, ref, and live status (loaded for locals,
+/// avg latency for remotes). No controls here — editing happens in LBEditView.
+struct LBMembersPreviewPanel: View {
+    let lbId: UUID
+    @State private var members: [LBMember] = []
+    @State private var stats: [UUID: LBMemberStats] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if members.isEmpty {
+                Text("No members yet — click Edit to add some.")
+                    .font(.caption).foregroundColor(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(members) { m in
+                    memberRow(m)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task { await reload() }
+    }
+
+    @ViewBuilder
+    private func memberRow(_ m: LBMember) -> some View {
+        HStack(spacing: 8) {
+            Text(m.kind == .local ? "LOCAL" : "REMOTE")
+                .font(.caption2.bold())
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(m.kind == .local
+                    ? Color.green.opacity(0.15) : Color.yellow.opacity(0.15))
+                .foregroundColor(m.kind == .local ? .green : .orange)
+                .clipShape(Capsule())
+
+            Text(m.ref).font(.caption.monospaced())
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer()
+
+            if !m.isEnabled {
+                Text("disabled")
+                    .font(.caption2).foregroundColor(.secondary)
+            } else if m.kind == .local {
+                let loaded = isLocalModelLoaded(m.ref)
+                Text(loaded ? "✓ loaded" : "⚠ not loaded")
+                    .font(.caption2)
+                    .foregroundColor(loaded ? .green : .orange)
+            } else if let s = stats[m.id] {
+                Text("\(s.avgLatencyMs)ms avg")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func reload() async {
+        do {
+            members = try NovaDB.shared.lbMemberStore.listMembers(lbId: lbId)
+            var map: [UUID: LBMemberStats] = [:]
+            for m in members {
+                if let s = try NovaDB.shared.lbMemberStatsStore.getStats(m.id) {
+                    map[m.id] = s
+                }
+            }
+            stats = map
+        } catch {
+            NovaMLXLog.error("[LBPreview] reload failed: \(error)")
+        }
     }
 }
 

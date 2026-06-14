@@ -51,7 +51,6 @@ struct TokenhubPageView: View {
 
     // Agent launcher
     @State private var selectedAgentPerProvider: [String: AgentSpec] = [:]
-    @State private var lbSelectedAgent: AgentSpec = AgentRegistry.all[0]
     @State private var agentToast: String?
     @State private var showAgentToast = false
     @State private var showCodexRestartConfirm = false
@@ -113,15 +112,6 @@ struct TokenhubPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Top: Load Balance (full width)
-            if !lbProviders.isEmpty {
-                loadBalanceSection
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                Divider()
-                    .padding(.vertical, 0)
-            }
-
             // Bottom: Provider List + Detail
             HStack(spacing: 0) {
                 leftPanel
@@ -394,13 +384,6 @@ struct TokenhubPageView: View {
 
     // MARK: - Right Panel
 
-    /// Providers shown in the top "Load Balance" section. Post-Task-6 this is
-    /// just enabled providers (Task 7+ will replace this with the LB entity's
-    /// actual member list). Kept here so the LB header section still renders.
-    private var lbProviders: [TokenhubProvider] {
-        providers.filter { $0.isEnabled }
-    }
-
     private var rightPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -418,60 +401,6 @@ struct TokenhubPageView: View {
             .padding(24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - Load Balance Section (fixed at top)
-
-    private var loadBalanceSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 12))
-                    .foregroundColor(NovaTheme.Colors.accent)
-                Text("Load Balance")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(NovaTheme.Colors.textPrimary)
-                Spacer()
-                let count = lbProviders.count
-                Text("\(count) provider\(count == 1 ? "" : "s")")
-                    .font(.system(size: 10))
-                    .foregroundColor(NovaTheme.Colors.textTertiary)
-            }
-
-            // Context window info
-            let (ctx, mixed) = ModelSpecs.lbContextWindow(from: providers)
-            HStack(spacing: 4) {
-                Text("Context:")
-                    .font(.system(size: 10))
-                    .foregroundColor(NovaTheme.Colors.textTertiary)
-                Text(formatContext(ctx))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(NovaTheme.Colors.textSecondary)
-                if mixed {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9))
-                        .foregroundColor(.orange)
-                    Text("Mixed context sizes in pool — using minimum for compatibility")
-                        .font(.system(size: 9))
-                        .foregroundColor(.orange)
-                }
-            }
-
-            // Agent launcher row
-            agentLauncherRow(
-                agent: lbSelectedAgent,
-                onAgentChange: { lbSelectedAgent = $0 },
-                modelName: "tknet",
-                allProviders: providers
-            )
-        }
-        .padding(14)
-        .background(NovaTheme.Colors.cardBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(NovaTheme.Colors.accent.opacity(0.2), lineWidth: 1)
-        )
-        .cornerRadius(8)
     }
 
     // MARK: - Provider Detail Section
