@@ -426,6 +426,22 @@ struct ChatPageView: View {
                 .controlSize(.small)
                 .help("Send enable_thinking=false on every request. Honored by Qwen3 / DashScope; ignored by models without a thinking switch.")
 
+            Divider().padding(.vertical, 2)
+
+            // cURL examples — copies with literal ${NOVA_API_KEY} placeholder so
+            // the secret never lands in clipboard. User exports NOVA_API_KEY in
+            // their shell once and reuses the copied command.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Copy cURL Example")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    curlCopyButton("OpenAI", template: openAICurlTemplate)
+                    curlCopyButton("Anthropic", template: anthropicCurlTemplate)
+                    curlCopyButton("Responses", template: responsesCurlTemplate)
+                }
+            }
+
             Spacer()
 
             Button("Reset Defaults") {
@@ -460,6 +476,75 @@ struct ChatPageView: View {
         paramTopK = 0
         paramMinP = 0
         paramRepeatPenalty = Double(config?.repeatPenalty ?? 1.0)
+    }
+
+    // MARK: - cURL Example Templates
+
+    /// All three templates use literal `${NOVA_API_KEY}` so the secret never
+    /// enters the clipboard. Users `export NOVA_API_KEY=...` in their shell
+    /// and the copied command works as-is.
+    private var curlApiBase: String { "http://localhost:\(appState.serverPort)/v1" }
+
+    private var openAICurlTemplate: String {
+        let model = selectedModel.isEmpty ? "<model>" : selectedModel
+        return """
+        curl -X POST \(curlApiBase)/chat/completions \\
+          -H "Authorization: Bearer ${NOVA_API_KEY}" \\
+          -H "Content-Type: application/json" \\
+          -d '{
+            "model": "\(model)",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "temperature": \(String(format: "%.2f", paramTemp)),
+            "max_tokens": \(Int(paramMaxTokens))
+          }'
+        """
+    }
+
+    private var anthropicCurlTemplate: String {
+        let model = selectedModel.isEmpty ? "<model>" : selectedModel
+        return """
+        curl -X POST \(curlApiBase)/messages \\
+          -H "x-api-key: ${NOVA_API_KEY}" \\
+          -H "anthropic-version: 2023-06-01" \\
+          -H "Content-Type: application/json" \\
+          -d '{
+            "model": "\(model)",
+            "max_tokens": \(Int(paramMaxTokens)),
+            "messages": [{"role": "user", "content": "Hello"}]
+          }'
+        """
+    }
+
+    private var responsesCurlTemplate: String {
+        let model = selectedModel.isEmpty ? "<model>" : selectedModel
+        return """
+        curl -X POST \(curlApiBase)/responses \\
+          -H "Authorization: Bearer ${NOVA_API_KEY}" \\
+          -H "Content-Type: application/json" \\
+          -d '{
+            "model": "\(model)",
+            "input": "Hello"
+          }'
+        """
+    }
+
+    @ViewBuilder
+    private func curlCopyButton(_ label: String, template: String) -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(template, forType: .string)
+        } label: {
+            Text(label)
+                .font(.system(size: 10))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(NovaTheme.Colors.accent.opacity(0.12))
+                .foregroundColor(NovaTheme.Colors.accent)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .disabled(selectedModel.isEmpty)
+        .help("Copy curl example (uses $NOVA_API_KEY env var)")
     }
 
     private var messageList: some View {
