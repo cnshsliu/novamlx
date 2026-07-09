@@ -42,6 +42,16 @@ struct APIKeyStoreTests {
                 t.column("per_model_tokens", .text).defaults(to: "{}")
             }
             try d.create(index: "idx_api_keys_hash", on: "api_keys", columns: ["key_hash"])
+            try d.create(table: "api_key_usage_events") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("key_id", .text)
+                t.column("recorded_at", .datetime).notNull()
+                t.column("model", .text)
+                t.column("endpoint", .text).notNull()
+                t.column("prompt_tokens", .integer).notNull().defaults(to: 0)
+                t.column("completion_tokens", .integer).notNull().defaults(to: 0)
+                t.column("total_tokens", .integer).notNull()
+            }
         }
         return APIKeyStore(db: db)
     }
@@ -179,6 +189,49 @@ struct APIKeyStoreTests {
 
         let domain = try store.getAsAPIKey(id: record.id)
         #expect(domain?.usageResetPeriod == .daily)
+    }
+
+    @Test("usage ledger supports time-range and per-model breakdown")
+    func usageLedgerReport() throws {
+        let store = try makeStore()
+        let (recordA, _) = try store.create(name: "dept-a")
+        let (recordB, _) = try store.create(name: "dept-b")
+
+        let now = Date()
+        let from = now.addingTimeInterval(-3600)
+        let to = now.addingTimeInterval(3600)
+
+        try store.recordUsage(
+            keyId: recordA.id, promptTokens: 100, completionTokens: 50,
+            model: "mlx-community/Qwen3-4B-4bit", endpoint: "/v1/chat/completions"
+        )
+        try store.recordUsage(
+            keyId: recordA.id, promptTokens: 20, completionTokens: 10,
+            model: "mlx-community/gemma-4-26b-a4b-it-4bit", endpoint: "/v1/chat/completions"
+        )
+        try store.recordUsage(
+            keyId: recordB.id, promptTokens: 30, completionTokens: 15,
+            model: "mlx-community/Qwen3-4B-4bit", endpoint: "/v1/messages"
+        )
+        try store.recordUsage(
+            keyId: nil, promptTokens: 5, completionTokens: 5,
+            model: "mlx-community/Qwen3-4B-4bit", endpoint: "/v1/chat/completions"
+        )
+
+        let report = try store.usageReport(from: from, to: to)
+        #expect(report.total.requests == 4)
+        #expect(report.total.totalTokens == 235)
+        #expect(report.attributed.totalTokens == 225)
+        #expect(report.unattributed.totalTokens == 10)
+        #expect(report.byKey.count == 3)
+
+        let keyA = report.byKey.first { $0.keyId == recordA.id }
+        #expect(keyA?.usage.totalTokens == 180)
+        #expect(keyA?.byModel.count == 2)
+
+        let perKeyA = try store.usageReport(keyId: recordA.id, from: from, to: to)
+        #expect(perKeyA.byKey.count == 1)
+        #expect(perKeyA.byKey.first?.usage.totalTokens == 180)
     }
 
     @Test("malformed JSON string fields decode to nil/empty without throwing")

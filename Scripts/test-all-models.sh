@@ -2,9 +2,10 @@
 # ──────────────────────────────────────────────────────────────────────
 # NovaMLX Full Model Test Suite
 #
-# For each downloaded model:
-#   LLM:       4 tests — OpenAI non-stream/stream, Anthropic non-stream/stream
+# For each downloaded model (one loaded at a time; unloads any prior model first):
+#   LLM/VLM:   4 tests — OpenAI non-stream/stream, Anthropic non-stream/stream
 #   ASR:       2 tests — Audio transcription non-stream, Audio transcription stream
+#   TTS:       1 test  — Audio speech synthesis (WAV response)
 #   Image:     1 test  — Image generation (b64_json response)
 #   Embedding: 1 test  — Embedding generation (float vector response)
 #
@@ -40,6 +41,8 @@ with wave.open(buf, 'w') as w:
 print(base64.b64encode(buf.getvalue()).decode())
 ")
 
+REGISTRY_DB="${REGISTRY_DB:-$HOME/.nova/nova_data.db}"
+
 wait_for_model() {
     local model="$1" timeout="${2:-180}"
     for i in $(seq 1 $((timeout/2))); do
@@ -49,6 +52,33 @@ wait_for_model() {
         sleep 2
     done
     return 1
+}
+
+unload_all_loaded() {
+    local loaded
+    loaded=$(curl -sf "$BASE/v1/models" -H "Authorization: Bearer $AUTH" 2>/dev/null | \
+        python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(m['id'] for m in d.get('data',[])))" 2>/dev/null || true)
+    if [ -z "$loaded" ]; then return 0; fi
+    for m in $loaded; do
+        curl -sf -X POST "$ADMIN_BASE/admin/models/unload" \
+            -H "Authorization: Bearer $AUTH" \
+            -H "Content-Type: application/json" \
+            -d "{\"modelId\":\"$m\"}" > /dev/null 2>&1 || true
+    done
+    sleep 2
+}
+
+load_timeout_for_model() {
+    local model="$1"
+    local size_gb
+    size_gb=$(sqlite3 "$REGISTRY_DB" "SELECT round(size_bytes/1e9,1) FROM model_registry WHERE model_id='$model' LIMIT 1;" 2>/dev/null || echo "0")
+    if python3 -c "import sys; sys.exit(0 if float('${size_gb:-0}') >= 20 else 1)" 2>/dev/null; then
+        echo 900
+    elif python3 -c "import sys; sys.exit(0 if float('${size_gb:-0}') >= 10 else 1)" 2>/dev/null; then
+        echo 600
+    else
+        echo 300
+    fi
 }
 
 printf "\n\e[1m══════════════════════════════════════════════════════\e[0m\n"
@@ -62,21 +92,47 @@ if ! curl -sf "$BASE/health" -o /dev/null 2>/dev/null; then
 fi
 log_pass "Server health check"
 
-# Get list of all downloaded models with type classification
+# Get list of all downloaded models with type classification (registry DB + family)
 DOWNLOADED=$(curl -sf "$ADMIN_BASE/admin/models" -H "Authorization: Bearer $AUTH" 2>/dev/null | \
-    python3 -c "
-import json,sys
-asr_kw = {'asr', 'whisper', 'speech'}
-img_kw = {'sdxl', 'stable-diffusion', 'sd-'}
-emb_kw = {'embedding', 'embed', 'e5-', 'bge-', 'jina-embed'}
+    REGISTRY_DB="$REGISTRY_DB" python3 -c "
+import json, os, sqlite3, sys
+
+registry = {}
+db = os.environ.get('REGISTRY_DB', '')
+if db and os.path.exists(db):
+    conn = sqlite3.connect(db)
+    for mid, mtype, family in conn.execute('SELECT model_id, model_type, family FROM model_registry'):
+        registry[mid] = (mtype or '', family or '')
+
+def classify(mid, family):
+    mtype, fam = registry.get(mid, ('', family or ''))
+    fam = fam or family or ''
+    if mtype == 'image' or fam in ('flux', 'stableDiffusion'):
+        return 'image'
+    if mtype == 'embedding':
+        return 'embedding'
+    if mtype == 'audio' or fam in ('whisper', 'qwen3Asr', 'dotsTts', 'qwen3Tts'):
+        if fam in ('dotsTts', 'qwen3Tts'):
+            return 'tts'
+        return 'asr'
+    if mtype == 'vlm':
+        return 'vlm'
+    low = mid.lower()
+    if 'tts' in low or 'dots.tts' in low:
+        return 'tts'
+    if any(k in low for k in ('asr', 'whisper')):
+        return 'asr'
+    if any(k in low for k in ('sdxl', 'stable-diffusion', 'flux')):
+        return 'image'
+    if any(k in low for k in ('embedding', 'embed', 'bge-', 'e5-')):
+        return 'embedding'
+    return 'llm'
+
 for m in json.load(sys.stdin):
-    if not m.get('downloaded'): continue
-    mid = m['id']; low = mid.lower()
-    if any(k in low for k in asr_kw):   mtype = 'asr'
-    elif any(k in low for k in img_kw): mtype = 'image'
-    elif any(k in low for k in emb_kw): mtype = 'embedding'
-    else:                                mtype = 'llm'
-    print(f'{mid}|{mtype}')
+    if not m.get('downloaded'):
+        continue
+    mid = m['id']
+    print(f\"{mid}|{classify(mid, m.get('family'))}\")
 " 2>/dev/null)
 
 if [ -z "$DOWNLOADED" ]; then
@@ -96,14 +152,23 @@ for ENTRY in $DOWNLOADED; do
 
     printf "\e[1m─── [%d/%d] %s [%s] ───\e[0m\n" "$MODEL_IDX" "$MODEL_COUNT" "$SHORT_NAME" "$MTYPE"
 
-    # 1. Load model
-    printf "  Loading..."
-    curl -sf -X POST "$ADMIN_BASE/admin/models/load" \
+    # 1. Unload any currently loaded model, then load target (single-model policy)
+    printf "  Unloading prior models..."
+    unload_all_loaded
+    printf " done\n  Loading..."
+    LOAD_TIMEOUT=$(load_timeout_for_model "$MODEL")
+    LOAD_ERR=$(curl -sf -X POST "$ADMIN_BASE/admin/models/load" \
         -H "Authorization: Bearer $AUTH" \
         -H "Content-Type: application/json" \
-        -d "{\"modelId\":\"$MODEL\"}" > /dev/null 2>&1
+        -d "{\"modelId\":\"$MODEL\"}" 2>&1)
+    if [ $? -ne 0 ]; then
+        printf " failed!\n"
+        log_fail "$SHORT_NAME" "load request failed: ${LOAD_ERR:-unknown}"
+        model_results+=("FAIL $SHORT_NAME [$MTYPE] (load failed)")
+        continue
+    fi
 
-    if ! wait_for_model "$MODEL" 180; then
+    if ! wait_for_model "$MODEL" "$LOAD_TIMEOUT"; then
         printf " timeout!\n"
         log_fail "$SHORT_NAME" "load timeout"
         model_results+=("FAIL $SHORT_NAME [$MTYPE] (load timeout)")
@@ -162,6 +227,22 @@ assert decoded[:4] == b'\\x89PNG', f'not a valid PNG ({len(decoded)} bytes)'
 " 2>&1)
         if [ $? -eq 0 ]; then log_pass "Image generation"; ((local_pass++)); else log_fail "Image generation" "$result"; ((local_fail++)); fi
 
+    elif [ "$MTYPE" = "tts" ]; then
+        # ── TTS Tests ──
+        local_total=1
+
+        result=$(curl -sf "$BASE/v1/audio/speech" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $AUTH" \
+            -d "{\"model\":\"$MODEL\",\"input\":\"Hello from NovaMLX.\",\"voice\":\"Tingting\",\"response_format\":\"wav\"}" 2>/dev/null | \
+            python3 -c "
+import sys
+data = sys.stdin.buffer.read()
+assert len(data) > 44, f'audio too short ({len(data)} bytes)'
+assert data[:4] == b'RIFF', f'not WAV ({data[:8]!r})'
+" 2>&1)
+        if [ $? -eq 0 ]; then log_pass "Audio speech synthesis"; ((local_pass++)); else log_fail "Audio speech synthesis" "$result"; ((local_fail++)); fi
+
     elif [ "$MTYPE" = "embedding" ]; then
         # ── Embedding Tests ──
         local_total=1
@@ -184,7 +265,7 @@ assert isinstance(vec[0], float), f'vector element not float: {type(vec[0])}'
         if [ $? -eq 0 ]; then log_pass "Embedding generation"; ((local_pass++)); else log_fail "Embedding generation" "$result"; ((local_fail++)); fi
 
     else
-        # ── LLM Tests ──
+        # ── LLM / VLM Tests ──
         local_total=4
 
         # T1: OpenAI Non-Streaming

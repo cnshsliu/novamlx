@@ -26,6 +26,10 @@ public final class WorkerSupervisor: @unchecked Sendable {
     // Stream metadata accumulation
     private var streamFinishReasons: [String: FinishReason] = [:]
     private var streamCompletionTokens: [String: Int] = [:]
+    // Per-request dispatch timestamp — used to measure IPC latency from
+    // sendStream() writeMessage → first WorkerMessageType.token reply.
+    private var streamDispatchStarts: [String: ContinuousClock.Instant] = [:]
+    private var streamFirstTokenLogged: [String: Bool] = [:]
 
     // Progress callbacks for model loads
     private var loadProgressCallbacks: [String: @Sendable (LoadPhase) -> Void] = [:]
@@ -206,29 +210,38 @@ public final class WorkerSupervisor: @unchecked Sendable {
     public func sendStream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
         let codable = CodableInferenceRequest(from: request)
         let requestId = request.id.uuidString
+        let reqTag = String(requestId.prefix(8))
         let msg = WorkerMessage(type: WorkerMessageType.stream, requestId: requestId, request: codable)
+        let dispatchStart = ContinuousClock.now
 
         return AsyncThrowingStream { continuation in
             if !self.ensureRunning() {
+                NovaMLXLog.error("[Sup:\(reqTag)] sendStream: worker not running, restart failed")
                 continuation.finish(throwing: NovaMLXError.inferenceFailed("Worker not running and restart failed"))
                 return
             }
             self.lock.lock()
             self.streamContinuations[requestId] = continuation
             self.streamCompletionTokens[requestId] = 0
+            self.streamDispatchStarts[requestId] = dispatchStart
             self.lock.unlock()
+            NovaMLXLog.info("[Sup:\(reqTag)] sendStream: queuing stream msg to worker (model=\(request.model))")
 
             continuation.onTermination = { [weak self] _ in
                 self?.lock.lock()
                 self?.streamContinuations.removeValue(forKey: requestId)
                 self?.streamFinishReasons.removeValue(forKey: requestId)
                 self?.streamCompletionTokens.removeValue(forKey: requestId)
+                self?.streamDispatchStarts.removeValue(forKey: requestId)
+                self?.streamFirstTokenLogged.removeValue(forKey: requestId)
                 self?.lock.unlock()
             }
 
             do {
                 try self.writeMessage(msg)
+                NovaMLXLog.info("[Sup:\(reqTag)] sendStream: msg written to worker stdin pipe")
             } catch {
+                NovaMLXLog.error("[Sup:\(reqTag)] sendStream: writeMessage failed: \(error)")
                 continuation.finish(throwing: error)
             }
         }
@@ -368,6 +381,8 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
         case WorkerMessageType.token:
             let tokenToYield: Token?
+            var ipcLatencyMs: Double? = nil
+            var isFirstToken = false
             lock.lock()
             if let token = msg.token, streamContinuations[requestId] != nil {
                 if let fr = token.finishReason {
@@ -376,6 +391,14 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 if var count = streamCompletionTokens[requestId] {
                     count += 1
                     streamCompletionTokens[requestId] = count
+                    // Log every 50 tokens OR the first one (for IPC latency).
+                    if count == 1 || count % 50 == 0 {
+                        isFirstToken = (count == 1)
+                        if let start = streamDispatchStarts[requestId] {
+                            let dur = ContinuousClock.now - start
+                            ipcLatencyMs = Double(dur.components.seconds) * 1000 + Double(dur.components.attoseconds) / 1e15
+                        }
+                    }
                 }
                 tokenToYield = token
             } else {
@@ -385,18 +408,33 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
             if let token = tokenToYield, let cont = streamContinuations[requestId] {
                 cont.yield(token)
+                if isFirstToken, let ms = ipcLatencyMs {
+                    NovaMLXLog.info("[Sup:\(String(requestId.prefix(8)))] First token from worker after \(String(format: "%.0f", ms))ms IPC latency")
+                } else if let ms = ipcLatencyMs {
+                    let count = streamCompletionTokens[requestId] ?? 0
+                    NovaMLXLog.info("[Sup:\(String(requestId.prefix(8)))] Progress: \(count) tokens from worker (cumulative IPC \(String(format: "%.0f", ms))ms)")
+                }
             }
 
         case WorkerMessageType.done:
             let contToFinish: AsyncThrowingStream<Token, Error>.Continuation?
+            var totalTokens = 0
+            var finishReason: FinishReason? = nil
+            var totalTime: Duration? = nil
             lock.lock()
             contToFinish = streamContinuations.removeValue(forKey: requestId)
-            streamFinishReasons.removeValue(forKey: requestId)
-            streamCompletionTokens.removeValue(forKey: requestId)
+            finishReason = streamFinishReasons.removeValue(forKey: requestId)
+            totalTokens = streamCompletionTokens.removeValue(forKey: requestId) ?? 0
+            if let start = streamDispatchStarts.removeValue(forKey: requestId) {
+                totalTime = ContinuousClock.now - start
+            }
+            streamFirstTokenLogged.removeValue(forKey: requestId)
             lock.unlock()
 
             contToFinish?.finish()
-            NovaMLXLog.info("[WorkerSupervisor] Done processed: hadCont=\(contToFinish != nil) requestId=\(requestId)")
+            let totalSec = totalTime.map { Double($0.components.seconds) + Double($0.components.attoseconds) / 1e18 } ?? 0
+            let avgTps = totalSec > 0 ? Double(totalTokens) / totalSec : 0
+            NovaMLXLog.info("[Sup:\(String(requestId.prefix(8)))] Done processed — tokens=\(totalTokens) finish=\(finishReason?.rawValue ?? "nil") avgTPS=\(String(format: "%.1f", avgTps)) total=\(String(format: "%.2f", totalSec))s hadCont=\(contToFinish != nil)")
 
         default:
             break

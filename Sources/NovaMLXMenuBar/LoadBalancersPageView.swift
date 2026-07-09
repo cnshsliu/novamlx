@@ -6,6 +6,7 @@ import NovaMLXUtils
 // MARK: - LoadBalancersPageView (Task 10)
 
 struct LoadBalancersPageView: View {
+    @ObservedObject var appState: MenuBarAppState
     @State private var lbs: [LoadBalancer] = []
     @State private var editing: LoadBalancer?
     @State private var creating = false
@@ -54,7 +55,8 @@ struct LoadBalancersPageView: View {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         expandedId = isExpanded ? nil : lb.id
                     }
-                }
+                },
+                onPlay: { appState.pickInPlayground("lb:" + lb.slug) }
             )
             if isExpanded {
                 LBMembersPreviewPanel(lbId: lb.id)
@@ -106,6 +108,7 @@ struct LBRow: View {
     let isExpanded: Bool
     let onEdit: () -> Void
     let onToggle: () -> Void
+    let onPlay: () -> Void
 
     var body: some View {
         HStack {
@@ -124,6 +127,16 @@ struct LBRow: View {
                         .background(Color.accentColor.opacity(0.15))
                         .foregroundColor(.accentColor)
                         .clipShape(Capsule())
+                    // Pick-to-Playground: copies lb:<slug> into the Playground
+                    // model picker and jumps there. Kept outside the row's
+                    // contentShape tap so it doesn't toggle the accordion.
+                    Button(action: onPlay) {
+                        Image(systemName: "play.circle")
+                            .font(.system(size: 11))
+                            .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in Playground")
                 }
                 Text("\(lb.strategy.rawValue) · \(lb.requestCount) requests")
                     .font(.caption).foregroundColor(.secondary)

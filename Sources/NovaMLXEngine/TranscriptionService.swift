@@ -52,6 +52,10 @@ public final class TranscriptionService: @unchecked Sendable {
     private var containers: [String: TranscriptionContainer] = [:]
     private let lock = NovaMLXLock()
 
+    /// Shared metrics store. Set by InferenceService after construction so the
+    /// status panel can show live ASR activity.
+    public var metricsStore: MetricsStore?
+
     public init() {
         self.containers = [:]
     }
@@ -117,6 +121,10 @@ public final class TranscriptionService: @unchecked Sendable {
         let (_, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
 
         let startTime = Date()
+        // Report live activity so the status panel shows ASR is running.
+        metricsStore?.reportActivity(model: modelId, kind: .asr, speed: 0, unit: "×RT")
+        defer { metricsStore?.clearActivity(forModel: modelId) }
+
         let output: STTOutput
         switch model {
         case .qwen3ASR(let asrModel):

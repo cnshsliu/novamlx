@@ -126,10 +126,11 @@ struct ModelsPageView: View {
                                 .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
                         }
                         .foregroundColor(selectedTab == tab ? NovaTheme.Colors.accent : NovaTheme.Colors.textTertiary)
-                        .padding(.horizontal, 14)
+                        .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .background(selectedTab == tab ? NovaTheme.Colors.accent.opacity(0.1) : Color.clear)
                         .cornerRadius(6)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -210,13 +211,31 @@ struct ModelsPageView: View {
             guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
             return typeFilter.matches(record.modelType)
         }
+        let restoring = appState.restoringModels.filter { id in
+            guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
+            return typeFilter.matches(record.modelType)
+        }
 
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(l10n.tr("status.activeModels"), icon: "bolt.fill", count: loaded.count)
+            HStack {
+                sectionHeader(l10n.tr("status.activeModels"), icon: "bolt.fill", count: loaded.count)
+                if !restoring.isEmpty {
+                    HStack(spacing: 4) {
+                        ProgressView().controlSize(.mini)
+                        Text("Restoring \(restoring.count) model\(restoring.count > 1 ? "s" : "")...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
 
-            if loaded.isEmpty {
+            if loaded.isEmpty && restoring.isEmpty {
                 emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
             } else {
+                // Models currently being restored on startup — show spinner rows
+                ForEach(restoring, id: \.self) { modelId in
+                    restoringModelRow(modelId)
+                }
                 ForEach(loaded, id: \.self) { modelId in
                     modelRow(
                         modelId,
@@ -240,6 +259,31 @@ struct ModelsPageView: View {
             }
         }
         .sectionCard()
+    }
+
+    /// Spinner row shown for a model that is currently being restored on startup.
+    private func restoringModelRow(_ modelId: String) -> some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(modelId)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                Text("Loading…")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(NovaTheme.Colors.rowBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(NovaTheme.Colors.accent.opacity(0.2), lineWidth: 0.5)
+        )
     }
 
     @ViewBuilder
@@ -388,6 +432,17 @@ struct ModelsPageView: View {
                         .help(l10n.tr("models.clickDetails"))
                         .onTapGesture { fetchModelCard(repoId: modelId) }
                     CopyIDButton(id: modelId)
+                    if isLoaded {
+                        Button {
+                            appState.pickInPlayground(modelId)
+                        } label: {
+                            Image(systemName: "play.circle")
+                                .font(.system(size: 11))
+                                .foregroundColor(NovaTheme.Colors.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open in Playground")
+                    }
                 }
                 Text(subtitle).font(.caption2).foregroundColor(.secondary)
             }

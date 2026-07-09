@@ -313,6 +313,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 } catch {
                     // SAFE: pre-prefill error path, continuation is exclusively owned
                     continuation.finish(throwing: error)
+                    NovaMLXLog.error("[Fused:\(request.id.uuidString.prefix(8))] prefill error — model=\(modelId): \(error) — \(type(of: error))")
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
                         assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in submit() prefill error path")
@@ -393,6 +394,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 } catch {
                     // SAFE: pre-prefill error path, continuation is exclusively owned
                     continuation.finish(throwing: error)
+                    NovaMLXLog.error("[Fused:\(request.id.uuidString.prefix(8))] submitStream prefill error — model=\(modelId): \(error) — \(type(of: error))")
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
                         assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in submitStream error path")
@@ -420,6 +422,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 } catch {
                     // SAFE: pre-prefill error path, continuation is exclusively owned
                     continuation.finish(throwing: error)
+                    NovaMLXLog.error("[Fused:\(request.id.uuidString.prefix(8))] internalSubmitStream prefill error — model=\(modelId): \(error) — \(type(of: error))")
                     self.lock.withLock {
                         self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
                         assert((self.activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in internalSubmitStream error path")
@@ -1143,6 +1146,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             } catch {
                 // SAFE: pre-prefill error path, continuation is exclusively owned
                 item.continuation.finish(throwing: error)
+                NovaMLXLog.error("[Fused:\(item.request.id.uuidString.prefix(8))] admitQueued prefill error — model=\(modelId): \(error) — \(type(of: error))")
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
                     assert((activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in admitQueued error path")

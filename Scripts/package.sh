@@ -74,11 +74,152 @@ PLIST
 sed -i '' "s/VERSION_PLACEHOLDER/$VERSION/g" "$APP_CONTENTS/Info.plist"
 
 echo "→ Signing with entitlements..."
+# DEVELOPER_ID env var, when set (by Scripts/sign_and_notarize.py for release
+# builds), triggers a real Developer ID Application signature. Without it we
+# fall back to ad-hoc (--sign -) which is fine for local testing but won't
+# pass Gatekeeper on other machines.
+#
+# Notarization requires:
+#   • Hardened Runtime (--options runtime) on every Mach-O binary.
+#   • --team-identifier and an explicit designated requirement (-r rqset):
+#     Without these, codesign auto-generates a broken DR using the leaf
+#     cert's SHA-1 in place of the Apple Root CA hash (i.e. an unsatisfiable
+#     "certificate root = H<leaf_hash>" DR). Notary rejects with
+#     "The signature of the binary is invalid." even though the signature
+#     itself is cryptographically valid.
+#   • Sign leaf binaries individually first (--deep is deprecated since
+#     macOS 13 and leaves some inner binaries improperly signed).
+#
+# So we sign each leaf binary with full DR flags, then the .app bundle.
 ENTITLEMENTS="NovaMLX.entitlements"
-if [ -f "$ENTITLEMENTS" ]; then
-    codesign --force --deep --entitlements "$ENTITLEMENTS" --sign - "$DIST_DIR/$APP_NAME"
+SIGN_ARGS=()
+TEAM_ID=""
+if [ -n "${DEVELOPER_ID:-}" ]; then
+    echo "   using Developer ID: $DEVELOPER_ID"
+    SIGN_ARGS=(--sign "$DEVELOPER_ID")
+    # Extract Team ID from cert name: "Developer ID Application: Name (TEAMID)"
+    TEAM_ID=$(echo "$DEVELOPER_ID" | grep -oE '\(([A-Z0-9]+)\)' | tr -d '()' || true)
+    if [ -z "$TEAM_ID" ]; then
+        echo "   ⚠️  Could not extract Team ID from Developer ID name."
+        echo "       Notarization will likely fail. Pass --team-identifier manually."
+    else
+        echo "   Team ID: $TEAM_ID"
+    fi
 else
-    codesign --force --deep --sign - "$DIST_DIR/$APP_NAME"
+    echo "   DEVELOPER_ID not set — using ad-hoc signature (--sign -)"
+    SIGN_ARGS=(--sign -)
+fi
+# Hardened runtime is required for notarization. We enable it for both
+# Developer ID and ad-hoc paths — ad-hoc + runtime still works locally.
+SIGN_ARGS+=(--options runtime --force)
+if [ -f "$ENTITLEMENTS" ]; then
+    SIGN_ARGS+=(--entitlements "$ENTITLEMENTS")
+fi
+if [ -n "$TEAM_ID" ]; then
+    SIGN_ARGS+=(--team-identifier "$TEAM_ID")
+fi
+
+# Build the designated requirement file used for every signature in this bundle.
+# This is Apple's canonical Developer ID DR. Without an explicit -r flag,
+# codesign generates an unsatisfiable DR that references the leaf cert hash as
+# "certificate root" — which breaks notarization. Mirrors VoiceVibeCode's
+# package.sh approach. Only applied when we have a Team ID (Developer ID mode).
+RQSET_FILE=""
+if [ -n "$TEAM_ID" ]; then
+    RQSET_FILE=$(mktemp /tmp/novamlx_req.XXXXXX)
+    APP_ID="com.novamlx.app"
+    cat > "$RQSET_FILE" << REQEOF
+designated => anchor apple generic and identifier "$APP_ID" and (certificate leaf[field.1.2.840.113635.100.6.1.9] exists or certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "$TEAM_ID")
+REQEOF
+    SIGN_ARGS+=(-r "$RQSET_FILE")
+fi
+
+# Helper: sign a single Mach-O/metallib leaf with a per-leaf identifier.
+# The rqset above uses identifier "com.novamlx.app" for the OUTER bundle.
+# Leaf binaries have their own identifiers (their filename), so they need
+# their own rqset with the right identifier, otherwise DR check fails.
+# Note: codesign auto-strips extensions from non-Mach-O (e.g. mlx.metallib
+# becomes identifier "mlx"). We pass -i explicitly so the identifier in the
+# rqset matches what codesign actually embeds.
+sign_leaf() {
+    local bin_path="$1"
+    local bin_name=$(basename "$bin_path")
+    # For metallib (non-Mach-O), codesign strips the extension. Match that.
+    local bin_id="$bin_name"
+    if [[ "$bin_name" == *.metallib ]]; then
+        bin_id="${bin_name%.metallib}"
+    fi
+    if [ -n "$TEAM_ID" ]; then
+        local leaf_rqset=$(mktemp /tmp/novamlx_leaf_req.XXXXXX)
+        cat > "$leaf_rqset" << REQEOF
+designated => anchor apple generic and identifier "$bin_id" and (certificate leaf[field.1.2.840.113635.100.6.1.9] exists or certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "$TEAM_ID")
+REQEOF
+        codesign --force --options runtime \
+            -i "$bin_id" \
+            --entitlements "$ENTITLEMENTS" \
+            --team-identifier "$TEAM_ID" \
+            -r "$leaf_rqset" \
+            --sign "$DEVELOPER_ID" \
+            "$bin_path"
+        local rc=$?
+        rm -f "$leaf_rqset"
+        return $rc
+    else
+        codesign "${SIGN_ARGS[@]}" "$bin_path"
+    fi
+}
+
+# 1. Sign each Mach-O binary in Contents/MacOS/.
+#    Also sign .metallib files — codesign treats Metal shader libraries as
+#    "code items" that must be individually signed when hardened runtime is
+#    enabled, even though they aren't Mach-O.
+for bin in "$APP_CONTENTS/MacOS/"*; do
+    [ -f "$bin" ] || continue
+    name=$(basename "$bin")
+    if [[ "$name" == *.metallib ]]; then
+        echo "   signing metallib: $name"
+        sign_leaf "$bin" || true
+        continue
+    fi
+    # Skip other non-Mach-O files.
+    file "$bin" 2>/dev/null | grep -q "Mach-O" || continue
+    echo "   signing binary: $name"
+    sign_leaf "$bin"
+done
+
+# 2. Sign SPM resource bundles in Contents/Resources/ — only if they contain
+#    Mach-O code. Most SPM resource bundles (GRDB, NovaMLXEngine, etc.) are
+#    pure resources (JSON / Jinja / xcprivacy) that codesign refuses to treat
+#    as bundles. Those get sealed into the outer .app's CodeResources instead.
+for bundle in "$APP_CONTENTS/Resources/"*.bundle; do
+    [ -d "$bundle" ] || continue
+    # Skip if no Mach-O anywhere in the bundle.
+    if ! find "$bundle" -type f -exec file {} \; 2>/dev/null | grep -q "Mach-O"; then
+        echo "   skipping resource-only bundle: $(basename "$bundle")"
+        continue
+    fi
+    echo "   signing bundle (has Mach-O): $(basename "$bundle")"
+    sign_leaf "$bundle"
+done
+
+# 3. Sign the .app bundle itself (outermost signature). Resources inside
+#    (including unsigned .bundle folders) get sealed via CodeResources.
+echo "   signing app bundle: $APP_NAME"
+codesign "${SIGN_ARGS[@]}" "$DIST_DIR/$APP_NAME"
+
+# Cleanup rqset temp file.
+[ -n "$RQSET_FILE" ] && rm -f "$RQSET_FILE"
+
+# Verify signature integrity locally before we waste a notary submission.
+# This catches the "signature of the binary is invalid" class of errors that
+# would otherwise only surface after the ~2min notary round-trip.
+if [ -n "$TEAM_ID" ]; then
+    echo "   verifying signature locally..."
+    if codesign --verify --deep --strict --verbose=2 "$DIST_DIR/$APP_NAME" 2>&1; then
+        echo "   ✅ local codesign verify passed"
+    else
+        echo "   ⚠️  local codesign verify FAILED — notary will reject this build"
+    fi
 fi
 
 DMG_NAME="NovaMLX-${VERSION}-arm64.dmg"

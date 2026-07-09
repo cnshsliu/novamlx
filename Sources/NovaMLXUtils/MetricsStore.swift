@@ -56,6 +56,50 @@ public struct PersistentMetrics: Codable, Sendable {
     }
 }
 
+/// The kind of inference being performed. Drives which unit/label the UI shows
+/// alongside the live speed number.
+public enum InferenceKind: String, Sendable {
+    case llm          // text generation (chat / completions)
+    case vlm          // vision-language (image understanding)
+    case asr          // speech-to-text / transcription
+    case tts          // text-to-speech / speech synthesis
+    case image        // image generation / edit / variation
+
+    /// Short human label for UI badges.
+    public var label: String {
+        switch self {
+        case .llm: return "LLM"
+        case .vlm: return "VLM"
+        case .asr: return "ASR"
+        case .tts: return "TTS"
+        case .image: return "Image"
+        }
+    }
+}
+
+/// A single live inference-in-progress record. Stored in MetricsStore so the
+/// status panel can show "what is running right now" regardless of model type.
+public struct LiveActivity: Sendable, Equatable {
+    public let model: String
+    public let kind: InferenceKind
+    /// Speed in kind-appropriate units (tok/s, sec/s, img/s).
+    public let speed: Double
+    /// Human unit string, e.g. "tok/s", "×RT", "img/s".
+    public let unit: String
+    public let startedAt: Date
+    public let updatedAt: Date
+
+    public init(model: String, kind: InferenceKind, speed: Double, unit: String,
+                startedAt: Date = Date(), updatedAt: Date = Date()) {
+        self.model = model
+        self.kind = kind
+        self.speed = speed
+        self.unit = unit
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+    }
+}
+
 public final class MetricsStore: @unchecked Sendable {
     private let metricsFile: URL
     private var _metrics: PersistentMetrics
@@ -63,6 +107,8 @@ public final class MetricsStore: @unchecked Sendable {
     private var saveCounter: Int = 0
     private var _recentTps: Double = 0
     private var _lastTpsUpdate: Date = Date.distantPast
+    private var _liveActivity: LiveActivity? = nil
+    private var _lastActivityUpdate: Date = Date.distantPast
 
     /// Seconds after which a cached TPS value is considered stale and returned as 0
     private let tpsStaleThreshold: TimeInterval = 5
@@ -110,6 +156,48 @@ public final class MetricsStore: @unchecked Sendable {
         lock.withLock {
             _recentTps = tps
             _lastTpsUpdate = Date()
+        }
+    }
+
+    /// Compute the real-time-factor for streaming-style media: generated-output
+    /// seconds per wall-clock second. ASR and TTS both use this ("×RT").
+    public static func realTimeFactor(outputSeconds: Double, wallSeconds: Double) -> Double {
+        wallSeconds > 0 ? outputSeconds / wallSeconds : 0
+    }
+
+    /// Record (or refresh) a live, in-progress inference operation. Called by every
+    /// backend (LLM, VLM, ASR, TTS, image-gen) so the status panel always reflects
+    /// what is running right now, not just the LLM tok/s path.
+    public func reportActivity(model: String, kind: InferenceKind, speed: Double, unit: String) {
+        lock.withLock {
+            if let existing = _liveActivity, existing.model == model {
+                _liveActivity = LiveActivity(
+                    model: model, kind: kind, speed: speed, unit: unit,
+                    startedAt: existing.startedAt, updatedAt: Date())
+            } else {
+                let now = Date()
+                _liveActivity = LiveActivity(model: model, kind: kind, speed: speed, unit: unit, startedAt: now, updatedAt: now)
+            }
+            _lastActivityUpdate = Date()
+        }
+    }
+
+    /// Clear a single finished operation. Only clears if the finishing model
+    /// matches the current activity, so a concurrent request isn't wiped early.
+    public func clearActivity(forModel model: String) {
+        lock.withLock {
+            if _liveActivity?.model == model {
+                _liveActivity = nil
+            }
+        }
+    }
+
+    /// Live activity if one is in progress and not stale (5s). Returns nil when idle.
+    public var liveActivity: LiveActivity? {
+        lock.withLock {
+            guard let activity = _liveActivity else { return nil }
+            let stale = Date().timeIntervalSince(_lastActivityUpdate) > tpsStaleThreshold
+            return stale ? nil : activity
         }
     }
 

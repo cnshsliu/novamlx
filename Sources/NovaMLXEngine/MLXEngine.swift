@@ -2038,6 +2038,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let probeCache = model.value.newCache(parameters: parameters)
         let modelUsesRotating = probeCache.contains { $0 is RotatingKVCache }
 
+        // Report live activity so the status panel shows this non-streaming
+        // LLM/VLM request is in progress (model name + kind).
+        let genKind: InferenceKind = isVLM ? .vlm : .llm
+        metricsStore.reportActivity(model: request.model, kind: genKind, speed: 0, unit: "tok/s")
+        defer { metricsStore.clearActivity(forModel: request.model) }
+
         // Capture prompt tokens for prefix cache storage + loading.
         // Skip for VLM (builds fresh cache in perform) and RotatingKVCache (incompatible).
         let allPromptTokens: [Int]?
@@ -2200,6 +2206,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 let stopIdsBox = SetBox(stopTokenIds)
                 let unknownTokenId = mlxTokenizer.unknownTokenId
 
+                // Box the LMInput image/video payload for @Sendable closure capture.
+                // LMInput itself is not Sendable, but MLXArray and THW are, so we extract
+                // the pixel data and reconstruct LMInput inside the closure. This is needed
+                // because model.prepare() reads the merged image pixels from LMInput.image.
+                let prefillImage = effectiveInput.image
+                let prefillVideo = effectiveInput.video
+                let prefillTextTokens = effectiveInput.text.tokens
+                let imageBox = SendableBox<LMInput.ProcessedImage?>(prefillImage)
+                let videoBox = SendableBox<LMInput.ProcessedVideo?>(prefillVideo)
+                let promptTokensBox = SendableBox<MLXArray>(prefillTextTokens)
+
                 // Wrap non-Sendable values for capture in @Sendable closure
                 let cacheBox = MutableSendableBox<[KVCache]?>(kvCache)
                 let samplerBox = SamplerBox(sampler)
@@ -2212,13 +2229,31 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 // mirror fix.
                 let processorBox = ProcessorBox(processor)
 
-                let genResult = await mlxContainer.perform { context in
+                let genResult = try await mlxContainer.perform { context in
                     let modelObj = context.model
                     let caches = cacheBox.value!
 
                     // Prefill
+                    // VLM prefill MUST use model.prepare() (not callAsFunction) so that
+                    // image features are merged into the token embeddings via
+                    // mergeInputIdsWithImageFeatures. Calling callAsFunction would run the
+                    // language model on raw <|image_pad|> token IDs, producing garbage logits
+                    // that immediately collapse to EOS (token 151645) — the model "sees" only
+                    // placeholder tokens and has no visual information.
                     let inputTokens = MLXArray(tokenIds.map { Int32($0) }).reshaped(1, tokenIds.count)
-                    let logits = modelObj(inputTokens, cache: caches)
+                    let vlmInput = LMInput(
+                        text: .init(tokens: promptTokensBox.value),
+                        image: imageBox.value,
+                        video: videoBox.value)
+                    let prepareResult = try modelObj.prepare(
+                        vlmInput, cache: caches, windowSize: nil)
+                    let logits: MLXArray
+                    switch prepareResult {
+                    case .logits(let output):
+                        logits = output.logits
+                    case .tokens(let remainingText):
+                        logits = modelObj(remainingText.tokens.reshaped(1, remainingText.tokens.size), cache: caches)
+                    }
                     eval(logits)
                     eval(caches)
 
@@ -2380,6 +2415,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
+        RequestLogStore.shared.finish(
+            request: request, model: request.model,
+            kind: isVLM ? .vlm : .llm,
+            tps: tps, promptTokens: promptTokenCount,
+            completionTokens: completionTokens, durationMs: elapsed * 1000,
+            finishReason: finishReason.rawValue)
 
         NovaMLXLog.info("[Engine] Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s) [\(request.model)]")
 
@@ -2507,19 +2548,42 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         // VLM requests. Mirrors the non-stream VLM fix.
                         let processorBox = ProcessorBox(processor)
 
+                        // Box the LMInput image/video payload for @Sendable closure capture
+                        // (mirrors the non-stream VLM fix). model.prepare() reads the merged image
+                        // pixels from LMInput.image, so we must pass the full LMInput — not raw
+                        // token IDs — to the prefill call.
+                        let prefillImage = input.image
+                        let prefillVideo = input.video
+                        let prefillTextTokens = input.text.tokens
+                        let imageBox = SendableBox<LMInput.ProcessedImage?>(prefillImage)
+                        let videoBox = SendableBox<LMInput.ProcessedVideo?>(prefillVideo)
+                        let promptTokensBox = SendableBox<MLXArray>(prefillTextTokens)
+
                         // Yield role chunk immediately
                         continuation.yield(Token(id: 0, text: ""))
 
                         var completionTokens = 0
                         var finishReason: FinishReason = .stop
 
-                        let genResult = await mlxContainer.perform { context in
+                        let genResult = try await mlxContainer.perform { context in
                             let modelObj = context.model
                             let caches = cacheBox.value!
 
-                            // Prefill
+                            // Prefill — VLM MUST use model.prepare() so image features are merged.
                             let inputTokens = MLXArray(tokenIds.map { Int32($0) }).reshaped(1, tokenIds.count)
-                            let logits = modelObj(inputTokens, cache: caches)
+                            let vlmInput = LMInput(
+                                text: .init(tokens: promptTokensBox.value),
+                                image: imageBox.value,
+                                video: videoBox.value)
+                            let prepareResult = try modelObj.prepare(
+                                vlmInput, cache: caches, windowSize: nil)
+                            let logits: MLXArray
+                            switch prepareResult {
+                            case .logits(let output):
+                                logits = output.logits
+                            case .tokens(let remainingText):
+                                logits = modelObj(remainingText.tokens.reshaped(1, remainingText.tokens.size), cache: caches)
+                            }
                             eval(logits)
                             eval(caches)
 
@@ -2897,6 +2961,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             kvGroupSize: container.config.kvGroupSize
         )
 
+        // Report live activity (session path uses the engine VLM/non-VLM kind).
+        let sessionKind: InferenceKind = container.config.modelType == .vlm ? .vlm : .llm
+        metricsStore.reportActivity(model: request.model, kind: sessionKind, speed: 0, unit: "tok/s")
+        defer { metricsStore.clearActivity(forModel: request.model) }
+
         let startTime = Date()
         var generatedText = ""
         var promptTokens = 0
@@ -2935,6 +3004,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
+        RequestLogStore.shared.finish(
+            request: request, model: request.model,
+            kind: sessionKind, tps: tps, promptTokens: promptTokens,
+            completionTokens: completionTokens, durationMs: elapsed * 1000,
+            finishReason: finishReason.rawValue)
 
         return InferenceResult(
             id: request.id, model: request.model, text: Self.scrubControlTokens(Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model))),
@@ -3236,6 +3310,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
+        let procKind: InferenceKind = container.config.modelType == .vlm ? .vlm : .llm
+        RequestLogStore.shared.finish(
+            request: request, model: request.model,
+            kind: procKind, tps: tps, promptTokens: Int(promptTokenCount),
+            completionTokens: completionTokens, durationMs: elapsed * 1000,
+            finishReason: finishReason.rawValue)
 
         return InferenceResult(
             id: request.id, model: request.model, text: Self.scrubControlTokens(Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model))),

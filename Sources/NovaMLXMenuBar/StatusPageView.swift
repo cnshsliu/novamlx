@@ -9,8 +9,9 @@ struct StatusPageView: View {
     let modelManager: ModelManager
     @EnvironmentObject var l10n: L10n
     @State private var deviceInfo: DeviceInfo?
-    @State private var hoveredTPS: Double?
+    @State private var hoveredPoint: TPSHistoryPoint?
     @State private var hoveredIndex: Int = 0
+    @State private var hoveredX: CGFloat?
 
     var body: some View {
         ScrollView {
@@ -30,7 +31,7 @@ struct StatusPageView: View {
                 Circle()
                     .fill(appState.isServerRunning ? NovaTheme.Colors.statusOK.opacity(0.2) : NovaTheme.Colors.statusError.opacity(0.2))
                     .frame(width: 56, height: 56)
-                Image(systemName: appState.isServerRunning ? "bolt.fill" : "bolt.slash")
+                Image(systemName: heroIcon)
                     .font(.title2)
                     .foregroundColor(appState.isServerRunning ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
             }
@@ -44,7 +45,19 @@ struct StatusPageView: View {
                     + Text("  admin:\(String(appState.serverPort == 8080 ? 8081 : 8081))")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                if let model = appState.currentInferenceModel ?? appState.loadedModels.first {
+                // Live inference indicator: show the active model + kind if a
+                // backend (LLM, VLM, ASR, TTS, image) is currently running.
+                if let activity = appState.liveActivity {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 10, height: 10)
+                        Text("\(activity.model) · \(activity.kind.label)")
+                            .font(.caption)
+                            .foregroundColor(NovaTheme.Colors.accent)
+                            .lineLimit(1)
+                    }
+                } else if let model = appState.currentInferenceModel ?? appState.loadedModels.first {
                     HStack(spacing: 4) {
                         Circle()
                             .fill(NovaTheme.Colors.accent)
@@ -81,16 +94,25 @@ struct StatusPageView: View {
             HStack {
                 Text(l10n.tr("status.realtimeInferenceSpeed"))
                     .font(.headline)
+                if let activity = appState.liveActivity {
+                    Text(activity.kind.label)
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(NovaTheme.Colors.accent.opacity(0.15))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .clipShape(Capsule())
+                }
                 Spacer()
-                if let last = appState.tpsHistory.last, last > 0 {
-                    Text(String(format: "%.1f tok/s", last))
+                if !liveSpeedText.isEmpty {
+                    Text(liveSpeedText)
                         .font(.caption)
                         .foregroundColor(NovaTheme.Colors.accent)
                         .fontWeight(.medium)
                 }
             }
 
-            if appState.tpsHistory.allSatisfy({ $0 == 0 }) {
+            if appState.tpsHistory.allSatisfy({ $0.tps == 0 }) {
                 Text(l10n.tr("status.noActivity"))
                     .foregroundColor(.secondary)
                     .font(.subheadline)
@@ -99,17 +121,17 @@ struct StatusPageView: View {
             } else {
                 let history = appState.tpsHistory
                 Chart {
-                    ForEach(Array(history.enumerated()), id: \.offset) { index, tps in
+                    ForEach(Array(history.enumerated()), id: \.offset) { index, point in
                         LineMark(
                             x: .value("Time", index),
-                            y: .value("tok/s", tps)
+                            y: .value("tok/s", point.tps)
                         )
                         .foregroundStyle(NovaTheme.Colors.accent)
                         .interpolationMethod(.catmullRom)
 
                         AreaMark(
                             x: .value("Time", index),
-                            y: .value("tok/s", tps)
+                            y: .value("tok/s", point.tps)
                         )
                         .foregroundStyle(
                             .linearGradient(
@@ -121,14 +143,14 @@ struct StatusPageView: View {
                         .interpolationMethod(.catmullRom)
                     }
 
-                    if let tps = hoveredTPS {
-                        RuleMark(y: .value("tok/s", tps))
+                    if let point = hoveredPoint {
+                        RuleMark(y: .value("tok/s", point.tps))
                             .foregroundStyle(NovaTheme.Colors.accent.opacity(0.5))
                             .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
 
                         PointMark(
                             x: .value("Time", hoveredIndex),
-                            y: .value("tok/s", tps)
+                            y: .value("tok/s", point.tps)
                         )
                         .foregroundStyle(NovaTheme.Colors.accent)
                         .symbolSize(50)
@@ -143,43 +165,45 @@ struct StatusPageView: View {
                 }
                 .chartOverlay { proxy in
                     GeometryReader { geometry in
-                        Rectangle()
-                            .fill(.clear)
-                            .contentShape(Rectangle())
-                            .onContinuousHover { phase in
-                                switch phase {
-                                case .active(let location):
-                                    guard let plotAnchor = proxy.plotFrame else {
-                                        hoveredTPS = nil
-                                        return
+                        ZStack(alignment: .topLeading) {
+                            Rectangle()
+                                .fill(.clear)
+                                .contentShape(Rectangle())
+                                .onContinuousHover { phase in
+                                    switch phase {
+                                    case .active(let location):
+                                        guard let plotAnchor = proxy.plotFrame else {
+                                            hoveredPoint = nil
+                                            hoveredX = nil
+                                            return
+                                        }
+                                        let plotFrame = geometry[plotAnchor]
+                                        let relX = location.x - plotFrame.origin.x
+                                        let xRatio = max(0, min(1, relX / max(plotFrame.width, 1)))
+                                        let maxIndex = max(history.count - 1, 0)
+                                        let idx = maxIndex > 0
+                                            ? Int(round(xRatio * Double(maxIndex)))
+                                            : 0
+                                        let clamped = max(0, min(idx, maxIndex))
+                                        hoveredPoint = history[clamped]
+                                        hoveredIndex = clamped
+                                        hoveredX = plotFrame.minX + xRatio * plotFrame.width
+                                    case .ended:
+                                        hoveredPoint = nil
+                                        hoveredIndex = 0
+                                        hoveredX = nil
                                     }
-                                    let plotFrame = geometry[plotAnchor]
-                                    let relX = location.x - plotFrame.origin.x
-                                    let xRatio = max(0, min(1, relX / plotFrame.width))
-                                    let idx = Int(round(xRatio * Double(history.count - 1)))
-                                    let clamped = max(0, min(idx, history.count - 1))
-                                    hoveredTPS = history[clamped]
-                                    hoveredIndex = clamped
-                                case .ended:
-                                    hoveredTPS = nil
-                                    hoveredIndex = 0
                                 }
+
+                            if let point = hoveredPoint, let x = hoveredX {
+                                tpsHoverTooltip(for: point)
+                                    .fixedSize()
+                                    .position(
+                                        x: min(max(x, 72), geometry.size.width - 72),
+                                        y: 18
+                                    )
                             }
-                    }
-                }
-                .overlay(alignment: .topLeading) {
-                    if let tps = hoveredTPS {
-                        Text(String(format: "%.1f tok/s", tps))
-                            .font(.caption.bold())
-                            .foregroundColor(NovaTheme.Colors.accent)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(NovaTheme.Colors.cardBackground)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(NovaTheme.Colors.accent.opacity(0.4), lineWidth: 1))
-                            )
-                            .padding(4)
+                        }
                     }
                 }
                 .frame(height: 120)
@@ -237,9 +261,71 @@ struct StatusPageView: View {
         return h > 0 ? "\(h)h \(m)m" : "\(m)m"
     }
 
+    private func tpsHoverTooltip(for point: TPSHistoryPoint) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(String(format: "%.1f tok/s", point.tps))
+                .font(.caption.bold())
+                .foregroundColor(NovaTheme.Colors.accent)
+            Text(formatTPSHoverTimestamp(point.timestamp))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(NovaTheme.Colors.cardBackground)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(NovaTheme.Colors.accent.opacity(0.4), lineWidth: 1))
+        )
+        .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+    }
+
+    private func formatTPSHoverTimestamp(_ date: Date) -> String {
+        let interval = Date().timeIntervalSince(date)
+        let relative: String
+        if interval < 10 {
+            relative = l10n.tr("status.tpsJustNow")
+        } else if interval < 60 {
+            relative = l10n.tr("status.tpsSecondsAgo", Int(interval))
+        } else if interval < 3600 {
+            relative = l10n.tr("status.tpsMinutesAgo", Int(interval / 60))
+        } else {
+            relative = l10n.tr("status.tpsHoursAgo", Int(interval / 3600))
+        }
+        let clock = DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium)
+        return "\(relative) · \(clock)"
+    }
+
     private func formatNumber(_ n: UInt64) -> String {
         if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
         if n >= 1_000 { return String(format: "%.1fK", Double(n) / 1_000) }
         return "\(n)"
+    }
+
+    // MARK: - Live activity helpers
+
+    /// SF Symbol for the hero badge, chosen by what is running (or idle bolt).
+    private var heroIcon: String {
+        guard appState.isServerRunning else { return "bolt.slash" }
+        switch appState.liveActivity?.kind {
+        case .asr: return "waveform"
+        case .tts: return "speaker.wave.2"
+        case .image: return "photo"
+        case .vlm: return "eye"
+        case .llm: return "bolt.fill"
+        case nil: return "bolt.fill"
+        }
+    }
+
+    /// Speed string for the active inference, e.g. "23.5 tok/s". Falls back to
+    /// the recent LLM TPS when idle. Returns "" if nothing to show.
+    private var liveSpeedText: String {
+        if let activity = appState.liveActivity, activity.speed > 0 {
+            return String(format: "%.1f %@", activity.speed, activity.unit)
+        }
+        if let last = appState.tpsHistory.last, last.tps > 0 {
+            return String(format: "%.1f tok/s", last.tps)
+        }
+        return ""
     }
 }

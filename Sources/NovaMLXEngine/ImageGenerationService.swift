@@ -52,6 +52,12 @@ public final class ImageGenerationService: @unchecked Sendable {
     private let lock = NovaMLXLock()
     private var isGenerating = false
 
+    /// Shared metrics store. Set by InferenceService after construction so the
+    /// status panel can show live image-generation activity.
+    public var metricsStore: MetricsStore?
+    /// Model currently generating, used to clear the right activity on completion.
+    private var activeModelId: String = ""
+
     public init() {}
 
     public func loadModel(
@@ -230,6 +236,14 @@ public final class ImageGenerationService: @unchecked Sendable {
         let resolvedSeed: UInt64 = if let seed { seed } else { defaultSeed }
         var usedSeed: UInt64 = resolvedSeed
 
+        // Report live activity so the status panel reflects image generation.
+        self.activeModelId = modelId
+        metricsStore?.reportActivity(model: modelId, kind: .image, speed: 0, unit: "img/s")
+        defer {
+            metricsStore?.clearActivity(forModel: modelId)
+            self.activeModelId = ""
+        }
+
         for i in 0..<n {
             let imageSeed = n == 1 ? usedSeed : usedSeed &+ UInt64(i)
             let result = try generateBlock(pipeline, imageSeed)
@@ -239,6 +253,11 @@ public final class ImageGenerationService: @unchecked Sendable {
             }
             let b64 = try cgImageToBase64PNG(cgImage)
             base64Images.append(b64)
+            // Refresh running speed so the panel updates every image.
+            let elapsedSoFar = Date().timeIntervalSince(startTime)
+            let done = Double(i + 1)
+            let imgPerSec = elapsedSoFar > 0 ? done / elapsedSoFar : 0
+            metricsStore?.reportActivity(model: modelId, kind: .image, speed: imgPerSec, unit: "img/s")
         }
 
         let elapsed = Date().timeIntervalSince(startTime)

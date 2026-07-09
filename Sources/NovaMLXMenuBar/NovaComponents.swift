@@ -359,3 +359,60 @@ struct ItemInput: View {
         }
     }
 }
+
+// MARK: - PlainSlider
+
+/// Custom slider drawn from SwiftUI primitives to dodge the macOS native `Slider`
+/// bottom-line rendering glitch inside grouped forms. Pointer-driven; no native chrome.
+struct PlainSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+
+    init(value: Binding<Double>, range: ClosedRange<Double>, step: Double = 0.01) {
+        self._value = value
+        self.range = range
+        self.step = max(step, .leastNormalMagnitude)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let thumbDiameter: CGFloat = 14
+            let trackHeight: CGFloat = 5
+            let effectiveWidth = max(geo.size.width - thumbDiameter, 0)
+            let span = max(range.upperBound - range.lowerBound, .leastNormalMagnitude)
+            let progress = (value - range.lowerBound) / span
+            let thumbOffset = CGFloat(max(0, min(1, progress))) * effectiveWidth
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(Color.gray.opacity(0.35))
+                    .frame(height: trackHeight)
+
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(NovaTheme.Colors.accent)
+                    .frame(width: thumbOffset + thumbDiameter / 2, height: trackHeight)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: thumbDiameter, height: thumbDiameter)
+                    .shadow(color: Color.black.opacity(0.2), radius: 2, x: 0, y: 1)
+                    .offset(x: thumbOffset)
+            }
+            .frame(height: max(thumbDiameter, trackHeight))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        let denom = max(effectiveWidth, 1)
+                        let rawProgress = Double((g.location.x - thumbDiameter / 2) / denom)
+                        let clamped = max(0, min(1, rawProgress))
+                        let raw = range.lowerBound + clamped * span
+                        let stepped = (round(raw / step) * step)
+                        value = max(range.lowerBound, min(range.upperBound, stepped))
+                    }
+            )
+        }
+        .frame(height: 14)
+    }
+}

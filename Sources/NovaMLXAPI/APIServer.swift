@@ -284,7 +284,7 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
         return Self.unauthorized("Invalid or missing API key.")
     }
 
-    private static func extractToken(from request: Request) -> String? {
+    fileprivate static func extractToken(from request: Request) -> String? {
         let authHeader = request.headers[.authorization]
         if let authHeader, authHeader.hasPrefix("Bearer ") {
             return String(authHeader.dropFirst(7))
@@ -347,15 +347,123 @@ private struct RequestIDMiddleware: RouterMiddleware {
         context: Context,
         next: (Request, Context) async throws -> Response
     ) async throws -> Response {
+        let inboundID = request.headers[fields: Self.requestIDHeader].first?.value
         let requestID: String
-        if let hdr = request.headers[fields: Self.requestIDHeader].first?.value, !hdr.isEmpty {
+        if let hdr = inboundID, !hdr.isEmpty {
             requestID = hdr
         } else {
             requestID = UUID().uuidString.prefix(8).description
         }
-        var response = try await next(request, context)
+        // Propagate the resolved id ONTO the request before calling next so the
+        // downstream log middleware and every handler read ONE consistent id.
+        // Without this, RequestLogMiddleware generates its own UUID-B and the
+        // handler reads the unmodified request (no header) -> nil, so the
+        // streaming completion callback can't correlate to the log entry and
+        // leaves it stuck in "active" forever.
+        let propagated: Request
+        if inboundID == nil {
+            var head = request.head
+            head.headerFields[Self.requestIDHeader] = requestID
+            propagated = Request(head: head, body: request.body)
+        } else {
+            propagated = request
+        }
+        var response = try await next(propagated, context)
         response.headers[Self.requestIDHeader] = requestID
         return response
+    }
+}
+
+/// Logs every inbound API request so the user-facing Requests page can show a
+/// live scroll of what hit the server, which model handled it, which API key
+/// was used, and how long it took. Records start on entry; for requests that
+/// fail before reaching the inference layer (auth errors, bad route, etc.) it
+/// finalizes here from the HTTP status. Successful inference is finalized by
+/// the engine layer with model/kind/timing/token detail (see RequestLogStore).
+private struct RequestLogMiddleware: RouterMiddleware {
+    typealias Context = AppContext
+    let store: RequestLogStore
+
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        let requestID: String
+        if let hdr = request.headers[fields: HTTPField.Name("x-request-id")!].first?.value, !hdr.isEmpty {
+            requestID = hdr
+        } else {
+            requestID = UUID().uuidString.prefix(8).description
+        }
+
+        let token = APIKeyAuthMiddleware.extractToken(from: request)
+        let path = request.uri.path
+
+        // Record the start. We don't always know the model at middleware time
+        // (LB/modelfile resolution happens inside the handler) — inference
+        // completion re-finalizes with the exact model.
+        store.start(id: requestID, method: request.method.rawValue, path: path, apiKeyToken: token)
+
+        let start = Date()
+        do {
+            let response = try await next(request, context)
+            // Finalize failed HTTP responses here (4xx/5xx). Successful inference
+            // responses are finalized by the engine with richer data; if for any
+            // reason they aren't, fall through to the 200 path below.
+            let httpStatus = response.status
+            let isSuccess = (200..<300).contains(httpStatus.code)
+            if path.isInferenceEndpoint {
+                if isSuccess {
+                    // Engine is expected to finalize; nothing to do here.
+                } else {
+                    store.finishHTTP(
+                        id: requestID,
+                        status: .error,
+                        error: "HTTP \(httpStatus.code)",
+                        durationMs: Date().timeIntervalSince(start) * 1000)
+                }
+            } else {
+                // Non-inference endpoints (models list, stats, etc.) — finalize now.
+                store.finishHTTP(
+                    id: requestID,
+                    status: isSuccess ? .success : .error,
+                    error: isSuccess ? nil : "HTTP \(httpStatus.code)",
+                    durationMs: Date().timeIntervalSince(start) * 1000)
+            }
+            return response
+        } catch {
+            store.finishHTTP(
+                id: requestID,
+                status: .error,
+                error: error.localizedDescription,
+                durationMs: Date().timeIntervalSince(start) * 1000)
+            throw error
+        }
+    }
+}
+
+enum HTTPHelpers {
+    /// Pull the request id either from the `x-request-id` header or from the
+    /// response `RequestIDMiddleware` will have stamped there. Returns nil when
+    /// httpRequest is nil (non-HTTP contexts like internal playground calls).
+    static func requestID(from httpRequest: Request?) -> String? {
+        guard let httpRequest else { return nil }
+        if let hdr = httpRequest.headers[fields: HTTPField.Name("x-request-id")!].first?.value, !hdr.isEmpty {
+            return hdr
+        }
+        return nil
+    }
+}
+
+private extension String {
+    /// True for endpoints whose success path runs inference and is finalized by
+    /// the engine layer rather than the HTTP status alone.
+    var isInferenceEndpoint: Bool {
+        self.hasPrefix("/v1/chat/completions")
+            || self.hasPrefix("/v1/messages")
+            || self.hasPrefix("/v1/audio/transcriptions")
+            || self.hasPrefix("/v1/audio/speech")
+            || self.hasPrefix("/v1/images/generations")
     }
 }
 
@@ -485,6 +593,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         let mainRouter = RouterBuilder(context: AppContext.self) {
             CORSMiddleware(allowedOrigins: "*")
             RequestIDMiddleware()
+            RequestLogMiddleware(store: RequestLogStore.shared)
             securityHeaders
             requestSizeLimit
             rateLimitMiddleware
@@ -674,7 +783,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
                         cfg: cfg, clientType: clientType,
                         coordinator: coordinator,
-                        responseModelOverride: modelfileName
+                        responseModelOverride: modelfileName,
+                        httpRequest: request
                     )
                 } else {
                     response = try await Self.handleChat(
@@ -682,16 +792,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         sessionId: sessionId, responseFormat: responseFormat, jsonSchemaDef: jsonSchemaDef,
                         regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
                         cfg: cfg, clientType: clientType,
-                        responseModelOverride: modelfileName
+                        responseModelOverride: modelfileName,
+                        httpRequest: request
                     )
                     Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
                 }
                 if case .justLoaded(let ms) = loadOutcome {
                     response.headers[.init("X-Model-Cold-Load")!] = "true"
                     response.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
-                }
-                if openAIReq.stream != true {
-                    // Non-streaming usage tracked via handleChat result
                 }
                 return response
             }
@@ -728,10 +836,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         case .remote:
                             let rawDict = try JSONSerialization.jsonObject(with: memberBody) as? [String: Any]
                             let tag = rawDict?["tag"] as? String
+                            let (aVer, aBeta) = Self.extractAnthropicForwardHeaders(lbRequest)
                             return try await Self.handleTokenhubPassthrough(
                                 modelName: "tknet:" + member.ref,
                                 rawBody: memberBody, path: memberPath,
-                                inference: inference, tag: tag
+                                inference: inference, tag: tag,
+                                anthropicVersion: aVer, anthropicBeta: aBeta
                             )
                         }
                     }
@@ -745,10 +855,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 if TokenhubManager.shared.isTokenhubModel(anthropicReq.model) {
                     let rawDict = try JSONSerialization.jsonObject(with: Data(buffer: body)) as? [String: Any]
                     let tag = rawDict?["tag"] as? String
+                    let (aVer, aBeta) = Self.extractAnthropicForwardHeaders(request)
                     return try await Self.handleTokenhubPassthrough(
                         modelName: anthropicReq.model, rawBody: Data(buffer: body),
                         path: "messages", inference: inference,
-                        tag: tag
+                        tag: tag,
+                        anthropicVersion: aVer, anthropicBeta: aBeta
                     )
                 }
 
@@ -763,7 +875,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     var streamResp = try await Self.handleStreamAnthropic(
                         anthropicReq: anthropicReq, messages: messages, inference: inference,
                         cfg: cfg, clientType: anthropicClientType,
-                        coordinator: coordinator
+                        coordinator: coordinator,
+                        httpRequest: httpRequest
                     )
                     if case .justLoaded(let ms) = anthropicLoadOutcome {
                         streamResp.headers[.init("X-Model-Cold-Load")!] = "true"
@@ -799,7 +912,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     stream: false, stop: ocrStop,
                     thinkingBudget: anthropicReq.resolvedThinkingBudget,
                     enableThinking: anthropicReq.resolvedEnableThinking,
-                    preserveThinking: anthropicReq.resolvedPreserveThinking
+                    preserveThinking: anthropicReq.resolvedPreserveThinking,
+                    httpRequestId: HTTPHelpers.requestID(from: request)
                 )
 
                 CurrentInferenceModel.shared.modelID = request.model
@@ -888,7 +1002,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     httpResponse.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
                 }
                 Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
-                Self.recordTokenUsage(request: httpRequest, promptTokens: result.promptTokens, completionTokens: result.completionTokens, model: anthropicReq.model)
+                Self.recordTokenUsage(
+                    request: httpRequest,
+                    promptTokens: scaledInput,
+                    completionTokens: scaledOutput,
+                    model: anthropicReq.model,
+                    endpoint: "/v1/messages"
+                )
                 return httpResponse
             }
             Post("/v1/messages/count_tokens") { request, context in
@@ -980,6 +1100,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         totalTokens: scaledTotal
                     )
                 )
+                Self.recordTokenUsage(
+                    request: request,
+                    promptTokens: scaledPrompt,
+                    completionTokens: max(0, scaledTotal - scaledPrompt),
+                    model: embReq.model,
+                    endpoint: "/v1/embeddings"
+                )
                 var embHttpResponse = try Self.jsonResponse(response)
                 if case .justLoaded(let ms) = embLoadOutcome {
                     embHttpResponse.headers[.init("X-Model-Cold-Load")!] = "true"
@@ -1026,10 +1153,23 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         audioData: audioData,
                         language: language
                     )
+                    // Capture id + model synchronously so the body callback (which
+                    // fires on completion, possibly after this closure returns) can
+                    // finalize the exact log entry.
+                    let rid = HTTPHelpers.requestID(from: request)
+                    let modelCapture = model
+                    let store = RequestLogStore.shared
                     return Response(
                         status: .ok,
                         headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive"],
-                        body: AudioSSEStream.body(from: tokenStream)
+                        body: AudioSSEStream.body(from: tokenStream) { error in
+                            store.finish(
+                                model: modelCapture, kind: .asr,
+                                status: error != nil ? .error : .success,
+                                tps: 0, promptTokens: 0,
+                                completionTokens: 0, durationMs: 0,
+                                error: error?.localizedDescription, requestId: rid)
+                        }
                     )
                 }
 
@@ -1039,6 +1179,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     language: language,
                     responseFormat: responseFormat
                 )
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    let ridDur = result.duration.map { $0 * 1000 } ?? 0
+                    RequestLogStore.shared.finish(
+                        model: model, kind: .asr, status: .success,
+                        tps: 0, promptTokens: 0,
+                        completionTokens: result.text.split(separator: " ").count,
+                        durationMs: ridDur, requestId: rid)
+                }
 
                 switch responseFormat {
                 case "text":
@@ -1096,6 +1244,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 let rate = Int(175.0 * Double(speed))
 
+                let ttsStart = Date()
                 let audioData = try await inference.ttsService.synthesize(
                     text: input,
                     voice: voice,
@@ -1103,9 +1252,17 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     engine: nil,
                     voiceProfile: voiceProfile
                 )
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    RequestLogStore.shared.finish(
+                        model: model, kind: .tts, status: .success,
+                        tps: 0, promptTokens: input.split(separator: " ").count,
+                        completionTokens: 0,
+                        durationMs: Date().timeIntervalSince(ttsStart) * 1000,
+                        requestId: rid)
+                }
 
                 let mimeType = self.mimeType(forFormat: responseFormat)
-                var headers: HTTPFields = [.contentType: mimeType]
+                let headers: HTTPFields = [.contentType: mimeType]
 
                 return Response(
                     status: .ok,
@@ -1140,6 +1297,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         from: record.localURL, config: config)
                 }
 
+                let tgenStart = Date()
                 let result = try await inference.imageGenerationService.generate(
                     modelId: model,
                     prompt: req.prompt,
@@ -1150,6 +1308,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     seed: req.seed.map { UInt64($0) },
                     steps: req.steps
                 )
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    RequestLogStore.shared.finish(
+                        model: model, kind: .image, status: .success,
+                        tps: 0, promptTokens: 0,
+                        completionTokens: result.images.count,
+                        durationMs: Date().timeIntervalSince(tgenStart) * 1000,
+                        requestId: rid)
+                }
 
                 let imageData: [ImageData]
                 switch format {
@@ -1234,6 +1400,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
                 }
 
+                let editStart = Date()
                 let result = try await inference.imageGenerationService.edit(
                     modelId: model,
                     image: inputCGImage,
@@ -1243,6 +1410,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     width: width,
                     height: height
                 )
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    RequestLogStore.shared.finish(
+                        model: model, kind: .image, status: .success,
+                        tps: 0, promptTokens: 0, completionTokens: result.images.count,
+                        durationMs: Date().timeIntervalSince(editStart) * 1000, requestId: rid)
+                }
 
                 let imageDataResp: [ImageData]
                 switch format {
@@ -1315,6 +1488,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
                 }
 
+                let varStart = Date()
                 let result = try await inference.imageGenerationService.variation(
                     modelId: model,
                     image: inputCGImage,
@@ -1322,6 +1496,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     width: width,
                     height: height
                 )
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    RequestLogStore.shared.finish(
+                        model: model, kind: .image, status: .success,
+                        tps: 0, promptTokens: 0, completionTokens: result.images.count,
+                        durationMs: Date().timeIntervalSince(varStart) * 1000, requestId: rid)
+                }
 
                 let imageDataResp: [ImageData]
                 switch format {
@@ -1382,11 +1562,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 coordinator: coordinator
                             )
                         case .remote:
-                            // Reuse the Responses-API passthrough; it decodes
-                            // the body itself so memberBody is what it wants.
-                            let memberReq = try JSONDecoder().decode(OpenAIResponseRequest.self, from: memberBody)
+                            // Rewrite model to "tknet:<ref>" so the Responses
+                            // passthrough's provider resolver can find it.
+                            // (Matches the chat/messages LB dispatcher pattern
+                            // above. Without this prefix, the resolver errors
+                            // with "Unknown tokenhub provider: <ref>".)
+                            let rewrittenMemberBody = Self.rewriteModel(in: memberBody, to: "tknet:" + member.ref)
+                            let memberReq = try JSONDecoder().decode(OpenAIResponseRequest.self, from: rewrittenMemberBody)
                             return try await Self.handleTokenhubResponsesPassthrough(
-                                req: memberReq, rawBody: memberBody, inference: inference
+                                req: memberReq, rawBody: rewrittenMemberBody, inference: inference
                             )
                         }
                     }
@@ -1726,1045 +1910,1318 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             securityHeaders
             requestSizeLimit
             NovaMLXErrorMiddleware()
-            Get("/admin/models") { request, context in
-                let records = models.allRegisteredModels()
-                var statuses: [AdminModelStatus] = []
-                statuses.reserveCapacity(records.count)
-                for record in records {
-                    let isDownloaded = models.isDownloaded(record.id)
-                    let isLoaded = inference.isModelLoaded(record.id) || embeddings.isLoaded(record.id) || inference.transcriptionService.isLoaded(record.id) || inference.imageGenerationService.isLoaded(record.id)
-                    // Only check feasibility for downloaded, non-loaded, non-embedding models
-                    var feasibility: MemoryFeasibility? = nil
-                    if isDownloaded && !isLoaded && record.modelType != .embedding {
-                        feasibility = await inference.checkMemoryFeasibility(
-                            modelId: record.id, sizeBytes: record.sizeBytes, localURL: record.localURL
-                        )
-                    }
-
-                    // SpecBoost status
-                    var specBoost: SpecBoostInfo? = nil
-                    if record.modelType == .llm {
-                        let isHybrid: Bool
-                        if isLoaded {
-                            isHybrid = inference.isHybridModel(record.id)
-                        } else {
-                            isHybrid = false
-                        }
-                        let status = DraftModelRegistry.shared.boostStatus(
-                            family: record.family,
-                            isHybrid: isHybrid,
-                            modelType: record.modelType,
-                            draftModelLoaded: { id in inference.isModelLoaded(id) },
-                            draftModelOnDisk: { id in models.isDownloaded(id) }
-                        )
-                        switch status {
-                        case .ineligible(let reason):
-                            specBoost = SpecBoostInfo(status: "ineligible", reason: reason)
-                        case .eligible(let candidate):
-                            specBoost = SpecBoostInfo(
-                                status: "eligible",
-                                draftModelId: candidate.draftModelId,
-                                draftDisplayName: candidate.displayName,
-                                draftDownloaded: models.isDownloaded(candidate.draftModelId),
-                                draftLoaded: inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true
-                            )
-                        case .active(let draftModelId):
-                            specBoost = SpecBoostInfo(
-                                status: "active",
-                                draftModelId: draftModelId,
-                                draftLoaded: true
-                            )
-                        }
-                    }
-
-                    statuses.append(AdminModelStatus(
-                        id: record.id,
-                        family: record.family.rawValue,
-                        downloaded: isDownloaded,
-                        loaded: isLoaded,
-                        sizeBytes: record.sizeBytes,
-                        downloadedAt: record.downloadedAt,
-                        memoryFeasibility: feasibility,
-                        specBoost: specBoost
-                    ))
-                }
-                return try Self.jsonResponse(statuses)
-            }
-            Post("/admin/models/download") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdminDownloadRequest.self, from: body)
-
-                guard models.getRecord(req.modelId) != nil else {
-                    throw NovaMLXError.modelNotFound(req.modelId)
-                }
-
-                if let status = models.getDownloadStatus(req.modelId), status.state == .downloading {
-                    return try Self.jsonResponse(status, httpStatus: .accepted)
-                }
-
-                if models.isDownloaded(req.modelId) {
-                    guard let record = models.getRecord(req.modelId) else {
-                        throw NovaMLXError.modelNotFound(req.modelId)
-                    }
-                    return try Self.jsonResponse(AdminModelStatus(
-                        id: req.modelId, family: record.family.rawValue,
-                        downloaded: true, loaded: inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId),
-                        sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt
-                    ))
-                }
-
-                try models.startDownload(req.modelId)
-
-                let status = models.getDownloadStatus(req.modelId) ?? DownloadStatus(modelId: req.modelId, state: .downloading)
-                return try Self.jsonResponse(status, httpStatus: .accepted)
-            }
-            Post("/admin/models/status") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
-
-                if let status = models.getDownloadStatus(req.modelId) {
-                    return try Self.jsonResponse(status)
-                }
-                let state: DownloadState = models.isDownloaded(req.modelId) ? .downloaded : .notDownloaded
-                return try Self.jsonResponse(DownloadStatus(modelId: req.modelId, state: state))
-            }
-            Post("/admin/models/load") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
-
-                guard models.isDownloaded(req.modelId) else {
-                    throw NovaMLXError.modelNotFound(req.modelId)
-                }
-
-                if inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId) {
-                    let record = models.getRecord(req.modelId)
-                    return try Self.jsonResponse(AdminModelStatus(
-                        id: req.modelId, family: record?.family.rawValue ?? "other",
-                        downloaded: true, loaded: true,
-                        sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt
-                    ))
-                }
-
-                guard let record = models.getRecord(req.modelId) else {
-                    throw NovaMLXError.modelNotFound(req.modelId)
-                }
-
-                let config = ModelConfig(
-                    identifier: ModelIdentifier(id: req.modelId, family: record.family),
-                    modelType: record.modelType
-                )
-
-                if record.modelType == .embedding {
-                    _ = try await embeddings.loadModel(from: record.localURL, config: config)
-                } else if record.modelType == .audio {
-                    if record.family == .dotsTts || record.family == .qwen3Tts {
-                        try await inference.ttsService.loadModel(from: record.localURL)
-                    } else {
-                        _ = try await inference.transcriptionService.loadModel(from: record.localURL, config: config)
-                    }
-                    inference.saveLoadedModelsList()
-                } else if record.modelType == .image {
-                    _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
-                    inference.saveLoadedModelsList()
-                } else {
-                    try await inference.loadModel(at: record.localURL, config: config)
-                }
-
-                return try Self.jsonResponse(AdminModelStatus(
-                    id: req.modelId, family: record.family.rawValue,
-                    downloaded: true, loaded: true,
-                    sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt
-                ))
-            }
-            Post("/admin/models/unload") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
-
-                guard inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId) else {
-                    throw NovaMLXError.modelNotFound(req.modelId)
-                }
-
-                let record = models.getRecord(req.modelId)
-
-                if inference.isModelLoaded(req.modelId) {
-                    await inference.unloadModel(ModelIdentifier(id: req.modelId, family: record?.family ?? .other))
-                }
-
-                if embeddings.isLoaded(req.modelId) {
-                    embeddings.unloadModel(req.modelId)
-                }
-
-                if inference.transcriptionService.isLoaded(req.modelId) {
-                    inference.transcriptionService.unload(modelId: req.modelId)
-                    inference.saveLoadedModelsList()
-                }
-
-                if inference.imageGenerationService.isLoaded(req.modelId) {
-                    inference.imageGenerationService.unload(modelId: req.modelId)
-                    inference.saveLoadedModelsList()
-                }
-
-                return try Self.jsonResponse(AdminModelStatus(
-                    id: req.modelId, family: record?.family.rawValue ?? "other",
-                    downloaded: models.isDownloaded(req.modelId), loaded: false,
-                    sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt
-                ))
-            }
-            Delete("/admin/models/{id}") { request, context in
-                let modelId = try context.parameters.require("id")
-
-                if inference.isModelLoaded(modelId) {
-                    await inference.unloadModel(ModelIdentifier(id: modelId, family: .other))
-                }
-
-                if embeddings.isLoaded(modelId) {
-                    embeddings.unloadModel(modelId)
-                }
-
-                try models.deleteModel(modelId)
-
-                return Response(status: .noContent)
-            }
             // MARK: - Speed Boost (Draft Model)
-            Post("/admin/models/boost/download") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
-                let modelId = req.modelId
-                guard let record = models.getRecord(modelId) else {
-                    throw NovaMLXError.modelNotFound(modelId)
-                }
-                let isHybrid = inference.isModelLoaded(modelId) && inference.isHybridModel(modelId)
-                guard let candidate = DraftModelRegistry.shared.recommendation(
-                    family: record.family, isHybrid: isHybrid
-                ) else {
-                    throw NovaMLXError.apiError("No compatible draft model for \(modelId)")
-                }
-                if models.getRecord(candidate.draftModelId) == nil {
-                    models.register(
-                        id: candidate.draftModelId,
-                        family: candidate.family,
-                        modelType: .llm,
-                        remoteURL: "https://huggingface.co/\(candidate.downloadRepo)",
-                        sizeBytes: UInt64(candidate.estimatedSizeMB) * 1_000_000
-                    )
-                }
-                if models.isDownloaded(candidate.draftModelId) {
-                    return try Self.jsonResponse(SpecBoostInfo(
-                        status: "eligible",
-                        draftModelId: candidate.draftModelId,
-                        draftDisplayName: candidate.displayName,
-                        draftDownloaded: true,
-                        draftLoaded: inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true
-                    ))
-                }
-                if let status = models.getDownloadStatus(candidate.draftModelId), status.state == .downloading {
-                    return try Self.jsonResponse(status, httpStatus: .accepted)
-                }
-                try models.startDownload(candidate.draftModelId)
-                let status = models.getDownloadStatus(candidate.draftModelId)
-                    ?? DownloadStatus(modelId: candidate.draftModelId, state: .downloading)
-                return try Self.jsonResponse(status, httpStatus: .accepted)
-            }
-            Post("/admin/models/boost/load") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
-                let modelId = req.modelId
-                guard let record = models.getRecord(modelId) else {
-                    throw NovaMLXError.modelNotFound(modelId)
-                }
-                let isHybrid = inference.isModelLoaded(modelId) && inference.isHybridModel(modelId)
-                guard let candidate = DraftModelRegistry.shared.recommendation(
-                    family: record.family, isHybrid: isHybrid
-                ) else {
-                    throw NovaMLXError.apiError("No compatible draft model for \(modelId)")
-                }
-                guard models.isDownloaded(candidate.draftModelId) else {
-                    throw NovaMLXError.apiError("Draft model \(candidate.draftModelId) not downloaded yet")
-                }
-                if inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true {
-                    return try Self.jsonResponse(SpecBoostInfo(
-                        status: "active",
-                        draftModelId: candidate.draftModelId,
-                        draftLoaded: true
-                    ))
-                }
-                if models.getRecord(candidate.draftModelId) == nil {
-                    models.register(
-                        id: candidate.draftModelId,
-                        family: candidate.family,
-                        modelType: .llm,
-                        remoteURL: "https://huggingface.co/\(candidate.downloadRepo)",
-                        sizeBytes: UInt64(candidate.estimatedSizeMB) * 1_000_000
-                    )
-                }
-                guard let draftRecord = models.getRecord(candidate.draftModelId) else {
-                    throw NovaMLXError.modelNotFound(candidate.draftModelId)
-                }
-                let config = ModelConfig(
-                    identifier: ModelIdentifier(id: candidate.draftModelId, family: candidate.family),
-                    modelType: .llm
-                )
-                try await inference.loadModel(at: draftRecord.localURL, config: config)
-                return try Self.jsonResponse(SpecBoostInfo(
-                    status: "active",
-                    draftModelId: candidate.draftModelId,
-                    draftDisplayName: candidate.displayName,
-                    draftLoaded: true
-                ))
-            }
-            Post("/admin/models/discover") { request, context in
-                let discovered = models.discoverModels()
-                let items = discovered.map { model -> AdminDiscoveredModel in
-                    AdminDiscoveredModel(
-                        id: model.modelId,
-                        type: model.modelType.rawValue,
-                        family: model.family.rawValue,
-                        path: model.modelPath.path
-                    )
-                }
-                return try Self.jsonResponse(AdminDiscoverResponse(discovered: items))
-            }
-            Get("/admin/models/{id}/settings") { request, context in
-                let modelId = try context.parameters.require("id")
-                let settings = inference.settingsManager.getSettings(modelId)
-                return try Self.jsonResponse(AdminModelSettingsResponse(modelId: modelId, settings: settings))
-            }
-            Put("/admin/models/{id}/settings") { request, context in
-                let modelId = try context.parameters.require("id")
-                let body = try await request.body.collect(upTo: .max)
-                var settings = inference.settingsManager.getSettings(modelId)
-
-                if let update = try? JSONDecoder().decode(ModelSettingsUpdateRequest.self, from: body) {
-                    if let v = update.maxContextWindow { settings.maxContextWindow = v }
-                    if let v = update.maxTokens { settings.maxTokens = v }
-                    if let v = update.temperature { settings.temperature = v }
-                    if let v = update.topP { settings.topP = v }
-                    if let v = update.topK { settings.topK = v }
-                    if let v = update.minP { settings.minP = v }
-                    if let v = update.repetitionPenalty { settings.repetitionPenalty = v }
-                    if let v = update.presencePenalty { settings.presencePenalty = v }
-                    if let v = update.frequencyPenalty { settings.frequencyPenalty = v }
-                    if let v = update.ttlSeconds { settings.ttlSeconds = v }
-                    if let v = update.modelAlias { settings.modelAlias = v }
-                    if let v = update.isPinned { settings.isPinned = v }
-                    if let v = update.isDefault { settings.isDefault = v }
-                    if let v = update.displayName { settings.displayName = v }
-                    if let v = update.description { settings.description = v }
-                    if let v = update.thinkingBudget { settings.thinkingBudget = v }
-                    if let v = update.kvBits { settings.kvBits = v }
-                    if let v = update.kvGroupSize { settings.kvGroupSize = v }
-                    if let v = update.kvMemoryBytesPerTokenOverride { settings.kvMemoryBytesPerTokenOverride = v }
-
-                    inference.settingsManager.setSettings(modelId, settings)
-
-                    if update.isPinned == true {
-                        if inference.engine.getContainer(for: modelId) != nil {
-                            inference.engine.pool.pin(modelId)
-                        }
-                    } else if update.isPinned == false {
-                        inference.engine.pool.unpin(modelId)
-                    }
-
-                    if let container = inference.engine.getContainer(for: modelId) {
-                        container.kvMemoryOverride = settings.kvMemoryBytesPerTokenOverride
-                    }
-                }
-
-                return try Self.jsonResponse(AdminModelSettingsResponse(modelId: modelId, settings: settings))
-            }
             // MARK: - Load Balancers
             // CRUD + member management for multi-provider routing. Handler
             // logic lives in APIServer+LoadBalancerAdmin.swift.
-            Get("/admin/load-balancers") { _, _ in
-                let dtos = try Self.lbAdminList()
-                return try Self.jsonResponse(dtos)
-            }
-            Post("/admin/load-balancers") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                let input = try JSONDecoder().decode(CreateLBInput.self, from: body)
-                let dto = try Self.lbAdminCreate(input: input)
-                return try Self.jsonResponse(dto, httpStatus: .created)
-            }
-            Get("/admin/load-balancers/{id}") { _, context in
-                let id = try context.parameters.require("id", as: UUID.self)
-                let dto = try Self.lbAdminDetail(id: id)
-                return try Self.jsonResponse(dto)
-            }
-            Patch("/admin/load-balancers/{id}") { request, context in
-                let id = try context.parameters.require("id", as: UUID.self)
-                let body = try await request.body.collect(upTo: .max)
-                let patch = try JSONDecoder().decode(PatchLBInput.self, from: body)
-                let dto = try Self.lbAdminUpdate(id: id, patch: patch)
-                return try Self.jsonResponse(dto)
-            }
-            Delete("/admin/load-balancers/{id}") { _, context in
-                let id = try context.parameters.require("id", as: UUID.self)
-                try Self.lbAdminDelete(id: id)
-                return try Self.jsonResponse(["ok": true])
-            }
-            Post("/admin/load-balancers/{id}/members") { request, context in
-                let id = try context.parameters.require("id", as: UUID.self)
-                let body = try await request.body.collect(upTo: .max)
-                let input = try JSONDecoder().decode(AddMemberInput.self, from: body)
-                let dto = try Self.lbAdminAddMember(lbId: id, input: input)
-                return try Self.jsonResponse(dto, httpStatus: .created)
-            }
-            Patch("/admin/load-balancers/{id}/members/{memberId}") { request, context in
-                let memberId = try context.parameters.require("memberId", as: UUID.self)
-                let body = try await request.body.collect(upTo: .max)
-                let patch = try JSONDecoder().decode(PatchMemberInput.self, from: body)
-                let dto = try Self.lbAdminUpdateMember(memberId: memberId, patch: patch)
-                return try Self.jsonResponse(dto)
-            }
-            Delete("/admin/load-balancers/{id}/members/{memberId}") { _, context in
-                let memberId = try context.parameters.require("memberId", as: UUID.self)
-                try Self.lbAdminDeleteMember(memberId: memberId)
-                return try Self.jsonResponse(["ok": true])
-            }
-            Post("/admin/load-balancers/{id}/test") { _, context in
-                let id = try context.parameters.require("id", as: UUID.self)
-                let trace = try Self.lbAdminTest(id: id, inference: inference)
-                return try Self.jsonResponse(trace)
-            }
-            Get("/admin/sessions") { request, context in
-                let sessions = inference.engine.sessionManager.listSessions()
-                return try Self.jsonResponse(sessions)
-            }
-            Delete("/admin/sessions/{id}") { request, context in
-                let sessionId = try context.parameters.require("id")
-                inference.engine.sessionManager.remove(sessionId)
-                return Response(status: .noContent)
-            }
-            Delete("/admin/sessions") { request, context in
-                let sessions = inference.engine.sessionManager.listSessions()
-                for session in sessions {
-                    inference.engine.sessionManager.remove(session.sessionId)
-                }
-                return Response(status: .noContent)
-            }
-            Post("/admin/sessions/{id}/save") { request, context in
-                let sessionId = try context.parameters.require("id")
-                do {
-                    try await inference.engine.saveSession(sessionId)
-                    return Response(status: .ok)
-                } catch {
-                    throw NovaMLXError.cacheError("Failed to save session: \(error.localizedDescription)")
-                }
-            }
-            Post("/admin/sessions/fork") { request, context in
-                let body = try await request.body.collect(upTo: 1024 * 1024)
-                let req = try JSONDecoder().decode(AdminSessionForkRequest.self, from: body)
-                do {
-                    try await inference.forkSession(from: req.sourceId, into: req.targetId, modelId: req.modelId)
-                    return Response(status: .ok)
-                } catch {
-                    throw NovaMLXError.cacheError("Failed to fork session: \(error.localizedDescription)")
-                }
-            }
-            Get("/admin/cache/{modelId}/stats") { request, context in
-                let modelId = try context.parameters.require("modelId")
-                if let stats = inference.engine.getPrefixCacheStats(for: modelId) {
-                    let obj: [String: String] = [
-                        "hits": String(stats.hits),
-                        "misses": String(stats.misses),
-                        "tokensSaved": String(stats.tokensSaved),
-                        "evictions": String(stats.evictions),
-                        "totalBlocks": String(stats.totalBlocks),
-                        "allocatedBlocks": String(stats.allocatedBlocks),
-                        "freeBlocks": String(stats.freeBlocks),
-                        "sharedBlocks": String(stats.sharedBlocks),
-                        "ssdBlockCount": String(stats.ssdBlockCount),
-                        "ssdTotalSize": String(stats.ssdTotalSize),
-                    ]
-                    let data = try JSONEncoder().encode(obj)
-                    return Response(status: .ok, body: ResponseBody(byteBuffer: ByteBuffer(data: data)))
-                }
-                return Response(status: .notFound)
-            }
-            Delete("/admin/cache/{modelId}") { request, context in
-                let modelId = try context.parameters.require("modelId")
-                inference.engine.clearPrefixCache(for: modelId)
-                return Response(status: .ok)
-            }
-            Get("/admin/api/device-info") { _, _ in
-                let info = DeviceInfo.current()
-                return try Self.jsonResponse(info)
-            }
-            Get("/admin/api/chat-template/diagnose/{modelId}") { [modelManager] _, context in
-                // The {modelId} parameter is URL-encoded by the client (slashes
-                // become %2F); Hummingbird's parameter capture decodes that.
-                let modelId = try context.parameters.require("modelId")
-                // Look up the registered family for this model.
-                let family: NovaMLXCore.ModelFamily = modelManager.getRecord(modelId)?.family ?? .other
-                let report = ChatTemplateDiagnostics.diagnose(
-                    modelId: modelId,
-                    modelsDir: NovaMLXPaths.modelsDir,
-                    family: family
-                )
-                return try Self.jsonResponse(report)
-            }
-            Post("/admin/api/bench/start") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let benchReq = try JSONDecoder().decode(BenchmarkRequest.self, from: body)
-                let run = try benchmark.startBenchmark(benchReq)
-                return try Self.jsonResponse(run, httpStatus: .accepted)
-            }
-            Get("/admin/api/bench/status") { _, _ in
-                if let run = benchmark.getActiveRun() {
-                    return try Self.jsonResponse(run)
-                }
-                return try Self.jsonResponse(["status": "idle"])
-            }
-            Post("/admin/api/bench/cancel") { _, _ in
-                benchmark.cancelActiveRun()
-                return try Self.jsonResponse(["status": "cancelled"])
-            }
-            Post("/admin/api/stats/clear") { _, _ in
-                inference.engine.resetSessionMetrics()
-                return try Self.jsonResponse(["status": "cleared"])
-            }
-            Post("/admin/api/stats/clear-alltime") { _, _ in
-                inference.engine.metricsStore.clearAllTime()
-                return try Self.jsonResponse(["status": "cleared"])
-            }
-            Get("/admin/api/memory") { _, _ in
-                guard let enforcer = inference.engine.memoryEnforcer else {
-                    let body: [String: Any] = [
-                        "enabled": false,
-                        "currentBytes": inference.engine.gpuActiveMemory
-                    ]
-                    let data = try JSONSerialization.data(withJSONObject: body)
-                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-                }
-                let status = await enforcer.status
-                var body: [String: Any] = [
-                    "enabled": status.enabled,
-                    "softLimitBytes": status.softLimitBytes,
-                    "hardLimitBytes": status.hardLimitBytes,
-                    "currentBytes": status.currentBytes,
-                    "utilization": status.utilization,
-                    "totalEvictions": status.totalEvictions,
-                    "physicalRAM": status.physicalRAM,
-                ]
-                if let model = status.lastEvictedModel { body["lastEvictedModel"] = model }
-                if let time = status.lastEvictionTime { body["lastEvictionTime"] = time.ISO8601Format() }
-                let data = try JSONSerialization.data(withJSONObject: body)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-            Get("/admin/api/turboquant") { _, _ in
-                let configs = inference.engine.turboQuantService.allConfigs()
-                var result: [[String: Any]] = []
-                for (modelId, config) in configs {
-                    var entry: [String: Any] = [
-                        "model_id": modelId,
-                        "bits": config.bits,
-                        "group_size": config.groupSize,
-                        "scheme": "affine",
-                        "compression_ratio": config.estimatedCompressionRatio
-                    ]
-                    if let stats = inference.engine.turboQuantService.getStats(modelId: modelId) {
-                        entry["compression_ratio"] = stats.compressionRatio
-                    }
-                    result.append(entry)
-                }
-                let jsonData = try JSONSerialization.data(withJSONObject: ["configs": result])
-                var headers = HTTPFields()
-                headers[.contentType] = "application/json"
-                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
-            }
-            Put("/admin/api/turboquant/{modelId}") { request, context in
-                let modelId = try context.parameters.require("modelId")
-                let body = try await request.body.collect(upTo: .max)
-                struct TurboQuantRequest: Codable, Sendable {
-                    let enabled: Bool
-                    let bits: Int?
-                    let groupSize: Int?
-                    let modelSizeGB: Double?
-                    let contextLength: Int?
-                    let availableMemoryGB: Double?
-                }
-                let req = try JSONDecoder().decode(TurboQuantRequest.self, from: body)
-                if req.enabled {
-                    if let bits = req.bits {
-                        let config = TurboQuantService.Config(bits: bits, groupSize: req.groupSize ?? 64)
-                        inference.engine.turboQuantService.setConfig(config, forModel: modelId)
-                    } else {
-                        _ = inference.engine.turboQuantService.autoConfigure(
-                            modelId: modelId,
-                            modelSizeGB: req.modelSizeGB ?? 2.0,
-                            contextLength: req.contextLength ?? 4096,
-                            availableMemoryGB: req.availableMemoryGB ?? 16.0
-                        )
-                    }
-                    return try Self.jsonResponse(["status": "enabled", "model_id": modelId])
-                } else {
-                    inference.engine.turboQuantService.removeConfig(forModel: modelId)
-                    return try Self.jsonResponse(["status": "disabled", "model_id": modelId])
-                }
-            }
-            Delete("/admin/api/turboquant/{modelId}") { request, context in
-                let modelId = try context.parameters.require("modelId")
-                inference.engine.turboQuantService.removeConfig(forModel: modelId)
-                return try Self.jsonResponse(["status": "disabled", "model_id": modelId])
-            }
-            Put("/admin/api/model-family/{modelId}") { request, context in
-                let modelId = try context.parameters.require("modelId")
-                let body = try await request.body.collect(upTo: .max)
-                struct FamilyOverrideRequest: Codable, Sendable {
-                    let defaultKVBits: Int?
-                    let defaultKVGroupSize: Int?
-                    let prefillStepSize: Int?
-                    let recommendedContextLength: Int?
-                    let repeatLastN: Int?
-                }
-                let req = try JSONDecoder().decode(FamilyOverrideRequest.self, from: body)
-                let opt = ModelFamilyOptimization(
-                    defaultKVBits: req.defaultKVBits,
-                    defaultKVGroupSize: req.defaultKVGroupSize ?? 64,
-                    prefillStepSize: req.prefillStepSize ?? 512,
-                    recommendedContextLength: req.recommendedContextLength ?? 4096,
-                    repeatLastN: req.repeatLastN ?? 64
-                )
-                ModelFamilyRegistry.shared.setOverride(opt, forModel: modelId)
-                return try Self.jsonResponse(["status": "ok", "model_id": modelId])
-            }
-            Delete("/admin/api/model-family/{modelId}") { request, context in
-                let modelId = try context.parameters.require("modelId")
-                ModelFamilyRegistry.shared.removeOverride(forModel: modelId)
-                return try Self.jsonResponse(["status": "removed", "model_id": modelId])
-            }
-            Get("/admin/api/model-family") { _, _ in
-                let overrides = ModelFamilyRegistry.shared.allOverrides()
-                var result: [[String: Any]] = []
-                for (modelId, opt) in overrides {
-                    var entry: [String: Any] = [
-                        "model_id": modelId,
-                        "kv_group_size": opt.defaultKVGroupSize,
-                        "prefill_step_size": opt.prefillStepSize,
-                        "recommended_context_length": opt.recommendedContextLength,
-                        "repeat_last_n": opt.repeatLastN
-                    ]
-                    if let bits = opt.defaultKVBits {
-                        entry["kv_bits"] = bits
-                    }
-                    result.append(entry)
-                }
-                let jsonData = try JSONSerialization.data(withJSONObject: ["overrides": result])
-                var headers = HTTPFields()
-                headers[.contentType] = "application/json"
-                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
-            }
-            Post("/admin/api/ppl/start") { request, context in
-                let body = try await request.body.collect(upTo: .max)
-                let pplReq = try JSONDecoder().decode(PerplexityRequest.self, from: body)
-                let run = try perplexity.startEvaluation(pplReq)
-                return try Self.jsonResponse(run, httpStatus: .accepted)
-            }
-            Get("/admin/api/ppl/status") { _, _ in
-                if let run = perplexity.getActiveRun() {
-                    return try Self.jsonResponse(run)
-                }
-                return try Self.jsonResponse(["status": "idle"])
-            }
-            Post("/admin/api/ppl/cancel") { _, _ in
-                perplexity.cancelActiveRun()
-                return try Self.jsonResponse(["status": "cancelled"])
-            }
-            Get("/admin/adapters") { request, _ in
-                let modelId = request.uri.query.flatMap { url in
-                    URLComponents(string: "/" + url)?.queryItems?.first(where: { $0.name == "model_id" })?.value
-                }
-                let adapters: [AdapterInfo]
-                if let modelId {
-                    adapters = inference.engine.adapterService.listAdapters(for: modelId)
-                } else {
-                    adapters = inference.engine.adapterService.listAdapters()
-                }
-                return try Self.jsonResponse(["adapters": adapters])
-            }
-            Post("/admin/adapters/load") { request, _ in
-                struct AdapterLoadRequest: Codable, Sendable {
-                    let modelId: String
-                    let path: String
-                    let name: String?
-                }
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdapterLoadRequest.self, from: body)
-
-                guard let container = inference.engine.getContainer(for: req.modelId) else {
-                    throw NovaMLXError.modelNotFound(req.modelId)
-                }
-
-                let adapterURL = URL(fileURLWithPath: req.path)
-                let info = try await inference.engine.adapterService.loadAdapter(
-                    from: adapterURL,
-                    into: container,
-                    name: req.name
-                )
-                return try Self.jsonResponse(info)
-            }
-            Post("/admin/adapters/unload") { request, _ in
-                struct AdapterUnloadRequest: Codable, Sendable {
-                    let modelId: String
-                    let name: String
-                }
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdapterUnloadRequest.self, from: body)
-
-                guard let container = inference.engine.getContainer(for: req.modelId) else {
-                    throw NovaMLXError.modelNotFound(req.modelId)
-                }
-
-                let info = try await inference.engine.adapterService.unloadAdapter(
-                    name: req.name,
-                    from: container
-                )
-                return try Self.jsonResponse(info)
-            }
-            Post("/admin/adapters/fuse") { request, _ in
-                struct AdapterFuseRequest: Codable, Sendable {
-                    let modelId: String
-                    let name: String
-                }
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(AdapterFuseRequest.self, from: body)
-
-                guard let container = inference.engine.getContainer(for: req.modelId) else {
-                    throw NovaMLXError.modelNotFound(req.modelId)
-                }
-
-                let info = try await inference.engine.adapterService.fuseAdapter(
-                    name: req.name,
-                    into: container
-                )
-                return try Self.jsonResponse(info)
-            }
-            Get("/admin/adapters/discover") { request, _ in
-                let dir: String? = request.uri.query.flatMap { url in
-                    URLComponents(string: "/" + url)?.queryItems?.first(where: { $0.name == "directory" })?.value
-                }
-                let searchDir = dir.map { URL(fileURLWithPath: $0) }
-                    ?? NovaMLXPaths.modelsDir
-                let adapters = inference.engine.adapterService.discoverAdapters(in: searchDir)
-                return try Self.jsonResponse(["adapters": adapters])
-            }
 
             // MARK: - Modelfiles
-            Get("/admin/modelfiles") { _, _ in
-                let files = modelfileMgr.list()
-                return try Self.jsonResponse(files)
-            }
-            Get("/admin/modelfiles/{name}") { request, context in
-                let name = try context.parameters.require("name")
-                guard let mf = modelfileMgr.get(name) else {
-                    throw NovaMLXError.modelNotFound("Modelfile '\(name)' not found")
-                }
-                return try Self.jsonResponse(mf)
-            }
-            Post("/admin/modelfiles") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                let mf = try JSONDecoder().decode(Modelfile.self, from: body)
-                try modelfileMgr.create(mf)
-                return try Self.jsonResponse(mf, httpStatus: .created)
-            }
-            Put("/admin/modelfiles/{name}") { request, context in
-                let name = try context.parameters.require("name")
-                let body = try await request.body.collect(upTo: .max)
-                var mf = try JSONDecoder().decode(Modelfile.self, from: body)
-                // Force name to match URL parameter to prevent mismatches
-                mf = Modelfile(
-                    name: name, baseModel: mf.baseModel,
-                    systemPrompt: mf.systemPrompt, parameters: mf.parameters,
-                    tools: mf.tools, description: mf.description
-                )
-                try modelfileMgr.update(mf)
-                return try Self.jsonResponse(mf)
-            }
-            Delete("/admin/modelfiles/{name}") { request, context in
-                let name = try context.parameters.require("name")
-                try modelfileMgr.delete(name)
-                return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
-            }
 
             // MARK: - Tokenhub Provider CRUD
             let tokenhubMgr = TokenhubManager.shared
-            Get("/admin/tokenhub/providers") { _, _ in
-                let providers = tokenhubMgr.list()
-                return try Self.jsonResponse(providers)
-            }
-            Post("/admin/tokenhub/providers") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
-                // Ensure id is derived from name
-                provider = TokenhubProvider(
-                    name: provider.name,
-                    endpoint: provider.endpoint,
-                    apiKey: provider.apiKey,
-                    remoteModel: provider.remoteModel,
-                    isEnabled: provider.isEnabled,
-                    tags: provider.tags,
-                    isFree: provider.isFree
-                )
-                try tokenhubMgr.create(provider)
-                return try Self.jsonResponse(provider, httpStatus: .created)
-            }
-            Put("/admin/tokenhub/providers/{name}") { request, context in
-                let name = try context.parameters.require("name")
-                let body = try await request.body.collect(upTo: .max)
-                var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
-                provider = TokenhubProvider(
-                    name: name,
-                    endpoint: provider.endpoint,
-                    apiKey: provider.apiKey,
-                    remoteModel: provider.remoteModel,
-                    isEnabled: provider.isEnabled,
-                    tags: provider.tags,
-                    isFree: provider.isFree
-                )
-                try tokenhubMgr.update(provider)
-                return try Self.jsonResponse(provider)
-            }
-            Delete("/admin/tokenhub/providers/{name}") { request, context in
-                let name = try context.parameters.require("name")
-                try tokenhubMgr.delete(name)
-                return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
-            }
-            Post("/admin/tokenhub/test") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
-                let backend = CloudBackend.shared
-                let ok = await backend.healthCheck(provider: provider)
-                if ok {
-                    provider.lastTestedAt = Date()
-                    provider.lastStatus = "ok"
-                    if let existing = tokenhubMgr.get(provider.name) {
-                        var updated = provider
-                        updated = TokenhubProvider(
-                            name: existing.name,
-                            endpoint: updated.endpoint,
-                            apiKey: updated.apiKey,
-                            remoteModel: updated.remoteModel,
-                            isEnabled: updated.isEnabled
+            // Agent binary detection
+
+            // MARK: - API Key Management
+
+
+
+
+
+
+
+
+            // Config store read/write (backed by SQLite; JSON shape preserved for API compat)
+
+
+            // MARK: - Cluster Admin
+
+            // Shard plan: GET /admin/api/cluster/shard-plan?model=<modelId>
+
+            // Worker registration: POST /admin/api/cluster/workers/register
+
+            // Worker heartbeat: POST /admin/api/cluster/workers/heartbeat
+
+            // Model download for workers: GET /admin/api/cluster/models/{id}/download
+
+            // Cluster model activation: POST /admin/api/cluster/activate-model
+
+            // Cluster model deactivation: POST /admin/api/cluster/deactivate-model
+
+            // Cluster model status: GET /admin/api/cluster/model-status
+            RouteGroup("admin/models") {
+                Get("") { request, context in
+                    let records = models.allRegisteredModels()
+                    var statuses: [AdminModelStatus] = []
+                    statuses.reserveCapacity(records.count)
+                    for record in records {
+                        let isDownloaded = models.isDownloaded(record.id)
+                        let isLoaded = inference.isModelLoaded(record.id) || embeddings.isLoaded(record.id) || inference.transcriptionService.isLoaded(record.id) || inference.imageGenerationService.isLoaded(record.id)
+                        // Only check feasibility for downloaded, non-loaded, non-embedding models
+                        var feasibility: MemoryFeasibility? = nil
+                        if isDownloaded && !isLoaded && record.modelType != .embedding {
+                            feasibility = await inference.checkMemoryFeasibility(
+                                modelId: record.id, sizeBytes: record.sizeBytes, localURL: record.localURL
+                            )
+                        }
+
+                        // SpecBoost status
+                        var specBoost: SpecBoostInfo? = nil
+                        if record.modelType == .llm {
+                            let isHybrid: Bool
+                            if isLoaded {
+                                isHybrid = inference.isHybridModel(record.id)
+                            } else {
+                                isHybrid = false
+                            }
+                            let status = DraftModelRegistry.shared.boostStatus(
+                                family: record.family,
+                                isHybrid: isHybrid,
+                                modelType: record.modelType,
+                                draftModelLoaded: { id in inference.isModelLoaded(id) },
+                                draftModelOnDisk: { id in models.isDownloaded(id) }
+                            )
+                            switch status {
+                            case .ineligible(let reason):
+                                specBoost = SpecBoostInfo(status: "ineligible", reason: reason)
+                            case .eligible(let candidate):
+                                specBoost = SpecBoostInfo(
+                                    status: "eligible",
+                                    draftModelId: candidate.draftModelId,
+                                    draftDisplayName: candidate.displayName,
+                                    draftDownloaded: models.isDownloaded(candidate.draftModelId),
+                                    draftLoaded: inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true
+                                )
+                            case .active(let draftModelId):
+                                specBoost = SpecBoostInfo(
+                                    status: "active",
+                                    draftModelId: draftModelId,
+                                    draftLoaded: true
+                                )
+                            }
+                        }
+
+                        statuses.append(AdminModelStatus(
+                            id: record.id,
+                            family: record.family.rawValue,
+                            downloaded: isDownloaded,
+                            loaded: isLoaded,
+                            sizeBytes: record.sizeBytes,
+                            downloadedAt: record.downloadedAt,
+                            memoryFeasibility: feasibility,
+                            specBoost: specBoost
+                        ))
+                    }
+                    return try Self.jsonResponse(statuses)
+                }
+                Post("/download") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminDownloadRequest.self, from: body)
+
+                    guard models.getRecord(req.modelId) != nil else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+
+                    if let status = models.getDownloadStatus(req.modelId), status.state == .downloading {
+                        return try Self.jsonResponse(status, httpStatus: .accepted)
+                    }
+
+                    if models.isDownloaded(req.modelId) {
+                        guard let record = models.getRecord(req.modelId) else {
+                            throw NovaMLXError.modelNotFound(req.modelId)
+                        }
+                        return try Self.jsonResponse(AdminModelStatus(
+                            id: req.modelId, family: record.family.rawValue,
+                            downloaded: true, loaded: inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId),
+                            sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt
+                        ))
+                    }
+
+                    try models.startDownload(req.modelId)
+
+                    let status = models.getDownloadStatus(req.modelId) ?? DownloadStatus(modelId: req.modelId, state: .downloading)
+                    return try Self.jsonResponse(status, httpStatus: .accepted)
+                }
+                Post("/status") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+
+                    if let status = models.getDownloadStatus(req.modelId) {
+                        return try Self.jsonResponse(status)
+                    }
+                    let state: DownloadState = models.isDownloaded(req.modelId) ? .downloaded : .notDownloaded
+                    return try Self.jsonResponse(DownloadStatus(modelId: req.modelId, state: state))
+                }
+                Post("/load") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+
+                    guard models.isDownloaded(req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+
+                    if inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId) {
+                        let record = models.getRecord(req.modelId)
+                        return try Self.jsonResponse(AdminModelStatus(
+                            id: req.modelId, family: record?.family.rawValue ?? "other",
+                            downloaded: true, loaded: true,
+                            sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt
+                        ))
+                    }
+
+                    guard let record = models.getRecord(req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+
+                    let config = ModelConfig(
+                        identifier: ModelIdentifier(id: req.modelId, family: record.family),
+                        modelType: record.modelType
+                    )
+
+                    if record.modelType == .embedding {
+                        _ = try await embeddings.loadModel(from: record.localURL, config: config)
+                    } else if record.modelType == .audio {
+                        if record.family == .dotsTts || record.family == .qwen3Tts {
+                            try await inference.ttsService.loadModel(from: record.localURL)
+                        } else {
+                            _ = try await inference.transcriptionService.loadModel(from: record.localURL, config: config)
+                        }
+                        inference.saveLoadedModelsList()
+                    } else if record.modelType == .image {
+                        _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
+                        inference.saveLoadedModelsList()
+                    } else {
+                        try await inference.loadModel(at: record.localURL, config: config)
+                    }
+
+                    return try Self.jsonResponse(AdminModelStatus(
+                        id: req.modelId, family: record.family.rawValue,
+                        downloaded: true, loaded: true,
+                        sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt
+                    ))
+                }
+                Post("/unload") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+
+                    let record = models.getRecord(req.modelId)
+                    let isLoaded = inference.isModelLoaded(req.modelId)
+                        || embeddings.isLoaded(req.modelId)
+                    guard isLoaded else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+
+                    if embeddings.isLoaded(req.modelId) {
+                        embeddings.unloadModel(req.modelId)
+                    } else {
+                        await inference.unloadModel(
+                            ModelIdentifier(id: req.modelId, family: record?.family ?? .other)
                         )
-                        // Preserve test result timestamps
-                        _ = try? tokenhubMgr.update(updated)
                     }
+
+                    return try Self.jsonResponse(AdminModelStatus(
+                        id: req.modelId, family: record?.family.rawValue ?? "other",
+                        downloaded: models.isDownloaded(req.modelId), loaded: false,
+                        sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt
+                    ))
                 }
-                struct TestResult: Encodable {
-                    let success: Bool
-                    let provider: String
-                    let endpoint: String
+                Delete("/{id}") { request, context in
+                    let modelId = try context.parameters.require("id")
+
+                    if inference.isModelLoaded(modelId) {
+                        await inference.unloadModel(ModelIdentifier(id: modelId, family: .other))
+                    }
+
+                    if embeddings.isLoaded(modelId) {
+                        embeddings.unloadModel(modelId)
+                    }
+
+                    try models.deleteModel(modelId)
+
+                    return Response(status: .noContent)
                 }
-                return try Self.jsonResponse(TestResult(
-                    success: ok, provider: provider.name, endpoint: provider.endpoint
-                ))
+                Post("/boost/download") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+                    let modelId = req.modelId
+                    guard let record = models.getRecord(modelId) else {
+                        throw NovaMLXError.modelNotFound(modelId)
+                    }
+                    let isHybrid = inference.isModelLoaded(modelId) && inference.isHybridModel(modelId)
+                    guard let candidate = DraftModelRegistry.shared.recommendation(
+                        family: record.family, isHybrid: isHybrid
+                    ) else {
+                        throw NovaMLXError.apiError("No compatible draft model for \(modelId)")
+                    }
+                    if models.getRecord(candidate.draftModelId) == nil {
+                        models.register(
+                            id: candidate.draftModelId,
+                            family: candidate.family,
+                            modelType: .llm,
+                            remoteURL: "https://huggingface.co/\(candidate.downloadRepo)",
+                            sizeBytes: UInt64(candidate.estimatedSizeMB) * 1_000_000
+                        )
+                    }
+                    if models.isDownloaded(candidate.draftModelId) {
+                        return try Self.jsonResponse(SpecBoostInfo(
+                            status: "eligible",
+                            draftModelId: candidate.draftModelId,
+                            draftDisplayName: candidate.displayName,
+                            draftDownloaded: true,
+                            draftLoaded: inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true
+                        ))
+                    }
+                    if let status = models.getDownloadStatus(candidate.draftModelId), status.state == .downloading {
+                        return try Self.jsonResponse(status, httpStatus: .accepted)
+                    }
+                    try models.startDownload(candidate.draftModelId)
+                    let status = models.getDownloadStatus(candidate.draftModelId)
+                        ?? DownloadStatus(modelId: candidate.draftModelId, state: .downloading)
+                    return try Self.jsonResponse(status, httpStatus: .accepted)
+                }
+                Post("/boost/load") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+                    let modelId = req.modelId
+                    guard let record = models.getRecord(modelId) else {
+                        throw NovaMLXError.modelNotFound(modelId)
+                    }
+                    let isHybrid = inference.isModelLoaded(modelId) && inference.isHybridModel(modelId)
+                    guard let candidate = DraftModelRegistry.shared.recommendation(
+                        family: record.family, isHybrid: isHybrid
+                    ) else {
+                        throw NovaMLXError.apiError("No compatible draft model for \(modelId)")
+                    }
+                    guard models.isDownloaded(candidate.draftModelId) else {
+                        throw NovaMLXError.apiError("Draft model \(candidate.draftModelId) not downloaded yet")
+                    }
+                    if inference.engine.getContainer(for: candidate.draftModelId)?.isLoaded == true {
+                        return try Self.jsonResponse(SpecBoostInfo(
+                            status: "active",
+                            draftModelId: candidate.draftModelId,
+                            draftLoaded: true
+                        ))
+                    }
+                    if models.getRecord(candidate.draftModelId) == nil {
+                        models.register(
+                            id: candidate.draftModelId,
+                            family: candidate.family,
+                            modelType: .llm,
+                            remoteURL: "https://huggingface.co/\(candidate.downloadRepo)",
+                            sizeBytes: UInt64(candidate.estimatedSizeMB) * 1_000_000
+                        )
+                    }
+                    guard let draftRecord = models.getRecord(candidate.draftModelId) else {
+                        throw NovaMLXError.modelNotFound(candidate.draftModelId)
+                    }
+                    let config = ModelConfig(
+                        identifier: ModelIdentifier(id: candidate.draftModelId, family: candidate.family),
+                        modelType: .llm
+                    )
+                    try await inference.loadModel(at: draftRecord.localURL, config: config)
+                    return try Self.jsonResponse(SpecBoostInfo(
+                        status: "active",
+                        draftModelId: candidate.draftModelId,
+                        draftDisplayName: candidate.displayName,
+                        draftLoaded: true
+                    ))
+                }
+                Post("/discover") { request, context in
+                    let discovered = models.discoverModels()
+                    let items = discovered.map { model -> AdminDiscoveredModel in
+                        AdminDiscoveredModel(
+                            id: model.modelId,
+                            type: model.modelType.rawValue,
+                            family: model.family.rawValue,
+                            path: model.modelPath.path
+                        )
+                    }
+                    return try Self.jsonResponse(AdminDiscoverResponse(discovered: items))
+                }
+                Get("/{id}/settings") { request, context in
+                    let modelId = try context.parameters.require("id")
+                    let settings = inference.settingsManager.getSettings(modelId)
+                    return try Self.jsonResponse(AdminModelSettingsResponse(modelId: modelId, settings: settings))
+                }
+                Put("/{id}/settings") { request, context in
+                    let modelId = try context.parameters.require("id")
+                    let body = try await request.body.collect(upTo: .max)
+                    var settings = inference.settingsManager.getSettings(modelId)
+
+                    if let update = try? JSONDecoder().decode(ModelSettingsUpdateRequest.self, from: body) {
+                        if let v = update.maxContextWindow { settings.maxContextWindow = v }
+                        if let v = update.maxTokens { settings.maxTokens = v }
+                        if let v = update.temperature { settings.temperature = v }
+                        if let v = update.topP { settings.topP = v }
+                        if let v = update.topK { settings.topK = v }
+                        if let v = update.minP { settings.minP = v }
+                        if let v = update.repetitionPenalty { settings.repetitionPenalty = v }
+                        if let v = update.presencePenalty { settings.presencePenalty = v }
+                        if let v = update.frequencyPenalty { settings.frequencyPenalty = v }
+                        if let v = update.ttlSeconds { settings.ttlSeconds = v }
+                        if let v = update.modelAlias { settings.modelAlias = v }
+                        if let v = update.isPinned { settings.isPinned = v }
+                        if let v = update.isDefault { settings.isDefault = v }
+                        if let v = update.displayName { settings.displayName = v }
+                        if let v = update.description { settings.description = v }
+                        if let v = update.thinkingBudget { settings.thinkingBudget = v }
+                        if let v = update.kvBits { settings.kvBits = v }
+                        if let v = update.kvGroupSize { settings.kvGroupSize = v }
+                        if let v = update.kvMemoryBytesPerTokenOverride { settings.kvMemoryBytesPerTokenOverride = v }
+
+                        inference.settingsManager.setSettings(modelId, settings)
+
+                        if update.isPinned == true {
+                            if inference.engine.getContainer(for: modelId) != nil {
+                                inference.engine.pool.pin(modelId)
+                            }
+                        } else if update.isPinned == false {
+                            inference.engine.pool.unpin(modelId)
+                        }
+
+                        if let container = inference.engine.getContainer(for: modelId) {
+                            container.kvMemoryOverride = settings.kvMemoryBytesPerTokenOverride
+                        }
+                    }
+
+                    return try Self.jsonResponse(AdminModelSettingsResponse(modelId: modelId, settings: settings))
+                }
             }
-            Post("/admin/api/grammar/validate") { request, _ in
-                struct GrammarValidateRequest: Codable, Sendable {
-                    let type: String
-                    let value: String
+            RouteGroup("admin/load-balancers") {
+                Get("") { _, _ in
+                    let dtos = try Self.lbAdminList()
+                    return try Self.jsonResponse(dtos)
                 }
-                let body = try await request.body.collect(upTo: .max)
-                let req = try JSONDecoder().decode(GrammarValidateRequest.self, from: body)
-                do {
-                    switch req.type {
-                    case "regex":
-                        _ = try NSRegularExpression(pattern: req.value, options: [])
-                        let jsonData = try JSONSerialization.data(withJSONObject: ["valid": true, "type": "regex"] as [String: Any])
-                        var headers = HTTPFields()
-                        headers[.contentType] = "application/json"
-                        return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
-                    case "gbnf":
-                        let rules = try GBNFParser.parse(req.value)
-                        let result: [String: Any] = [
-                            "valid": true,
-                            "type": "gbnf",
-                            "rules": rules.map { ["name": $0.name, "alternatives": $0.alternatives.count] as [String: Any] }
-                        ]
-                        let jsonData = try JSONSerialization.data(withJSONObject: result)
-                        var headers = HTTPFields()
-                        headers[.contentType] = "application/json"
-                        return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
-                    default:
-                        let jsonData = try JSONSerialization.data(withJSONObject: ["valid": false, "error": "Unknown grammar type: \(req.type). Use 'regex' or 'gbnf'."] as [String: Any])
-                        var headers = HTTPFields()
-                        headers[.contentType] = "application/json"
-                        return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                Post("") { request, _ in
+                    let body = try await request.body.collect(upTo: .max)
+                    let input = try JSONDecoder().decode(CreateLBInput.self, from: body)
+                    let dto = try Self.lbAdminCreate(input: input)
+                    return try Self.jsonResponse(dto, httpStatus: .created)
+                }
+                Get("/{id}") { _, context in
+                    let id = try context.parameters.require("id", as: UUID.self)
+                    let dto = try Self.lbAdminDetail(id: id)
+                    return try Self.jsonResponse(dto)
+                }
+                Patch("/{id}") { request, context in
+                    let id = try context.parameters.require("id", as: UUID.self)
+                    let body = try await request.body.collect(upTo: .max)
+                    let patch = try JSONDecoder().decode(PatchLBInput.self, from: body)
+                    let dto = try Self.lbAdminUpdate(id: id, patch: patch)
+                    return try Self.jsonResponse(dto)
+                }
+                Delete("/{id}") { _, context in
+                    let id = try context.parameters.require("id", as: UUID.self)
+                    try Self.lbAdminDelete(id: id)
+                    return try Self.jsonResponse(["ok": true])
+                }
+                Post("/{id}/members") { request, context in
+                    let id = try context.parameters.require("id", as: UUID.self)
+                    let body = try await request.body.collect(upTo: .max)
+                    let input = try JSONDecoder().decode(AddMemberInput.self, from: body)
+                    let dto = try Self.lbAdminAddMember(lbId: id, input: input)
+                    return try Self.jsonResponse(dto, httpStatus: .created)
+                }
+                Patch("/{id}/members/{memberId}") { request, context in
+                    let memberId = try context.parameters.require("memberId", as: UUID.self)
+                    let body = try await request.body.collect(upTo: .max)
+                    let patch = try JSONDecoder().decode(PatchMemberInput.self, from: body)
+                    let dto = try Self.lbAdminUpdateMember(memberId: memberId, patch: patch)
+                    return try Self.jsonResponse(dto)
+                }
+                Delete("/{id}/members/{memberId}") { _, context in
+                    let memberId = try context.parameters.require("memberId", as: UUID.self)
+                    try Self.lbAdminDeleteMember(memberId: memberId)
+                    return try Self.jsonResponse(["ok": true])
+                }
+                Post("/{id}/test") { _, context in
+                    let id = try context.parameters.require("id", as: UUID.self)
+                    let trace = try Self.lbAdminTest(id: id, inference: inference)
+                    return try Self.jsonResponse(trace)
+                }
+            }
+            RouteGroup("admin/sessions") {
+                Get("") { request, context in
+                    let sessions = inference.engine.sessionManager.listSessions()
+                    return try Self.jsonResponse(sessions)
+                }
+                Delete("/{id}") { request, context in
+                    let sessionId = try context.parameters.require("id")
+                    inference.engine.sessionManager.remove(sessionId)
+                    return Response(status: .noContent)
+                }
+                Delete("") { request, context in
+                    let sessions = inference.engine.sessionManager.listSessions()
+                    for session in sessions {
+                        inference.engine.sessionManager.remove(session.sessionId)
                     }
-                } catch {
-                    let jsonData = try JSONSerialization.data(withJSONObject: ["valid": false, "error": error.localizedDescription] as [String: Any])
+                    return Response(status: .noContent)
+                }
+                Post("/{id}/save") { request, context in
+                    let sessionId = try context.parameters.require("id")
+                    do {
+                        try await inference.engine.saveSession(sessionId)
+                        return Response(status: .ok)
+                    } catch {
+                        throw NovaMLXError.cacheError("Failed to save session: \(error.localizedDescription)")
+                    }
+                }
+                Post("/fork") { request, context in
+                    let body = try await request.body.collect(upTo: 1024 * 1024)
+                    let req = try JSONDecoder().decode(AdminSessionForkRequest.self, from: body)
+                    do {
+                        try await inference.forkSession(from: req.sourceId, into: req.targetId, modelId: req.modelId)
+                        return Response(status: .ok)
+                    } catch {
+                        throw NovaMLXError.cacheError("Failed to fork session: \(error.localizedDescription)")
+                    }
+                }
+            }
+            RouteGroup("admin/cache") {
+                Get("/{modelId}/stats") { request, context in
+                    let modelId = try context.parameters.require("modelId")
+                    if let stats = inference.engine.getPrefixCacheStats(for: modelId) {
+                        let obj: [String: String] = [
+                            "hits": String(stats.hits),
+                            "misses": String(stats.misses),
+                            "tokensSaved": String(stats.tokensSaved),
+                            "evictions": String(stats.evictions),
+                            "totalBlocks": String(stats.totalBlocks),
+                            "allocatedBlocks": String(stats.allocatedBlocks),
+                            "freeBlocks": String(stats.freeBlocks),
+                            "sharedBlocks": String(stats.sharedBlocks),
+                            "ssdBlockCount": String(stats.ssdBlockCount),
+                            "ssdTotalSize": String(stats.ssdTotalSize),
+                        ]
+                        let data = try JSONEncoder().encode(obj)
+                        return Response(status: .ok, body: ResponseBody(byteBuffer: ByteBuffer(data: data)))
+                    }
+                    return Response(status: .notFound)
+                }
+                Delete("/{modelId}") { request, context in
+                    let modelId = try context.parameters.require("modelId")
+                    inference.engine.clearPrefixCache(for: modelId)
+                    return Response(status: .ok)
+                }
+            }
+            RouteGroup("admin/api") {
+                Get("/device-info") { _, _ in
+                    let info = DeviceInfo.current()
+                    return try Self.jsonResponse(info)
+                }
+                Get("/memory") { _, _ in
+                    guard let enforcer = inference.engine.memoryEnforcer else {
+                        let body: [String: Any] = [
+                            "enabled": false,
+                            "currentBytes": inference.engine.gpuActiveMemory
+                        ]
+                        let data = try JSONSerialization.data(withJSONObject: body)
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                    let status = await enforcer.status
+                    var body: [String: Any] = [
+                        "enabled": status.enabled,
+                        "softLimitBytes": status.softLimitBytes,
+                        "hardLimitBytes": status.hardLimitBytes,
+                        "currentBytes": status.currentBytes,
+                        "utilization": status.utilization,
+                        "totalEvictions": status.totalEvictions,
+                        "physicalRAM": status.physicalRAM,
+                    ]
+                    if let model = status.lastEvictedModel { body["lastEvictedModel"] = model }
+                    if let time = status.lastEvictionTime { body["lastEvictionTime"] = time.ISO8601Format() }
+                    let data = try JSONSerialization.data(withJSONObject: body)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                Get("/turboquant") { _, _ in
+                    let configs = inference.engine.turboQuantService.allConfigs()
+                    var result: [[String: Any]] = []
+                    for (modelId, config) in configs {
+                        var entry: [String: Any] = [
+                            "model_id": modelId,
+                            "bits": config.bits,
+                            "group_size": config.groupSize,
+                            "scheme": "affine",
+                            "compression_ratio": config.estimatedCompressionRatio
+                        ]
+                        if let stats = inference.engine.turboQuantService.getStats(modelId: modelId) {
+                            entry["compression_ratio"] = stats.compressionRatio
+                        }
+                        result.append(entry)
+                    }
+                    let jsonData = try JSONSerialization.data(withJSONObject: ["configs": result])
                     var headers = HTTPFields()
                     headers[.contentType] = "application/json"
                     return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
                 }
-            }
-            Get("/admin/api/update-check") { _, _ in
-                do {
-                    let info = try await updater.checkForUpdates()
-                    return try Self.jsonResponse(info)
-                } catch {
-                    return try Self.jsonResponse(["error": error.localizedDescription])
-                }
-            }
-            Get("/admin/api/hf/search") { request, _ in
-                do {
-                    let query = request.uri.query ?? ""
-                    let params = Self.parseQuery(query)
-                    let q = params["q"] ?? ""
-                    let limit = Int(params["limit"] ?? "50") ?? 50
-                    let mlxOnly = params["mlx_only"] == "true"
-                    let endpoint = params["endpoint"] ?? params["mirror"]
-                    NovaMLXLog.info("[HF][Search] admin request q=\(q) endpoint=\(endpoint ?? "official") mlxOnly=\(mlxOnly) limit=\(limit)")
-
-                    let searchService: HuggingFaceService = {
-                        if let ep = endpoint, !ep.isEmpty {
-                            return HuggingFaceService(modelDirectory: self.modelManager.modelsDirectory, endpoint: ep)
+                Get("/model-family") { _, _ in
+                    let overrides = ModelFamilyRegistry.shared.allOverrides()
+                    var result: [[String: Any]] = []
+                    for (modelId, opt) in overrides {
+                        var entry: [String: Any] = [
+                            "model_id": modelId,
+                            "kv_group_size": opt.defaultKVGroupSize,
+                            "prefill_step_size": opt.prefillStepSize,
+                            "recommended_context_length": opt.recommendedContextLength,
+                            "repeat_last_n": opt.repeatLastN
+                        ]
+                        if let bits = opt.defaultKVBits {
+                            entry["kv_bits"] = bits
                         }
-                        return hf
-                    }()
-
-                    let result = try await searchService.searchModels(query: q, limit: limit, mlxOnly: mlxOnly)
-                    return try Self.jsonResponse(result)
-                } catch {
-                    NovaMLXLog.error("HF search failed: \(error)")
-                    return try Self.jsonResponse(["error": error.localizedDescription])
+                        result.append(entry)
+                    }
+                    let jsonData = try JSONSerialization.data(withJSONObject: ["overrides": result])
+                    var headers = HTTPFields()
+                    headers[.contentType] = "application/json"
+                    return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
                 }
-            }
-            Get("/admin/api/hf/model-info") { request, _ in
-                do {
-                    let query = request.uri.query ?? ""
-                    let params = Self.parseQuery(query)
-                    guard let repoId = params["repo_id"] else {
-                        return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
+                Get("/update-check") { _, _ in
+                    do {
+                        let info = try await updater.checkForUpdates()
+                        return try Self.jsonResponse(info)
+                    } catch {
+                        return try Self.jsonResponse(["error": error.localizedDescription])
                     }
-                    let endpoint = params["endpoint"] ?? params["mirror"]
-
-                    let infoService: HuggingFaceService = {
-                        if let ep = endpoint, !ep.isEmpty {
-                            return HuggingFaceService(modelDirectory: self.modelManager.modelsDirectory, endpoint: ep)
-                        }
-                        return hf
-                    }()
-
-                    let detail = try await infoService.getModelDetail(repoId: repoId)
-                    return try Self.jsonResponse(detail)
-                } catch {
-                    return try Self.jsonResponse(["error": error.localizedDescription])
                 }
-            }
-            Post("/admin/api/hf/download") { request, _ in
-                do {
-                    let body = try await request.body.collect(upTo: .max)
-                    let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
-                    let repoId = json["repo_id"] as? String ?? ""
-                    let hfToken = json["hf_token"] as? String
-                    let endpoint = json["endpoint"] as? String
-                    guard !repoId.isEmpty else {
-                        return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
-                    }
-
-                    if let ep = endpoint, !ep.isEmpty {
-                        NovaMLXLog.info("[HF] Download request for \(repoId) using custom endpoint: \(ep)")
-                    }
-
-                    // Always use the global hf instance so that the created HFDownloadTask
-                    // ends up in the activeTasks that GET /admin/api/hf/tasks returns.
-                    // The live mirrorEndpoint (if any) is passed down so ModelScope / custom
-                    // mirrors still get the correct listing + resolve logic.
-                    let task = try await hf.startDownload(
-                        repoId: repoId,
-                        hfToken: hfToken,
-                        mirrorEndpoint: endpoint
+                Get("/rate-limits") { _, _ in
+                    let stats = rateLimiter.getStats()
+                    let data = try JSONSerialization.data(withJSONObject: stats)
+                    return Response(
+                        status: .ok,
+                        headers: [.contentType: "application/json"],
+                        body: .init(byteBuffer: ByteBuffer(data: data))
                     )
-                    return try Self.jsonResponse(["success": "true", "task_id": task.id] as [String: String])
-                } catch {
-                    return try Self.jsonResponse(["error": error.localizedDescription])
                 }
-            }
-            Get("/admin/api/hf/tasks") { _, _ in
-                let tasks = hf.getTasks()
-                return try Self.jsonResponse(["tasks": tasks])
-            }
-            Post("/admin/api/hf/cancel") { request, _ in
-                do {
+                Get("/config") { _, _ in
+                    let data: Data = await {
+                        do { return try await NovaMLXConfiguration.shared.serializedConfigJSON() }
+                        catch { return Data("{}".utf8) }
+                    }()
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                Put("/config") { request, _ in
                     let body = try await request.body.collect(upTo: .max)
-                    let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
-                    let taskId = json["task_id"] as? String ?? ""
-                    let success = hf.cancelTask(id: taskId)
-                    return try Self.jsonResponse(["success": success])
-                } catch {
-                    return try Self.jsonResponse(["error": error.localizedDescription])
-                }
-            }
-            Get("/admin/api/rate-limits") { _, _ in
-                let stats = rateLimiter.getStats()
-                let data = try JSONSerialization.data(withJSONObject: stats)
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "application/json"],
-                    body: .init(byteBuffer: ByteBuffer(data: data))
-                )
-            }
-            // Agent binary detection
-            Get("/admin/api/agents/check") { _, _ in
-                let agentsToCheck = [
-                    ("openclaw", "OpenClaw", "https://github.com/openclaw/openclaw"),
-                    ("hermes", "Hermes Agent", "https://github.com/hermes-agent/hermes"),
-                    ("opencode", "OpenCode", "https://github.com/opencode-ai/opencode"),
-                ]
-                let searchPaths = ["/usr/local/bin", "/opt/homebrew/bin", NSString(string: "~/").expandingTildeInPath + "/.local/bin"]
-                var results: [[String: Any]] = []
-                for (binary, name, installUrl) in agentsToCheck {
-                    var found = false
-                    var foundPath: String? = nil
-                    // Try which
-                    let task = Process()
-                    task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-                    task.arguments = [binary]
-                    let pipe = Pipe()
-                    task.standardOutput = pipe
-                    task.standardError = FileHandle.nullDevice
-                    try? task.run()
-                    task.waitUntilExit()
-                    if task.terminationStatus == 0 {
-                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-                            found = true
-                            foundPath = path
-                        }
+                    do {
+                        try await NovaMLXConfiguration.shared.applySerializedConfigJSON(Data(body.readableBytesView))
+                    } catch {
+                        throw NovaMLXError.apiError("Invalid config JSON: \(error)")
                     }
-                    if !found {
-                        for dir in searchPaths {
-                            let p = dir + "/" + binary
-                            if FileManager.default.isExecutableFile(atPath: p) {
-                                found = true
-                                foundPath = p
-                                break
+                    return try Self.jsonResponse(["status": "ok", "message": "Config saved. Restart required."])
+                }
+                Get("/log-level") { _, _ in
+                    try Self.jsonResponse(["level": "\(NovaMLXLog.fileLogLevel.rawValue)"] as [String: String])
+                }
+                Put("/log-level") { request, _ in
+                    let body = try await request.body.collect(upTo: .max)
+                    guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                          let level = json["level"] as? Int,
+                          let logLevel = NovaMLXLog.LogLevel(rawValue: level) else {
+                        return try Self.jsonResponse(["error": "Invalid level. Use 0=debug, 1=info, 2=warning, 3=error"], httpStatus: .badRequest)
+                    }
+                    NovaMLXLog.fileLogLevel = logLevel
+                    NovaMLXLog.info("[Admin] Log level changed to \(logLevel)")
+                    return try Self.jsonResponse(["level": logLevel.rawValue])
+                }
+                RouteGroup("agents") {
+                    Get("/check") { _, _ in
+                        let agentsToCheck = [
+                            ("openclaw", "OpenClaw", "https://github.com/openclaw/openclaw"),
+                            ("hermes", "Hermes Agent", "https://github.com/hermes-agent/hermes"),
+                            ("opencode", "OpenCode", "https://github.com/opencode-ai/opencode"),
+                        ]
+                        let searchPaths = ["/usr/local/bin", "/opt/homebrew/bin", NSString(string: "~/").expandingTildeInPath + "/.local/bin"]
+                        var results: [[String: Any]] = []
+                        for (binary, name, installUrl) in agentsToCheck {
+                            var found = false
+                            var foundPath: String? = nil
+                            // Try which
+                            let task = Process()
+                            task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+                            task.arguments = [binary]
+                            let pipe = Pipe()
+                            task.standardOutput = pipe
+                            task.standardError = FileHandle.nullDevice
+                            try? task.run()
+                            task.waitUntilExit()
+                            if task.terminationStatus == 0 {
+                                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+                                    found = true
+                                    foundPath = path
+                                }
                             }
+                            if !found {
+                                for dir in searchPaths {
+                                    let p = dir + "/" + binary
+                                    if FileManager.default.isExecutableFile(atPath: p) {
+                                        found = true
+                                        foundPath = p
+                                        break
+                                    }
+                                }
+                            }
+                            results.append([
+                                "id": binary,
+                                "name": name,
+                                "installed": found,
+                                "path": foundPath as Any,
+                                "installUrl": installUrl,
+                            ])
+                        }
+                        let data = try JSONSerialization.data(withJSONObject: results)
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                }
+                RouteGroup("bench") {
+                    Post("/start") { request, context in
+                        let body = try await request.body.collect(upTo: .max)
+                        let benchReq = try JSONDecoder().decode(BenchmarkRequest.self, from: body)
+                        let run = try benchmark.startBenchmark(benchReq)
+                        return try Self.jsonResponse(run, httpStatus: .accepted)
+                    }
+                    Get("/status") { _, _ in
+                        if let run = benchmark.getActiveRun() {
+                            return try Self.jsonResponse(run)
+                        }
+                        return try Self.jsonResponse(["status": "idle"])
+                    }
+                    Post("/cancel") { _, _ in
+                        benchmark.cancelActiveRun()
+                        return try Self.jsonResponse(["status": "cancelled"])
+                    }
+                }
+                RouteGroup("chat-template") {
+                    Get("/diagnose/{modelId}") { [modelManager] _, context in
+                        // The {modelId} parameter is URL-encoded by the client (slashes
+                        // become %2F); Hummingbird's parameter capture decodes that.
+                        let modelId = try context.parameters.require("modelId")
+                        // Look up the registered family for this model.
+                        let family: NovaMLXCore.ModelFamily = modelManager.getRecord(modelId)?.family ?? .other
+                        let report = ChatTemplateDiagnostics.diagnose(
+                            modelId: modelId,
+                            modelsDir: NovaMLXPaths.modelsDir,
+                            family: family
+                        )
+                        return try Self.jsonResponse(report)
+                    }
+                }
+                RouteGroup("cluster") {
+                    Get("/status") { _, _ in
+                        let body = ClusterAdminRoutes.shared.clusterStatus()
+                        let data = try JSONSerialization.data(withJSONObject: body)
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                    Get("/discovery-debug") { _, _ in
+                        let body = ClusterAdminRoutes.shared.discoveryDebug()
+                        let data = try JSONSerialization.data(withJSONObject: body)
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                    Get("/shard-plan") { request, context in
+                        let modelId = request.uri.query?.split(separator: "&")
+                            .compactMap { param -> String? in
+                                let parts = param.split(separator: "=", maxSplits: 1)
+                                guard parts.count == 2, parts[0] == "model" else { return nil }
+                                return String(parts[1])
+                            }.first ?? ""
+                        guard !modelId.isEmpty else {
+                            let err = ["error": "missing ?model= parameter"]
+                            let data = try JSONSerialization.data(withJSONObject: err)
+                            return Response(status: .badRequest, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                        }
+                        if let plan = ClusterAdminRoutes.shared.currentShardPlan(modelId: modelId) {
+                            let data = try JSONSerialization.data(withJSONObject: plan)
+                            return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                        } else {
+                            let data = try JSONSerialization.data(withJSONObject: ["status": "no_plan"])
+                            return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
                         }
                     }
-                    results.append([
-                        "id": binary,
-                        "name": name,
-                        "installed": found,
-                        "path": foundPath as Any,
-                        "installUrl": installUrl,
-                    ])
+                    Post("/workers/register") { request, _ in
+                        let body = try await request.body.collect(upTo: .max)
+                        let spec = try JSONDecoder().decode(NodeSpec.self, from: body)
+                        let info = ClusterManager.shared.registerWorker(spec: spec)
+                        let data = try JSONEncoder().encode(["nodeId": info.nodeId, "status": info.status.rawValue])
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                    Post("/workers/heartbeat") { request, _ in
+                        let body = try await request.body.collect(upTo: .max)
+                        struct HeartbeatPayload: Codable { let nodeId: String }
+                        let payload = try JSONDecoder().decode(HeartbeatPayload.self, from: body)
+                        ClusterManager.shared.updateHeartbeat(nodeId: payload.nodeId)
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(string: "{\"ok\":true}")))
+                    }
+                    Get("/models/{id}/download") { _, context in
+                        let modelId = try context.parameters.require("id")
+                        guard let record = models.getRecord(modelId) else {
+                            return Response(status: .notFound)
+                        }
+                        let modelDir = record.localURL.path
+                        let fm = FileManager.default
+                        guard fm.fileExists(atPath: modelDir) else {
+                            return Response(status: .notFound)
+                        }
+                        // Stream the entire model directory as a tar.gz
+                        let process = Process()
+                        let pipe = Pipe()
+                        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+                        process.arguments = ["-czf", "-", "-C", modelDir, "."]
+                        process.standardOutput = pipe
+                        try process.run()
+                        process.waitUntilExit()
+                        guard let data = try pipe.fileHandleForReading.readToEnd() else {
+                            return Response(status: .internalServerError)
+                        }
+                        return Response(
+                            status: .ok,
+                            headers: [
+                                .contentType: "application/gzip",
+                                .contentDisposition: "attachment; filename=\"\(modelId.replacingOccurrences(of:"/",with:"-")).tar.gz\"",
+                            ],
+                            body: .init(byteBuffer: ByteBuffer(data: data))
+                        )
+                    }
+                    Post("/activate-model") { request, _ in
+                        let body = try await request.body.collect(upTo: .max)
+                        guard let json = try? JSONSerialization.jsonObject(with: Data(buffer: body)) as? [String: String],
+                              let modelId = json["modelId"] else {
+                            return Response(status: .badRequest, headers: [.contentType: "application/json"],
+                                            body: .init(byteBuffer: ByteBuffer(string: "{\"error\":true,\"message\":\"modelId required\"}")))
+                        }
+                        let result = await ClusterAdminRoutes.shared.activateModel(modelId: modelId)
+                        let data = try? JSONSerialization.data(withJSONObject: result)
+                        let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                        return Response(status: .ok, headers: [.contentType: "application/json"],
+                                        body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
+                    }
+                    Post("/deactivate-model") { _, _ in
+                        let result = await ClusterAdminRoutes.shared.deactivateModel()
+                        let data = try? JSONSerialization.data(withJSONObject: result)
+                        let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                        return Response(status: .ok, headers: [.contentType: "application/json"],
+                                        body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
+                    }
+                    Get("/model-status") { _, _ in
+                        let result = ClusterAdminRoutes.shared.modelStatus()
+                        let data = try? JSONSerialization.data(withJSONObject: result)
+                        let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                        return Response(status: .ok, headers: [.contentType: "application/json"],
+                                        body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
+                    }
                 }
-                let data = try JSONSerialization.data(withJSONObject: results)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                RouteGroup("grammar") {
+                    Post("/validate") { request, _ in
+                        struct GrammarValidateRequest: Codable, Sendable {
+                            let type: String
+                            let value: String
+                        }
+                        let body = try await request.body.collect(upTo: .max)
+                        let req = try JSONDecoder().decode(GrammarValidateRequest.self, from: body)
+                        do {
+                            switch req.type {
+                            case "regex":
+                                _ = try NSRegularExpression(pattern: req.value, options: [])
+                                let jsonData = try JSONSerialization.data(withJSONObject: ["valid": true, "type": "regex"] as [String: Any])
+                                var headers = HTTPFields()
+                                headers[.contentType] = "application/json"
+                                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                            case "gbnf":
+                                let rules = try GBNFParser.parse(req.value)
+                                let result: [String: Any] = [
+                                    "valid": true,
+                                    "type": "gbnf",
+                                    "rules": rules.map { ["name": $0.name, "alternatives": $0.alternatives.count] as [String: Any] }
+                                ]
+                                let jsonData = try JSONSerialization.data(withJSONObject: result)
+                                var headers = HTTPFields()
+                                headers[.contentType] = "application/json"
+                                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                            default:
+                                let jsonData = try JSONSerialization.data(withJSONObject: ["valid": false, "error": "Unknown grammar type: \(req.type). Use 'regex' or 'gbnf'."] as [String: Any])
+                                var headers = HTTPFields()
+                                headers[.contentType] = "application/json"
+                                return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                            }
+                        } catch {
+                            let jsonData = try JSONSerialization.data(withJSONObject: ["valid": false, "error": error.localizedDescription] as [String: Any])
+                            var headers = HTTPFields()
+                            headers[.contentType] = "application/json"
+                            return Response(status: .ok, headers: headers, body: .init(byteBuffer: ByteBuffer(data: jsonData)))
+                        }
+                    }
+                }
+                RouteGroup("hf") {
+                    Get("/search") { request, _ in
+                        do {
+                            let query = request.uri.query ?? ""
+                            let params = Self.parseQuery(query)
+                            let q = params["q"] ?? ""
+                            let limit = Int(params["limit"] ?? "50") ?? 50
+                            let mlxOnly = params["mlx_only"] == "true"
+                            let endpoint = params["endpoint"] ?? params["mirror"]
+                            NovaMLXLog.info("[HF][Search] admin request q=\(q) endpoint=\(endpoint ?? "official") mlxOnly=\(mlxOnly) limit=\(limit)")
+
+                            let searchService: HuggingFaceService = {
+                                if let ep = endpoint, !ep.isEmpty {
+                                    return HuggingFaceService(modelDirectory: self.modelManager.modelsDirectory, endpoint: ep)
+                                }
+                                return hf
+                            }()
+
+                            let result = try await searchService.searchModels(query: q, limit: limit, mlxOnly: mlxOnly)
+                            return try Self.jsonResponse(result)
+                        } catch {
+                            NovaMLXLog.error("HF search failed: \(error)")
+                            return try Self.jsonResponse(["error": error.localizedDescription])
+                        }
+                    }
+                    Get("/model-info") { request, _ in
+                        do {
+                            let query = request.uri.query ?? ""
+                            let params = Self.parseQuery(query)
+                            guard let repoId = params["repo_id"] else {
+                                return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
+                            }
+                            let endpoint = params["endpoint"] ?? params["mirror"]
+
+                            let infoService: HuggingFaceService = {
+                                if let ep = endpoint, !ep.isEmpty {
+                                    return HuggingFaceService(modelDirectory: self.modelManager.modelsDirectory, endpoint: ep)
+                                }
+                                return hf
+                            }()
+
+                            let detail = try await infoService.getModelDetail(repoId: repoId)
+                            return try Self.jsonResponse(detail)
+                        } catch {
+                            return try Self.jsonResponse(["error": error.localizedDescription])
+                        }
+                    }
+                    Post("/download") { request, _ in
+                        do {
+                            let body = try await request.body.collect(upTo: .max)
+                            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+                            let repoId = json["repo_id"] as? String ?? ""
+                            let hfToken = json["hf_token"] as? String
+                            let endpoint = json["endpoint"] as? String
+                            guard !repoId.isEmpty else {
+                                return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
+                            }
+
+                            if let ep = endpoint, !ep.isEmpty {
+                                NovaMLXLog.info("[HF] Download request for \(repoId) using custom endpoint: \(ep)")
+                            }
+
+                            // Always use the global hf instance so that the created HFDownloadTask
+                            // ends up in the activeTasks that GET /admin/api/hf/tasks returns.
+                            // The live mirrorEndpoint (if any) is passed down so ModelScope / custom
+                            // mirrors still get the correct listing + resolve logic.
+                            let task = try await hf.startDownload(
+                                repoId: repoId,
+                                hfToken: hfToken,
+                                mirrorEndpoint: endpoint
+                            )
+                            return try Self.jsonResponse(["success": "true", "task_id": task.id] as [String: String])
+                        } catch {
+                            return try Self.jsonResponse(["error": error.localizedDescription])
+                        }
+                    }
+                    Get("/tasks") { _, _ in
+                        let tasks = hf.getTasks()
+                        return try Self.jsonResponse(["tasks": tasks])
+                    }
+                    Post("/cancel") { request, _ in
+                        do {
+                            let body = try await request.body.collect(upTo: .max)
+                            let json = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+                            let taskId = json["task_id"] as? String ?? ""
+                            let success = hf.cancelTask(id: taskId)
+                            return try Self.jsonResponse(["success": success])
+                        } catch {
+                            return try Self.jsonResponse(["error": error.localizedDescription])
+                        }
+                    }
+                }
+                RouteGroup("model-family") {
+                    Put("/{modelId}") { request, context in
+                        let modelId = try context.parameters.require("modelId")
+                        let body = try await request.body.collect(upTo: .max)
+                        struct FamilyOverrideRequest: Codable, Sendable {
+                            let defaultKVBits: Int?
+                            let defaultKVGroupSize: Int?
+                            let prefillStepSize: Int?
+                            let recommendedContextLength: Int?
+                            let repeatLastN: Int?
+                        }
+                        let req = try JSONDecoder().decode(FamilyOverrideRequest.self, from: body)
+                        let opt = ModelFamilyOptimization(
+                            defaultKVBits: req.defaultKVBits,
+                            defaultKVGroupSize: req.defaultKVGroupSize ?? 64,
+                            prefillStepSize: req.prefillStepSize ?? 512,
+                            recommendedContextLength: req.recommendedContextLength ?? 4096,
+                            repeatLastN: req.repeatLastN ?? 64
+                        )
+                        ModelFamilyRegistry.shared.setOverride(opt, forModel: modelId)
+                        return try Self.jsonResponse(["status": "ok", "model_id": modelId])
+                    }
+                    Delete("/{modelId}") { request, context in
+                        let modelId = try context.parameters.require("modelId")
+                        ModelFamilyRegistry.shared.removeOverride(forModel: modelId)
+                        return try Self.jsonResponse(["status": "removed", "model_id": modelId])
+                    }
+                }
+                RouteGroup("models") {
+                    Get("/{id}/cluster/sync-status") { _, context in
+                        let modelId = try context.parameters.require("id")
+                        let body = ClusterAdminRoutes.shared.modelSyncStatus(modelId: modelId)
+                        let data = try JSONSerialization.data(withJSONObject: body)
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                }
+                RouteGroup("ppl") {
+                    Post("/start") { request, context in
+                        let body = try await request.body.collect(upTo: .max)
+                        let pplReq = try JSONDecoder().decode(PerplexityRequest.self, from: body)
+                        let run = try perplexity.startEvaluation(pplReq)
+                        return try Self.jsonResponse(run, httpStatus: .accepted)
+                    }
+                    Get("/status") { _, _ in
+                        if let run = perplexity.getActiveRun() {
+                            return try Self.jsonResponse(run)
+                        }
+                        return try Self.jsonResponse(["status": "idle"])
+                    }
+                    Post("/cancel") { _, _ in
+                        perplexity.cancelActiveRun()
+                        return try Self.jsonResponse(["status": "cancelled"])
+                    }
+                }
+                RouteGroup("stats") {
+                    Post("/clear") { _, _ in
+                        inference.engine.resetSessionMetrics()
+                        return try Self.jsonResponse(["status": "cleared"])
+                    }
+                    Post("/clear-alltime") { _, _ in
+                        inference.engine.metricsStore.clearAllTime()
+                        return try Self.jsonResponse(["status": "cleared"])
+                    }
+                }
+                RouteGroup("turboquant") {
+                    Put("/{modelId}") { request, context in
+                        let modelId = try context.parameters.require("modelId")
+                        let body = try await request.body.collect(upTo: .max)
+                        struct TurboQuantRequest: Codable, Sendable {
+                            let enabled: Bool
+                            let bits: Int?
+                            let groupSize: Int?
+                            let modelSizeGB: Double?
+                            let contextLength: Int?
+                            let availableMemoryGB: Double?
+                        }
+                        let req = try JSONDecoder().decode(TurboQuantRequest.self, from: body)
+                        if req.enabled {
+                            if let bits = req.bits {
+                                let config = TurboQuantService.Config(bits: bits, groupSize: req.groupSize ?? 64)
+                                inference.engine.turboQuantService.setConfig(config, forModel: modelId)
+                            } else {
+                                _ = inference.engine.turboQuantService.autoConfigure(
+                                    modelId: modelId,
+                                    modelSizeGB: req.modelSizeGB ?? 2.0,
+                                    contextLength: req.contextLength ?? 4096,
+                                    availableMemoryGB: req.availableMemoryGB ?? 16.0
+                                )
+                            }
+                            return try Self.jsonResponse(["status": "enabled", "model_id": modelId])
+                        } else {
+                            inference.engine.turboQuantService.removeConfig(forModel: modelId)
+                            return try Self.jsonResponse(["status": "disabled", "model_id": modelId])
+                        }
+                    }
+                    Delete("/{modelId}") { request, context in
+                        let modelId = try context.parameters.require("modelId")
+                        inference.engine.turboQuantService.removeConfig(forModel: modelId)
+                        return try Self.jsonResponse(["status": "disabled", "model_id": modelId])
+                    }
+                }
             }
+            RouteGroup("admin/adapters") {
+                Get("") { request, _ in
+                    let modelId = request.uri.query.flatMap { url in
+                        URLComponents(string: "/" + url)?.queryItems?.first(where: { $0.name == "model_id" })?.value
+                    }
+                    let adapters: [AdapterInfo]
+                    if let modelId {
+                        adapters = inference.engine.adapterService.listAdapters(for: modelId)
+                    } else {
+                        adapters = inference.engine.adapterService.listAdapters()
+                    }
+                    return try Self.jsonResponse(["adapters": adapters])
+                }
+                Post("/load") { request, _ in
+                    struct AdapterLoadRequest: Codable, Sendable {
+                        let modelId: String
+                        let path: String
+                        let name: String?
+                    }
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdapterLoadRequest.self, from: body)
 
-            // MARK: - API Key Management
+                    guard let container = inference.engine.getContainer(for: req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
 
-            Get("/admin/keys") { _, _ in
-                let keys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
-                let masked: [[String: Any]] = keys.map { key in
+                    let adapterURL = URL(fileURLWithPath: req.path)
+                    let info = try await inference.engine.adapterService.loadAdapter(
+                        from: adapterURL,
+                        into: container,
+                        name: req.name
+                    )
+                    return try Self.jsonResponse(info)
+                }
+                Post("/unload") { request, _ in
+                    struct AdapterUnloadRequest: Codable, Sendable {
+                        let modelId: String
+                        let name: String
+                    }
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdapterUnloadRequest.self, from: body)
+
+                    guard let container = inference.engine.getContainer(for: req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+
+                    let info = try await inference.engine.adapterService.unloadAdapter(
+                        name: req.name,
+                        from: container
+                    )
+                    return try Self.jsonResponse(info)
+                }
+                Post("/fuse") { request, _ in
+                    struct AdapterFuseRequest: Codable, Sendable {
+                        let modelId: String
+                        let name: String
+                    }
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdapterFuseRequest.self, from: body)
+
+                    guard let container = inference.engine.getContainer(for: req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+
+                    let info = try await inference.engine.adapterService.fuseAdapter(
+                        name: req.name,
+                        into: container
+                    )
+                    return try Self.jsonResponse(info)
+                }
+                Get("/discover") { request, _ in
+                    let dir: String? = request.uri.query.flatMap { url in
+                        URLComponents(string: "/" + url)?.queryItems?.first(where: { $0.name == "directory" })?.value
+                    }
+                    let searchDir = dir.map { URL(fileURLWithPath: $0) }
+                        ?? NovaMLXPaths.modelsDir
+                    let adapters = inference.engine.adapterService.discoverAdapters(in: searchDir)
+                    return try Self.jsonResponse(["adapters": adapters])
+                }
+            }
+            RouteGroup("admin/modelfiles") {
+                Get("") { _, _ in
+                    let files = modelfileMgr.list()
+                    return try Self.jsonResponse(files)
+                }
+                Get("/{name}") { request, context in
+                    let name = try context.parameters.require("name")
+                    guard let mf = modelfileMgr.get(name) else {
+                        throw NovaMLXError.modelNotFound("Modelfile '\(name)' not found")
+                    }
+                    return try Self.jsonResponse(mf)
+                }
+                Post("") { request, _ in
+                    let body = try await request.body.collect(upTo: .max)
+                    let mf = try JSONDecoder().decode(Modelfile.self, from: body)
+                    try modelfileMgr.create(mf)
+                    return try Self.jsonResponse(mf, httpStatus: .created)
+                }
+                Put("/{name}") { request, context in
+                    let name = try context.parameters.require("name")
+                    let body = try await request.body.collect(upTo: .max)
+                    var mf = try JSONDecoder().decode(Modelfile.self, from: body)
+                    // Force name to match URL parameter to prevent mismatches
+                    mf = Modelfile(
+                        name: name, baseModel: mf.baseModel,
+                        systemPrompt: mf.systemPrompt, parameters: mf.parameters,
+                        tools: mf.tools, description: mf.description
+                    )
+                    try modelfileMgr.update(mf)
+                    return try Self.jsonResponse(mf)
+                }
+                Delete("/{name}") { request, context in
+                    let name = try context.parameters.require("name")
+                    try modelfileMgr.delete(name)
+                    return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
+                }
+            }
+            RouteGroup("admin/tokenhub") {
+                Get("/providers") { _, _ in
+                    let providers = tokenhubMgr.list()
+                    return try Self.jsonResponse(providers)
+                }
+                Post("/providers") { request, _ in
+                    let body = try await request.body.collect(upTo: .max)
+                    var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
+                    // Ensure id is derived from name
+                    provider = TokenhubProvider(
+                        name: provider.name,
+                        endpoint: provider.endpoint,
+                        apiKey: provider.apiKey,
+                        remoteModel: provider.remoteModel,
+                        isEnabled: provider.isEnabled,
+                        tags: provider.tags,
+                        isFree: provider.isFree
+                    )
+                    try tokenhubMgr.create(provider)
+                    return try Self.jsonResponse(provider, httpStatus: .created)
+                }
+                Put("/providers/{name}") { request, context in
+                    let name = try context.parameters.require("name")
+                    let body = try await request.body.collect(upTo: .max)
+                    var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
+                    provider = TokenhubProvider(
+                        name: name,
+                        endpoint: provider.endpoint,
+                        apiKey: provider.apiKey,
+                        remoteModel: provider.remoteModel,
+                        isEnabled: provider.isEnabled,
+                        tags: provider.tags,
+                        isFree: provider.isFree
+                    )
+                    try tokenhubMgr.update(provider)
+                    return try Self.jsonResponse(provider)
+                }
+                Delete("/providers/{name}") { request, context in
+                    let name = try context.parameters.require("name")
+                    try tokenhubMgr.delete(name)
+                    return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
+                }
+                Post("/test") { request, _ in
+                    let body = try await request.body.collect(upTo: .max)
+                    var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
+                    let backend = CloudBackend.shared
+                    let ok = await backend.healthCheck(provider: provider)
+                    if ok {
+                        provider.lastTestedAt = Date()
+                        provider.lastStatus = "ok"
+                        if let existing = tokenhubMgr.get(provider.name) {
+                            var updated = provider
+                            updated = TokenhubProvider(
+                                name: existing.name,
+                                endpoint: updated.endpoint,
+                                apiKey: updated.apiKey,
+                                remoteModel: updated.remoteModel,
+                                isEnabled: updated.isEnabled
+                            )
+                            // Preserve test result timestamps
+                            _ = try? tokenhubMgr.update(updated)
+                        }
+                    }
+                    struct TestResult: Encodable {
+                        let success: Bool
+                        let provider: String
+                        let endpoint: String
+                    }
+                    return try Self.jsonResponse(TestResult(
+                        success: ok, provider: provider.name, endpoint: provider.endpoint
+                    ))
+                }
+            }
+            RouteGroup("admin/keys") {
+                Get("") { _, _ in
+                    let keys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
+                    let masked: [[String: Any]] = keys.map { key in
+                        var usage: [String: Any] = [
+                            "totalTokensUsed": key.usage.totalTokensUsed,
+                            "totalRequests": key.usage.totalRequests,
+                            "dailyTokens": key.usage.periodTokens,
+                            "dailyRequests": key.usage.periodRequests,
+                        ]
+                        if let lastUsed = key.usage.lastUsedAt {
+                            usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
+                        }
+                        var dict: [String: Any] = [
+                            "id": key.id,
+                            "name": key.name,
+                            "keyPrefix": key.keyPrefix,
+                            "createdAt": ISO8601DateFormatter().string(from: key.createdAt),
+                            "isEnabled": key.isEnabled,
+                            "isExpired": key.isExpired,
+                            "isActive": key.isActive,
+                            "usage": usage,
+                        ]
+                        if let exp = key.expiresAt { dict["expiresAt"] = ISO8601DateFormatter().string(from: exp) }
+                        if let rps = key.rateLimitPerSecond { dict["rateLimitPerSecond"] = rps }
+                        if let burst = key.rateLimitBurst { dict["rateLimitBurst"] = burst }
+                        if let models = key.allowedModels { dict["allowedModels"] = models }
+                        if let endpoints = key.allowedEndpoints { dict["allowedEndpoints"] = endpoints }
+                        if let maxTokens = key.maxTokensPerPeriod { dict["maxTokensPerPeriod"] = maxTokens }
+                        if let maxRequests = key.maxRequestsPerPeriod { dict["maxRequestsPerPeriod"] = maxRequests }
+                        return dict
+                    }
+                    let data = try JSONSerialization.data(withJSONObject: masked)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                Post("") { request, _ in
+                    let body = try await request.body.collect(upTo: .max)
+                    struct CreateKeyRequest: Decodable {
+                        let name: String?
+                        let rateLimitPerSecond: Double?
+                        let rateLimitBurst: Int?
+                        let allowedModels: [String]?
+                        let allowedEndpoints: [String]?
+                        let maxTokensPerPeriod: Int64?
+                        let maxRequestsPerPeriod: Int64?
+                        let usageResetPeriod: String?
+                    }
+                    let req = try JSONDecoder().decode(CreateKeyRequest.self, from: body)
+                    let name = req.name ?? "API Key"
+                    let period: UsageResetPeriod = req.usageResetPeriod.flatMap { UsageResetPeriod(rawValue: $0) } ?? .daily
+                    let (record, rawKey) = try NovaDB.shared.apiKeyStore.create(
+                        name: name,
+                        rateLimitPerSecond: req.rateLimitPerSecond,
+                        rateLimitBurst: req.rateLimitBurst,
+                        allowedModels: req.allowedModels,
+                        allowedEndpoints: req.allowedEndpoints,
+                        maxTokensPerPeriod: req.maxTokensPerPeriod,
+                        maxRequestsPerPeriod: req.maxRequestsPerPeriod,
+                        usageResetPeriod: period.rawValue
+                    )
+                    let resp: [String: String] = [
+                        "id": record.id,
+                        "name": record.name,
+                        "key": rawKey,
+                        "keyPrefix": record.keyPrefix,
+                        "createdAt": ISO8601DateFormatter().string(from: record.createdAt),
+                    ]
+                    return try Self.jsonResponse(resp)
+                }
+                Get("usage/report") { request, _ in
+                    let fromParam = request.uri.queryParameters.get("from")
+                    let toParam = request.uri.queryParameters.get("to")
+                    guard let (from, to) = Self.parseUsageWindow(from: fromParam, to: toParam) else {
+                        throw NovaMLXError.apiError("Invalid usage window: 'from' must be before 'to'")
+                    }
+                    let report = try NovaDB.shared.apiKeyStore.usageReport(from: from, to: to)
+                    return try Self.usageReportJSON(report)
+                }
+                Get("/{id}") { request, context in
+                    guard let id = context.parameters.get("id", as: String.self) else {
+                        throw NovaMLXError.apiError("Missing key ID")
+                    }
+                    guard let key = (try? NovaDB.shared.apiKeyStore.getAsAPIKey(id: id)) ?? nil else {
+                        return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
+                    }
                     var usage: [String: Any] = [
                         "totalTokensUsed": key.usage.totalTokensUsed,
                         "totalRequests": key.usage.totalRequests,
-                        "dailyTokens": key.usage.periodTokens,
-                        "dailyRequests": key.usage.periodRequests,
+                        "periodTokens": key.usage.periodTokens,
+                        "periodRequests": key.usage.periodRequests,
                     ]
                     if let lastUsed = key.usage.lastUsedAt {
                         usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
@@ -2786,320 +3243,100 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     if let endpoints = key.allowedEndpoints { dict["allowedEndpoints"] = endpoints }
                     if let maxTokens = key.maxTokensPerPeriod { dict["maxTokensPerPeriod"] = maxTokens }
                     if let maxRequests = key.maxRequestsPerPeriod { dict["maxRequestsPerPeriod"] = maxRequests }
-                    return dict
-                }
-                let data = try JSONSerialization.data(withJSONObject: masked)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-
-            Post("/admin/keys") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                struct CreateKeyRequest: Decodable {
-                    let name: String?
-                    let rateLimitPerSecond: Double?
-                    let rateLimitBurst: Int?
-                    let allowedModels: [String]?
-                    let allowedEndpoints: [String]?
-                    let maxTokensPerPeriod: Int64?
-                    let maxRequestsPerPeriod: Int64?
-                    let usageResetPeriod: String?
-                }
-                let req = try JSONDecoder().decode(CreateKeyRequest.self, from: body)
-                let name = req.name ?? "API Key"
-                let period: UsageResetPeriod = req.usageResetPeriod.flatMap { UsageResetPeriod(rawValue: $0) } ?? .daily
-                let (record, rawKey) = try NovaDB.shared.apiKeyStore.create(
-                    name: name,
-                    rateLimitPerSecond: req.rateLimitPerSecond,
-                    rateLimitBurst: req.rateLimitBurst,
-                    allowedModels: req.allowedModels,
-                    allowedEndpoints: req.allowedEndpoints,
-                    maxTokensPerPeriod: req.maxTokensPerPeriod,
-                    maxRequestsPerPeriod: req.maxRequestsPerPeriod,
-                    usageResetPeriod: period.rawValue
-                )
-                let resp: [String: String] = [
-                    "id": record.id,
-                    "name": record.name,
-                    "key": rawKey,
-                    "keyPrefix": record.keyPrefix,
-                    "createdAt": ISO8601DateFormatter().string(from: record.createdAt),
-                ]
-                return try Self.jsonResponse(resp)
-            }
-
-            Get("/admin/keys/{id}") { request, context in
-                guard let id = context.parameters.get("id", as: String.self) else {
-                    throw NovaMLXError.apiError("Missing key ID")
-                }
-                guard let key = (try? NovaDB.shared.apiKeyStore.getAsAPIKey(id: id)) ?? nil else {
-                    return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
-                }
-                var usage: [String: Any] = [
-                    "totalTokensUsed": key.usage.totalTokensUsed,
-                    "totalRequests": key.usage.totalRequests,
-                    "periodTokens": key.usage.periodTokens,
-                    "periodRequests": key.usage.periodRequests,
-                ]
-                if let lastUsed = key.usage.lastUsedAt {
-                    usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
-                }
-                var dict: [String: Any] = [
-                    "id": key.id,
-                    "name": key.name,
-                    "keyPrefix": key.keyPrefix,
-                    "createdAt": ISO8601DateFormatter().string(from: key.createdAt),
-                    "isEnabled": key.isEnabled,
-                    "isExpired": key.isExpired,
-                    "isActive": key.isActive,
-                    "usage": usage,
-                ]
-                if let exp = key.expiresAt { dict["expiresAt"] = ISO8601DateFormatter().string(from: exp) }
-                if let rps = key.rateLimitPerSecond { dict["rateLimitPerSecond"] = rps }
-                if let burst = key.rateLimitBurst { dict["rateLimitBurst"] = burst }
-                if let models = key.allowedModels { dict["allowedModels"] = models }
-                if let endpoints = key.allowedEndpoints { dict["allowedEndpoints"] = endpoints }
-                if let maxTokens = key.maxTokensPerPeriod { dict["maxTokensPerPeriod"] = maxTokens }
-                if let maxRequests = key.maxRequestsPerPeriod { dict["maxRequestsPerPeriod"] = maxRequests }
-                let data = try JSONSerialization.data(withJSONObject: dict)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-
-            Put("/admin/keys/{id}") { request, context in
-                guard let id = context.parameters.get("id", as: String.self) else {
-                    throw NovaMLXError.apiError("Missing key ID")
-                }
-                let body = try await request.body.collect(upTo: .max)
-                struct UpdateKeyRequest: Decodable {
-                    let name: String?
-                    let isEnabled: Bool?
-                    let expiresAt: String?
-                    let rateLimitPerSecond: Double?
-                    let rateLimitBurst: Int?
-                    let allowedModels: [String]?
-                    let allowedEndpoints: [String]?
-                    let maxTokensPerPeriod: Int64?
-                    let maxRequestsPerPeriod: Int64?
-                    let usageResetPeriod: String?
-                }
-                let req = try JSONDecoder().decode(UpdateKeyRequest.self, from: body)
-                try NovaDB.shared.apiKeyStore.update(id: id) { rec in
-                    if let name = req.name { rec.name = name }
-                    if let isEnabled = req.isEnabled { rec.isEnabled = isEnabled }
-                    if let expiresAtStr = req.expiresAt {
-                        rec.expiresAt = (expiresAtStr == "never") ? nil : ISO8601DateFormatter().date(from: expiresAtStr)
-                    }
-                    if let rps = req.rateLimitPerSecond { rec.rateLimitPerSecond = rps }
-                    if let burst = req.rateLimitBurst { rec.rateLimitBurst = burst }
-                    if let models = req.allowedModels {
-                        rec.allowedModels = Self.encodeJSONField(models.isEmpty ? nil : models)
-                    }
-                    if let endpoints = req.allowedEndpoints {
-                        rec.allowedEndpoints = Self.encodeJSONField(endpoints.isEmpty ? nil : endpoints)
-                    }
-                    if let maxTokens = req.maxTokensPerPeriod { rec.maxTokensPerPeriod = maxTokens }
-                    if let maxRequests = req.maxRequestsPerPeriod { rec.maxRequestsPerPeriod = maxRequests }
-                    if let periodStr = req.usageResetPeriod {
-                        rec.usageResetPeriod = periodStr
-                    }
-                }
-                return try Self.jsonResponse(["status": "ok"])
-            }
-
-            Delete("/admin/keys/{id}") { request, context in
-                guard let id = context.parameters.get("id", as: String.self) else {
-                    throw NovaMLXError.apiError("Missing key ID")
-                }
-                try NovaDB.shared.apiKeyStore.delete(id: id)
-                return try Self.jsonResponse(["status": "ok"])
-            }
-
-            Post("/admin/keys/{id}/rotate") { request, context in
-                guard let id = context.parameters.get("id", as: String.self) else {
-                    throw NovaMLXError.apiError("Missing key ID")
-                }
-                let (record, rawKey) = try NovaDB.shared.apiKeyStore.rotate(id: id)
-                let resp: [String: String] = [
-                    "id": record.id,
-                    "key": rawKey,
-                    "keyPrefix": record.keyPrefix,
-                ]
-                return try Self.jsonResponse(resp)
-            }
-
-            Get("/admin/keys/{id}/usage") { request, context in
-                guard let id = context.parameters.get("id", as: String.self) else {
-                    throw NovaMLXError.apiError("Missing key ID")
-                }
-                guard let key = (try? NovaDB.shared.apiKeyStore.getAsAPIKey(id: id)) ?? nil else {
-                    return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
-                }
-                var usage: [String: Any] = [
-                    "totalTokensUsed": key.usage.totalTokensUsed,
-                    "totalRequests": key.usage.totalRequests,
-                    "periodTokens": key.usage.periodTokens,
-                    "periodRequests": key.usage.periodRequests,
-                ]
-                if let lastUsed = key.usage.lastUsedAt {
-                    usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
-                }
-                let data = try JSONSerialization.data(withJSONObject: usage)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-
-            // Config store read/write (backed by SQLite; JSON shape preserved for API compat)
-            Get("/admin/api/config") { _, _ in
-                let data: Data = await {
-                    do { return try await NovaMLXConfiguration.shared.serializedConfigJSON() }
-                    catch { return Data("{}".utf8) }
-                }()
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-            Put("/admin/api/config") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                do {
-                    try await NovaMLXConfiguration.shared.applySerializedConfigJSON(Data(body.readableBytesView))
-                } catch {
-                    throw NovaMLXError.apiError("Invalid config JSON: \(error)")
-                }
-                return try Self.jsonResponse(["status": "ok", "message": "Config saved. Restart required."])
-            }
-
-            Get("/admin/api/log-level") { _, _ in
-                try Self.jsonResponse(["level": "\(NovaMLXLog.fileLogLevel.rawValue)"] as [String: String])
-            }
-            Put("/admin/api/log-level") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-                      let level = json["level"] as? Int,
-                      let logLevel = NovaMLXLog.LogLevel(rawValue: level) else {
-                    return try Self.jsonResponse(["error": "Invalid level. Use 0=debug, 1=info, 2=warning, 3=error"], httpStatus: .badRequest)
-                }
-                NovaMLXLog.fileLogLevel = logLevel
-                NovaMLXLog.info("[Admin] Log level changed to \(logLevel)")
-                return try Self.jsonResponse(["level": logLevel.rawValue])
-            }
-
-            // MARK: - Cluster Admin
-            Get("/admin/api/cluster/status") { _, _ in
-                let body = ClusterAdminRoutes.shared.clusterStatus()
-                let data = try JSONSerialization.data(withJSONObject: body)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-            Get("/admin/api/cluster/discovery-debug") { _, _ in
-                let body = ClusterAdminRoutes.shared.discoveryDebug()
-                let data = try JSONSerialization.data(withJSONObject: body)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-            Get("/admin/api/models/{id}/cluster/sync-status") { _, context in
-                let modelId = try context.parameters.require("id")
-                let body = ClusterAdminRoutes.shared.modelSyncStatus(modelId: modelId)
-                let data = try JSONSerialization.data(withJSONObject: body)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-
-            // Shard plan: GET /admin/api/cluster/shard-plan?model=<modelId>
-            Get("/admin/api/cluster/shard-plan") { request, context in
-                let modelId = request.uri.query?.split(separator: "&")
-                    .compactMap { param -> String? in
-                        let parts = param.split(separator: "=", maxSplits: 1)
-                        guard parts.count == 2, parts[0] == "model" else { return nil }
-                        return String(parts[1])
-                    }.first ?? ""
-                guard !modelId.isEmpty else {
-                    let err = ["error": "missing ?model= parameter"]
-                    let data = try JSONSerialization.data(withJSONObject: err)
-                    return Response(status: .badRequest, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-                }
-                if let plan = ClusterAdminRoutes.shared.currentShardPlan(modelId: modelId) {
-                    let data = try JSONSerialization.data(withJSONObject: plan)
-                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-                } else {
-                    let data = try JSONSerialization.data(withJSONObject: ["status": "no_plan"])
+                    let data = try JSONSerialization.data(withJSONObject: dict)
                     return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
                 }
-            }
-
-            // Worker registration: POST /admin/api/cluster/workers/register
-            Post("/admin/api/cluster/workers/register") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                let spec = try JSONDecoder().decode(NodeSpec.self, from: body)
-                let info = ClusterManager.shared.registerWorker(spec: spec)
-                let data = try JSONEncoder().encode(["nodeId": info.nodeId, "status": info.status.rawValue])
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
-            }
-
-            // Worker heartbeat: POST /admin/api/cluster/workers/heartbeat
-            Post("/admin/api/cluster/workers/heartbeat") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                struct HeartbeatPayload: Codable { let nodeId: String }
-                let payload = try JSONDecoder().decode(HeartbeatPayload.self, from: body)
-                ClusterManager.shared.updateHeartbeat(nodeId: payload.nodeId)
-                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(string: "{\"ok\":true}")))
-            }
-
-            // Model download for workers: GET /admin/api/cluster/models/{id}/download
-            Get("/admin/api/cluster/models/{id}/download") { _, context in
-                let modelId = try context.parameters.require("id")
-                guard let record = models.getRecord(modelId) else {
-                    return Response(status: .notFound)
+                Put("/{id}") { request, context in
+                    guard let id = context.parameters.get("id", as: String.self) else {
+                        throw NovaMLXError.apiError("Missing key ID")
+                    }
+                    let body = try await request.body.collect(upTo: .max)
+                    struct UpdateKeyRequest: Decodable {
+                        let name: String?
+                        let isEnabled: Bool?
+                        let expiresAt: String?
+                        let rateLimitPerSecond: Double?
+                        let rateLimitBurst: Int?
+                        let allowedModels: [String]?
+                        let allowedEndpoints: [String]?
+                        let maxTokensPerPeriod: Int64?
+                        let maxRequestsPerPeriod: Int64?
+                        let usageResetPeriod: String?
+                    }
+                    let req = try JSONDecoder().decode(UpdateKeyRequest.self, from: body)
+                    try NovaDB.shared.apiKeyStore.update(id: id) { rec in
+                        if let name = req.name { rec.name = name }
+                        if let isEnabled = req.isEnabled { rec.isEnabled = isEnabled }
+                        if let expiresAtStr = req.expiresAt {
+                            rec.expiresAt = (expiresAtStr == "never") ? nil : ISO8601DateFormatter().date(from: expiresAtStr)
+                        }
+                        if let rps = req.rateLimitPerSecond { rec.rateLimitPerSecond = rps }
+                        if let burst = req.rateLimitBurst { rec.rateLimitBurst = burst }
+                        if let models = req.allowedModels {
+                            rec.allowedModels = Self.encodeJSONField(models.isEmpty ? nil : models)
+                        }
+                        if let endpoints = req.allowedEndpoints {
+                            rec.allowedEndpoints = Self.encodeJSONField(endpoints.isEmpty ? nil : endpoints)
+                        }
+                        if let maxTokens = req.maxTokensPerPeriod { rec.maxTokensPerPeriod = maxTokens }
+                        if let maxRequests = req.maxRequestsPerPeriod { rec.maxRequestsPerPeriod = maxRequests }
+                        if let periodStr = req.usageResetPeriod {
+                            rec.usageResetPeriod = periodStr
+                        }
+                    }
+                    return try Self.jsonResponse(["status": "ok"])
                 }
-                let modelDir = record.localURL.path
-                let fm = FileManager.default
-                guard fm.fileExists(atPath: modelDir) else {
-                    return Response(status: .notFound)
+                Delete("/{id}") { request, context in
+                    guard let id = context.parameters.get("id", as: String.self) else {
+                        throw NovaMLXError.apiError("Missing key ID")
+                    }
+                    try NovaDB.shared.apiKeyStore.delete(id: id)
+                    return try Self.jsonResponse(["status": "ok"])
                 }
-                // Stream the entire model directory as a tar.gz
-                let process = Process()
-                let pipe = Pipe()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-                process.arguments = ["-czf", "-", "-C", modelDir, "."]
-                process.standardOutput = pipe
-                try process.run()
-                process.waitUntilExit()
-                guard let data = try pipe.fileHandleForReading.readToEnd() else {
-                    return Response(status: .internalServerError)
+                Post("/{id}/rotate") { request, context in
+                    guard let id = context.parameters.get("id", as: String.self) else {
+                        throw NovaMLXError.apiError("Missing key ID")
+                    }
+                    let (record, rawKey) = try NovaDB.shared.apiKeyStore.rotate(id: id)
+                    let resp: [String: String] = [
+                        "id": record.id,
+                        "key": rawKey,
+                        "keyPrefix": record.keyPrefix,
+                    ]
+                    return try Self.jsonResponse(resp)
                 }
-                return Response(
-                    status: .ok,
-                    headers: [
-                        .contentType: "application/gzip",
-                        .contentDisposition: "attachment; filename=\"\(modelId.replacingOccurrences(of:"/",with:"-")).tar.gz\"",
-                    ],
-                    body: .init(byteBuffer: ByteBuffer(data: data))
-                )
-            }
+                Get("/{id}/usage") { request, context in
+                    guard let id = context.parameters.get("id", as: String.self) else {
+                        throw NovaMLXError.apiError("Missing key ID")
+                    }
+                    guard let key = (try? NovaDB.shared.apiKeyStore.getAsAPIKey(id: id)) ?? nil else {
+                        return try Self.jsonResponse(["error": "Key not found"], httpStatus: .notFound)
+                    }
 
-            // Cluster model activation: POST /admin/api/cluster/activate-model
-            Post("/admin/api/cluster/activate-model") { request, _ in
-                let body = try await request.body.collect(upTo: .max)
-                guard let json = try? JSONSerialization.jsonObject(with: Data(buffer: body)) as? [String: String],
-                      let modelId = json["modelId"] else {
-                    return Response(status: .badRequest, headers: [.contentType: "application/json"],
-                                    body: .init(byteBuffer: ByteBuffer(string: "{\"error\":true,\"message\":\"modelId required\"}")))
+                    let fromParam = request.uri.queryParameters.get("from")
+                    let toParam = request.uri.queryParameters.get("to")
+
+                    if fromParam != nil || toParam != nil {
+                        guard let (from, to) = Self.parseUsageWindow(from: fromParam, to: toParam) else {
+                            throw NovaMLXError.apiError("Invalid usage window: 'from' must be before 'to'")
+                        }
+                        let report = try NovaDB.shared.apiKeyStore.usageReport(keyId: id, from: from, to: to)
+                        return try Self.usageReportJSON(report)
+                    }
+
+                    var usage: [String: Any] = [
+                        "totalTokensUsed": key.usage.totalTokensUsed,
+                        "totalRequests": key.usage.totalRequests,
+                        "periodTokens": key.usage.periodTokens,
+                        "periodRequests": key.usage.periodRequests,
+                        "perModelTokens": key.usage.perModelTokens,
+                    ]
+                    if let lastUsed = key.usage.lastUsedAt {
+                        usage["lastUsedAt"] = ISO8601DateFormatter().string(from: lastUsed)
+                    }
+                    let data = try JSONSerialization.data(withJSONObject: usage)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
                 }
-                let result = await ClusterAdminRoutes.shared.activateModel(modelId: modelId)
-                let data = try? JSONSerialization.data(withJSONObject: result)
-                let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-                return Response(status: .ok, headers: [.contentType: "application/json"],
-                                body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
-            }
-
-            // Cluster model deactivation: POST /admin/api/cluster/deactivate-model
-            Post("/admin/api/cluster/deactivate-model") { _, _ in
-                let result = await ClusterAdminRoutes.shared.deactivateModel()
-                let data = try? JSONSerialization.data(withJSONObject: result)
-                let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-                return Response(status: .ok, headers: [.contentType: "application/json"],
-                                body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
-            }
-
-            // Cluster model status: GET /admin/api/cluster/model-status
-            Get("/admin/api/cluster/model-status") { _, _ in
-                let result = ClusterAdminRoutes.shared.modelStatus()
-                let data = try? JSONSerialization.data(withJSONObject: result)
-                let jsonStr = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-                return Response(status: .ok, headers: [.contentType: "application/json"],
-                                body: .init(byteBuffer: ByteBuffer(string: jsonStr)))
             }
         }
 
@@ -3163,16 +3400,101 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func recordTokenUsage(request: Request, promptTokens: Int, completionTokens: Int, model: String? = nil) {
+    static func recordTokenUsage(
+        request: Request?,
+        promptTokens: Int,
+        completionTokens: Int,
+        model: String? = nil,
+        endpoint: String
+    ) {
         let total = Int64(promptTokens) + Int64(completionTokens)
         guard total > 0 else { return }
-        let token = extractRequestToken(request)
-        guard let token else { return }
-        Task {
-            if let key = (try? NovaDB.shared.apiKeyStore.findAPIKeyByRawToken(token)) ?? nil {
-                try? NovaDB.shared.apiKeyStore.recordUsage(keyId: key.id, tokens: total, model: model)
-            }
+        var keyId: String?
+        if let request, let token = extractRequestToken(request),
+           let key = (try? NovaDB.shared.apiKeyStore.findAPIKeyByRawToken(token)) ?? nil {
+            keyId = key.id
         }
+        Task {
+            try? NovaDB.shared.apiKeyStore.recordUsage(
+                keyId: keyId,
+                promptTokens: Int64(promptTokens),
+                completionTokens: Int64(completionTokens),
+                model: model,
+                endpoint: endpoint
+            )
+        }
+    }
+
+    private static func parseUsageWindow(from: String?, to: String?) -> (Date, Date)? {
+        let end = APIKeyStore.parseUsageDate(to) ?? Date()
+        let start = APIKeyStore.parseUsageDate(from, defaultOffsetDays: -30) ?? end.addingTimeInterval(-30 * 86400)
+        guard start < end else { return nil }
+        return (start, end)
+    }
+
+    private static func usageReportJSON(_ report: UsageReport) throws -> Response {
+        let iso = ISO8601DateFormatter()
+        var byKey: [[String: Any]] = []
+        for entry in report.byKey {
+            var item: [String: Any] = [
+                "requests": entry.usage.requests,
+                "promptTokens": entry.usage.promptTokens,
+                "completionTokens": entry.usage.completionTokens,
+                "totalTokens": entry.usage.totalTokens,
+                "byModel": entry.byModel.map { m in
+                    [
+                        "model": m.model,
+                        "requests": m.usage.requests,
+                        "promptTokens": m.usage.promptTokens,
+                        "completionTokens": m.usage.completionTokens,
+                        "totalTokens": m.usage.totalTokens,
+                    ] as [String: Any]
+                },
+            ]
+            if let keyId = entry.keyId { item["keyId"] = keyId }
+            if let keyName = entry.keyName { item["keyName"] = keyName }
+            byKey.append(item)
+        }
+
+        let payload: [String: Any] = [
+            "from": iso.string(from: report.from),
+            "to": iso.string(from: report.to),
+            "total": [
+                "requests": report.total.requests,
+                "promptTokens": report.total.promptTokens,
+                "completionTokens": report.total.completionTokens,
+                "totalTokens": report.total.totalTokens,
+            ],
+            "attributed": [
+                "requests": report.attributed.requests,
+                "promptTokens": report.attributed.promptTokens,
+                "completionTokens": report.attributed.completionTokens,
+                "totalTokens": report.attributed.totalTokens,
+            ],
+            "unattributed": [
+                "requests": report.unattributed.requests,
+                "promptTokens": report.unattributed.promptTokens,
+                "completionTokens": report.unattributed.completionTokens,
+                "totalTokens": report.unattributed.totalTokens,
+            ],
+            "byKey": byKey,
+            "byModel": report.byModel.map { m in
+                [
+                    "model": m.model,
+                    "requests": m.usage.requests,
+                    "promptTokens": m.usage.promptTokens,
+                    "completionTokens": m.usage.completionTokens,
+                    "totalTokens": m.usage.totalTokens,
+                ] as [String: Any]
+            },
+            "reconciliation": [
+                "attributedTokens": report.attributed.totalTokens,
+                "unattributedTokens": report.unattributed.totalTokens,
+                "sumMatchesTotal": report.attributed.totalTokens + report.unattributed.totalTokens == report.total.totalTokens,
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
     }
 
     private static func extractRequestToken(_ request: Request) -> String? {

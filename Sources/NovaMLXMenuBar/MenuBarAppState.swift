@@ -5,6 +5,16 @@ import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
 
+public struct TPSHistoryPoint: Sendable, Equatable {
+    public let tps: Double
+    public let timestamp: Date
+
+    public init(tps: Double, timestamp: Date = Date()) {
+        self.tps = tps
+        self.timestamp = timestamp
+    }
+}
+
 public struct SpecBoostState: Sendable {
     public let status: String
     public let reason: String?
@@ -21,15 +31,26 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var adminPort: Int = 6591
     @Published public var apiKey: String? = nil
     @Published public var loadedModels: [String] = []
+    /// Models currently being restored on startup. Shown as spinner rows in the
+    /// UI so the user sees progress while waiting (model loading can take minutes).
+    @Published public var restoringModels: [String] = []
     @Published public var systemStats: SystemStats = SystemStats()
     @Published public var inferenceStats: InferenceStats = InferenceStats()
     @Published public var totalTokensGenerated: UInt64 = 0
     @Published public var uptime: TimeInterval = 0
     @Published public var downloadTasks: [String: DownloadTaskInfo] = [:]
     @Published public var requestedPage: AppPage? = nil
-    @Published public var tpsHistory: [Double] = []
+    /// When non-nil, ChatPageView should pre-select this model on its next
+    /// appear / onReceive. Cleared after consumption. Drives the
+    /// "Pick to Playground" buttons in Active Models, Tokenhub API models,
+    /// and Load Balancers.
+    @Published public var requestedPlaygroundModel: String? = nil
+    @Published public var tpsHistory: [TPSHistoryPoint] = []
     @Published public var peakTokensPerSecond: Double = 0
     @Published public var currentInferenceModel: String? = nil
+    /// Live, in-progress inference across ALL backends (LLM, VLM, ASR, TTS, image).
+    /// Drives the "Realtime Inference Speed" panel. nil when idle.
+    @Published public var liveActivity: LiveActivity? = nil
 
     // Cloud auth state — shared across all pages
     @Published public var cloudLoggedIn: Bool = false
@@ -50,6 +71,13 @@ public final class MenuBarAppState: ObservableObject {
     private let maxRealisticTps: Double = 500
 
     public init() {}
+
+    /// Jump to Playground and request that this model be pre-selected.
+    /// Used by play.circle buttons in Models / Tokenhub / LoadBalancers pages.
+    public func pickInPlayground(_ modelId: String) {
+        requestedPlaygroundModel = modelId
+        requestedPage = .chat
+    }
 
     // MARK: - Stats Monitoring
 
@@ -77,6 +105,7 @@ public final class MenuBarAppState: ObservableObject {
                 }
                 self.systemStats = systemStats
                 self.inferenceStats = currentStats
+                self.liveActivity = currentStats.liveActivity
                 self.currentInferenceModel = CurrentInferenceModel.shared.modelID
                 self.loadedModels = inferenceService.listLoadedModels()
                 self.uptime = SystemMonitor.shared.uptime
@@ -84,12 +113,13 @@ public final class MenuBarAppState: ObservableObject {
                 // Trim consecutive zeros: allow at most 1 zero data point (~2s) between
                 // inference bursts. Long idle stretches produce a flat line that wastes
                 // chart space — only keep the interesting TPS up/down curve.
+                let point = TPSHistoryPoint(tps: tps, timestamp: Date())
                 if tps > 0 {
-                    self.tpsHistory.append(tps)
+                    self.tpsHistory.append(point)
                 } else {
-                    let trailingZeros = self.tpsHistory.reversed().prefix(while: { $0 == 0 }).count
+                    let trailingZeros = self.tpsHistory.reversed().prefix(while: { $0.tps == 0 }).count
                     if trailingZeros < 1 {
-                        self.tpsHistory.append(tps)
+                        self.tpsHistory.append(point)
                     }
                 }
                 if self.tpsHistory.count > self.maxTpsHistory {
@@ -157,7 +187,13 @@ public final class MenuBarAppState: ObservableObject {
     }
 
     public func startDownload(repoId: String) {
-        guard downloadTasks[repoId]?.isActive != true else { return }
+        // Allow click-through even when a download is "active" — the server's
+        // cancelTasksForRepo guarantees single-flight per repo by killing any
+        // in-flight task before starting the new one. Why allow this: a
+        // stalled-but-not-failed download looks frozen to the user; letting
+        // them click Resume (which kills + restarts server-side) is the
+        // intended escape hatch. The local DownloadTaskInfo is rebuilt to
+        // reset progress + status to .pending so the UI shows immediate feedback.
         downloadTasks[repoId] = DownloadTaskInfo(repoId: repoId)
 
         Task {
@@ -300,8 +336,9 @@ public final class MenuBarAppState: ObservableObject {
 
                 // Parse per-file progress
                 if let files = taskJson["fileProgresses"] as? [[String: Any]] {
-                    downloadTasks[repoId]?.fileProgresses = files.compactMap { f in
+                    let parsed: [FileDownloadInfo] = files.compactMap { f in
                         guard let name = f["filename"] as? String else { return nil }
+                        let stallSeconds: Double? = (f["secondsSinceLastByte"] as? Double)
                         return FileDownloadInfo(
                             filename: name,
                             downloadedBytes: f["downloadedBytes"] as? Int64 ?? 0,
@@ -310,9 +347,11 @@ public final class MenuBarAppState: ObservableObject {
                             currentURL: f["currentURL"] as? String,
                             retryCount: f["retryCount"] as? Int ?? 0,
                             isResuming: f["isResuming"] as? Bool ?? false,
-                            speed: f["speed"] as? Double ?? 0
+                            speed: f["speed"] as? Double ?? 0,
+                            secondsSinceLastByte: stallSeconds
                         )
                     }
+                    downloadTasks[repoId]?.fileProgresses = parsed
                 }
 
                 switch status {

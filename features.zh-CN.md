@@ -1,7 +1,7 @@
 # NovaMLX — 功能参考
 
-> **面向 Apple Silicon 的生产级纯 Swift LLM/VLM 推理服务器。**
-> 兼容 OpenAI 与 Anthropic API。原生 macOS 菜单栏应用。基于 MLX 构建。
+> **面向 Apple Silicon 的生产级纯 Swift LLM / VLM / 音频 / 图像推理服务器。**
+> 兼容 OpenAI、Anthropic、Responses 三套 API。原生 macOS 菜单栏应用。基于 MLX 构建。支持多节点分布式推理、云模型代理、负载均衡，以及完整的 API Key 管理体系。
 
 ---
 
@@ -10,730 +10,676 @@
 - [推理引擎](#推理引擎)
 - [Worker 子进程隔离](#worker-子进程隔离)
 - [多模态支持](#多模态支持)
+- [模型架构](#模型架构)
 - [API 兼容性](#api-兼容性)
+  - [OpenAI 兼容（端口 6590）](#openai-兼容端口-6590)
+  - [Anthropic 兼容](#anthropic-兼容)
+  - [Responses API](#responses-api)
+  - [管理端口（6591）](#管理端口6591)
 - [结构化输出](#结构化输出)
 - [工具调用](#工具调用)
-- [控制 Token 与思维链过滤](#控制-token-与思维链过滤)
-- [KV 缓存与前缀共享](#kv-缓存与前缀共享)
+- [控制令牌与思考过滤](#控制令牌与思考过滤)
+- [KV Cache 与前缀共享](#kv-cache-与前缀共享)
 - [TurboQuant KV 压缩](#turboquant-kv-压缩)
 - [连续批处理](#连续批处理)
 - [推测解码](#推测解码)
+  - [N-gram 推测解码](#n-gram-推测解码)
+  - [草稿模型推测解码](#草稿模型推测解码)
+- [分布式推理](#分布式推理)
+- [音频（ASR / TTS / 语音克隆）](#音频asr--tts--语音克隆)
+- [图像生成](#图像生成)
+- [嵌入与重排](#嵌入与重排)
 - [会话管理](#会话管理)
-- [向量嵌入与重排序](#向量嵌入与重排序)
-
 - [MCP — 模型上下文协议](#mcp--模型上下文协议)
 - [Agent 集成](#agent-集成)
+- [Tokenhub 云模型代理](#tokenhub-云模型代理)
+- [Anthropic↔OpenAI 翻译桥](#anthropicopenai-翻译桥)
+- [负载均衡器](#负载均衡器)
+- [API Key 管理](#api-key-管理)
 - [模型管理](#模型管理)
-- [内存管理](#内存管理)
-- [逐模型配置](#逐模型配置)
 - [HuggingFace 集成](#huggingface-集成)
-- [云端模型代理](#云端模型代理)
+- [Modelfile 系统](#modelfile-系统)
+- [内存管理](#内存管理)
+- [按模型独立配置](#按模型独立配置)
 - [可观测性与基准测试](#可观测性与基准测试)
-- [Web 界面](#web-界面)
 - [macOS 菜单栏应用](#macos-菜单栏应用)
 - [国际化](#国际化)
 - [安全与中间件](#安全与中间件)
 - [Homebrew 分发](#homebrew-分发)
-- [配置参考](#配置参考)
+- [TCC 监控器](#tcc-监控器)
+- [配置](#配置)
+- [架构总览](#架构总览)
+- [快速开始](#快速开始)
 
 ---
 
 ## 推理引擎
 
-NovaMLX 通过 MLX 在 Apple Silicon GPU 上直接运行 LLM 和 VLM 推理，零外部依赖（无需 Python 或远程服务）。
+NovaMLX 通过 MLX 直接在 Apple Silicon GPU 上运行 LLM、VLM、音频与图像推理，完全脱离 Python 或任何远端服务。
 
-| 特性 | 详情 |
-|------|------|
-| **计算后端** | MLX（Apple Silicon GPU）、惰性求值、统一内存架构 |
-| **模型格式** | SafeTensors（4-bit、8-bit、FP16 量化） |
-| **50+ 模型架构** | Llama 3/3.1、Mistral/Mixtral、Qwen 2/2.5/3、Gemma 2/3、Phi 3.5/4、StarCoder2 等 |
-| **采样策略** | Temperature、Top-P、Top-K、Min-P、频率/存在/重复惩罚、随机种子 |
-| **流式输出** | 所有生成端点均支持 SSE 逐 Token 流式输出 |
-| **最大生成长度** | 按请求或按模型可配置 |
-| **融合批量解码** | 共享 KV 缓存的并发多序列解码 |
-| **推测解码** | 基于 N-gram 模式和草稿模型的 Token 预测加速生成 |
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **后端** | MLX（Apple Silicon GPU）、惰性求值、统一内存 |
+| **模型格式** | SafeTensors — 4-bit、8-bit、FP16、NVFP4 预量化 |
+| **采样参数** | `temperature`、`top_p`、`top_k`、`min_p`、`frequency_penalty`、`presence_penalty`、`repetition_penalty`、`seed` |
+| **停止控制** | 停止字符串、停止 token ID、max_tokens 上限 |
+| **流式输出** | OpenAI/Anthropic/Responses 使用 SSE；音频/图像使用原始字节流 |
+| **分阶段求值** | 分批 `eval` 防止大模型（>500 数组，如 Ling-2.6-flash 61 GB）出现 Metal OOM |
+| **CompiledSampler** | 预编译采样图，加速热路径 token 选择 |
+| **MLXEngine.perform** | 线程隔离的 `model()+eval()+sample()` 包裹器，保证并发安全 |
 
 ## Worker 子进程隔离
 
-推理 Worker 作为独立子进程运行，通过 stdin/stdout 的 JSON 消息与主 API 服务器通信。
+每个推理模型运行在独立的 Worker 子进程中，由 `WorkerSupervisor` 监管（`Sources/NovaMLXInference/WorkerSupervisor.swift`）。
 
-| 特性 | 详情 |
-|------|------|
-| **崩溃隔离** | Worker 崩溃不影响 API 服务器——Supervisor 自动重启 |
-| **内存隔离** | Worker 拥有独立的进程内存预算，与主应用分开 |
-| **通信协议** | 基于 stdin/stdout 的双向 JSON 消息协议 |
-| **健康上报** | 每 5 秒向父进程推送内存统计 |
-| **代码签名** | Ad-hoc 签名满足 macOS 进程完整性要求 |
-| **守护进程** | WorkerSupervisor 监控 Worker 健康，异常退出时自动重启，处理背压 |
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **进程隔离** | 单个模型崩溃不会拖垮整个服务 |
+| **自动重启** | 崩溃恢复（2 秒冷却），请求自动重路由 |
+| **内存统计** | 跟踪每个 Worker 的当前 / soft / hard RSS 上限 |
+| **GPU 内存** | 实时 Metal 分配器压力报告 |
+| **请求追踪** | 飞行中请求账目，崩溃时自动清理 |
+| **进度回调** | 分阶段的模型加载进度（init / weights / kv-cache / ready） |
 
 ## 多模态支持
 
-完整的视觉语言模型（VLM）推理管线，支持图像理解。
+| 模态 | 支持架构 | 备注 |
+|----------|---------------|-------|
+| **视觉（VLM）** | Llava、LlavaNext、LlavaQwen2、Qwen2VL、Qwen2.5VL、Qwen3VL、Mllama、Gemma3、Gemma4、InternVLChat、Idefics3、PaliGemma、Phi3V、Pixtral、Molmo、Florence2、Mistral3 | 3D-mRoPE 状态需走 `ContinuousBatcher`（不能用 fused-decode） |
+| **音频 ASR** | Whisper、Qwen3-ASR | 48 kHz Core Audio 录音 |
+| **音频 TTS** | Qwen3-TTS（旧）、Dots TTS（现行） | Dots 支持语音克隆 |
+| **图像生成** | FLUX.1（4-bit、8-bit、FP16） | 内嵌 `flux.swift` |
+| **嵌入** | BERT、XLM-Roberta、ModernBert、Qwen3-ForTextEmbedding、Siglip、NomicBert | 池化：mean / cls / last-token |
+| **重排** | 交叉编码器 reranker | 对候选段落重新打分排序 |
 
-| 特性 | 详情 |
-|------|------|
-| **图像输入** | Base64 Data URI、HTTP URL、本地文件路径 |
-| **VLM 架构** | Qwen2-VL、Qwen2.5-VL、Qwen3-VL、LLaVA、Gemma3、Phi-3-Vision、Pixtral、Molmo、Idefics3、InternVL、PaliGemma、DeepSeek-VL2 等 |
-| **视觉特征缓存** | 内存 LRU（20 条目）+ 可选 SSD 持久化，SHA-256 哈希，按模型隔离 |
-| **API 适配** | 标准 OpenAI `image_url` 消息内容格式 |
+## 模型架构
 
-### 图像识别示例
+`ModelFamily` 注册表（`Sources/NovaMLXCore/Types.swift`）：`llama`、`mistral`、`phi`、`qwen`、`gemma`、`starcoder`、`claude`、`bailing`、`gptOss`、`whisper`、`qwen3Asr`、`qwen3Tts`、`dotsTts`、`stableDiffusion`、`flux`、`other`。
 
-```bash
-# 通过 base64 数据 URI 描述图像
-curl http://localhost:6590/v1/chat/completions \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "mlx-community/gemma-4-e4b-it-4bit",
-    "messages": [{
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "这张图片里有什么？"},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAA...=="}}
-      ]
-    }],
-    "max_tokens": 100
-  }'
+**LLM 家族包括：** Llama 3 / 3.1 / 3.2 / 3.3、Mistral / Mixtral、Qwen 2 / 2.5 / 3 / 3.5 / 3.6、Gemma 2 / 3 / 4、Phi 3.5 / 4、StarCoder2、GPT-OSS（Harmony）、Bailing-Hybrid（Ling 系列 — MLA + GLA + MoE）。
 
-# 通过 HTTP URL 描述图像
-curl http://localhost:6590/v1/chat/completions \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "mlx-community/gemma-4-e4b-it-4bit",
-    "messages": [{
-      "role": "user",
-      "content": [
-        {"type": "text", "text": "请描述这张图片。"},
-        {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}}
-      ]
-    }]
-  }'
-```
+**按家族默认配置**（`ModelFamilyRegistry`）：
 
-> 以上模型名称仅为示例，更多模型请通过软件内的 HuggingFace 浏览器或管理 API `/admin/models/download` 浏览和下载。
+| 家族 | KV 精度 | Prefill | 上下文 |
+|--------|--------------|---------|---------|
+| Llama / Mistral | 4-bit | 512 | 8192 |
+| Phi | 32-bit | 256 | 4096 |
+| Qwen | 4-bit | 512 | 8192 |
+| Gemma | 32-bit | 256 | 8192 |
 
----
+**Chat 模板处理器** — `ChatTemplateProcessorRegistry` 按 `(ModelFamily, ChatTemplateFormat)` 元组路由。家族特定处理器负责控制令牌、隐式思考检测、停止序列注入。
 
 ## API 兼容性
 
-### OpenAI 兼容端点（端口 6590）
+三种线上协议共用同一套推理引擎与工具调用层。
 
-| 方法 | 端点 | 说明 |
-|------|------|------|
-| `GET` | `/v1/models` | 列出可用模型 |
-| `POST` | `/v1/chat/completions` | 对话补全（流式 + 非流式） |
-| `POST` | `/v1/completions` | 文本补全（流式 + 非流式） |
-| `POST` | `/v1/embeddings` | 文本向量嵌入 |
-| `POST` | `/v1/rerank` | 文档重排序 |
-| `POST` | `/v1/responses` | OpenAI Responses API |
-| `GET` | `/v1/responses/{id}` | 获取已存储的响应 |
-| `DELETE` | `/v1/responses/{id}` | 删除已存储的响应 |
-| `POST` | `/v1/audio/transcriptions` | 语音转文字（Qwen3-ASR） |
-| `POST` | `/v1/images/generations` | 文生图（SDXL-Turbo） |
+### OpenAI 兼容（端口 6590）
 
-### Anthropic 兼容端点
+| 端点 | 方法 | 备注 |
+|----------|--------|-------|
+| `/v1/models` | GET | 列出已加载 + 已下载模型 |
+| `/v1/models/{id}` | GET | 模型元数据 |
+| `/v1/chat/completions` | POST | 流式 + 非流式 |
+| `/v1/completions` | POST | 旧式文本补全 |
+| `/v1/embeddings` | POST | 文本转向量 |
+| `/v1/audio/transcriptions` | POST | Whisper / Qwen3-ASR |
+| `/v1/audio/speech` | POST | Dots / Qwen3-TTS |
+| `/v1/images/generations` | POST | FLUX.1 |
+| `/v1/images/edits` | POST | FLUX.1 带遮罩 |
+| `/v1/images/variations` | POST | FLUX.1 变体 |
+| `/v1/rerank` | POST | 交叉编码器重排 |
 
-| 方法 | 端点 | 说明 |
-|------|------|------|
-| `POST` | `/v1/messages` | Anthropic Messages API（流式 + 非流式） |
-| `POST` | `/v1/messages/count_tokens` | Token 计数 |
+### Anthropic 兼容
 
-### 工具端点
+| 端点 | 方法 | 备注 |
+|----------|--------|-------|
+| `/v1/messages` | POST | 流式 + 非流式；支持 `messages`、`system`、`tools`、`tool_choice`、`thinking_budget` |
+| `/v1/messages/count_tokens` | POST | 预先 token 计数 |
 
-| 方法 | 端点 | 说明 |
-|------|------|------|
-| `GET` | `/health` | 健康检查（状态、GPU 内存、已加载模型、MCP） |
-| `GET` | `/v1/stats` | 会话与历史推理指标 |
-| `POST` | `/v1/mcp/execute` | 执行 MCP 工具调用 |
+鉴权：`x-api-key` 或 `Authorization: Bearer`。需带 `anthropic-version: 2023-06-01` 头。
 
----
+### Responses API
+
+与 Codex 兼容的 `/v1/responses` 实现。
+
+| 功能 | 详情 |
+|---------|---------|
+| **端点** | `POST /v1/responses`（流式 + 非流式）、`GET/DELETE /v1/responses/{id}`、`POST /v1/responses/{id}/cancel` |
+| **P0** | `tool_choice` 透传（auto / required / none / 指定工具） |
+| **P1** | 17 字段响应回显（status、output、usage、completed_at 等） |
+| **P2** | SSE `seq` 字段，便于客户端断点检测 |
+| **ConversationStore** | `previous_response_id` 解析已存储的对话历史 |
+| **Reasoning 别名** | `reasoning.effort` → `thinking_budget` |
+| **Compact** | `POST /v1/responses/compact` 截断存储的对话 |
+| **Input tokens** | `POST /v1/responses/input_tokens` 精确 tokenization 计数 |
+
+### 管理端口（6591）
+
+通过 admin key 走 Bearer 鉴权。完整端点清单：
+
+- **Models** — 列表 / 详情 / 下载 / 取消 / 加载 / 卸载 / forget / benchmark / perplexity / 缓存统计
+- **API Keys** — CRUD、轮换、用量统计、按 key 指标
+- **Tokenhub providers** — CRUD、测试、指标
+- **Load balancers** — CRUD、成员管理、试跑路由
+- **Modelfiles** — 自定义模型定义的 CRUD
+- **Stats / Info / Reset** — 服务指标、系统信息、重置
+- **Log level** — 运行时日志级别控制
 
 ## 结构化输出
 
-### JSON 模式（`response_format: json_object`）
-
-基于字符级有限状态机，将输出约束为合法 JSON。内部跟踪 12 种状态（对象、数组、字符串、数字、字面量），确保括号匹配、转义正确。
-
-### Schema 引导模式（`response_format: json_schema`）
-
-完整的 JSON Schema 解析为类型树，支持：
-- `object`（含必填字段追踪）
-- `array`、`string`、`integer`、`number`、`boolean`、`null`
-- `enum`（字符串值约束）
-- `anyOf`、`oneOf`、`allOf` 组合
-- Schema 状态与 JSON 状态同步追踪，实现字段级约束
-- 基于 Token 级 logits 掩码的字符过滤
-
----
+| 模式 | 线上字段 | 备注 |
+|------|------------|-------|
+| **JSON object** | `response_format: {type: "json_object"}` | 强制输出合法 JSON |
+| **JSON schema** | `response_format: {type: "json_schema", json_schema: {schema: ...}}` | 严格 schema 约束生成 |
+| **Regex** | `response_format: {type: "regex", regex: "..."}` | 正则锚定输出 |
+| **GBNF 语法** | `response_format: {type: "gbnf", gbnf: "..."}` | llama.cpp 语法格式 |
+| **Choice / Enum** | 通过 schema `enum` | 枚举单选约束 |
 
 ## 工具调用
 
-自动检测并解析 7 种工具调用输出格式：
+| 格式 | 字段 | 响应结构 |
+|--------|-------|----------------|
+| **OpenAI** | `tools: [{type:"function", function:{name, parameters}}]` | `choices[0].message.tool_calls[]` |
+| **Anthropic** | `tools: [{name, description, input_schema}]` | `content[].tool_use` 块 |
+| **Responses** | 通过 modelfile | 正则 + JSON 解析提取 |
 
-| 格式 | 模式 |
+`tool_choice`：`auto` / `required` / `none` / 指定工具 / `any`（Anthropic）。跨格式双向翻译会保留 tool id、name、arguments。
+
+## 控制令牌与思考过滤
+
+| 子系统 | 行为 |
+|-----------|----------|
+| **TurnStopProcessor** | 按模型定义停止 token 集（`<\|turn\|>`、`<\|end\|>` 等）；channel-thinking 模型排除 channel token |
+| **ThinkingParser** | 隐式 `<think>` 标签处理；显式 thinking_budget 透传 |
+| **语义 vs. 协议 token** | 语义标签（`<think>`）透传；协议 token（`<\|turn\|>`）过滤 |
+| **按模型检测** | 每个 model ID 有 `isImplicitThinkingModel` 标记 |
+| **stop 前刷新** | 在发出 stop chunk 前先 flush 解析出的思考（Qwen3.6 流式修复） |
+| **Channel 感知** | GPT-OSS Harmony 的 `<\|channel\|>` token 排除出停止集合 |
+
+## KV Cache 与前缀共享
+
+| 功能 | 详情 |
+|---------|---------|
+| **SSD 缓存存储** | 持久化跨会话 KV cache，位于 `~/.nova/cache/` |
+| **Block 哈希** | 内容寻址的 block，通过 `BlockHasher` |
+| **分页 block 池** | 通过 `PagedBlockPool` 高效管理内存 |
+| **启动自动加载** | 为热模型重建缓存（hybrid 模型当前禁用，因 Mamba+KV 混合） |
+| **命中/缺失追踪** | 通过 `/admin/models/{id}/cache` 暴露每模型缓存统计 |
+| **Session 复用** | 请求里的 `session_id` 字段把请求钉到对应 KV-cache 谱系；同一 session = 同一份 KV 跨请求复用。OpenAI / Anthropic / Responses 三套 API 都支持。 |
+
+### 澄清：Anthropic `cache_control` 字段为什么不被解析
+
+Anthropic 的 `cache_control: { type: "ephemeral" }` 字段是为**计费**设计的——告诉 Anthropic 云端哪些内容块要按 cache write 价格计费。NovaMLX 是**没有计费层的本地推理服务器**，这个字段对我们没意义：KV cache 在每次共享前缀的请求里都会自动复用。
+
+我们按路由路径处理 `cache_control`：
+
+| 路径 | 行为 |
 |------|------|
-| **XML** | `<tool>{"name": "...", "arguments": {...}}</tool>` 或 `<function=name>...` |
-| **括号** | `[TOOL_CALLS] [{"name": ...}]` |
-| **标记** | `<\|tool_call\|>...<\|/tool_call\|>` |
-| **命名空间 XML** | `<ns:tool_call><invoke name="...">...` |
-| **GLM 格式** | `☐函数名☐参数名■参数值■` 分隔符对 |
-| **Gemma 格式** | `call:functionName {key: value}` |
-| **思维链回退** | 从 `<think...>` 块中提取工具调用 |
-
-流式过滤器在输出流中实时屏蔽工具调用标记，确保终端用户看到纯净内容。
-
----
-
-## 控制 Token 与思维链过滤
-
-实时控制 Token 检测与过滤，保持生成输出干净并防止无限生成循环。
-
-### TurnStopProcessor
-
-检测生成文本中的轮次分隔符模式并强制发出 EOS Token。对使用语义标记但很少发出配置 EOS Token 的模型（如 Qwen3.6）至关重要。
-
-| 特性 | 详情 |
-|------|------|
-| **模式匹配** | 可配置的停止模式（如 `<|turn|>`、`<|im_end|>`） |
-| **状态机** | Active → StopDetected → Done 生命周期 |
-| **EOS 强制** | 检测到模式时将非 EOS logits 全部设为 `-inf` |
-| **累积追踪** | 追踪完整解码序列，而非单个 Token |
-
-### 思维链标签架构
-
-语义思维标签透传给用户，协议级控制 Token 被过滤：
-
-| 行为 | 示例 |
-|------|------|
-| **透传** | `<think>推理过程</think>` — 用户可见思维内容 |
-| **过滤** | `<|turn|>`、`<|im_end|>` — 流式输出前剥离 |
-| **隐式开放** | `ThinkingParser` 处理无开放标签的 `</think>` 闭合 |
-| **部分缓冲** | SSE 流中缓冲不完整的控制 Token 防止片段泄露 |
-
-### 控制 Token 过滤管线
-
-- 通用流式过滤器清理所有 Agent 输出格式中的控制 Token
-- 多轮 Agent 对话保护——控制 Token 不会在轮次间泄露
-- 支持正则 Token 匹配选项的自定义模式
-
----
-
-## KV 缓存与前缀共享
-
-借鉴 vLLM 的分块 KV 缓存架构，实现跨会话前缀复用。
-
-| 特性 | 详情 |
-|------|------|
-| **块大小** | 64 个 Token（可配置） |
-| **哈希算法** | SHA-1 链式哈希（父哈希 + Token + 模型名） |
-| **块池** | 双向链表空闲队列，引用计数，写时复制分叉 |
-| **SSD 持久化** | SafeTensors 格式，16 桶分片目录，GCD 异步写入队列 |
-| **SSD 容量** | 默认 100 GB，LRU 驱逐 |
-| **缓存类型** | KVCacheSimple、RotatingKVCache、QuantizedKVCache、ChunkedKVCache、MambaCache、ArraysCache、CacheList |
-| **统计指标** | 命中/未命中/节省 Token/驱逐次数/共享块数/SSD 块数与大小 |
-
----
+| **本地推理**（`/v1/messages` → MLX） | Codable 解码时静默丢弃（`AnthropicContentBlock` 没有这个字段）。KV cache 仍然通过前缀匹配 + `session_id` 自动复用。**客户端无需做任何事。** |
+| **`tknet:` / `lb:` → 原生 Anthropic 上游**（raw passthrough） | body 原样保留。`anthropic-version` header 总是转发；`anthropic-beta` header 客户端传了就转发（保证 1 小时 cache TTL 真到达 provider，不会静默降级成 5 分钟）。 |
+| **`tknet:` / `lb:` → OpenAI 格式上游**（Anthropic↔OpenAI 翻译桥） | 翻译时丢弃（OpenAI chat/completions 没有对应概念）。服务器会打 `[WARN] [TokenhubBridge]` 日志，让运维知道发生了静默降级。 |
 
 ## TurboQuant KV 压缩
 
-按模型可配置的 KV 缓存量化和内存压缩。
+4-bit 仿射量化 KV cache，支持动态 group size。
 
-| 位宽 | 压缩比 | 适用场景 |
-|------|--------|----------|
-| 2-bit | **8.0×** | 极端内存压力 |
-| 3-bit | **5.33×** | 高内存压力 |
-| 4-bit | **4.0×** | 均衡模式（推荐默认值） |
-| 6-bit | **2.67×** | 质量敏感场景 |
-| 8-bit | **2.0×** | 最小质量损失 |
-
-- **分组大小**：32、64（默认）、128
-- **自动推荐**：基于模型体积/可用内存比和上下文长度自动选择最佳位宽
-- **管理端点**：`GET /admin/api/turboquant` — 查看活跃配置
-- **底层实现**：基于 mlx-swift-lm 的 `QuantizedKVCache`，使用优化 Metal 内核
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **压缩** | 对 K、V 张量做 4-bit 仿射量化 |
+| **group size** | 按 head dim 动态决定每层 group size |
+| **透明性** | 在采样层之下运作，sampler 无感知 |
+| **质量权衡** | KV 内存减少约 75%，长上下文质量损失极小 |
 
 ## 连续批处理
 
-支持优先级感知的请求批处理，实现高吞吐并发推理。
-
-| 特性 | 详情 |
-|------|------|
-| **最大批量** | 8（可配置） |
-| **优先级** | 低、普通、高 |
-| **抢占调度** | 高优先级请求可抢占低优先级 |
-| **指标** | 活跃请求数、队列深度、已入队/已完成/已抢占总数、峰值并发、平均等待时间 |
-| **请求取消** | 支持单请求级别中断 |
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **默认 batch** | 8 序列（可配） |
+| **抢占** | 内存压力下按优先级驱逐 |
+| **专用队列** | VLM、hybrid-attention、会话、语法引导分别走独立路径 |
+| **异步流** | 每请求按优先级队列发射 token |
+| **指标** | `BatcherMetrics` 暴露队列深度、抢占率、平均等待 |
 
 ## 推测解码
 
-两种互补方式通过并行预测和验证多个 Token 来加速生成。
-
 ### N-gram 推测解码
 
-内置于 `FusedBatchScheduler` 的基于模式的草稿 Token 生成：
-
-| 特性 | 详情 |
-|------|------|
-| **方法** | 从最近上下文窗口进行 N-gram 模式匹配 |
-| **草稿长度** | 可配置的每步候选 Token 数量 |
-| **验证** | 目标模型并行验证所有草稿 Token |
-| **开销** | 无需辅助模型——纯算法实现 |
-
----
-
-## 语音转文字
-
-通过本地 MLX 运行 Qwen3-ASR 实现语音转文字。
-
-| 特性 | 详情 |
-|------|------|
-| **端点** | `POST /v1/audio/transcriptions`（兼容 OpenAI） |
-| **模型** | Qwen3-ASR（Swift/MLX） |
-| **格式** | WAV、MP3、M4A、FLAC、CAF |
-| **响应** | `{"text": "转录文本"}` |
-
----
-
-## 文生图
-
-通过本地 MLX 运行 SDXL-Turbo 实现文本生成图片。
-
-| 特性 | 详情 |
-|------|------|
-| **端点** | `POST /v1/images/generations`（兼容 OpenAI） |
-| **模型** | SDXL-Turbo |
-| **参数** | `prompt`、`size`（默认 1024×1024）、`n`（默认 1） |
-| **输出** | Base64 编码的 PNG（`b64_json`） |
-| **速度** | M 系列 GPU 约 2 秒生成一张图 |
+无需草稿模型的免费推测解码，通过 n-gram token 预测 + 接受采样实现。
 
 ### 草稿模型推测解码
 
-通过 `SpeculativeTokenIterator` 使用专用小模型：
+| 功能 | 详情 |
+|---------|---------|
+| **DraftModelRegistry** | 按目标模型家族自动注入推荐草稿模型 |
+| **内置草稿** | Qwen3-0.6B-4bit、Llama-3.2-1B-4bit、Gemma-2-2B-4bit |
+| **API** | `draft_model` + `num_draft_tokens` 请求字段 |
+| **EOS 抑制** | 仅草稿侧的 EOS token 被过滤，防止提前停止 |
+| **限制** | 不支持 hybrid-attention（Mamba）目标；不支持跨词表草稿 |
+| **状态 API** | `SpecBoostStatus`：`.eligible` / `.active` / `.ineligible`，按模型 |
 
-| 特性 | 详情 |
-|------|------|
-| **草稿模型** | 更小更快的模型生成候选 Token |
-| **目标模型** | 完整模型在单次前向传播中验证所有候选 |
-| **吞吐提升** | 对内存带宽瓶颈场景有显著加速 |
-| **适用场景** | 单 Token 生成受内存限制的大模型 |
+## 分布式推理
 
----
+通过 TCP / Thunderbolt 在多台 Apple Silicon 节点间做 pipeline-parallel 切片。
+
+| 功能 | 详情 |
+|---------|---------|
+| **传输层** | 数据面走原始 TCP 二进制；控制面按规模自适应 |
+| **切片策略** | `SlicedForwardPolicy` — 基于反射的层级切片 |
+| **ShardEngine** | 协调每节点前向传播 |
+| **ClusterModelManager** | 全集群激活/去激活；`ClusterModelState`（idle / activating / ready / failed） |
+| **远端采样** | Worker 侧做 argmax；只回传 4 字节 token ID，不回完整 logits |
+| **WorkerSupervisor** | 每节点生命周期、心跳/健康追踪 |
+| **自动降级** | 集群失败时回落到本地推理 |
+| **已编译后端** | Ring（TCP）已启用；JACCL（RDMA）在 `rdma_ctl` flag 后待启用 |
+| **实测性能** | coord 31.8 ms、worker 33.7 ms、TCP 9 ms、tokenizer 0.3 ms；顺序上限约 14 tok/s；远端采样基线 13.8 tok/s |
+| **真实场景** | Qwen3.6-27B 跨 M4 Max + M4 Mac Mini 经 Thunderbolt → 1.8 tok/s pipeline-parallel |
+
+## 音频（ASR / TTS / 语音克隆）
+
+| 功能 | 详情 |
+|---------|---------|
+| **Whisper ASR** | 48 kHz 录音、语言自动检测、`TranscriptionContainer` 热切换 |
+| **Qwen3-ASR** | 备选 ASR 后端，复用 `/v1/audio/transcriptions` 入口 |
+| **Dots TTS** | 内嵌 `mlx-swift-dots-tts`；`DotsTTSPipeline` 神经语音 |
+| **Qwen3-TTS** | 旧路径，已被 Dots 取代 |
+| **系统语音** | macOS `NSSpeechSynthesizer` 兜底 |
+| **语音克隆** | `VoiceProfile` 管理器位于 `~/.nova/voices/`；多说话人；参考音频克隆 |
+| **VoiceCloneSheet UI** | 录音/选取参考音、预览、保存为命名 profile |
+| **麦克风权限** | `audio-input` entitlement + `NSMicrophoneUsageDescription`，由 `build.sh` 注入 |
+
+## 图像生成
+
+| 功能 | 详情 |
+|---------|---------|
+| **模型** | FLUX.1（4-bit、8-bit、FP16） |
+| **Pipeline** | 内嵌 `flux.swift` 的 `FluxPipeline` |
+| **容器** | `ImageGenerationContainer` 支持热加载/卸载 |
+| **端点** | `/v1/images/generations`、`/v1/images/edits`、`/1/images/variations` |
+| **输出** | Base64 PNG；可配 height / width / steps / guidance |
+| **服务** | `ImageGenerationService` async API |
+
+## 嵌入与重排
+
+| 功能 | 详情 |
+|---------|---------|
+| **EmbeddingContainer** | 可热加载的嵌入模型 |
+| **架构** | BERT、XLM-Roberta、ModernBert、Qwen3-ForTextEmbedding、Siglip、NomicBert |
+| **池化** | mean / cls / last-token |
+| **端点** | `POST /v1/embeddings` |
+| **RerankerContainer** | 交叉编码器 reranker |
+| **端点** | `POST /v1/rerank`（候选 → 打分后的候选） |
 
 ## 会话管理
 
-持久化对话会话，跨轮次复用 KV 缓存。
-
-| 特性 | 详情 |
-|------|------|
-| **最大会话数** | 64 个并发会话 |
-| **会话 TTL** | 1800 秒自动回收 |
-| **持久化** | KV 缓存保存/恢复为 SafeTensors 文件 |
-| **会话分叉** | 深拷贝 KV 缓存到独立新会话 |
-| **管理 API** | 列出、删除、保存、分叉会话 |
-
----
-
-## 向量嵌入与重排序
-
-### 嵌入服务
-- **模型**：BERT、XLM-RoBERTa、ModernBERT、SigLIP、ColQwen2.5、NomicBERT、Jina v3
-- **批处理**：自动填充与堆叠，注意力掩码
-- **输出**：归一化池化向量
-- **端点**：`POST /v1/embeddings`（OpenAI 兼容）
-
-### 重排序服务
-- **方法**：交叉编码器对打分（query `</s></s>` document）
-- **归一化**：Min-Max 分数归一化
-- **Top-N 过滤**：仅返回前 N 个结果
-- **端点**：`POST /v1/rerank`（兼容 Cohere/Jina）
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **Session ID** | 请求里的 `session_id` 字段把请求钉到对应 KV-cache 谱系 |
+| **Fork** | 不复制 KV，把会话分叉到新 ID |
+| **TTL** | 内存压力下按 LRU 驱逐空闲会话 |
+| **跨端点** | 同一会话在 OpenAI / Anthropic / Responses 都能用 |
 
 ## MCP — 模型上下文协议
 
-多服务器 MCP 客户端，支持工具发现与执行。
-
-| 特性 | 详情 |
-|------|------|
-| **传输协议** | `stdio`（子进程）、`sse`（HTTP SSE）、`streamable-http`（HTTP POST） |
-| **协议版本** | `2024-11-05` |
-| **工具发现** | 连接时自动 `tools/list` |
-| **命名空间** | 工具以 `{服务器名}__{工具名}` 命名，避免冲突 |
-| **超时控制** | 按服务器可配置 |
-| **管理 API** | 配置、启用/禁用、查看工具列表与服务器状态 |
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **传输** | stdio、SSE、streamable-HTTP |
+| **工具** | `MCPTool` 带 JSON-schema 输入；命名空间化 `server__tool` |
+| **资源** | 通过 `MCPServerConfig` 暴露 |
+| **服务状态** | disconnected / connecting / connected / error |
+| **工具执行** | `MCPExecuteRequest` / `Response`；超时 + headers 可配 |
+| **校验** | 工具调用前强制 input-schema 校验 |
 
 ## Agent 集成
 
-内置外部 AI 编码 Agent 支持，通过自动生成配置将 NovaMLX 作为 LLM 后端。
+| Agent | 内置支持 |
+|-------|------------------|
+| **OpenClaw** | 工具调用型 agent |
+| **Hermes Agent** | 长链路推理 agent |
+| **OpenCode** | 编程 agent |
+| **插件系统** | 可扩展的 agent 框架 |
 
-| Agent | 描述 | 配置格式 |
-|-------|------|----------|
-| **OpenClaw** | 开源 AI Agent 框架，插件系统与工具调用 | JSON (`~/.openclaw/openclaw.json`) |
-| **Hermes Agent** | 自主 AI Agent，多步推理与工具执行 | YAML (`~/.hermes/config.yaml`) |
-| **OpenCode** | 基于终端的 AI 编程助手，支持代码编辑 | 环境变量 |
+`AgentsPageView` 提供 安装/启动/配置/查看配置 的 UX。
 
-| 特性 | 详情 |
-|------|------|
-| **自动检测** | 扫描 `$PATH` 及常见安装位置中的 Agent 二进制 |
-| **配置生成** | 一键生成包含端口、API Key、模型设置的配置 |
-| **剪贴板复制** | 快速复制粘贴到 Agent 配置文件 |
-| **安装链接** | 直达各 Agent 的 GitHub 仓库 |
-| **GUI** | 菜单栏应用中独立的 Agents 标签页 |
+## Tokenhub 云模型代理
 
----
+把远端 API 提供商通过 NovaMLX 代理出来，让所有客户端（Codex、Claude Code、Continue 等）只需要打一个本地入口。
+
+| 功能 | 详情 |
+|---------|---------|
+| **提供商目录** | 20+ 预置：OpenAI、Anthropic、DeepSeek、GLM/智谱、Qwen/通义、Groq、Mistral、Moonshot、Yi、Together、Fireworks、OpenRouter 等 |
+| **提供商类型** | 云托管（tknet.ai 会话）vs. 自带 Key（BYO-key） |
+| **路由** | `tknet:<provider-id>` 模型前缀 → 解析到对应 provider |
+| **透传** | 原样转发 body；只把 `model` 换成 `provider.remoteModel` |
+| **视觉后端** | 层级一：本地 VLM；层级二：provider 的 `anthropicEndpoint`（如 GLM anthropic-proxy）；层级三：`visionCompanionModel`；附带图像预处理 + 描述注入 |
+| **Provider 指标** | 成功数、请求数、平均延迟、按 provider 统计 |
+| **Key 解析** | 托管 provider 用会话 token；BYO-key 用 `provider.apiKey` |
+| **Endpoint 字段** | `anthropicEndpoint` 用于原生支持 Anthropic 格式的 provider |
+
+## Anthropic↔OpenAI 翻译桥
+
+当客户端发送 `/v1/messages`（Anthropic 格式），但解析到的 provider 只会说 OpenAI（DeepSeek、GLM、Qwen-compat 等），翻译桥会把请求翻译成 OpenAI `/chat/completions`，转发后重新组装出 `AnthropicResponse`。
+
+| 子系统 | 行为 |
+|-----------|----------|
+| **判别条件** | `needsAnthropicBridge(provider, path)`：path 是 `messages` 且 provider 没设 `anthropicEndpoint` 时为 true |
+| **入站** | 解码 `AnthropicRequest`，通过既有 `mapAnthropicMessages` 映射 |
+| **出站 body** | 构造 OpenAI chat/completions：model、messages、tools、tool_choice、采样参数、stop |
+| **响应** | 解码 `OpenAIResponse`，重建带 text / thinking / tool_use 块的 `AnthropicResponse` |
+| **流式** | 逐事件状态机：OpenAI chunk → Anthropic `message_start` / `content_block_start` / `content_block_delta(text_delta\|thinking_delta\|input_json_delta)` / `content_block_stop` / `message_delta(stop_reason, usage)` / `message_stop` |
+| **stop reason 映射** | `stop → end_turn`、`tool_calls → tool_use`、`length → max_tokens`、`stop_sequence → stop_sequence` |
+| **对 LB 透明** | LB dispatcher 把 `lb:` + messages 走同一套 passthrough — 翻译桥自动生效 |
+| **代码位置** | `Sources/NovaMLXAPI/APIServer+TokenhubAnthropicBridge.swift` |
+
+## 负载均衡器
+
+通过 `lb:<slug>` 模型前缀，把请求路由到本地 + 远端混合的模型池。
+
+| 功能 | 详情 |
+|---------|---------|
+| **LBRouter 策略** | Tiered（默认）、round-robin、weighted、least-latency |
+| **成员类型** | `.local`（推理服务）和 `.remote`（tokenhub provider） |
+| **LBProxy** | 每请求独立 actor：选成员、按序尝试、失败重试 |
+| **管理 API** | 9 个端点：LB + 成员 CRUD、试跑路由、统计 |
+| **按成员统计** | 成功/失败/平均延迟；UI 中可视化 |
+| **UI** | `LoadBalancersPageView`：手风琴行、成员选择器、策略配置、每行 play 按钮 |
+| **API 格式** | 跨 OpenAI / Anthropic / Responses 全支持（Anthropic 走翻译桥；Responses 走 `tknet:` 重写） |
+
+## API Key 管理
+
+基于 SQLite 的 API key 体系，带哈希、速率限制、白名单。
+
+| 功能 | 详情 |
+|---------|---------|
+| **存储** | SQLite 通过 `APIKeyStore`（取代了原 `api_keys.json`） |
+| **哈希** | SHA-256（明文为了 reveal 功能保留；DB 访问受控） |
+| **CRUD** | 通过 `/admin/keys` 与 UI 创建/读/更新/删除 |
+| **轮换** | `/admin/keys/{id}/rotate` 生成新明文，作废旧 key |
+| **速率限制** | 按 key 的 `rateLimitPerSecond`、`maxTokensPerPeriod`、`maxRequestsPerPeriod`，按周期（分/时/日）重置 |
+| **白名单** | 按 key 的 `allowedModels[]`、`allowedEndpoints[]` |
+| **用量追踪** | 总计 + 周期 token/请求数；按模型分解；最近使用时间 |
+| **开放模式旁路** | 未配置任何 key 时关闭鉴权（开发模式） |
+| **UI** | `APIKeysPageView`：整行手风琴、eye 揭示、copy 已揭示、用量进度条、白名单 |
+| **Admin vs. 普通 key** | 中间件分离：`AdminAuthMiddleware`（端口 6591）vs. `APIKeyAuthMiddleware`（端口 6590） |
 
 ## 模型管理
 
-### 管理端点（端口 6591，Bearer 认证）
-
-| 方法 | 端点 | 说明 |
-|------|------|------|
-| `GET` | `/admin/models` | 列出所有模型（下载/加载状态） |
-| `POST` | `/admin/models/download` | 从 HuggingFace 下载模型 |
-| `POST` | `/admin/models/load` | 加载模型到 GPU 内存 |
-| `POST` | `/admin/models/unload` | 从 GPU 内存卸载 |
-| `DELETE` | `/admin/models/{id}` | 删除模型文件 |
-| `POST` | `/admin/models/discover` | 扫描文件系统发现新模型 |
-| `GET` | `/admin/models/{id}/settings` | 获取逐模型配置 |
-| `PUT` | `/admin/models/{id}/settings` | 更新逐模型配置 |
-| `GET` | `/admin/api/memory` | 内存状态与压力监控 |
-
-### 模型驱逐
-- **LRU 驱逐**：超出内存预算时自动卸载非固定模型
-- **TTL 自动卸载**：按模型可配置空闲超时
-- **系统内存压力响应**：Critical → 卸载全部非固定模型；Warning → 仅保留 1 个
-- **周期监控**（60s）：GPU 内存超过 80% 触发驱逐
-
----
-
-## 内存管理
-
-通过 `ProcessMemoryEnforcer` 实现系统级内存压力监控与自动模型驱逐。
-
-### ProcessMemoryEnforcer
-
-基于 Actor 的内存压力管理器，配置策略灵活：
-
-| 特性 | 详情 |
-|------|------|
-| **轮询** | 1 秒间隔内存压力监控循环 |
-| **软限制** | 超限时触发警告日志 |
-| **硬限制** | 强制立即驱逐非固定模型 |
-| **Auto 模式** | 为系统保留 `max(4GB, min(8GB, physMem/5))`，其余供 NovaMLX 使用 |
-| **百分比模式** | 用户自定义物理内存百分比（如 `80%`） |
-| **固定值模式** | 绝对字节限制（如 `24GB`、`4096MB`） |
-| **OS 集成** | 响应 macOS 内存压力通知 |
-| **GUI 配置** | 设置中提供模式选择器，按模式显示条件输入字段 |
-
-### 内存预算追踪
-
-每序列 KV 缓存预算与准入控制：
-
-| 特性 | 详情 |
-|------|------|
-| **预留** | 每个序列在准入前预留 KV 缓存预算 |
-| **释放** | 序列完成时释放预算 |
-| **准入控制** | 预算不足时拒绝新请求 |
-| **TurboQuant 加成** | KV 量化有效将准入容量翻倍 |
-
----
-
-## 逐模型配置
-
-每个推理参数均可按模型独立覆盖，持久化存储于 `model_settings.json`：
-
-| 配置项 | 说明 |
-|--------|------|
-| `max_context_window` | 上下文长度覆盖 |
-| `max_tokens` | 最大生成 Token 数 |
-| `temperature` | 采样温度 |
-| `top_p` / `top_k` / `min_p` | 采样策略 |
-| `frequency_penalty` / `presence_penalty` / `repetition_penalty` | 重复控制 |
-| `seed` | 确定性生成种子 |
-| `ttl_seconds` | 空闲自动卸载超时 |
-| `keep_alive` | 按请求覆盖模型 TTL（秒，`-1` 为无限） |
-| `model_alias` | 模型 ID 别名 |
-| `is_pinned` | 免驱逐保护 |
-| `is_default` | 默认模型标记 |
-| `kv_bits` / `kv_group_size` | TurboQuant 配置 |
-| `thinking_budget` | 最大思维/推理 Token 数 |
-| `display_name` / `description` | 人类可读的名称与描述 |
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **模型目录** | `~/.nova/models/<repo_id>/` |
+| **发现** | `modelManager.downloadedModels()` + `inferenceService.listLoadedModels()` |
+| **自动加载** | 请求未加载模型时触发加载（通过 `ensureModelReady` 可配） |
+| **自动驱逐** | 内存压力下 LRU；绝不在请求中途驱逐 |
+| **重启恢复** | `restoreModels()` 重建上次会话的加载集合 |
+| **loaded_models 持久化** | SQLite 表（原 JSON，已修复"重启即被擦"的 bug） |
+| **模型设置** | 按模型覆盖项持久化到 SQLite（`model_settings` 表） |
+| **模型卡** | 通过 `/admin/api/hf/model-info` 从 HuggingFace 拉取元数据 |
+| **Forgetting** | `/admin/models/{id}/forget` — 清空 KV cache + container 状态 |
 
 ## HuggingFace 集成
 
-直接从 HuggingFace 浏览、搜索和下载模型。
-
-| 特性 | 详情 |
-|------|------|
-| **搜索** | 查询 HF Hub，支持仅 MLX 模型过滤，按趋势/下载量排序 |
-| **模型详情** | 架构、标签、文件列表、许可证 |
-| **下载** | 异步逐文件下载，带进度追踪和取消支持 |
-| **仪表盘 UI** | 搜索框、结果列表、下载进度与取消按钮 |
-| **自动注册** | 下载完成后自动发现并注册模型 |
-
----
+| 功能 | 详情 |
+|---------|---------|
+| **下载** | `POST /admin/api/hf/download`，带 `repo_id` + 可选 `endpoint` |
+| **取消** | `POST /admin/api/hf/cancel` 按 task ID；杀掉飞行中的 `Task` |
+| **状态轮询** | `GET /admin/api/hf/tasks` 返回按文件的进度 + 速度 + 卡顿检测 |
+| **镜像支持** | HF endpoint 可配（默认 `huggingface.co`；国内常切 `hf-mirror.com`） |
+| **幂等续传** | `cancelTasksForRepo` 在启动新任务前先杀飞行中任务（防点击竞争） |
+| **HEAD 探测** | 每个文件下载前做 3 秒连通性探测（被墙时快速失败） |
+| **阶段 UI** | 客户端显示：Connecting / Downloading（MB/s）/ Stalled（已 N 秒无字节）/ Endpoint unreachable |
+| **断点扫描** | 启动时检测 `*.download` 临时文件 → 转成 `.failed` 任务供手动 Resume |
+| **Xet CDN** | 自动跟随 `cas-bridge.xethub.hf.co` 重定向 |
 
 ## Modelfile 系统
 
-用户自定义模型配方，支持系统提示词、采样参数覆盖和模型选择。
+类似 Ollama Modelfile 的自定义模型定义。
 
-| 特性 | 详情 |
-|------|------|
-| **格式** | `FROM <model_id>` + 可选 `SYSTEM`、`PARAMETER`、`TEMPLATE` 指令 |
-| **API** | `POST /admin/modelfiles/create`、`GET /admin/modelfiles`、`DELETE /admin/modelfiles/{name}` |
-| **推理** | Modelfile 模型出现在 `/v1/models`，接受聊天补全请求并注入系统提示词 + 采样覆盖 |
-| **存储** | `~/.nova/modelfiles/` — 每个 Modelfile 一个 `.json` 文件 |
+| 功能 | 详情 |
+|---------|---------|
+| **存储** | SQLite `modelfiles` 表 |
+| **字段** | `name`、`base_model`、`system`、`template`、`parameters`、`adapter`、`tools` |
+| **管理 API** | `/admin/modelfiles` 的 CRUD |
+| **解析** | Modelfile 名称像 model ID 一样被解析 |
+| **工具定义** | 静态 tool 定义嵌在 modelfile 里 |
 
----
+## 内存管理
 
-## 云端模型代理
+| 子系统 | 行为 |
+|-----------|----------|
+| **ProcessMemoryEnforcer** | 通过 `ProcessInfo.memoryPressure` + 主动 trim 硬性 RSS 上限 |
+| **MemoryBudgetTracker** | 每个激活模型的 GPU 内存预算 |
+| **WiredMemoryTicket** | 分配前预留 wired Metal 内存 |
+| **Auto 模式** | 进程监控系统压力，按需驱逐 |
+| **Disabled 模式** | 不设上限（开发/基准） |
+| **Percent 模式** | 上限 = 系统内存的 N% |
+| **Fixed 模式** | 显式 GB 上限 |
+| **分阶段 eval** | 大模型按批次加载，避免 Metal OOM |
 
-远程推理代理，使云端模型与本地模型并列显示。
+## 按模型独立配置
 
-| 特性 | 详情 |
-|------|------|
-| **协议** | OpenAI 兼容 API 透传 |
-| **流式** | 完整 SSE 流式透传，逐 Token 中继 |
-| **模型发现** | 云端模型与本地模型一起在 `/v1/models` 中列出 |
-| **配置** | 按云端模型配置远程端点 URL 和 API Key |
-| **适用场景** | 运行本地 GPU 放不下的大模型，或增加远端回退容量 |
+按 model ID 持久化，请求时覆盖默认值：
 
----
+- 默认采样（temperature、maxTokens、topP、repeatPenalty）
+- KV 精度（4-bit / 8-bit / 32-bit）
+- 上下文窗口覆盖
+- TurboQuant 开关
+- 视觉策略
+- 配套视觉模型
+- 思考默认值（`enableThinking`、`thinkingBudget`、`preserveThinking`）
+- Keep-alive 间隔
 
 ## 可观测性与基准测试
 
-### 性能基准测试
-- **提示词长度**：可配置（默认：1024、4096）
-- **指标**：TTFT（ms）、生成 tok/s、预填充 tok/s、峰值内存（GB）、端到端延迟（s）
-- **端点**：`POST /admin/api/bench/start`、`GET /admin/api/bench/status`、`POST /admin/api/bench/cancel`
-
-### 困惑度评估
-- **指标**：逐文本困惑度、Token 计数、平均困惑度
-- **端点**：`POST /admin/api/ppl/start`、`GET /admin/api/ppl/status`、`POST /admin/api/ppl/cancel`
-
-### 推理指标
-- 会话 + 持久化历史计数器
-- 总请求数、生成 Token 数、平均 tok/s
-- 逐模型请求计数、缓存命中率
-- GPU 内存追踪
-
-### 系统监控
-- 设备信息：芯片、型号、内存、GPU/CPU 核心数、系统版本
-- 更新检查：GitHub Releases API
-- 指标清除：会话级和历史级
-
----
-
-## Web 界面
-
-### 聊天界面（`/chat`）
-功能完备的 Web 聊天应用 — 无需管理员认证。
-- 深色主题，紫色主题色
-- SSE 流式响应，支持停止按钮
-- 模型选择器
-- 系统提示词配置弹窗
-- 对话历史（localStorage，最多 50 条）
-- Markdown 渲染，代码语法高亮与复制按钮
-- 图片上传（拖拽、粘贴、文件选择器），支持 VLM
-- 思维/推理过程气泡展示
-- 图片灯箱弹窗
-- API Key 输入与持久化存储
-- 移动端响应式侧边栏
-
-### 管理仪表盘（`/admin/dashboard`）
-运维管理面板 — 需要管理员认证。
-- 状态卡片（健康状态、GPU 内存）
-- 设备信息表格
-- MCP 服务器状态
-- 基准测试运行器
-- 困惑度运行器
-- HuggingFace 模型浏览器（搜索、下载、进度）
-- 下载任务管理与取消
-- 指标管理（清除会话/历史）
-- 每 5 秒自动刷新
-- 响应式布局
-
----
+| 工具 | 端点 | 备注 |
+|------|----------|-------|
+| **Benchmark** | `/admin/models/{id}/benchmark` | 测 TPS、TTFT、内存、峰值 |
+| **Perplexity** | `/admin/models/{id}/perplexity` | 标准困惑度测试集 |
+| **缓存统计** | `/admin/models/{id}/cache` | KV cache 命中/缺失/大小 |
+| **服务统计** | `/admin/stats` | 聚合：总 token、活跃请求、uptime |
+| **系统信息** | `/admin/info` | 芯片、核心、RAM、GPU、macOS 版本 |
+| **日志** | `~/.nova/novamlx.log` | 轮转文件日志；运行时级别通过 admin 控制 |
+| **日志级别** | debug / info / warning / error | `POST /admin/log/level` |
+| **指标响应头** | `X-Tokenhub-Provider`、`X-Model-Cold-Load`、`X-Model-Load-Time-Ms` | 按响应内省 |
+| **InferenceStats** | 实时 TPS、峰值 TPS、已生成 token、活跃请求、Worker CPU | UI 每 2 秒轮询 |
 
 ## macOS 菜单栏应用
 
-原生 SwiftUI 菜单栏组件，显示脑图标。
+原生 SwiftUI 菜单栏应用。状态图标 + 下拉 + 弹出窗口。
 
-| 特性 | 详情 |
-|------|------|
-| **状态标签页** | 运行指示器、服务器地址、已加载模型数、GPU 内存、活跃请求、运行时间、tok/s |
-| **模型标签页** | 已加载模型列表及状态指示器、已下载模型数、磁盘占用 |
-| **Agents 标签页** | 外部 Agent 检测（OpenClaw、Hermes、OpenCode）、配置生成、安装链接 |
-| **设置标签页** | 查看/编辑配置切换、内存限制配置、模型设置、服务器管理 |
-| **轮询** | 2 秒统计刷新 |
-| **窗口** | 280×200pt 浮动面板 |
+### 页面
 
----
+| 页面 | 亮点 |
+|------|------------|
+| **Status** | 实时 TPS 曲线（90 采样窗口、峰值追踪、零值裁剪）、CPU/内存/GPU 栅格、设备信息、峰值 TPS |
+| **Dashboard** | 单屏概览：已加载模型、活跃请求、内存、uptime、快速加载 |
+| **Local Inference** | 已激活模型支持 卸载 + 复制名 + play 跳 Playground；已下载模型按类型 tabs（全部 / LLM / VLM / Embed / Audio / Image）；模型卡 |
+| **Downloads** | 分类 tabs、推荐模型卡、阶段感知进度、卡顿检测、镜像配置 |
+| **Playground（Chat）** | LLM / ASR / TTS / Image 统一入口；按模型类型自动识别；带分段的 picker（本地直连 vs TOKENHUB HTTP）；参数滑块；Disable-Thinking 开关；粘性自动滚动；cURL 复制（OpenAI/Anthropic/Responses）；ASR 麦克风 + TTS 扬声器 + 语音克隆 |
+| **Tokenhub** | 20+ 提供商目录；CRUD；每个 provider 的 API 模型支持复制 + play；端点连通性测试 |
+| **Load Balancers** | 手风琴行；成员选择器（本地 + 远端）；策略 + 统计；每行 play 按钮 |
+| **API Keys** | 整行手风琴；eye 揭示；复制已揭示；用量进度条；速率限制展示；白名单 |
+| **Cluster** | 网络扫描（Thunderbolt + ARP）；Worker 健康状态监控；按节点模型就绪度 |
+| **Settings** | HF endpoint + 镜像；内存模式；日志级别；集群开关；TurboQuant；tknet.ai 账号绑定 |
+| **Audio** | 独立的 ASR / TTS 入口（与 Playground 分离） |
+| **Agents** | 安装/启动/配置 OpenClaw、Hermes、OpenCode |
+
+### 跨页面 UX
+
+| 功能 | 详情 |
+|---------|---------|
+| **Pick-to-Playground** | Active Models / Tokenhub API 模型 / Load Balancers 上的 `play.circle` 按钮 → 跳到 Playground 并预选该模型 |
+| **复制 cURL 按钮** | Playground Parameters 里：OpenAI / Anthropic / Responses — 输出 `${NOVA_API_KEY}` 占位符，密钥不入剪贴板 |
+| **粘性自动滚动** | 通过 `MessageListBottomOffsetKey` PreferenceKey 做 80 pt 阈值 |
+| **模型 picker** | `inferModeFromName` + `autoDetectMode` 自动切换模式（LLM / ASR / TTS / Image） |
+| **HF Endpoint 设置** | 镜像切换免重启 — 通过 `NovaMLXConfiguration.shared` 传播 |
 
 ## 国际化
 
-完整的 i18n 系统，支持 9 种语言，覆盖所有 GUI 视图和 Web 界面。
+9 种语言，从系统 locale 自动检测，英文兜底。
 
-| 语言 | 代码 |
-|------|------|
-| English | `en` |
-| 简体中文 | `zh-Hans` |
-| 繁體中文 (香港) | `zh-Hant-HK` |
-| 繁體中文 (台灣) | `zh-Hant-TW` |
-| 日本語 | `ja` |
-| 한국어 | `ko` |
-| Français | `fr` |
-| Deutsch | `de` |
-| Русский | `ru` |
-
-| 特性 | 详情 |
-|------|------|
-| **调用模式** | `L10n.tr("key.path")` 编译期 Key 校验 |
-| **覆盖范围** | 设置、Agents、聊天、菜单栏、仪表盘——所有面向用户的字符串 |
-| **回退** | 缺失翻译回退到英文 |
-| **Web UI** | 聊天和仪表盘同样完全国际化 |
-
----
+`英文`、`简体中文（zh-Hans）`、`香港繁体中文（zh-Hant-HK）`、`台湾繁体中文（zh-Hant-TW）`、`日文`、`韩文`、`法文`、`德文`、`俄文`。
 
 ## 安全与中间件
 
-| 层级 | 实现 |
-|------|------|
-| **API 认证** | 端口 6590 的 Bearer Token 认证（`APIKeyAuthMiddleware`） |
-| **管理认证** | 端口 6591 的 Bearer Token 或 `X-Admin-Key` 头（`AdminAuthMiddleware`） |
-| **CORS** | `Access-Control-Allow-Origin: *`，完整方法和请求头支持 |
-| **请求 ID** | `x-request-id` 头透传或自动生成 |
-| **错误处理** | OpenAI 兼容的 JSON 错误体，正确的 HTTP 状态码 |
-| **管理隔离** | 未配置 API Key 时管理 API 完全禁用 |
-| **Worker 签名** | Worker 子进程 Ad-hoc 代码签名满足 macOS 进程完整性 |
-
----
+| 层 | 行为 |
+|-------|----------|
+| **CORS** | 可配 origins；处理 preflight |
+| **限流** | 按 API key + 按 IP 的 token bucket；全局 + 按路由限流器 |
+| **错误中间件** | `NovaMLXErrorMiddleware` 把错误统一为 OpenAI/Anthropic 形态；429 带 `Retry-After` |
+| **Admin 鉴权** | 端口 6591 上的 `AdminAuthMiddleware` — 需要 admin key |
+| **API 鉴权** | 端口 6590 上的 `APIKeyAuthMiddleware` — Bearer 或 `x-api-key`；无 key 时开放模式旁路 |
+| **严格响应头** | `X-Content-Type-Options`、`Strict-Transport-Security`、`X-Frame-Options`、`Referrer-Policy` |
+| **请求 ID** | 每请求 `x-request-id` 用于追踪 |
+| **云端会话** | `AuthCache` 持有 tknet.ai 会话 token；云端校验端点 |
 
 ## Homebrew 分发
 
-通过 Homebrew 安装 NovaMLX，支持自动更新。
+| 渠道 | 详情 |
+|---------|---------|
+| **Formula** | `Formula/novamlx.rb` |
+| **构建脚本** | `./build.sh` — UUID 同步、codesign、MLX shader 编译、bundle 组装 |
+| **DMG** | 脚本化磁盘映像打包 |
+| **Codesigning** | 部署后必须 `codesign --force --deep --sign -`（否则 macOS 会 SIGKILL worker） |
+| **Entitlements** | `audio-input`、`com.apple.security.device.camera`（按需）、通过 PlistBuddy 注入 `NSMicrophoneUsageDescription` |
 
-```bash
-brew tap cnshsliu/nova
-brew install --cask novamlx
-```
+## TCC 监控器
 
-| 特性 | 详情 |
-|------|------|
-| **Tap** | `cnshsliu/nova` Homebrew tap |
-| **Cask** | `novamlx` — 安装 `.app` 包到 `/Applications` |
-| **更新** | `brew upgrade --cask novamlx` 获取最新 GitHub Release |
-| **版本检查** | 内置更新检查器查询 GitHub Releases API |
+| 功能 | 详情 |
+|---------|---------|
+| **目的** | 自动关闭阻断自动化的 macOS TCC 隐私弹窗 |
+| **Bundle** | `TCCWatcher.app`（CFBundleIdentifier `com.novamlx.TCCWatcher`） |
+| **安装** | `Scripts/install-tcc-watcher.sh` — 配置 LaunchAgent |
+| **机制** | 通过 `System Events` 监视 TCC 弹窗；`inspectWindow` 内联到主 tell 块（修复上下文传播 bug） |
+| **一次性配置** | 用户在 系统设置 → 隐私 → 辅助功能 里通过 `+` 添加 `TCCWatcher.app`（macOS 14+ 不会自动弹窗） |
 
----
+## 配置
 
-## 配置参考
+### `ServerConfig`（`~/.nova/config.json` 或 SQLite）
 
-### 服务器配置（`ServerConfig`）
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `host` | `127.0.0.1` | 绑定地址 |
-| `port` | `6590` | 推理 API 端口 |
-| `adminPort` | `6591` | 管理 API 端口 |
-| `apiKeys` | `[]` | API 密钥（空 = 禁用认证） |
-| `maxConcurrentRequests` | `16` | 最大并发请求数 |
-| `requestTimeout` | `300s` | 请求超时 |
-| `contextScalingTarget` | `nil` | 报告 Token 数缩放目标（计费兼容） |
-| `maxProcessMemory` | `auto` | 进程内存限制：`auto`、百分比（`80%`）或绝对值（`24GB`、`4096MB`） |
-| `maxRequestSizeMB` | `100` | 最大请求体大小（MB） |
+| 字段 | 默认 | 备注 |
+|-------|---------|-------|
+| `server.port` | 6590 | 公共 API 端口 |
+| `server.adminPort` | 6591 | 管理 API 端口 |
+| `server.cluster` | null | 启用分布式模式 |
+| `server.apiKey` | null | 为 null 时开放模式 |
+| `server.corsOrigins` | `*` | CORS 白名单 |
+| `huggingface.endpoint` | `huggingface.co` | 镜像切换 |
+| `autoLoad` | 启用 | 启动时预加载模型 |
+| `memory.mode` | `auto` | auto / disabled / percent / fixed |
+| `memory.limitGB` | null | 固定上限 |
+| `scaleTokenCount` | 启用 | 对上下文核算做 token 数缩放 |
+| `logLevel` | `info` | debug / info / warning / error |
+
+### `NOVA_DIR`
+
+| 优先级 | 来源 |
+|------------|--------|
+| 1（最高） | `~/.config/novamlx/path` 文件内容 |
+| 2 | `NOVA_DIR` 环境变量 |
+| 3（默认） | `~/.nova` |
+
+支持多实例。仅 `models/` 可跨实例共享。
 
 ### 引擎配置
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `kvCacheCapacity` | `1024` | KV 缓存块容量 |
-| `maxMemoryMB` | `2048` | 模型最大 GPU 内存 |
-| `maxConcurrent` | `8` | 最大并发推理任务 |
 
-### 前缀缓存配置
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `blockSize` | `64` | 每缓存块 Token 数 |
-| `maxBlocks` | `4096` | 最大缓存块数 |
-| `ssdMaxSizeBytes` | `100 GB` | 最大 SSD 缓存容量 |
-
----
+`ModelFamilyRegistry` 里的按家族默认值 — KV 精度、prefill chunk、上下文窗口、草稿模型推荐。
 
 ## 架构总览
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                   macOS 菜单栏应用                         │
-│      状态 • 模型 • Agents • 设置 • 仪表盘                  │
-├──────────────────────────────────────────────────────────┤
-│                  NovaMLX API 服务器                        │
-│  ┌─────────────────┐  ┌──────────────────────────────┐  │
-│  │   推理 API       │  │         管理 API              │  │
-│  │  (端口 6590)     │  │        (端口 6591)            │  │
-│  │  • OpenAI        │  │  • 模型管理                    │  │
-│  │  • Anthropic     │  │  • 逐模型配置                  │  │
-│  │  • 向量嵌入      │  │  • 基准测试                    │  │
-│  │  • 重排序        │  │  • HuggingFace 浏览器          │  │
-│  │  • MCP 工具      │  │  • 内存监控                    │  │
-│  │  • 云端代理      │  │  • 管理仪表盘                  │  │
-│  └────────┬─────────┘  └──────────────┬───────────────┘  │
-│           └──────────┬────────────────┘                   │
-│                      ▼                                    │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │            推理服务                                │    │
-│  │  • 连续批处理器    • 会话管理器                     │    │
-│  │  • 推测解码        • 引擎池                        │    │
-│  │  • 模型配置        • MCP 客户端管理                 │    │
-│  └────────────────────────┬─────────────────────────┘    │
-│                           ▼                               │
-│  ┌──────────────────────┬──────────────────────────┐     │
-│  │   MLX 推理引擎       │  Worker 子进程             │     │
-│  │  • LLM/VLM 生成      │  • stdin/stdout JSON IPC  │     │
-│  │  • 结构化输出        │  • ProcessMemoryEnforcer   │     │
-│  │  • TurboQuant        │  • WorkerSupervisor        │     │
-│  │  • 前缀/SSD 缓存     │  • GPU 内存隔离             │     │
-│  │  • 视觉特征缓存      │                            │     │
-│  │  • TurnStopProcessor │                            │     │
-│  │  • ControlTokenFilter│                            │     │
-│  └────────────────────┬─┴──────────────────────────┘     │
-│                       ▼                                   │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │          MLX / Apple Silicon GPU                   │    │
-│  │  • 惰性求值  • 统一内存  • Metal 加速              │    │
-│  └──────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  客户端: Codex / Claude Code / Continue / OpenAI SDK /      │
+│         Anthropic SDK / curl                                │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+            ┌────────────▼────────────┐
+            │   Hummingbird HTTP/2    │  端口 6590 (api) + 6591 (admin)
+            │   + CORS + 限流         │
+            │   + 鉴权中间件          │
+            └────────────┬────────────┘
+                         │
+   ┌─────────────────────┼──────────────────────────┐
+   │                     │                          │
+┌──▼─────────┐  ┌────────▼─────────┐  ┌────────────▼───────────┐
+│  本地推理  │  │  Tokenhub 代理   │  │  LBProxy (lb:<slug>)   │
+│  (Worker)  │  │  + Anthropic 桥  │  │  → 路由到本地或        │
+│            │  │                  │  │    tokenhub 成员        │
+└──┬─────────┘  └────────┬─────────┘  └────────────────────────┘
+   │                     │
+┌──▼─────────────────────▼──┐
+│  MLX 引擎                 │
+│  - ContinuousBatcher      │
+│  - TurboQuant KV Cache    │
+│  - 推测解码               │
+│  - 工具调用               │
+│  - 结构化输出             │
+│  - Chat 模板处理器        │
+└──┬────────────────────────┘
+   │
+┌──▼──────────────────────┐  ┌──────────────────────────┐
+│  WorkerSupervisor       │  │  分布式 (可选)           │
+│  (子进程隔离)           │  │  Ring TCP / Thunderbolt  │
+└─────────────────────────┘  └──────────────────────────┘
 ```
 
----
+数据持久化：**NovaDB**（SQLite + GRDB）— 14 张表，覆盖 api_keys、providers、load_balancers、modelfiles、loaded_models、model_settings、metrics、cluster_policy、conversations（Responses）等。首次启动时自动从旧 JSON 迁移。
 
 ## 快速开始
 
 ```bash
-# 编译
-swift build -c release
+# 通过 Homebrew 安装
+brew install --head novamlx
 
-# 启动（带 API Key）
-./build/release/NovaMLX --api-key sk-your-key
+# 或从源码构建
+git clone https://github.com/novamlx/novamlx && cd novamlx
+./build.sh
+open dist/NovaMLX.app
 
-# 对话补全
+# 配置 API Key（或不配置任何 key 走开放模式）
+export NOVA_API_KEY=$(openssl rand -hex 24)
+
+# 列出模型
+curl http://localhost:6590/v1/models \
+  -H "Authorization: Bearer $NOVA_API_KEY"
+
+# 聊天
 curl http://localhost:6590/v1/chat/completions \
-  -H "Authorization: Bearer sk-your-key" \
+  -H "Authorization: Bearer $NOVA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "your-model",
-    "messages": [{"role": "user", "content": "你好！"}],
-    "stream": true
+    "model": "mlx-community/Qwen3.6-27B-4bit",
+    "messages": [{"role":"user","content":"Hello"}]
+  }'
+
+# Anthropic 格式
+curl http://localhost:6590/v1/messages \
+  -H "x-api-key: $NOVA_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mlx-community/Qwen3.6-27B-4bit",
+    "max_tokens": 1024,
+    "messages": [{"role":"user","content":"Hello"}]
+  }'
+
+# 代理云端模型（先在 Tokenhub UI 里配置 provider）
+curl http://localhost:6590/v1/chat/completions \
+  -H "Authorization: Bearer $NOVA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "tknet:deepseek-v4-flash",
+    "messages": [{"role":"user","content":"Hello"}]
+  }'
+
+# 负载均衡器（先在 UI 里创建，再用 lb:<slug>）
+curl http://localhost:6590/v1/chat/completions \
+  -H "Authorization: Bearer $NOVA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "lb:my-pool",
+    "messages": [{"role":"user","content":"Hello"}]
   }'
 ```
+
+---
+
+**NovaMLX** — *由 hlky 与贡献者构建。MIT License 发布。*

@@ -16,7 +16,19 @@ private enum ChatDisplayMode: String, CaseIterable {
 }
 
 private enum PlaygroundMode {
-    case llm, asr, tts, image
+    case llm, asr, tts, image, vlm
+}
+
+/// PreferenceKey that reports the maxY (bottom edge) of the trailing
+/// sentinel anchor inside the message-list scroll view. Measured in the
+/// scroll's own coordinate space ("messageScroll"). Combined with the
+/// outer viewport height, this lets us compute how far the user is from
+/// the bottom and decide whether auto-scroll should stay engaged.
+private struct MessageListBottomOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
 }
 
 struct ChatPageView: View {
@@ -61,6 +73,17 @@ struct ChatPageView: View {
     @State private var lastPayload: String?
     @State private var lastResponse: String?
 
+    // Sticky auto-scroll state for the LLM message list.
+    // True when the user is parked at (or near) the bottom — new tokens
+    // appended to the last message auto-scroll into view. False when the
+    // user has scrolled up to read history, so streaming output doesn't
+    // yank them back down. Resumes as soon as they scroll back near the
+    // bottom. Threshold is in points; ~80pt felt right on a 13" window
+    // (a single scroll-wheel notch moves ~16pt, so this is ~5 notches of
+    // slack before auto-scroll pauses).
+    @State private var stickToBottom: Bool = true
+    private let stickToBottomThreshold: CGFloat = 80
+
     // ASR recording (chat mic input)
     @State private var isRecording = false
     @State private var chatRecorder: AVAudioRecorder?
@@ -70,7 +93,9 @@ struct ChatPageView: View {
     @State private var ttsPlayingMessageId: UUID?
 
     // MARK: - ASR Playground State
-    @State private var selectedASRModel: String = ""
+    // ASR no longer keeps its own selected-model state — the top-level
+    // Playground picker's `selectedModel` is the single source of truth
+    // for whichever model the ASR code path should use.
     @State private var isASRRecording = false
     @State private var asrRecorder: AVAudioRecorder?
     @State private var asrRecordingURL: URL?
@@ -112,6 +137,27 @@ struct ChatPageView: View {
     @State private var loadingImageModelName: String?
     @State private var generatedImageData: Data?
 
+    // MARK: - VLM Playground State
+    @State private var vlmImageData: Data?
+    @State private var vlmImagePreview: NSImage?
+    @State private var vlmAttachedImageName: String?
+    @State private var vlmIsAnalyzing = false
+    @State private var vlmError: String?
+    @State private var vlmMessages: [ChatMessageRow] = []
+    @State private var vlmInputText = ""
+    @State private var vlmLastPayload: String?
+    @State private var vlmLastResponse: String?
+    @State private var vlmInferenceTask: Task<Void, Never>? = nil
+    @FocusState private var vlmInputFocused: Bool
+
+    private let vlmQuickPrompts = [
+        "Describe this image in detail",
+        "Extract all text from this image (OCR)",
+        "Extract the table data as CSV",
+        "What does this chart show?",
+        "Read and translate the text to Chinese",
+    ]
+
     private let quickPrompts = [
         "2+2=? Please explain step by step",
         "Write a haiku about coding",
@@ -134,6 +180,7 @@ struct ChatPageView: View {
             if record.family == .whisper || record.family == .qwen3Asr { return .asr }
             if record.family == .dotsTts || record.family == .qwen3Tts { return .tts }
             if record.family == .flux || record.family == .stableDiffusion { return .image }
+            if record.modelType == .vlm { return .vlm }
             return .llm
         }
         return inferModeFromName(model)
@@ -154,6 +201,15 @@ struct ChatPageView: View {
             || lower.contains("imagen") || lower.contains("midjourney") {
             return .image
         }
+        if lower.contains("vl") || lower.contains("vision")
+            || lower.contains("internvl") || lower.contains("qwen2-vl")
+            || lower.contains("qwen2vl") || lower.contains("gemma3")
+            || lower.contains("gemma4") || lower.contains("molmo")
+            || lower.contains("idefics") || lower.contains("llava")
+            || lower.contains("pixtral") || lower.contains("florence")
+            || lower.contains("deepseek-vl") || lower.contains("mllama") {
+            return .vlm
+        }
         return .llm
     }
 
@@ -164,6 +220,9 @@ struct ChatPageView: View {
             switch playgroundMode {
             case .llm:
                 llmContent
+            case .vlm:
+                vlmContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .asr:
                 asrContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -176,12 +235,12 @@ struct ChatPageView: View {
             }
         }
         .onAppear {
-            autoSelectASRModel()
             loadMacOSVoices()
             loadVoiceProfiles()
         }
         .onChange(of: appState.loadedModels) { _, _ in
-            autoSelectASRModel()
+            // Top-level Playground picker handles model validity itself;
+            // no ASR-specific auto-select needed anymore.
         }
         .sheet(isPresented: $showCloneSheet) {
             VoiceCloneSheet(l10n: l10n) {
@@ -318,52 +377,11 @@ struct ChatPageView: View {
 
     private var chatToolbar: some View {
         HStack(spacing: 12) {
-            Picker(l10n.tr("chat.model"), selection: $selectedModel) {
-                if appState.loadedModels.isEmpty && tokenhubModels.isEmpty && loadBalancerEntries.isEmpty {
-                    Text(l10n.tr("chat.noModels")).tag("")
-                }
-                if !appState.loadedModels.isEmpty {
-                    Section("LOCAL — DIRECT IN-PROCESS") {
-                        ForEach(appState.loadedModels, id: \.self) { model in
-                            HStack(spacing: 6) {
-                                Image(systemName: modelTypeIcon(modelType(for: model)))
-                                    .foregroundColor(modelTypeColor(modelType(for: model)))
-                                    .font(.system(size: 10))
-                                Text(shortModelName(model))
-                            }
-                            .tag(model)
-                        }
-                    }
-                }
-                if !tokenhubModels.isEmpty {
-                    Section("TOKENHUB — HTTP ROUTING") {
-                        ForEach(tokenhubModels, id: \.self) { model in
-                            HStack {
-                                Image(systemName: "server.rack")
-                                    .font(.system(size: 10))
-                                Text(model)
-                            }
-                            .tag("tknet:\(model)")
-                        }
-                    }
-                }
-                if !loadBalancerEntries.isEmpty {
-                    Section("LOAD BALANCE — NAMED POOLS") {
-                        ForEach(loadBalancerEntries, id: \.slug) { lb in
-                            HStack {
-                                Image(systemName: "scalemass")
-                                    .font(.system(size: 10))
-                                Text("\(lb.name)  ·  lb:\(lb.slug)")
-                            }
-                            .tag("lb:\(lb.slug)")
-                        }
-                    }
-                }
-            }
-            .frame(width: 240)
+            modelPickerMenu
 
             Picker("Mode", selection: $playgroundMode) {
                 Text("LLM").tag(PlaygroundMode.llm)
+                Text("VLM").tag(PlaygroundMode.vlm)
                 Text("ASR").tag(PlaygroundMode.asr)
                 Text("TTS").tag(PlaygroundMode.tts)
                 Text("Image").tag(PlaygroundMode.image)
@@ -401,6 +419,133 @@ struct ChatPageView: View {
             }
             playgroundMode = autoDetectMode(newModel)
         }
+        .onReceive(appState.$requestedPlaygroundModel) { requested in
+            guard let model = requested, !model.isEmpty else { return }
+            // Accept anything: loaded locals, tknet:* / lb:* routes go through
+            // the HTTP path even when not present in loadedModels. The picker
+            // already handles these prefixes via inferModeFromName.
+            selectedModel = model
+            playgroundMode = autoDetectMode(model)
+            // Always clear — even if model wasn't applicable, don't leave
+            // dangling state that re-triggers on next appear.
+            DispatchQueue.main.async { appState.requestedPlaygroundModel = nil }
+        }
+    }
+
+    // MARK: - Model Picker (custom Menu so the label auto-sizes to content)
+
+    /// Label shown in the collapsed picker button. Renders the same icon + short
+    /// name as the menu rows, but inside a real SwiftUI view so `.frame(maxWidth:)`
+    /// actually expands to fit the full text (unlike NSPopUpButton-backed Picker).
+    private var modelPickerLabel: some View {
+        HStack(spacing: 6) {
+            Image(systemName: modelTypeIcon(modelType(for: selectedModel)))
+                .foregroundColor(modelTypeColor(modelType(for: selectedModel)))
+                .font(.system(size: 10))
+            Text(shortModelName(selectedModel))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 8))
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .frame(minWidth: 180, maxWidth: 420, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+    }
+
+    /// Custom Menu replacing the system Picker so the collapsed label can grow
+    /// to fit the full model name. Menu items mirror the original Picker sections.
+    private var modelPickerMenu: some View {
+        Menu {
+            if appState.loadedModels.isEmpty && tokenhubModels.isEmpty && loadBalancerEntries.isEmpty {
+                Button(action: {}) {
+                    Text(l10n.tr("chat.noModels"))
+                }
+                .disabled(true)
+            }
+            if !appState.loadedModels.isEmpty {
+                Section("LOCAL — DIRECT IN-PROCESS") {
+                    ForEach(appState.loadedModels, id: \.self) { model in
+                        Button(action: {
+                            selectedModel = model
+                            loadDefaultsFromModel(model)
+                            playgroundMode = autoDetectMode(model)
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: modelTypeIcon(modelType(for: model)))
+                                    .foregroundColor(modelTypeColor(modelType(for: model)))
+                                    .font(.system(size: 10))
+                                Text(shortModelName(model))
+                                if model == selectedModel {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !tokenhubModels.isEmpty {
+                Section("TOKENHUB — HTTP ROUTING") {
+                    ForEach(tokenhubModels, id: \.self) { model in
+                        let tag = "tknet:\(model)"
+                        Button(action: {
+                            selectedModel = tag
+                            playgroundMode = autoDetectMode(tag)
+                        }) {
+                            HStack {
+                                Image(systemName: "server.rack")
+                                    .font(.system(size: 10))
+                                Text(model)
+                                if tag == selectedModel {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !loadBalancerEntries.isEmpty {
+                Section("LOAD BALANCE — NAMED POOLS") {
+                    ForEach(loadBalancerEntries, id: \.slug) { lb in
+                        let tag = "lb:\(lb.slug)"
+                        Button(action: {
+                            selectedModel = tag
+                            playgroundMode = autoDetectMode(tag)
+                        }) {
+                            HStack {
+                                Image(systemName: "scalemass")
+                                    .font(.system(size: 10))
+                                Text("\(lb.name)  ·  lb:\(lb.slug)")
+                                if tag == selectedModel {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            modelPickerLabel
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize(horizontal: false, vertical: true)
+        .help("Select model for Playground")
     }
 
     // MARK: - Right Params Panel
@@ -549,34 +694,80 @@ struct ChatPageView: View {
 
     private var messageList: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    if messages.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "bubble.left.and.bubble.right")
-                                .font(.system(size: 40))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Text(l10n.tr("chat.startConversation"))
-                                .font(.title3)
-                                .foregroundColor(.secondary)
-                            Text(l10n.tr("chat.selectModel"))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+            GeometryReader { viewportGeo in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        if messages.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(.secondary.opacity(0.5))
+                                Text(l10n.tr("chat.startConversation"))
+                                    .font(.title3)
+                                    .foregroundColor(.secondary)
+                                Text(l10n.tr("chat.selectModel"))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 80)
                         }
-                        .padding(.top, 80)
-                    }
 
-                    ForEach(messages) { msg in
-                        messageBubble(msg)
-                            .id(msg.id)
+                        ForEach(messages) { msg in
+                            messageBubble(msg)
+                                .id(msg.id)
+                        }
+
+                        // Bottom sentinel: a 1pt transparent anchor whose
+                        // frame we read in the scroll's coordinate space.
+                        // When its maxY is close to the viewport height,
+                        // the user is parked at the bottom — eligible for
+                        // auto-scroll. When maxY exceeds viewport height
+                        // by more than the threshold, the user has scrolled
+                        // up to read history — pause auto-scroll until they
+                        // return to the bottom.
+                        Color.clear
+                            .frame(height: 1)
+                            .background(
+                                GeometryReader { sentinelGeo in
+                                    Color.clear.preference(
+                                        key: MessageListBottomOffsetKey.self,
+                                        value: sentinelGeo.frame(in: .named("messageScroll")).maxY
+                                    )
+                                }
+                            )
+                    }
+                    .padding(16)
+                }
+                .coordinateSpace(name: "messageScroll")
+                .onPreferenceChange(MessageListBottomOffsetKey.self) { bottomMaxY in
+                    // bottomMaxY = Y of the content's bottom edge in the
+                    // scrollview's coordinate space. Viewport height is
+                    // measured by the outer GeometryReader. Distance from
+                    // bottom = bottomMaxY - viewportHeight (positive when
+                    // the user has scrolled up so content extends past
+                    // the visible area).
+                    let viewportHeight = viewportGeo.size.height
+                    let distanceFromBottom = bottomMaxY - viewportHeight
+                    let sticky = distanceFromBottom <= stickToBottomThreshold
+                    if sticky != stickToBottom {
+                        stickToBottom = sticky
                     }
                 }
-                .padding(16)
             }
+            // Auto-scroll on two signals: a new message arrives, OR the
+            // last message's content grows (streaming). The previous
+            // implementation only watched `messages.count`, which meant
+            // streaming token appends never re-triggered the scroll and
+            // long responses would silently walk off the bottom.
             .onChange(of: messages.count) { _, _ in
-                if let last = messages.last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
+                guard stickToBottom, let last = messages.last else { return }
+                withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+            .onChange(of: messages.last?.content) { _, _ in
+                guard stickToBottom, let last = messages.last else { return }
+                // No animation for streaming token appends — smooth-scroll
+                // on every token jitterers visually and burns CPU.
+                proxy.scrollTo(last.id, anchor: .bottom)
             }
         }
     }
@@ -1311,7 +1502,7 @@ struct ChatPageView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                         .buttonStyle(.plain)
-                        .disabled(selectedASRModel.isEmpty || isTranscribing)
+                        .disabled(selectedModel.isEmpty || isTranscribing)
 
                         Button { uploadAudioFile() } label: {
                             HStack(spacing: 8) {
@@ -1328,7 +1519,7 @@ struct ChatPageView: View {
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(NovaTheme.Colors.cardBorder, lineWidth: 1))
                         }
                         .buttonStyle(.plain)
-                        .disabled(selectedASRModel.isEmpty || isTranscribing)
+                        .disabled(selectedModel.isEmpty || isTranscribing)
                     }
 
                     if let name = uploadedFileName {
@@ -1379,7 +1570,7 @@ struct ChatPageView: View {
                     }
                 }
 
-                if !selectedASRModel.isEmpty { asrApiExamples }
+                if !selectedModel.isEmpty { asrApiExamples }
 
                 Spacer(minLength: 0)
             }
@@ -1578,36 +1769,14 @@ struct ChatPageView: View {
 
     // MARK: - ASR Actions
 
-    private func autoSelectASRModel() {
-        let asrModels = loadedASRModels
-        if asrModels.count == 1, selectedASRModel.isEmpty || !asrModels.contains(selectedASRModel) {
-            selectedASRModel = asrModels[0]
-        } else if !asrModels.contains(selectedASRModel) {
-            selectedASRModel = asrModels.first ?? ""
-        }
-    }
+    // Note: model selection for ASR is driven by the top-level Playground
+    // picker (`selectedModel`), not a separate ASR-only state. The top
+    // picker lists every loaded model regardless of type, and playgroundMode
+    // auto-detects from the selected model's family. So when the user
+    // selects an ASR model up there, selectedModel already holds its ID
+    // and every ASR code path (curl demo, transcribe, disabled-guards)
+    // reads from selectedModel directly.
 
-    private func loadASRModel(_ modelId: String) {
-        isASRModelLoading = true
-        loadingASRModelName = modelId.components(separatedBy: "/").last ?? modelId
-        asrError = nil
-        Task {
-            do {
-                guard let record = modelManager.getRecord(modelId) else {
-                    throw NovaMLXError.modelNotFound(modelId)
-                }
-                let config = ModelConfig(
-                    identifier: ModelIdentifier(id: modelId, family: record.family),
-                    modelType: record.modelType
-                )
-                _ = try await inferenceService.transcriptionService.loadModel(from: record.localURL, config: config)
-                selectedASRModel = modelId
-                await MainActor.run { isASRModelLoading = false; loadingASRModelName = nil }
-            } catch {
-                await MainActor.run { asrError = error.localizedDescription; isASRModelLoading = false; loadingASRModelName = nil }
-            }
-        }
-    }
 
     private func toggleASRRecording() {
         if isASRRecording {
@@ -1672,10 +1841,10 @@ struct ChatPageView: View {
     }
 
     private func transcribeAudio(url: URL) {
-        guard !selectedASRModel.isEmpty else {
+        guard !selectedModel.isEmpty else {
             asrError = l10n.tr("audio.asr.noModel"); return
         }
-        let modelId = selectedASRModel
+        let modelId = selectedModel
         isTranscribing = true
         transcriptionText = ""
         asrError = nil
@@ -1779,7 +1948,7 @@ struct ChatPageView: View {
                 Spacer()
                 langTabs($asrCodeTab)
             }.foregroundColor(.secondary)
-            let model = selectedASRModel; let key = realApiKey
+            let model = selectedModel; let key = realApiKey
             switch asrCodeTab {
             case .curl:
                 codeBlock("curl -X POST http://localhost:6590/v1/audio/transcriptions \\\n  -H \"Authorization: Bearer \(key)\" \\\n  -F \"file=@recording.wav\" \\\n  -F \"model=\(model)\"")
@@ -2040,7 +2209,371 @@ struct ChatPageView: View {
             }
         }
     }
+
+    // MARK: - VLM Playground
+
+    private var downloadedVLMModels: [ModelRecord] {
+        modelManager.downloadedModels().filter { $0.modelType == .vlm }
+    }
+
+    private func isVLMLoaded(_ modelId: String) -> Bool {
+        appState.loadedModels.contains(modelId)
+    }
+
+    private var vlmContent: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                vlmToolbarStrip
+                Divider()
+                vlmMessageList
+                Divider()
+                vlmInputBar
+            }
+            .frame(maxWidth: .infinity)
+
+            Divider()
+            rightParamsPanel
+                .frame(width: 200)
+        }
+    }
+
+    private var vlmToolbarStrip: some View {
+        HStack(spacing: 8) {
+            Text("👁️ VLM")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(NovaTheme.Colors.accent)
+
+            Spacer()
+
+            if vlmIsAnalyzing {
+                ProgressView()
+                    .controlSize(.small)
+                Button(action: { cancelVLMInference() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "stop.circle").font(.system(size: 10))
+                        Text("Stop").font(.system(size: 10))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .foregroundColor(.red)
+            }
+
+            Button {
+                clearVLMChat()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "trash").font(.system(size: 10))
+                    Text("Clear").font(.system(size: 10))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private var vlmMessageList: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                // Image attachment area (always visible at top)
+                vlmImagePanel
+
+                if vlmMessages.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 32))
+                            .foregroundColor(.secondary.opacity(0.4))
+                        Text("Attach an image above, then ask a question")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 40)
+                }
+
+                ForEach(vlmMessages) { msg in
+                    messageBubble(msg)
+                        .id(msg.id)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private var vlmImagePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let preview = vlmImagePreview {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "photo").font(.caption).foregroundColor(.secondary)
+                        Text(vlmAttachedImageName ?? "image")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button {
+                            vlmImageData = nil
+                            vlmImagePreview = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove image")
+                    }
+                    Image(nsImage: preview)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxHeight: 160)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .padding(10)
+                .background(NovaTheme.Colors.rowBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                HStack(spacing: 12) {
+                    Button {
+                        pasteVLMVImage()
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: "doc.on.clipboard")
+                                .font(.system(size: 20))
+                            Text("Paste")
+                                .font(.caption)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Paste image from clipboard")
+
+                    Button {
+                        browseVLMImage()
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: "folder")
+                                .font(.system(size: 20))
+                            Text("Browse")
+                                .font(.caption)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Choose image file")
+                }
+                .padding(8)
+                .background(NovaTheme.Colors.rowBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var vlmInputBar: some View {
+        VStack(spacing: 6) {
+            // Quick prompts
+            if !vlmMessages.isEmpty || vlmImageData != nil {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        if vlmMessages.isEmpty {
+                            ForEach(vlmQuickPrompts, id: \.self) { prompt in
+                                Button(prompt) {
+                                    vlmInputText = prompt
+                                    sendVLMMessage()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .font(.system(size: 10))
+                                .disabled(vlmImageData == nil || vlmIsAnalyzing)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                }
+            }
+
+            HStack(spacing: 8) {
+                ZStack(alignment: .topLeading) {
+                    TextEditor(text: $vlmInputText)
+                        .font(.system(size: 13))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 28, maxHeight: 120)
+                        .focused($vlmInputFocused)
+                        .onKeyPress(.return, phases: .down) { press in
+                            if press.modifiers.contains(.shift) {
+                                sendVLMMessage()
+                                return .handled
+                            }
+                            return .ignored
+                        }
+
+                    if vlmInputText.isEmpty && !vlmInputFocused {
+                        Text("Ask about the image...")
+                            .foregroundColor(Color(NSColor.placeholderTextColor))
+                            .font(.system(size: 13))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 5)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                if vlmIsAnalyzing {
+                    Button(action: { cancelVLMInference() }) {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop analysis")
+                } else {
+                    Button(action: { sendVLMMessage() }) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title2)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(vlmInputText.trimmingCharacters(in: .whitespaces).isEmpty || selectedModel.isEmpty)
+                }
+            }
+            .padding(12)
+            .background(NovaTheme.Colors.cardBackground)
+            .overlay(Rectangle().fill(NovaTheme.Colors.cardBorder).frame(height: 1), alignment: .top)
+        }
+    }
+
+    // MARK: - VLM Actions
+
+    private func pasteVLMVImage() {
+        let pasteboard = NSPasteboard.general
+        if let img = NSImage(pasteboard: pasteboard), let tiff = img.tiffRepresentation {
+            vlmImageData = tiff
+            vlmImagePreview = img
+            vlmAttachedImageName = "pasted image"
+            vlmError = nil
+        } else {
+            vlmError = "No image found in clipboard"
+        }
+    }
+
+    private func browseVLMImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .heic, .bmp, .tiff, .gif]
+        panel.allowsMultipleSelection = false
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                if let data = try? Data(contentsOf: url) {
+                    vlmImageData = data
+                    vlmImagePreview = NSImage(data: data)
+                    vlmAttachedImageName = url.lastPathComponent
+                    vlmError = nil
+                } else {
+                    vlmError = "Failed to read image file"
+                }
+            }
+        }
+    }
+
+    private func sendVLMMessage() {
+        let text = vlmInputText.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !selectedModel.isEmpty else { return }
+        vlmInputText = ""
+
+        // First message requires an image attached; follow-ups reuse the last image
+        let isFirstMessage = vlmMessages.isEmpty
+        if isFirstMessage {
+            guard vlmImageData != nil else {
+                vlmError = "Please attach an image first (paste or browse)"
+                return
+            }
+        }
+
+        vlmMessages.append(ChatMessageRow(content: text, isUser: true))
+        let assistantMsg = ChatMessageRow(content: "", isUser: false)
+        vlmMessages.append(assistantMsg)
+        let assistantIdx = vlmMessages.count - 1
+        vlmIsAnalyzing = true
+        vlmError = nil
+        let model = selectedModel
+
+        // MLXEngine VLM path: images MUST go in ChatMessage.images (base64 data URL).
+        // buildUserInput() detects hasImages and routes through VLMModelFactory's
+        // vision-enabled prepare() which runs the vision tower + image prefill.
+        let message: ChatMessage
+        if let imageData = vlmImageData {
+            let b64 = imageData.base64EncodedString()
+            let dataURL = "data:image/jpeg;base64,\(b64)"
+            message = ChatMessage(role: .user, content: text, images: [dataURL])
+        } else {
+            message = ChatMessage(role: .user, content: text)
+        }
+
+        let request = InferenceRequest(
+            model: model,
+            messages: [message],
+            temperature: paramTemp,
+            maxTokens: Int(paramMaxTokens),
+            topP: paramTopP,
+            topK: Int(paramTopK),
+            minP: Float(paramMinP),
+            repetitionPenalty: Float(paramRepeatPenalty),
+            stream: true
+        )
+
+        let imgBytes = vlmImageData?.count ?? 0
+        if let data = try? JSONSerialization.data(withJSONObject: ["model": model, "prompt": text, "hasImage": imgBytes > 0, "imageBytes": imgBytes], options: [.prettyPrinted, .sortedKeys]) {
+            vlmLastPayload = String(data: data, encoding: .utf8)
+        }
+
+        vlmInferenceTask = Task {
+            defer {
+                vlmIsAnalyzing = false
+                vlmInferenceTask = nil
+            }
+
+            do {
+                var tokenCount = 0
+                let tokenStream = inferenceService.stream(request)
+                for try await token in tokenStream {
+                    if Task.isCancelled { break }
+                    tokenCount += 1
+                    if !token.text.isEmpty {
+                        if vlmMessages.indices.contains(assistantIdx) {
+                            vlmMessages[assistantIdx].content += token.text
+                        }
+                    }
+                }
+                if vlmMessages.indices.contains(assistantIdx), vlmLastResponse == nil {
+                    vlmLastResponse = vlmMessages[assistantIdx].content
+                }
+                if tokenCount == 0 && vlmMessages.indices.contains(assistantIdx) && vlmMessages[assistantIdx].content.isEmpty {
+                    vlmMessages[assistantIdx].content = "(no response)"
+                }
+            } catch {
+                if vlmMessages.indices.contains(assistantIdx) {
+                    vlmMessages[assistantIdx].content = "Error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func cancelVLMInference() {
+        vlmInferenceTask?.cancel()
+        vlmInferenceTask = nil
+        vlmIsAnalyzing = false
+    }
+
+    private func clearVLMChat() {
+        cancelVLMInference()
+        vlmMessages.removeAll()
+        vlmLastPayload = nil
+        vlmLastResponse = nil
+        vlmError = nil
+    }
 }
+
 
 private struct ChatMessageRow: Identifiable {
     let id = UUID()
@@ -2068,8 +2601,7 @@ private struct ParamSlider: View {
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundColor(NovaTheme.Colors.accent)
             }
-            Slider(value: $value, in: min...max, step: step)
-                .controlSize(.mini)
+            PlainSlider(value: $value, range: min...max, step: step)
         }
     }
 }

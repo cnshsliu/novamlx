@@ -479,6 +479,15 @@ struct TokenhubPageView: View {
                             .foregroundColor(NovaTheme.Colors.textTertiary)
                     }
                     .buttonStyle(.plain)
+                    Button {
+                        appState.pickInPlayground("tknet:" + provider.id)
+                    } label: {
+                        Image(systemName: "play.circle")
+                            .font(.system(size: 9))
+                            .foregroundColor(NovaTheme.Colors.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in Playground")
                 }
                 detailRow(label: "Endpoint", value: provider.endpoint)
                 if !provider.apiKey.isEmpty {

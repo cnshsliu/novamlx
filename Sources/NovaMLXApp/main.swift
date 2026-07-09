@@ -288,11 +288,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-            // Restore models in background after API is live
-            Task {
-                await inferenceService.restoreModels(modelManager: modelManager)
+            // Restore models in background after API is live.
+            // Progress callback keeps restoringModels in sync so the UI shows
+            // spinners for models still loading (can take minutes).
+            Task { [self] in
+                await inferenceService.restoreModels(modelManager: modelManager, progress: { [self] modelId, phase in
+                    Task { @MainActor in
+                        switch phase {
+                        case .started:
+                            if !self.appState.restoringModels.contains(modelId) {
+                                self.appState.restoringModels.append(modelId)
+                            }
+                        case .completed, .failed, .skipped:
+                            self.appState.restoringModels.removeAll { $0 == modelId }
+                        }
+                    }
+                })
+                // Scan for partial downloads and surface them in the UI as
+                // .partial tasks. Do NOT auto-resume — user must click Resume
+                // manually. Resume always starts fresh (deletes temp + redownloads)
+                // to guarantee byte consistency.
                 appState.detectIncompleteDownloads(modelsDirectory: modelManager.modelsDirectory)
-                appState.resumeIncompleteDownloads()
             }
 
             appState.startStatsMonitoring(inferenceService: inferenceService)

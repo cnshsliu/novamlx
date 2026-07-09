@@ -116,6 +116,9 @@ public final class NovaDB: @unchecked Sendable {
         configMigrator.registerMigration("v4_load_balancers") { db in
             try LBMigration.v4LoadBalancers(in: db)
         }
+        configMigrator.registerMigration("v5_api_key_usage_events") { db in
+            try ConfigDBSchema.v5APIKeyUsageEvents(in: db)
+        }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")
 

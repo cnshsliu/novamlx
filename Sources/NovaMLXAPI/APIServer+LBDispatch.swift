@@ -120,7 +120,8 @@ extension NovaMLXAPIServer {
             stream: false, stop: ocrStop,
             thinkingBudget: anthropicReq.resolvedThinkingBudget,
             enableThinking: anthropicReq.resolvedEnableThinking,
-            preserveThinking: anthropicReq.resolvedPreserveThinking
+            preserveThinking: anthropicReq.resolvedPreserveThinking,
+            httpRequestId: HTTPHelpers.requestID(from: nil)
         )
         CurrentInferenceModel.shared.modelID = request.model
         defer { CurrentInferenceModel.shared.modelID = nil }

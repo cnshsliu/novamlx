@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+import HTTPTypes
 import NovaMLXCore
 import NovaMLXInference
 import NovaMLXUtils
@@ -15,6 +16,19 @@ extension NovaMLXAPIServer {
         Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1e15
     }
 
+    /// Extract Anthropic-specific headers worth forwarding to upstream
+    /// (so 1h cache TTL via `anthropic-beta` actually reaches the provider).
+    /// Returns nil for each if the client didn't send it.
+    static func extractAnthropicForwardHeaders(_ request: Request) -> (version: String?, beta: String?) {
+        let vName = HTTPField.Name("anthropic-version")!
+        let bName = HTTPField.Name("anthropic-beta")!
+        let version = request.headers[fields: vName].first?.value
+        let beta = request.headers[fields: bName].first?.value
+        let versionNil = (version?.isEmpty ?? true) ? nil : version
+        let betaNil = (beta?.isEmpty ?? true) ? nil : beta
+        return (versionNil, betaNil)
+    }
+
     // MARK: - Chat Completions Passthrough
 
     /// Raw passthrough proxy for tokenhub. Forwards the original request body to the provider
@@ -27,7 +41,11 @@ extension NovaMLXAPIServer {
         rawBody: Data,
         path: String,
         inference: InferenceService,
-        tag: String? = nil
+        tag: String? = nil,
+        // Anthropic cache-control signals forwarded from the client request.
+        // Without these the upstream silently degrades 1h cache TTL → 5min.
+        anthropicVersion: String? = nil,
+        anthropicBeta: String? = nil
     ) async throws -> Response {
         // Plain "tknet" (no provider) used to mean "load-balance across all
         // providers". That path is now superseded by named LBs via LBProxy
@@ -43,6 +61,23 @@ extension NovaMLXAPIServer {
             return try Self.jsonResponse(
                 ["error": ["message": "Unknown tokenhub provider: \(modelName)", "type": "invalid_request_error"]],
                 httpStatus: .badRequest
+            )
+        }
+
+        // Anthropic → OpenAI translation bridge: when the client sent
+        // /v1/messages but the provider doesn't expose a native Anthropic
+        // endpoint, raw passthrough would 404 upstream (DeepSeek/GLM/etc.
+        // don't implement /messages). Decode the Anthropic body, translate
+        // to OpenAI /chat/completions, forward, translate the response back.
+        if Self.needsAnthropicBridge(provider: provider, clientPath: path),
+           let anthropicReq = try? JSONDecoder().decode(AnthropicRequest.self, from: rawBody) {
+            if anthropicReq.stream ?? false {
+                return try await Self.handleTokenhubAnthropicBridgeStream(
+                    anthropicReq: anthropicReq, provider: provider, tag: tag, rawBody: rawBody
+                )
+            }
+            return try await Self.handleTokenhubAnthropicBridge(
+                anthropicReq: anthropicReq, provider: provider, tag: tag, rawBody: rawBody
             )
         }
 
@@ -68,6 +103,19 @@ extension NovaMLXAPIServer {
         let apiKey = effectiveApiKey(provider)
         if !apiKey.isEmpty {
             urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        // Forward Anthropic cache-control headers so 1h cache TTL (anthropic-beta)
+        // actually reaches the upstream. Previously only Content-Type + Authorization
+        // were set, which silently degraded client requests asking for 1h cache writes.
+        if let v = anthropicVersion, !v.isEmpty {
+            urlRequest.setValue(v, forHTTPHeaderField: "anthropic-version")
+        } else {
+            // Sensible default — matches what real Anthropic clients send and what
+            // ImagePreprocessor.swift:207 already hardcodes for the vision proxy path.
+            urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        }
+        if let b = anthropicBeta, !b.isEmpty {
+            urlRequest.setValue(b, forHTTPHeaderField: "anthropic-beta")
         }
         urlRequest.timeoutInterval = 120
         urlRequest.httpBody = bodyData

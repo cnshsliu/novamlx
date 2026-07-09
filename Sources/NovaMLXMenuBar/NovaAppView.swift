@@ -12,6 +12,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case loadBalancers = "Load Balancers"     // NEW — placeholder until Task 10
     case chat = "Playground"
     case cluster = "Cluster"
+    case requests = "Requests"
     case apiKeys = "API Keys"
     case settings = "Settings"
 
@@ -25,6 +26,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .loadBalancers: return "scalemass"
         case .chat: return "cpu"
         case .cluster: return "xserve"
+        case .requests: return "list.bullet.rectangle"
         case .apiKeys: return "key.fill"
         case .settings: return "gearshape"
         }
@@ -178,8 +180,8 @@ public struct NovaAppView: View {
 
     private var miniTpsChart: some View {
         let history = appState.tpsHistory
-        let hasData = !history.allSatisfy({ $0 == 0 })
-        let currentTps = history.last ?? 0
+        let hasData = !history.allSatisfy({ $0.tps == 0 })
+        let currentTps = history.last?.tps ?? 0
 
         return Group {
             if hasData {
@@ -196,10 +198,10 @@ public struct NovaAppView: View {
                         }
                     }
                     Chart {
-                        ForEach(Array(history.enumerated()), id: \.offset) { index, tps in
+                        ForEach(Array(history.enumerated()), id: \.offset) { index, point in
                             LineMark(
                                 x: .value("T", index),
-                                y: .value("tps", tps)
+                                y: .value("tps", point.tps)
                             )
                             .foregroundStyle(NovaTheme.Colors.accent)
                             .interpolationMethod(.catmullRom)
@@ -207,7 +209,7 @@ public struct NovaAppView: View {
 
                             AreaMark(
                                 x: .value("T", index),
-                                y: .value("tps", tps)
+                                y: .value("tps", point.tps)
                             )
                             .foregroundStyle(
                                 .linearGradient(
@@ -251,11 +253,14 @@ public struct NovaAppView: View {
             TokenhubPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .tokenhub ? 1 : 0)
-            LoadBalancersPageView()
+            LoadBalancersPageView(appState: appState)
                 .opacity(selectedPage == .loadBalancers ? 1 : 0)
             ChatPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
+            RequestLogPageView(appState: appState)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .requests ? 1 : 0)
             APIKeysPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .apiKeys ? 1 : 0)
@@ -273,6 +278,7 @@ public struct NovaAppView: View {
         case .tokenhub: return l10n.tr("app.tokenhub")
         case .loadBalancers: return l10n.tr("app.load_balancers")
         case .chat: return l10n.tr("app.chat")
+        case .requests: return l10n.tr("app.requests")
         case .apiKeys: return "API Keys"
         case .settings: return l10n.tr("app.settings")
         }

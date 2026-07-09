@@ -111,31 +111,212 @@ public final class APIKeyStore: Sendable {
 
     // MARK: - Usage Tracking
 
-    public func recordUsage(keyId: String, tokens: Int64, model: String?) throws {
+    /// Records one API call: updates key counters (when `keyId` is set) and
+    /// appends an immutable ledger row for time-range / per-model reporting.
+    public func recordUsage(
+        keyId: String?,
+        promptTokens: Int64,
+        completionTokens: Int64,
+        model: String? = nil,
+        endpoint: String = "unknown"
+    ) throws {
+        let total = promptTokens + completionTokens
+        guard total > 0 else { return }
+
         try db.write { db in
-            guard var record = try APIKeyRecord.fetchOne(db, key: keyId) else { return }
+            if let keyId {
+                guard var record = try APIKeyRecord.fetchOne(db, key: keyId) else { return }
 
-            let periodKey = Self.periodDate(for: record.usageResetPeriod)
-            if record.periodResetDate != periodKey {
-                record.periodTokens = 0
-                record.periodRequests = 0
-                record.periodResetDate = periodKey
+                let periodKey = Self.periodDate(for: record.usageResetPeriod)
+                if record.periodResetDate != periodKey {
+                    record.periodTokens = 0
+                    record.periodRequests = 0
+                    record.periodResetDate = periodKey
+                }
+
+                record.totalTokensUsed += total
+                record.totalRequests += 1
+                record.periodTokens += total
+                record.periodRequests += 1
+                record.lastUsedAt = Date()
+
+                if let model {
+                    var perModel: [String: Int64] = decodeJSON(record.perModelTokens ?? "{}") ?? [:]
+                    perModel[model, default: 0] += total
+                    record.perModelTokens = encodeJSON(perModel) ?? "{}"
+                }
+
+                try record.update(db)
             }
 
-            record.totalTokensUsed += tokens
-            record.totalRequests += 1
-            record.periodTokens += tokens
-            record.periodRequests += 1
-            record.lastUsedAt = Date()
-
-            if let model {
-                var perModel: [String: Int64] = decodeJSON(record.perModelTokens ?? "{}") ?? [:]
-                perModel[model, default: 0] += tokens
-                record.perModelTokens = encodeJSON(perModel) ?? "{}"
-            }
-
-            try record.update(db)
+            var event = APIKeyUsageEvent(
+                keyId: keyId,
+                recordedAt: Date(),
+                model: model,
+                endpoint: endpoint,
+                promptTokens: promptTokens,
+                completionTokens: completionTokens
+            )
+            try event.insert(db)
         }
+    }
+
+    /// Backward-compatible helper: treats all tokens as completion tokens.
+    public func recordUsage(keyId: String, tokens: Int64, model: String?) throws {
+        try recordUsage(
+            keyId: keyId,
+            promptTokens: 0,
+            completionTokens: tokens,
+            model: model,
+            endpoint: "unknown"
+        )
+    }
+
+    public func usageReport(
+        keyId: String? = nil,
+        from: Date,
+        to: Date
+    ) throws -> UsageReport {
+        try db.read { db in
+            var sql = """
+                SELECT key_id, model,
+                       COUNT(*) AS requests,
+                       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens
+                FROM api_key_usage_events
+                WHERE recorded_at >= ? AND recorded_at < ?
+                """
+            var args: [DatabaseValueConvertible] = [from, to]
+
+            if let keyId {
+                sql += " AND key_id = ?"
+                args.append(keyId)
+            }
+
+            sql += " GROUP BY key_id, model ORDER BY total_tokens DESC"
+
+            struct Row: FetchableRecord, Decodable {
+                let key_id: String?
+                let model: String?
+                let requests: Int64
+                let prompt_tokens: Int64
+                let completion_tokens: Int64
+                let total_tokens: Int64
+            }
+
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+
+            var total = UsageAggregate()
+            var attributed = UsageAggregate()
+            var unattributed = UsageAggregate()
+            var byModelMap: [String: UsageAggregate] = [:]
+            var byKeyMap: [String?: (name: String?, models: [String: UsageAggregate], usage: UsageAggregate)] = [:]
+
+            let keyNames: [String: String] = (try? APIKeyRecord.fetchAll(db).reduce(into: [:]) { dict, rec in
+                dict[rec.id] = rec.name
+            }) ?? [:]
+
+            for row in rows {
+                let modelName = row.model ?? "unknown"
+                var modelAgg = byModelMap[modelName] ?? UsageAggregate()
+                modelAgg.add(
+                    requests: row.requests,
+                    promptTokens: row.prompt_tokens,
+                    completionTokens: row.completion_tokens
+                )
+                byModelMap[modelName] = modelAgg
+
+                total.add(
+                    requests: row.requests,
+                    promptTokens: row.prompt_tokens,
+                    completionTokens: row.completion_tokens
+                )
+
+                if let kid = row.key_id {
+                    attributed.add(
+                        requests: row.requests,
+                        promptTokens: row.prompt_tokens,
+                        completionTokens: row.completion_tokens
+                    )
+                    var entry = byKeyMap[kid] ?? (name: keyNames[kid], models: [:], usage: UsageAggregate())
+                    entry.usage.add(
+                        requests: row.requests,
+                        promptTokens: row.prompt_tokens,
+                        completionTokens: row.completion_tokens
+                    )
+                    var modelUsage = entry.models[modelName] ?? UsageAggregate()
+                    modelUsage.add(
+                        requests: row.requests,
+                        promptTokens: row.prompt_tokens,
+                        completionTokens: row.completion_tokens
+                    )
+                    entry.models[modelName] = modelUsage
+                    byKeyMap[kid] = entry
+                } else {
+                    unattributed.add(
+                        requests: row.requests,
+                        promptTokens: row.prompt_tokens,
+                        completionTokens: row.completion_tokens
+                    )
+                    var entry = byKeyMap[nil] ?? (name: nil, models: [:], usage: UsageAggregate())
+                    entry.usage.add(
+                        requests: row.requests,
+                        promptTokens: row.prompt_tokens,
+                        completionTokens: row.completion_tokens
+                    )
+                    var modelUsage = entry.models[modelName] ?? UsageAggregate()
+                    modelUsage.add(
+                        requests: row.requests,
+                        promptTokens: row.prompt_tokens,
+                        completionTokens: row.completion_tokens
+                    )
+                    entry.models[modelName] = modelUsage
+                    byKeyMap[nil] = entry
+                }
+            }
+
+            let byModel = byModelMap.map { ModelUsageBreakdown(model: $0.key, usage: $0.value) }
+                .sorted { $0.usage.totalTokens > $1.usage.totalTokens }
+
+            let byKey = byKeyMap.map { kid, entry in
+                KeyUsageBreakdown(
+                    keyId: kid,
+                    keyName: entry.name,
+                    usage: entry.usage,
+                    byModel: entry.models.map { ModelUsageBreakdown(model: $0.key, usage: $0.value) }
+                        .sorted { $0.usage.totalTokens > $1.usage.totalTokens }
+                )
+            }.sorted { $0.usage.totalTokens > $1.usage.totalTokens }
+
+            return UsageReport(
+                from: from,
+                to: to,
+                total: total,
+                attributed: attributed,
+                unattributed: unattributed,
+                byKey: byKey,
+                byModel: byModel
+            )
+        }
+    }
+
+    public static func parseUsageDate(_ value: String?, defaultOffsetDays: Int = 0) -> Date? {
+        guard let value, !value.isEmpty else {
+            if defaultOffsetDays == 0 { return Date() }
+            return Calendar(identifier: .gregorian).date(byAdding: .day, value: defaultOffsetDays, to: Date())
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = iso.date(from: value) { return d }
+        iso.formatOptions = [.withInternetDateTime]
+        if let d = iso.date(from: value) { return d }
+        let day = DateFormatter()
+        day.calendar = Calendar(identifier: .gregorian)
+        day.locale = Locale(identifier: "en_US_POSIX")
+        day.timeZone = TimeZone.current
+        day.dateFormat = "yyyy-MM-dd"
+        return day.date(from: value)
     }
 
     /// Returns the period-date string (e.g. "2026-06-13") used to key usage-reset periods.

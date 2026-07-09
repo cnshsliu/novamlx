@@ -25,6 +25,10 @@ public struct MacOSVoice: Identifiable, Hashable, Sendable {
 public final class TTSService: @unchecked Sendable {
     private let lock = NovaMLXLock()
     private var pipeline: DotsTTSPipeline?
+
+    /// Shared metrics store. Set by InferenceService after construction so the
+    /// status panel can show live TTS activity. Weak to avoid a retain cycle.
+    public var metricsStore: MetricsStore?
     private var loadedModelId: String?
 
     public init() {}
@@ -168,6 +172,11 @@ public final class TTSService: @unchecked Sendable {
             } else {
                 throw NovaMLXError.apiError("No voice profile available. Clone a voice first.")
             }
+
+            // Report live activity so the status panel shows TTS is running.
+            metricsStore?.reportActivity(
+                model: "TTS", kind: .tts, speed: 0, unit: "×RT")
+            defer { metricsStore?.clearActivity(forModel: "TTS") }
 
             var params = DotsTTSPipeline.Params()
             let audio = pipe.generate(

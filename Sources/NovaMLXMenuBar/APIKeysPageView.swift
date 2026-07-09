@@ -28,6 +28,7 @@ struct APIKeysPageView: View {
     @State private var revealedKeyIds: Set<String> = []
     @State private var revealedRawKeys: [String: String] = [:]
     @State private var showDeleteConfirm: String? = nil
+    @State private var usageReports: [String: UsageReport] = [:]
 
     private let loadedModelNames: [String]
 
@@ -55,6 +56,11 @@ struct APIKeysPageView: View {
         .task { loadManagedKeys() }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("APIKeysChanged"))) { _ in
             loadManagedKeys()
+        }
+        .onChange(of: expandedKeyId) { _, newId in
+            if let newId {
+                loadUsageReport(for: newId)
+            }
         }
     }
 
@@ -155,6 +161,23 @@ struct APIKeysPageView: View {
                           : (key.isLegacyImport
                              ? "Pre-DB key — rotate to enable reveal"
                              : "Reveal plaintext key"))
+
+                    // Copy revealed plaintext — only enabled while the key is shown.
+                    // Copies revealedRawKeys[key.id] (populated by the eye toggle),
+                    // never the masked prefix.
+                    Button {
+                        if let raw = revealedRawKeys[key.id] {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(raw, forType: .string)
+                        }
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 9))
+                            .foregroundColor(revealedKeyIds.contains(key.id) ? .secondary : .secondary.opacity(0.3))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!revealedKeyIds.contains(key.id))
+                    .help(revealedKeyIds.contains(key.id) ? "Copy revealed key" : "Reveal the key first to copy")
                 }
 
                 Spacer()
@@ -194,6 +217,17 @@ struct APIKeysPageView: View {
             RoundedRectangle(cornerRadius: NovaTheme.Radius.sm)
                 .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
         )
+        // Whole-row click toggles expansion. Buttons inside (eye/copy/toggle/
+        // chevron) take precedence over this tap gesture automatically — same
+        // pattern as LBRow in LoadBalancersPageView. Accordion behavior is
+        // preserved: expandedKeyId holds at most one key id at a time.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                expandedKeyId = (expandedKeyId == key.id) ? nil : key.id
+                showDeleteConfirm = nil
+            }
+        }
     }
 
     // MARK: - Key Details (expanded)
@@ -257,14 +291,20 @@ struct APIKeysPageView: View {
                 }
             }
 
-            // Per-model usage breakdown
-            if !key.usage.perModelTokens.isEmpty {
+            // Per-model usage (last 30 days from ledger, falls back to lifetime counters)
+            let ledger = usageReports[key.id]
+            let modelRows: [(String, Int64)] = {
+                if let ledger, !ledger.byModel.isEmpty {
+                    return ledger.byModel.map { ($0.model, $0.usage.totalTokens) }
+                }
+                return key.usage.perModelTokens.sorted { $0.value > $1.value }.map { ($0.key, $0.value) }
+            }()
+            if !modelRows.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Usage by model:")
+                    Text(ledger == nil ? "Usage by model (lifetime):" : "Usage by model (last 30 days):")
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
-                    let sorted = key.usage.perModelTokens.sorted { $0.value > $1.value }
-                    ForEach(sorted.prefix(5), id: \.key) { model, tokens in
+                    ForEach(modelRows.prefix(5), id: \.0) { model, tokens in
                         HStack(spacing: 4) {
                             Text(shortModelName(model))
                                 .font(.system(size: 9))
@@ -275,8 +315,8 @@ struct APIKeysPageView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
-                    if sorted.count > 5 {
-                        Text("+\(sorted.count - 5) more...")
+                    if modelRows.count > 5 {
+                        Text("+\(modelRows.count - 5) more...")
                             .font(.system(size: 9))
                             .foregroundColor(.secondary)
                     }
@@ -536,6 +576,16 @@ struct APIKeysPageView: View {
     private func loadManagedKeys() {
         Task {
             managedKeys = (try? NovaDB.shared.apiKeyStore.listAsAPIKey()) ?? []
+        }
+    }
+
+    private func loadUsageReport(for keyId: String) {
+        Task {
+            let to = Date()
+            let from = Calendar(identifier: .gregorian).date(byAdding: .day, value: -30, to: to) ?? to
+            if let report = try? NovaDB.shared.apiKeyStore.usageReport(keyId: keyId, from: from, to: to) {
+                usageReports[keyId] = report
+            }
         }
     }
 

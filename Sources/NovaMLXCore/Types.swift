@@ -4,7 +4,7 @@ import Logging
 
 public enum NovaMLX {}
 
-public let version = "1.0.8"
+public let version = "1.2.0"
 
 public var buildTimestamp: String {
     guard let execURL = Bundle.main.executableURL,
@@ -267,6 +267,10 @@ public struct InferenceRequest: @unchecked Sendable {
     public let includeLogprobs: Bool
     /// Number of top logprobs to return per token (only used when includeLogprobs is true).
     public let topLogprobsCount: Int?
+    /// The HTTP-layer request id (from `x-request-id` header) so the engine can
+    /// finalize the matching `RequestLogEntry` on completion. Nil for requests
+    /// that didn't come through the HTTP API (e.g. internal/playground calls).
+    public let httpRequestId: String?
 
     public init(
         id: UUID = UUID(),
@@ -295,7 +299,8 @@ public struct InferenceRequest: @unchecked Sendable {
         draftModel: String? = nil,
         numDraftTokens: Int? = nil,
         includeLogprobs: Bool = false,
-        topLogprobsCount: Int? = nil
+        topLogprobsCount: Int? = nil,
+        httpRequestId: String? = nil
     ) {
         self.id = id
         self.model = model
@@ -324,6 +329,7 @@ public struct InferenceRequest: @unchecked Sendable {
         self.numDraftTokens = numDraftTokens
         self.includeLogprobs = includeLogprobs
         self.topLogprobsCount = topLogprobsCount
+        self.httpRequestId = httpRequestId
     }
 }
 
@@ -1002,6 +1008,10 @@ public struct FileDownloadInfo: Sendable, Identifiable, Codable {
     /// Current speed in bytes per second (updated by the download engine)
     public var speed: Double = 0
 
+    /// Seconds since the last byte was received. nil before the first byte
+    /// arrives (Connecting phase). Drives "Stalled" detection in the UI.
+    public var secondsSinceLastByte: Double? = nil
+
     public init(
         filename: String,
         downloadedBytes: Int64 = 0,
@@ -1010,7 +1020,8 @@ public struct FileDownloadInfo: Sendable, Identifiable, Codable {
         currentURL: String? = nil,
         retryCount: Int = 0,
         isResuming: Bool = false,
-        speed: Double = 0
+        speed: Double = 0,
+        secondsSinceLastByte: Double? = nil
     ) {
         self.filename = filename
         self.downloadedBytes = downloadedBytes
@@ -1020,6 +1031,7 @@ public struct FileDownloadInfo: Sendable, Identifiable, Codable {
         self.retryCount = retryCount
         self.isResuming = isResuming
         self.speed = speed
+        self.secondsSinceLastByte = secondsSinceLastByte
     }
 }
 

@@ -95,6 +95,8 @@ struct NovaMLXWorker {
                     }
 
                 case WorkerMessageType.stream:
+                    let reqTagRead = (msg.requestId ?? "?").prefix(8)
+                    NovaMLXLog.info("[Worker:\(reqTagRead)] stdin read + decoded — dispatching to handleStream")
                     group.addTask {
                         await handleStream(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
                     }
@@ -211,10 +213,24 @@ struct NovaMLXWorker {
         var promptTokens = 0
         var completionTokens = 0
         var finishReason: FinishReason = .stop
+        var firstTokenLogged = false
+        let workerStreamStart = ContinuousClock.now
 
         do {
             for try await token in tokenStream {
                 completionTokens += 1
+                if !firstTokenLogged {
+                    firstTokenLogged = true
+                    let elapsed = ContinuousClock.now - workerStreamStart
+                    let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
+                    NovaMLXLog.info("[Worker:\(reqTag)] First token yielded by scheduler (after \(String(format: "%.0f", ms))ms since dispatch)")
+                }
+                if completionTokens % 50 == 0 {
+                    let elapsed = ContinuousClock.now - workerStreamStart
+                    let sec = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                    let tps = sec > 0 ? Double(completionTokens) / sec : 0
+                    NovaMLXLog.info("[Worker:\(reqTag)] Progress: \(completionTokens) tokens, \(String(format: "%.1f", tps)) tok/s")
+                }
                 if let fr = token.finishReason {
                     finishReason = fr
                 }
@@ -235,7 +251,11 @@ struct NovaMLXWorker {
                 promptTokens: promptTokens,
                 completionTokens: completionTokens
             ))
+            let totalElapsed = ContinuousClock.now - workerStreamStart
+            let sec = Double(totalElapsed.components.seconds) + Double(totalElapsed.components.attoseconds) / 1e18
+            NovaMLXLog.info("[Worker:\(reqTag)] Stream done — tokens=\(completionTokens) finish=\(finishReason.rawValue) total=\(String(format: "%.2f", sec))s")
         } catch {
+            NovaMLXLog.error("[Worker:\(reqTag)] Stream errored: \(error) — \(type(of: error))")
             writer.write(WorkerMessage(type: WorkerMessageType.error, requestId: msg.requestId, errorMessage: error.localizedDescription))
         }
     }

@@ -154,4 +154,33 @@ enum ConfigDBSchema {
             t.add(column: "description", .text)
         }
     }
+
+    /// Append-only ledger for per-key / per-model / per-time usage analytics.
+    static func v5APIKeyUsageEvents(in db: Database) throws {
+        try db.create(table: "api_key_usage_events") { t in
+            t.autoIncrementedPrimaryKey("id")
+            t.column("key_id", .text) // nil = unattributed (open mode / no auth)
+            t.column("recorded_at", .datetime).notNull()
+            t.column("model", .text)
+            t.column("endpoint", .text).notNull()
+            t.column("prompt_tokens", .integer).notNull().defaults(to: 0)
+            t.column("completion_tokens", .integer).notNull().defaults(to: 0)
+            t.column("total_tokens", .integer).notNull()
+        }
+        try db.create(
+            index: "idx_usage_key_time",
+            on: "api_key_usage_events",
+            columns: ["key_id", "recorded_at"]
+        )
+        try db.create(
+            index: "idx_usage_time",
+            on: "api_key_usage_events",
+            columns: ["recorded_at"]
+        )
+        try db.create(
+            index: "idx_usage_model",
+            on: "api_key_usage_events",
+            columns: ["model"]
+        )
+    }
 }

@@ -12,9 +12,15 @@ struct DownloadsPageView: View {
 
     @State private var searchText = ""
     @State private var searchResults: [HFSearchResult] = []
+    @State private var searchTotalCount = 0       // total before local regex filter
+    @State private var searchRegexError: String?  // invalid-regex hint
     @State private var isSearching = false
     @State private var selectedMirrorOption = "official"
     @State private var customMirrorURL = ""
+
+    // Search options
+    @State private var searchRegex = false        // treat input as regex
+    @State private var suffixMlxCommunity = false // auto-prepend mlx-community/
 
     // Compat warning
     @State private var showCompatWarning = false
@@ -147,37 +153,49 @@ struct DownloadsPageView: View {
                 .disabled(searchText.isEmpty || isSearching)
             }
 
-            // Mirror picker
+            // Mirror picker + search toggles (one row)
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Mirror")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Picker("", selection: $selectedMirrorOption) {
-                        Text("Official (huggingface.co)").tag("official")
-                        Text("hf-mirror.com (China)").tag("hf-mirror")
-                        Text("Custom URL...").tag("custom")
-                    }
-                    .pickerStyle(.menu)
-                    .onChange(of: selectedMirrorOption) { _, newOption in
-                        let endpoint: String? = {
-                            switch newOption {
-                            case "official": return nil
-                            case "hf-mirror": return "https://hf-mirror.com"
-                            case "custom": return customMirrorURL.isEmpty ? nil : customMirrorURL
-                            default: return nil
+                HStack(spacing: 16) {
+                    HStack(spacing: 6) {
+                        Text("Mirror")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Picker("", selection: $selectedMirrorOption) {
+                            Text("Official (huggingface.co)").tag("official")
+                            Text("hf-mirror.com (China)").tag("hf-mirror")
+                            Text("Custom URL...").tag("custom")
+                        }
+                        .pickerStyle(.menu)
+                        .onChange(of: selectedMirrorOption) { _, newOption in
+                            let endpoint: String? = {
+                                switch newOption {
+                                case "official": return nil
+                                case "hf-mirror": return "https://hf-mirror.com"
+                                case "custom": return customMirrorURL.isEmpty ? nil : customMirrorURL
+                                default: return nil
+                                }
+                            }()
+                            Task { await appState.setHuggingfaceEndpoint(endpoint) }
+                            mirrorChangeMessage = (newOption == "official")
+                                ? "Switched to official Hugging Face"
+                                : "Mirror changed. New downloads will use the selected source."
+                            showMirrorChangeNote = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                                showMirrorChangeNote = false
                             }
-                        }()
-                        Task { await appState.setHuggingfaceEndpoint(endpoint) }
-                        mirrorChangeMessage = (newOption == "official")
-                            ? "Switched to official Hugging Face"
-                            : "Mirror changed. New downloads will use the selected source."
-                        showMirrorChangeNote = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                            showMirrorChangeNote = false
                         }
                     }
+
+                    Divider().frame(height: 14)
+
+                    Toggle("regex", isOn: $searchRegex)
+                        .toggleStyle(.switch)
+                        .help("Treat search as a regular expression matched against model ID")
+                    Toggle("mlx-community/", isOn: $suffixMlxCommunity)
+                        .toggleStyle(.switch)
+                        .help("Auto-prepend mlx-community/ so 'Qwen2-VL-7B' matches 'mlx-community/Qwen2-VL-7B-...'")
                 }
+                .font(.caption)
 
                 if selectedMirrorOption == "custom" {
                     TextField("Custom endpoint (e.g. https://hf-mirror.com)", text: $customMirrorURL)
@@ -331,6 +349,16 @@ struct DownloadsPageView: View {
                 : "Results from \(lastSearchSourceName)"
             sectionHeader(headerTitle, icon: "magnifyingglass", count: searchResults.count)
 
+            if let regexError = searchRegexError {
+                Text(regexError)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            } else if searchRegex && searchResults.count < searchTotalCount {
+                Text("Regex: \(searchText) — \(searchResults.count) of \(searchTotalCount) models")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             ForEach(searchResults, id: \.id) { result in
                 searchResultRow(result)
             }
@@ -412,6 +440,15 @@ struct DownloadsPageView: View {
                     }
                 }
                 .frame(height: 4)
+                // Phase line: shows Connecting / Downloading X MB/s / Stalled
+                // based on per-file speed and secondsSinceLastByte. Without
+                // this the user sees a frozen progress bar and assumes the
+                // download is dead — the leading cause of Resume click-storms.
+                if let phase = downloadPhaseText(for: task) {
+                    Text(phase.text)
+                        .font(.system(size: 9))
+                        .foregroundColor(phase.color)
+                }
             }
         } else if let task = appState.downloadTasks[repoId], task.status == .failed {
             VStack(alignment: .trailing, spacing: 2) {
@@ -773,7 +810,8 @@ struct DownloadsPageView: View {
     // MARK: - Search
 
     private func performSearch() {
-        guard !searchText.isEmpty else { return }
+        let rawQuery = searchText.trimmingCharacters(in: .whitespaces)
+        guard !rawQuery.isEmpty else { return }
 
         if appState.apiKey == nil {
             newApiKey = "sk-novamlx-\(UUID().uuidString.prefix(8))"
@@ -782,6 +820,7 @@ struct DownloadsPageView: View {
         }
 
         isSearching = true
+        searchRegexError = nil
         currentSearchEndpoint = {
             switch selectedMirrorOption {
             case "hf-mirror": return "https://hf-mirror.com"
@@ -800,7 +839,14 @@ struct DownloadsPageView: View {
 
         Task {
             let adminPort = appState.adminPort
-            let query = searchText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? searchText
+
+            // Build server query: optionally prepend mlx-community/
+            var serverQuery = rawQuery
+            if suffixMlxCommunity && !serverQuery.hasPrefix("mlx-community/") {
+                serverQuery = "mlx-community/" + serverQuery
+            }
+            let encodedQuery = serverQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? serverQuery
+
             let searchEndpoint: String? = {
                 switch selectedMirrorOption {
                 case "official": return nil
@@ -809,8 +855,21 @@ struct DownloadsPageView: View {
                 default: return nil
                 }
             }()
-            let endpointQuery = searchEndpoint != nil ? "&endpoint=\(searchEndpoint!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" : ""
-            guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/search?q=\(query)\(endpointQuery)") else {
+            let encodedEndpoint = searchEndpoint?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+
+            // Regex mode: fetch a wider pool so local filtering has more to match
+            let limit = searchRegex ? 200 : 50
+
+            var urlComps = URLComponents(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/search")!
+            urlComps.queryItems = [
+                URLQueryItem(name: "q", value: encodedQuery),
+                URLQueryItem(name: "limit", value: String(limit)),
+                URLQueryItem(name: "mlx_only", value: "true"),
+            ]
+            if !encodedEndpoint.isEmpty {
+                urlComps.queryItems?.append(URLQueryItem(name: "endpoint", value: encodedEndpoint))
+            }
+            guard let url = urlComps.url else {
                 alertMessage = l10n.tr("models.invalidUrl")
                 showAlert = true
                 isSearching = false
@@ -836,13 +895,29 @@ struct DownloadsPageView: View {
                         return []
                     }()
 
-                    searchResults = resultsArray.compactMap { r in
+                    var results = resultsArray.compactMap { r -> HFSearchResult? in
                         guard let id = r["id"] as? String else { return nil }
                         return HFSearchResult(id: id, tags: r["tags"] as? [String] ?? [])
                     }
+                    searchTotalCount = results.count
 
-                    if searchResults.isEmpty {
-                        alertMessage = l10n.tr("models.noResults", searchText)
+                    // Local regex filter (HF API doesn't support regex)
+                    if searchRegex {
+                        do {
+                            let regex = try NSRegularExpression(pattern: rawQuery, options: .caseInsensitive)
+                            results = results.filter { r in
+                                let range = NSRange(r.id.startIndex..., in: r.id)
+                                return regex.firstMatch(in: r.id, range: range) != nil
+                            }
+                        } catch {
+                            searchRegexError = "Invalid regex: \(error.localizedDescription)"
+                        }
+                    }
+
+                    searchResults = results
+
+                    if searchResults.isEmpty && searchRegexError == nil {
+                        alertMessage = l10n.tr("models.noResults", rawQuery)
                         showAlert = true
                     }
                 } else {
@@ -1023,6 +1098,44 @@ struct DownloadsPageView: View {
             Spacer()
         }
     }
+}
+
+// MARK: - Download Phase Helpers
+
+/// Derives a phase label + color from a task's live per-file stats.
+/// Returns nil when no useful phase can be computed (e.g. no files in flight).
+/// Decision tree:
+///   - Any file with `speed > 0`  → "Downloading · X MB/s"
+///   - Else, any file with `secondsSinceLastByte >= 5` → "Stalled (Ns)"
+///   - Else, any file with `secondsSinceLastByte != nil` → "Connecting…"
+///   - Otherwise fall back to "Waiting…" so the user sees something.
+private func downloadPhaseText(for task: DownloadTaskInfo) -> (text: String, color: Color)? {
+    let active = task.fileProgresses.filter { $0.status == "downloading" }
+    guard !active.isEmpty else { return ("Waiting…", .secondary) }
+
+    // Aggregate speed across all actively-downloading files.
+    let totalSpeed = active.reduce(0.0) { $0 + $1.speed }
+    if totalSpeed > 0 {
+        let mb = totalSpeed / 1_000_000
+        if mb >= 0.1 {
+            return ("Downloading · \(String(format: "%.1f", mb)) MB/s", .green)
+        }
+        let kb = totalSpeed / 1000
+        return ("Downloading · \(String(format: "%.0f", kb)) KB/s", .green)
+    }
+
+    // No speed yet — look at the worst (largest) secondsSinceLastByte.
+    let stallSeconds: Double? = active
+        .compactMap { $0.secondsSinceLastByte }
+        .max()
+
+    if let s = stallSeconds {
+        if s >= 5 {
+            return ("Stalled (\(Int(s))s since last byte)", .orange)
+        }
+        return ("Connecting…", .secondary)
+    }
+    return ("Waiting…", .secondary)
 }
 
 // MARK: - Model Card Data

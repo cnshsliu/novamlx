@@ -63,6 +63,11 @@ public final class InferenceService: @unchecked Sendable {
         self.transcriptionService = TranscriptionService()
         self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
+        // Share the engine's metrics store with every backend so the status
+        // panel's "Realtime Inference Speed" reflects ALL model types, not just LLM.
+        self.transcriptionService.metricsStore = engine.metricsStore
+        self.ttsService.metricsStore = engine.metricsStore
+        self.imageGenerationService.metricsStore = engine.metricsStore
         self.workerMode = workerMode
         self.clusterMode = clusterMode
 
@@ -268,14 +273,17 @@ public final class InferenceService: @unchecked Sendable {
                 NovaMLXLog.warning("[Route:\(finalRequest.id.uuidString.prefix(8))] Cluster failed, using local inference for stream")
             case .ready:
                 NovaMLXLog.info("[Route:\(finalRequest.id.uuidString.prefix(8))] -> Distributed stream (model=\(resolvedId))")
-                return runner.stream(request: finalRequest)
+                let clusterKind: InferenceKind = workerModelTypes[resolvedId] == .vlm ? .vlm : .llm
+                return Self.trackStream(runner.stream(request: finalRequest), tracker: StreamTracker(model: resolvedId, kind: clusterKind, metricsStore: engine.metricsStore), request: finalRequest)
             }
         }
 
         // Worker mode: route through subprocess
         if workerMode, let worker = worker {
-            let tracker = StreamTracker(model: resolvedId, metricsStore: engine.metricsStore)
+            let workerKind: InferenceKind = workerModelTypes[resolvedId] == .vlm ? .vlm : .llm
+            let tracker = StreamTracker(model: resolvedId, kind: workerKind, metricsStore: engine.metricsStore)
             let upstream = worker.sendStream(finalRequest)
+            let capturedRequest = finalRequest
             return AsyncThrowingStream { continuation in
                 let task = Task { @Sendable in
                     do {
@@ -283,9 +291,10 @@ public final class InferenceService: @unchecked Sendable {
                             tracker.increment()
                             continuation.yield(token)
                         }
-                        tracker.finish()
+                        tracker.finish(request: capturedRequest)
                         continuation.finish()
                     } catch {
+                        tracker.finish(request: capturedRequest, error: error.localizedDescription)
                         continuation.finish(throwing: error)
                     }
                 }
@@ -310,6 +319,7 @@ public final class InferenceService: @unchecked Sendable {
 
         // Session, grammar, VLM, hybrid, and draft-model paths use engine directly (specialized execution)
         let hasDraftModel = finalRequest.draftModel != nil
+        let localKind: InferenceKind = isVLM ? .vlm : .llm
         let needsSpecialized = finalRequest.sessionId != nil ||
             finalRequest.jsonSchemaDef != nil ||
             finalRequest.responseFormat == .jsonObject ||
@@ -319,15 +329,43 @@ public final class InferenceService: @unchecked Sendable {
             hasLinearAttention ||
             hasDraftModel
 
+        // Wrap any local stream with a log-tracking shim that finalizes the
+        // RequestLogEntry on completion (token count + timing + HTTP request id).
         if needsSpecialized {
             let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (finalRequest.sessionId != nil ? "session" : "grammar")))
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher stream (reason=\(reason), model=\(resolvedId))")
-            return batcher.submitStream(finalRequest)
+            return Self.trackStream(batcher.submitStream(finalRequest), tracker: StreamTracker(model: resolvedId, kind: localKind, metricsStore: engine.metricsStore), request: finalRequest)
         }
 
         // LLM standard path: fused batch scheduler (shared GPU forward passes)
         NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler stream (model=\(resolvedId))")
-        return fusedScheduler.submitStream(finalRequest)
+        return Self.trackStream(fusedScheduler.submitStream(finalRequest), tracker: StreamTracker(model: resolvedId, kind: localKind, metricsStore: engine.metricsStore), request: finalRequest)
+    }
+
+    /// Wrap an inbound token stream so the request log gets live updates during
+    /// streaming and a final record on completion. Isolates token counting from
+    /// the scheduler internals (which don't know the HTTP request id).
+    private static func trackStream(
+        _ upstream: AsyncThrowingStream<Token, Error>,
+        tracker: StreamTracker,
+        request: InferenceRequest
+    ) -> AsyncThrowingStream<Token, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { @Sendable in
+                do {
+                    for try await token in upstream {
+                        tracker.increment()
+                        continuation.yield(token)
+                    }
+                    tracker.finish(request: request)
+                    continuation.finish()
+                } catch {
+                    tracker.finish(request: request, error: error.localizedDescription)
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 
     public func abort(requestId: UUID) async {
@@ -464,12 +502,29 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) async {
+        let resolvedId = settingsManager.resolveModelId(identifier.id)
+
         // TTS models
-        if identifier.family == .qwen3Tts {
+        if identifier.family == .qwen3Tts || identifier.family == .dotsTts
+            || ttsService.listLoadedModels().contains(resolvedId) {
             ttsService.unloadModel()
             saveLoadedModelsList()
             return
         }
+
+        // ASR models (Whisper, Qwen3-ASR) live in TranscriptionService, not MLXEngine.
+        if transcriptionService.isLoaded(resolvedId) {
+            transcriptionService.unload(modelId: resolvedId)
+            saveLoadedModelsList()
+            return
+        }
+
+        if imageGenerationService.isLoaded(resolvedId) {
+            imageGenerationService.unload(modelId: resolvedId)
+            saveLoadedModelsList()
+            return
+        }
+
         if workerMode, let worker = worker {
             try? await worker.sendUnload(modelId: identifier.id)
             workerLoadedModels.remove(identifier.id)
@@ -574,15 +629,22 @@ public final class InferenceService: @unchecked Sendable {
         (try? NovaDB.shared.loadedModelsStore.list()) ?? []
     }
 
-    public func restoreModels(modelManager: ModelManager) async {
+    public typealias RestoreProgressCallback = @Sendable (_ modelId: String, _ phase: RestorePhase) -> Void
+
+    public enum RestorePhase: Sendable { case started, completed, failed, skipped }
+
+    public func restoreModels(modelManager: ModelManager,
+                              progress: RestoreProgressCallback? = nil) async {
         let ids = loadLoadedModelsList()
         guard !ids.isEmpty else { return }
         NovaMLXLog.info("[InferenceService] Restoring \(ids.count) previously loaded model(s)...")
         for modelId in ids {
             guard let record = modelManager.getRecord(modelId) else {
                 NovaMLXLog.warning("[InferenceService] Skipping restore of '\(modelId)' — not found in registry")
+                progress?(modelId, .skipped)
                 continue
             }
+            progress?(modelId, .started)
             let config = ModelConfig(
                 identifier: ModelIdentifier(id: modelId, family: record.family),
                 modelType: record.modelType
@@ -590,8 +652,10 @@ public final class InferenceService: @unchecked Sendable {
             do {
                 try await loadModel(at: record.localURL, config: config)
                 NovaMLXLog.info("[InferenceService] Restored model: \(modelId) (type: \(record.modelType))")
+                progress?(modelId, .completed)
             } catch {
                 NovaMLXLog.warning("[InferenceService] Failed to restore model \(modelId): \(error)")
+                progress?(modelId, .failed)
             }
         }
         saveLoadedModelsList()
@@ -614,6 +678,7 @@ public final class InferenceService: @unchecked Sendable {
             activeRequests: activeReqs,
             gpuMemoryUsed: gpuMem,
             recentTokensPerSecond: engine.metricsStore.recentTokensPerSecond,
+            liveActivity: engine.metricsStore.liveActivity,
             totalTokensGenerated: engine.metricsStore.metrics.totalTokensAllTime,
             workerCpuUsage: workerCpu
         )
@@ -659,12 +724,14 @@ public final class InferenceService: @unchecked Sendable {
 private final class StreamTracker: @unchecked Sendable {
     let model: String
     let metricsStore: MetricsStore
+    let kind: InferenceKind
     let startTime = Date()
     var tokenCount = 0
     private var lastLiveUpdate: Date = Date()
 
-    init(model: String, metricsStore: MetricsStore) {
+    init(model: String, kind: InferenceKind, metricsStore: MetricsStore) {
         self.model = model
+        self.kind = kind
         self.metricsStore = metricsStore
     }
 
@@ -675,17 +742,33 @@ private final class StreamTracker: @unchecked Sendable {
         if now.timeIntervalSince(lastLiveUpdate) >= 1.0 {
             let elapsed = now.timeIntervalSince(startTime)
             if elapsed > 0.01 {
-                metricsStore.updateLiveTps(Double(tokenCount) / elapsed)
+                let tps = Double(tokenCount) / elapsed
+                metricsStore.updateLiveTps(tps)
+                metricsStore.reportActivity(model: model, kind: kind, speed: tps, unit: "tok/s")
             }
             lastLiveUpdate = now
         }
     }
 
-    func finish() {
+    func finish(request: InferenceRequest? = nil, error: String? = nil) {
         let elapsed = Date().timeIntervalSince(startTime)
         if tokenCount > 0 && elapsed > 0 {
+            let tps = Double(tokenCount) / elapsed
+            metricsStore.updateLiveTps(tps)
+            metricsStore.reportActivity(model: model, kind: kind, speed: tps, unit: "tok/s")
             metricsStore.recordRequest(model: model, tokens: UInt64(tokenCount), inferenceTime: elapsed)
         }
+        // Finalize the request-log entry so the Requests page shows final stats.
+        if let req = request {
+            RequestLogStore.shared.finish(
+                request: req, model: model, kind: kind,
+                tps: tokenCount > 0 && elapsed > 0 ? Double(tokenCount) / elapsed : 0,
+                promptTokens: 0, completionTokens: tokenCount,
+                durationMs: elapsed * 1000, error: error)
+        }
+        // Keep the activity record briefly so the final speed is visible; it will
+        // also age out via the store's staleness threshold. Don't clear here since
+        // staleness handling in the store covers it.
     }
 }
 
@@ -694,13 +777,17 @@ public struct InferenceStats: Sendable {
     public let activeRequests: Int
     public let gpuMemoryUsed: UInt64
     public let recentTokensPerSecond: Double
+    /// Live, in-progress inference across ALL backends (LLM, VLM, ASR, TTS, image).
+    /// nil when idle.
+    public let liveActivity: LiveActivity?
     public let totalTokensGenerated: UInt64
     public let workerCpuUsage: Double
-    public init(loadedModels: Int = 0, activeRequests: Int = 0, gpuMemoryUsed: UInt64 = 0, recentTokensPerSecond: Double = 0, totalTokensGenerated: UInt64 = 0, workerCpuUsage: Double = 0) {
+    public init(loadedModels: Int = 0, activeRequests: Int = 0, gpuMemoryUsed: UInt64 = 0, recentTokensPerSecond: Double = 0, liveActivity: LiveActivity? = nil, totalTokensGenerated: UInt64 = 0, workerCpuUsage: Double = 0) {
         self.loadedModels = loadedModels
         self.activeRequests = activeRequests
         self.gpuMemoryUsed = gpuMemoryUsed
         self.recentTokensPerSecond = recentTokensPerSecond
+        self.liveActivity = liveActivity
         self.totalTokensGenerated = totalTokensGenerated
         self.workerCpuUsage = workerCpuUsage
     }

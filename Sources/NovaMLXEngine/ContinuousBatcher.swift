@@ -264,8 +264,10 @@ public final class ContinuousBatcher: @unchecked Sendable {
                                 continuation.yield(token)
                             }
                             continuation.finish()
+                            NovaMLXLog.info("[Batcher:\(request.id.uuidString.prefix(8))] stream finished cleanly — model=\(modelId)")
                         } catch {
                             continuation.finish(throwing: error)
+                            NovaMLXLog.error("[Batcher:\(request.id.uuidString.prefix(8))] stream errored — model=\(modelId): \(error) — \(type(of: error))")
                         }
 
                         self.lock.withLock {
@@ -441,12 +443,17 @@ public final class ContinuousBatcher: @unchecked Sendable {
             do {
                 let stream = engine.stream(request)
                 for try await token in stream {
-                    if Task.isCancelled { break }
+                    if Task.isCancelled {
+                        NovaMLXLog.info("[Batcher:\(request.id.uuidString.prefix(8))] stream cancelled — model=\(modelId)")
+                        break
+                    }
                     continuation.yield(token)
                 }
                 continuation.finish()
+                NovaMLXLog.info("[Batcher:\(request.id.uuidString.prefix(8))] dequeued stream finished cleanly — model=\(modelId)")
             } catch {
                 continuation.finish(throwing: error)
+                NovaMLXLog.error("[Batcher:\(request.id.uuidString.prefix(8))] dequeued stream errored — model=\(modelId): \(error) — \(type(of: error))")
             }
 
             lock.withLock {

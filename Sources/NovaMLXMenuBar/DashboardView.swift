@@ -79,7 +79,9 @@ public struct DashboardView: View {
             MetricCard(title: l10n.tr("status.memory"), value: appState.systemStats.memoryUsed.bytesFormatted, subtitle: l10n.tr("dashboard.system"))
             MetricCard(title: l10n.tr("status.gpu"), value: appState.systemStats.gpuMemoryUsed.bytesFormatted, subtitle: l10n.tr("dashboard.used"))
             MetricCard(title: l10n.tr("status.requests"), value: "\(appState.inferenceStats.activeRequests)", subtitle: l10n.tr("status.active"))
-            MetricCard(title: l10n.tr("status.inferenceSpeed"), value: String(format: "%.1f", appState.systemStats.tokensPerSecond), subtitle: "tok/s")
+            MetricCard(title: l10n.tr("status.inferenceSpeed"),
+                       value: dashboardSpeedValue,
+                       subtitle: dashboardSpeedSubtitle)
             MetricCard(title: l10n.tr("status.cpu"), value: String(format: "%.0f%%", min(appState.systemStats.cpuUsage, 100.0)), subtitle: l10n.tr("dashboard.usage"))
             MetricCard(title: l10n.tr("status.uptime"), value: formatUptime(appState.uptime), subtitle: l10n.tr("dashboard.session"))
             MetricCard(title: l10n.tr("status.disk"), value: modelManager.totalDiskUsage().bytesFormatted, subtitle: l10n.tr("status.models").lowercased())
@@ -122,16 +124,41 @@ public struct DashboardView: View {
     private var loadedModelsSection: some View {
         let l10n = L10n.shared
         return VStack(alignment: .leading, spacing: 8) {
-            Text(l10n.tr("dashboard.loadedModels"))
-                .font(.headline)
+            HStack {
+                Text(l10n.tr("dashboard.loadedModels"))
+                    .font(.headline)
+                if !appState.restoringModels.isEmpty {
+                    HStack(spacing: 4) {
+                        ProgressView().controlSize(.mini)
+                        Text("\(appState.restoringModels.count) restoring")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
 
-            if appState.loadedModels.isEmpty {
+            if appState.loadedModels.isEmpty && appState.restoringModels.isEmpty {
                 Text(l10n.tr("dashboard.noModelsLoaded"))
                     .foregroundColor(.secondary)
                     .font(.caption)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(12)
             } else {
+                // Models currently being restored on startup
+                ForEach(appState.restoringModels, id: \.self) { modelId in
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(modelId)
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                        Text("Loading…")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.vertical, 4)
+                }
                 ForEach(appState.loadedModels, id: \.self) { modelId in
                     HStack {
                         Image(systemName: "cpu")
@@ -243,6 +270,22 @@ public struct DashboardView: View {
         let minutes = Int(interval) % 3600 / 60
         if hours > 0 { return "\(hours)\(l10n.tr("status.hour")) \(minutes)\(l10n.tr("status.minute"))" }
         return "\(minutes)\(l10n.tr("status.minute"))"
+    }
+
+    // MARK: - Live inference speed helpers
+
+    private var dashboardSpeedValue: String {
+        if let activity = appState.liveActivity, activity.speed > 0 {
+            return String(format: "%.1f", activity.speed)
+        }
+        return String(format: "%.1f", appState.systemStats.tokensPerSecond)
+    }
+
+    private var dashboardSpeedSubtitle: String {
+        if let activity = appState.liveActivity, activity.speed > 0 {
+            return activity.unit
+        }
+        return "tok/s"
     }
 
     private func startRefresh() {

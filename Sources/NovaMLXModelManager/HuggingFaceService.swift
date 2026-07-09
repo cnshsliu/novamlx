@@ -63,6 +63,10 @@ public struct FileProgress: Codable, Sendable {
     public var retryCount: Int = 0
     public var isResuming: Bool = false
     public var speed: Double = 0
+    /// Seconds since the last byte was received for this file. nil if the
+    /// file has never received any data (still in Connecting phase). Drives
+    /// the UI's "Stalled (Ns)" indicator.
+    public var secondsSinceLastByte: Double? = nil
 
     public init(
         filename: String,
@@ -72,7 +76,8 @@ public struct FileProgress: Codable, Sendable {
         currentURL: String? = nil,
         retryCount: Int = 0,
         isResuming: Bool = false,
-        speed: Double = 0
+        speed: Double = 0,
+        secondsSinceLastByte: Double? = nil
     ) {
         self.filename = filename
         self.downloadedBytes = downloadedBytes
@@ -82,6 +87,7 @@ public struct FileProgress: Codable, Sendable {
         self.retryCount = retryCount
         self.isResuming = isResuming
         self.speed = speed
+        self.secondsSinceLastByte = secondsSinceLastByte
     }
 }
 
@@ -123,17 +129,51 @@ private struct FileResult: Sendable {
     let errorMessage: String?
 }
 
-/// Thread-safe byte counter for real-time progress across parallel downloads
+/// Thread-safe byte counter for real-time progress across parallel downloads.
+/// Also tracks per-file download speed (bytes/sec) computed over the last
+/// sample window. The speed sample is updated whenever addBytes is called —
+/// we record (timestamp, cumulative bytes) and compute the delta-time-weighted
+/// rate on read. This gives the UI a live "X MB/s" indicator without needing
+/// a separate timer.
 private final class SharedProgress: @unchecked Sendable {
     private let lock = NSLock()
     private var _total: Int64 = 0
     private var _fileBytes: [String: Int64] = [:]
     private var _fileTotals: [String: Int64] = [:]
+    /// Per-file last-sample timestamp. Used with _fileBytes to compute speed.
+    private var _fileLastSampleAt: [String: Date] = [:]
+    /// Per-file last computed speed in bytes/sec. Updated on each addBytes
+    /// call so callers reading via getFileSpeed see fresh data.
+    private var _fileSpeed: [String: Double] = [:]
+    /// Per-file timestamp of the last time we observed >0 bytes flowing.
+    /// Drives the UI's "Stalled (Ns since last byte)" indicator when an
+    /// established connection goes quiet.
+    private var _fileLastByteAt: [String: Date] = [:]
 
     func addBytes(_ bytes: Int64, forFile filename: String) {
+        let now = Date()
         lock.lock()
         _total += bytes
-        _fileBytes[filename, default: 0] += bytes
+        let prevBytes = _fileBytes[filename, default: 0]
+        let prevTime = _fileLastSampleAt[filename]
+        _fileBytes[filename] = prevBytes + bytes
+        _fileLastByteAt[filename] = now
+        // Compute instantaneous speed. Only update if the sample gap is
+        // meaningfulful (>= 50ms) to avoid div-by-near-zero blowups when
+        // multiple flushes land in the same millisecond.
+        if let prevTime = prevTime {
+            let dt = now.timeIntervalSince(prevTime)
+            if dt >= 0.05 {
+                // Exponential moving average — smooths jitter without
+                // keeping a ring buffer per file.
+                let instantaneous = Double(bytes) / dt
+                let prev = _fileSpeed[filename, default: 0]
+                _fileSpeed[filename] = prev == 0 ? instantaneous : (prev * 0.5 + instantaneous * 0.5)
+                _fileLastSampleAt[filename] = now
+            }
+        } else {
+            _fileLastSampleAt[filename] = now
+        }
         lock.unlock()
     }
     func setFile(filename: String, bytes: Int64) {
@@ -154,6 +194,16 @@ private final class SharedProgress: @unchecked Sendable {
     }
     func getFileTotal(_ filename: String) -> Int64 {
         lock.lock(); defer { lock.unlock() }; return _fileTotals[filename] ?? 0
+    }
+    func getFileSpeed(_ filename: String) -> Double {
+        lock.lock(); defer { lock.unlock() }; return _fileSpeed[filename] ?? 0
+    }
+    /// Seconds since the last byte was received for this file. Returns nil
+    /// if the file has never received data (still connecting).
+    func secondsSinceLastByte(_ filename: String) -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard let d = _fileLastByteAt[filename] else { return nil }
+        return Date().timeIntervalSince(d)
     }
 }
 
@@ -264,6 +314,11 @@ public final class HuggingFaceService: @unchecked Sendable {
     private let adapter: any MirrorAdapter
     private let lock = NovaMLXLock()
     private var activeTasks: [String: HFDownloadTask] = [:]
+    /// Live Swift `Task` handles keyed by task ID. We keep these separate from
+    /// `activeTasks` (which is Codable metadata only) so cancellation actually
+    /// propagates into the in-flight download instead of just flipping a flag.
+    /// Guarded by `lock` to stay consistent with `activeTasks` mutations.
+    private var activeTaskHandles: [String: Task<Void, Never>] = [:]
     private var downloadTask: Task<Void, Never>?
     private let modelDirectory: URL
     public var onModelDownloaded: ((String) -> Void)?
@@ -477,6 +532,14 @@ public final class HuggingFaceService: @unchecked Sendable {
         hfToken: String? = nil,
         mirrorEndpoint: String? = nil
     ) async throws -> HFDownloadTask {
+        // Idempotent Resume: kill any in-flight tasks for the SAME repoId
+        // before minting a new one. Without this, a user clicking Resume
+        // repeatedly would spawn N concurrent downloads all writing to the
+        // same `.download` temp files — guaranteed corruption + wasted bandwidth.
+        // We can't rely on the client-side dedup guard alone; restart crashes,
+        // race windows, and rapid clicks all leak through.
+        cancelTasksForRepo(repoId: repoId)
+
         // If the caller supplied a live mirror (ModelScope, hf-mirror, custom),
         // build a one-off adapter for this download only.
         // The HFDownloadTask is still registered in *this* service's activeTasks
@@ -490,12 +553,13 @@ public final class HuggingFaceService: @unchecked Sendable {
         lock.withLock { activeTasks[task.id] = task }
 
         #if DEBUG
-        NovaMLXLog.info("[DL] Starting download for \(repoId)")
+        NovaMLXLog.info("[DL] Starting download for \(repoId) (task=\(task.id.prefix(8)))")
         #endif
 
         let taskCopy = task
-        downloadTask = Task { [weak self] in
-            await self?.runDownload(
+        let handle: Task<Void, Never> = Task { [weak self] in
+            guard let self else { return }
+            await self.runDownload(
                 task: taskCopy,
                 hfToken: hfToken,
                 adapter: effectiveAdapter
@@ -503,6 +567,8 @@ public final class HuggingFaceService: @unchecked Sendable {
                 self?.onModelDownloaded?(repoId)
             }
         }
+        lock.withLock { activeTaskHandles[task.id] = handle }
+        downloadTask = handle
         return task
     }
 
@@ -510,14 +576,55 @@ public final class HuggingFaceService: @unchecked Sendable {
         lock.withLock { Array(activeTasks.values) }
     }
 
+    /// Cancel one task by id. Marks status AND signals the live Swift `Task`
+    /// to stop. The download loop in `streamFile` checks `Task.isCancelled`
+    /// around each byte flush, so cancellation takes effect within ~350ms.
     public func cancelTask(id: String) -> Bool {
-        lock.withLock {
-            guard var task = activeTasks[id] else { return false }
-            task.status = "cancelled"
-            task.completedAt = Date()
-            activeTasks[id] = task
-            return true
+        var handle: Task<Void, Never>?
+        var didMark = false
+        lock.withLock() {
+            handle = activeTaskHandles[id]
+            if var task = activeTasks[id] {
+                task.status = "cancelled"
+                task.completedAt = Date()
+                activeTasks[id] = task
+                didMark = true
+            }
         }
+        handle?.cancel()
+        return didMark
+    }
+
+    /// Cancel every active task whose repoId matches. Returns the count of
+    /// tasks signalled. Used by `startDownload` to guarantee single-flight
+    /// per repo — see the comment there for why.
+    @discardableResult
+    public func cancelTasksForRepo(repoId: String) -> Int {
+        var idsToCancel: [String] = []
+        lock.withLock() {
+            idsToCancel = activeTasks
+                .filter { $0.value.repoId == repoId && $0.value.status == "downloading" }
+                .map { $0.key }
+        }
+        guard !idsToCancel.isEmpty else { return 0 }
+
+        #if DEBUG
+        NovaMLXLog.info("[DL] Cancel \(idsToCancel.count) in-flight task(s) for \(repoId) before starting new one")
+        #endif
+
+        // Signal each task to stop. We don't wait for them to actually exit —
+        // streamFile's cancellation checkpoint fires every ~350ms, and any
+        // straggler writes after this point are harmless because the new task
+        // deletes the `.download` temp file before writing.
+        var handles: [Task<Void, Never>] = []
+        lock.withLock() {
+            for id in idsToCancel {
+                if var t = activeTasks[id] { t.status = "cancelled"; activeTasks[id] = t }
+                if let h = activeTaskHandles.removeValue(forKey: id) { handles.append(h) }
+            }
+        }
+        for h in handles { h.cancel() }
+        return idsToCancel.count
     }
 
     public func removeTask(id: String) -> Bool {
@@ -537,7 +644,15 @@ public final class HuggingFaceService: @unchecked Sendable {
         var currentTask = task
 
         func save(_ t: HFDownloadTask) {
-            lock.withLock { activeTasks[t.id] = t }
+            lock.withLock {
+                activeTasks[t.id] = t
+                // Drop the live Task handle once we've reached a terminal
+                // status. Keeps the dict from leaking handles for finished
+                // downloads; cancellation on a finished task is a no-op anyway.
+                if t.status == "completed" || t.status == "failed" || t.status == "cancelled" {
+                    activeTaskHandles.removeValue(forKey: t.id)
+                }
+            }
         }
 
         do {
@@ -626,7 +741,8 @@ public final class HuggingFaceService: @unchecked Sendable {
                             t.downloadedBytes = shared.getTotal()
                             var calculatedTotal: Int64 = 0
                             for i in t.fileProgresses.indices {
-                                let live = shared.getFileBytes(t.fileProgresses[i].filename)
+                                let fname = t.fileProgresses[i].filename
+                                let live = shared.getFileBytes(fname)
                                 if live > 0 {
                                     t.fileProgresses[i].downloadedBytes = live
                                     // Auto-detect: file has bytes → it's downloading
@@ -635,10 +751,15 @@ public final class HuggingFaceService: @unchecked Sendable {
                                     }
                                 }
                                 // Update totalBytes from actual response if HEAD failed
-                                let liveTotal = shared.getFileTotal(t.fileProgresses[i].filename)
+                                let liveTotal = shared.getFileTotal(fname)
                                 if liveTotal > 0 && t.fileProgresses[i].totalBytes == 0 {
                                     t.fileProgresses[i].totalBytes = liveTotal
                                 }
+                                // Live speed + stall indicator. The UI shows
+                                // "Downloading · X MB/s" when speed > 0 and
+                                // "Stalled (Ns)" when secondsSinceLastByte > 5.
+                                t.fileProgresses[i].speed = shared.getFileSpeed(fname)
+                                t.fileProgresses[i].secondsSinceLastByte = shared.secondsSinceLastByte(fname)
                                 calculatedTotal += t.fileProgresses[i].totalBytes > 0
                                     ? t.fileProgresses[i].totalBytes
                                     : t.fileProgresses[i].downloadedBytes
@@ -764,16 +885,38 @@ public final class HuggingFaceService: @unchecked Sendable {
             try? fm.removeItem(at: dest)
         }
 
+        // Reachability probe: 3s HEAD before committing to a long download.
+        // Why: with a 120s timeoutIntervalForRequest, an unreachable endpoint
+        // burns 2 full minutes before the user sees a failure. A 3s probe
+        // catches blocked hosts (e.g. huggingface.co from CN networks without
+        // VPN) within seconds and surfaces a clear "Endpoint unreachable"
+        // message instead of an opaque "request timed out".
+        // Per-file (not per-retry) — once we know the endpoint is up, retries
+        // can use the regular timeout.
+        let probeOutcome = await Self.probeReachability(
+            url: file.sourceURL, session: session, token: token
+        )
+        switch probeOutcome {
+        case .reachable:
+            break
+        case .notFound:
+            return .init(filename: file.filename, success: false, downloadedBytes: 0,
+                         errorMessage: "File not found (404): \(file.sourceURL.lastPathComponent)")
+        case .unreachable(let reason):
+            return .init(filename: file.filename, success: false, downloadedBytes: 0,
+                         errorMessage: "Endpoint unreachable: \(file.sourceURL.host ?? "?") — \(reason)")
+        }
+
         var backoff = initialBackoff
         for attempt in 0...maxRetries {
             do {
-                let existing: Int64 = fm.fileExists(atPath: temp.path) ? Int64(fm.fileSize(at: temp) ?? 0) : 0
-
-                // Temp already complete?
-                if existing > 0 && file.expectedSize > 0 && existing == file.expectedSize {
-                    try moveFile(temp: temp, dest: dest)
-                    progress.setFile(filename: file.filename, bytes: existing)
-                    return .init(filename: file.filename, success: true, downloadedBytes: existing, errorMessage: nil)
+                // Per-app policy: never HTTP-Range resume. A partial temp file
+                // is always discarded and the file is redownloaded from scratch.
+                // Guarantees byte consistency at the cost of retransferring on
+                // retry. The existing `dest` (fully-downloaded file) short-circuit
+                // at the top of this function still handles the idempotent case.
+                if fm.fileExists(atPath: temp.path) {
+                    try? fm.removeItem(at: temp)
                 }
 
                 var request = URLRequest(url: file.sourceURL)
@@ -786,22 +929,10 @@ public final class HuggingFaceService: @unchecked Sendable {
                                      forHTTPHeaderField: "User-Agent")
                 }
 
-                var resumeFrom: Int64 = 0
-                if existing > 0 {
-                    request.setValue("bytes=\(existing)-", forHTTPHeaderField: "Range")
-                    resumeFrom = existing
-                }
-
                 let (asyncBytes, response) = try await session.bytes(for: request)
                 guard let http = response as? HTTPURLResponse else { throw NSError(domain: "NovaMLX", code: -1) }
 
-                let isResume: Bool
-                if http.statusCode == 206 && resumeFrom > 0 {
-                    isResume = true
-                } else if http.statusCode == 200 {
-                    isResume = false
-                    if resumeFrom > 0 { try? fm.removeItem(at: temp); resumeFrom = 0 }
-                } else {
+                if http.statusCode != 200 {
                     NovaMLXLog.error("[HF] Download stream got HTTP \(http.statusCode) for \(file.sourceURL)")
                     throw NSError(domain: "NovaMLX", code: http.statusCode,
                                   userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode) for \(file.sourceURL)"])
@@ -810,17 +941,15 @@ public final class HuggingFaceService: @unchecked Sendable {
                 // Discover actual file size from response if HEAD didn't give it to us
                 if file.expectedSize == 0 {
                     if let cl = http.value(forHTTPHeaderField: "Content-Length"), let contentLength = Int64(cl) {
-                        let actualTotal = isResume ? resumeFrom + contentLength : contentLength
-                        progress.setFileTotal(filename: file.filename, total: actualTotal)
+                        progress.setFileTotal(filename: file.filename, total: contentLength)
                     }
                 }
 
-                if !fm.fileExists(atPath: temp.path) { fm.createFile(atPath: temp.path, contents: nil) }
+                fm.createFile(atPath: temp.path, contents: nil)
                 let handle = try FileHandle(forWritingTo: temp)
-                if isResume { try handle.seek(toOffset: UInt64(resumeFrom)) }
-                else { try handle.truncate(atOffset: 0) }
+                try handle.truncate(atOffset: 0)
 
-                var written: Int64 = resumeFrom
+                var written: Int64 = 0
                 var buffer = Data()
                 let flushSize = 64 * 1024
                 var sinceLastReport: Int64 = 0
@@ -831,7 +960,7 @@ public final class HuggingFaceService: @unchecked Sendable {
                 let isLargeFile = file.expectedSize > 50_000_000   // log first data only for files > 50MB
 
                 for try await byte in asyncBytes {
-                    if !firstDataLogged && written == resumeFrom + 1 {
+                    if !firstDataLogged && written == 1 {
                         firstDataLogged = true
                         if isLargeFile {
                             NovaMLXLog.info("[DL] Started receiving data for large file: \(file.filename) (expected \(file.expectedSize / 1_000_000) MB)")
@@ -846,6 +975,13 @@ public final class HuggingFaceService: @unchecked Sendable {
                         Date().timeIntervalSince(lastReportTime) >= reportInterval
 
                     if shouldFlushBySize || shouldFlushByTime {
+                        // Cancellation checkpoint: respect Task.cancel from
+                        // cancelTask/cancelTasksForRepo. Throwing here unwinds
+                        // to the outer catch which checks isCancelled and
+                        // skips retry. Without this, a cancelled download keeps
+                        // pulling bytes for up to 120s (timeoutIntervalForRequest).
+                        try Task.checkCancellation()
+
                         try handle.write(contentsOf: buffer)
                         progress.addBytes(sinceLastReport, forFile: file.filename)
 
@@ -881,6 +1017,15 @@ public final class HuggingFaceService: @unchecked Sendable {
                 return .init(filename: file.filename, success: true, downloadedBytes: written, errorMessage: nil)
 
             } catch {
+                // Don't retry a cancelled task — the user (or a fresh Resume
+                // click) asked us to stop. Returning success=false here lets
+                // the new task take over cleanly.
+                if Task.isCancelled || error is CancellationError {
+                    #if DEBUG
+                    NovaMLXLog.info("[DL] Cancelled mid-flight: \(file.filename)")
+                    #endif
+                    return .init(filename: file.filename, success: false, downloadedBytes: 0, errorMessage: "Cancelled")
+                }
                 if attempt < maxRetries {
                     #if DEBUG
                     NovaMLXLog.warning("[DL] Retry \(attempt+1)/\(maxRetries) \(file.filename): \(error.localizedDescription)")
@@ -914,6 +1059,46 @@ public final class HuggingFaceService: @unchecked Sendable {
             f.rfilename.hasSuffix(".tiktoken") ||
             f.rfilename == "tokenizer.model" ||
             f.rfilename.hasSuffix(".py")
+        }
+    }
+
+    enum ReachabilityOutcome {
+        case reachable
+        case notFound
+        case unreachable(String)
+    }
+
+    /// Quick HEAD probe with a 3s timeout. Classifies the endpoint as
+    /// reachable (200/30x/401/403/405 — anything that proves the host
+    /// responds), permanently missing (404), or unreachable (timeout /
+    /// network error / DNS failure). HEAD is preferred because it's cheap,
+    /// but some CDNs reject it with 405 — we treat that as reachable.
+    private static func probeReachability(
+        url: URL, session: URLSession, token: String?
+    ) async -> ReachabilityOutcome {
+        var req = URLRequest(url: url)
+        req.httpMethod = "HEAD"
+        req.timeoutInterval = 3
+        if let t = token { req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
+        if url.host?.contains("modelscope") == true {
+            req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                         forHTTPHeaderField: "User-Agent")
+        }
+        do {
+            let (_, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse else {
+                return .unreachable("non-HTTP response")
+            }
+            switch http.statusCode {
+            case 200, 206, 301, 302, 303, 307, 308, 401, 403, 405:
+                return .reachable
+            case 404:
+                return .notFound
+            default:
+                return .unreachable("HTTP \(http.statusCode)")
+            }
+        } catch {
+            return .unreachable(error.localizedDescription)
         }
     }
 

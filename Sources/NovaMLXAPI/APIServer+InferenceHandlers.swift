@@ -15,7 +15,8 @@ extension NovaMLXAPIServer {
         sessionId: String? = nil, responseFormat: ResponseFormat? = nil, jsonSchemaDef: [String: Any]? = nil,
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
         cfg: ServerConfig, clientType: ClientType,
-        responseModelOverride: String? = nil
+        responseModelOverride: String? = nil,
+        httpRequest: Request? = nil
     ) async throws -> Response {
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: openAIReq.model,
@@ -48,7 +49,8 @@ extension NovaMLXAPIServer {
             draftModel: openAIReq.draftModel,
             numDraftTokens: openAIReq.numDraftTokens,
             includeLogprobs: openAIReq.logprobs == true,
-            topLogprobsCount: openAIReq.topLogprobs
+            topLogprobsCount: openAIReq.topLogprobs,
+            httpRequestId: HTTPHelpers.requestID(from: httpRequest)
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -148,6 +150,18 @@ extension NovaMLXAPIServer {
                 return OpenAIUsage(promptTokens: p, completionTokens: c)
             }()
         )
+        let ctxWin = inference.getContextWindow(for: openAIReq.model) ?? 0
+        let scaledPrompt = clientType.shouldScaleContext
+            ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
+        let scaledCompletion = clientType.shouldScaleContext
+            ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin) : result.completionTokens
+        Self.recordTokenUsage(
+            request: httpRequest,
+            promptTokens: scaledPrompt,
+            completionTokens: scaledCompletion,
+            model: openAIReq.model,
+            endpoint: "/v1/chat/completions"
+        )
         return try jsonResponse(response)
     }
 
@@ -157,7 +171,8 @@ extension NovaMLXAPIServer {
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
         cfg: ServerConfig, clientType: ClientType,
         coordinator: AutoLoadCoordinator,
-        responseModelOverride: String? = nil
+        responseModelOverride: String? = nil,
+        httpRequest: Request? = nil
     ) async throws -> Response {
         let responseModel = responseModelOverride ?? openAIReq.model
         let ocrSampling = OCROptimizer.samplingOverrides(
@@ -191,7 +206,8 @@ extension NovaMLXAPIServer {
             draftModel: openAIReq.draftModel,
             numDraftTokens: openAIReq.numDraftTokens,
             includeLogprobs: openAIReq.logprobs == true,
-            topLogprobsCount: openAIReq.topLogprobs
+            topLogprobsCount: openAIReq.topLogprobs,
+            httpRequestId: HTTPHelpers.requestID(from: httpRequest)
         )
 
         let modelId = openAIReq.model
@@ -206,10 +222,21 @@ extension NovaMLXAPIServer {
         let chunkId = "chatcmpl-\(request.id.uuidString.prefix(8))"
         let includeUsage = openAIReq.streamOptions?.includeUsage == true
         let toolCallCounter = LockedCounter()
+        let reqTag = String(request.id.uuidString.prefix(8))
+        let toolCount = openAIReq.tools?.count ?? 0
+        let maxTok = ocrSampling.maxTokens ?? openAIReq.maxTokens ?? -1
+        NovaMLXLog.info("[SSE:\(reqTag)] OpenAI stream start — model=\(openAIReq.model) client=\(clientType) maxTokens=\(maxTok) tools=\(toolCount) promptMsgs=\(messages.count)")
 
         let body: ResponseBody = .init { writer in
             CurrentInferenceModel.shared.modelID = openAIReq.model
             defer { CurrentInferenceModel.shared.modelID = nil }
+            let streamStart = ContinuousClock.now
+            var firstTokenAt: ContinuousClock.Instant? = nil
+            var lastProgressAt = ContinuousClock.now
+            var lastProgressCount = 0
+            var completionTokenCount = 0
+            var promptTokenCount: Int? = nil
+            var lastFinishReason: String? = nil
             do {
                 let roleChunk = OpenAIStreamChunk(
                     id: chunkId,
@@ -221,12 +248,30 @@ extension NovaMLXAPIServer {
                 let roleData = try JSONEncoder().encode(roleChunk)
                 try await writer.write(ByteBuffer(string: "data: \(String(data: roleData, encoding: .utf8) ?? "")\n\n"))
 
-                var completionTokenCount = 0
-                var promptTokenCount: Int? = nil
                 let shouldParseThinking = openAIReq.resolvedEnableThinking != false
                 let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
                 let thinkingParser = shouldParseThinking ? ThinkingParser(expectImplicitThinking: isImplicitModel) : nil
                 var streamedResponse = ""
+                // Local helper — invoked on every emitted token to track TTFT
+                // and periodic progress. Throttled to every 50 tokens or 5 s.
+                func logTokenProgress() {
+                    if firstTokenAt == nil {
+                        firstTokenAt = ContinuousClock.now
+                        let ttft = firstTokenAt! - streamStart
+                        let ttftMs = Double(ttft.components.seconds) * 1000 + Double(ttft.components.attoseconds) / 1e15
+                        NovaMLXLog.info("[SSE:\(reqTag)] TTFT=\(String(format: "%.0f", ttftMs))ms — first content token")
+                    }
+                    let now = ContinuousClock.now
+                    let sinceLast = now - lastProgressAt
+                    if completionTokenCount - lastProgressCount >= 50 || sinceLast > .seconds(5) {
+                        let elapsedSec = Double(sinceLast.components.seconds) + Double(sinceLast.components.attoseconds) / 1e18
+                        let delta = completionTokenCount - lastProgressCount
+                        let tps = elapsedSec > 0 ? Double(delta) / elapsedSec : 0
+                        NovaMLXLog.info("[SSE:\(reqTag)] Progress: \(completionTokenCount) tokens, \(String(format: "%.1f", tps)) tok/s (last \(delta) in \(String(format: "%.1f", elapsedSec))s)")
+                        lastProgressCount = completionTokenCount
+                        lastProgressAt = now
+                    }
+                }
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
@@ -249,6 +294,7 @@ extension NovaMLXAPIServer {
                             let data = try JSONEncoder().encode(chunk)
                             try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
                         } else if let finish = token.finishReason {
+                            lastFinishReason = finish.rawValue
                             if let pt = token.promptTokens { promptTokenCount = pt }
                             if let tp = thinkingParser {
                                 let finalParsed = tp.finalize()
@@ -262,6 +308,7 @@ extension NovaMLXAPIServer {
                                 }
                                 if !cleanResp.isEmpty {
                                     completionTokenCount += 1
+                                    logTokenProgress()
                                     let respDelta = OpenAIDelta(content: cleanResp)
                                     let respChunk = OpenAIStreamChunk(id: chunkId, model: responseModel, choices: [OpenAIStreamChoice(index: 0, delta: respDelta)], novaChannels: token.channels?.map { NovaHarmonyChannel(channel: $0.channel, text: $0.text) })
                                     let respData = try JSONEncoder().encode(respChunk)
@@ -284,6 +331,7 @@ extension NovaMLXAPIServer {
                             try await writer.write(ByteBuffer(string: "data: \(String(data: finalData, encoding: .utf8) ?? "")\n\n"))
                         } else {
                             completionTokenCount += 1
+                            logTokenProgress()
                             var cleanText = token.text
                             if cleanText.contains("<|") || (!shouldParseThinking && cleanText.contains("<think")) {
                                 let pattern = shouldParseThinking
@@ -363,9 +411,29 @@ extension NovaMLXAPIServer {
                 }
                 try await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
                 Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
+                let totalElapsed = ContinuousClock.now - streamStart
+                let totalSec = Double(totalElapsed.components.seconds) + Double(totalElapsed.components.attoseconds) / 1e18
+                let avgTps = totalSec > 0 ? Double(completionTokenCount) / totalSec : 0
+                let promptN = promptTokenCount ?? inference.countTokens(model: openAIReq.model, messages: messages) ?? 0
+                let ctxWin = inference.getContextWindow(for: openAIReq.model) ?? 0
+                let scaledPrompt = clientType.shouldScaleContext
+                    ? cfg.scaleTokenCount(promptN, modelContextWindow: ctxWin) : promptN
+                let scaledCompletion = clientType.shouldScaleContext
+                    ? cfg.scaleTokenCount(completionTokenCount, modelContextWindow: ctxWin) : completionTokenCount
+                Self.recordTokenUsage(
+                    request: httpRequest,
+                    promptTokens: scaledPrompt,
+                    completionTokens: scaledCompletion,
+                    model: openAIReq.model,
+                    endpoint: "/v1/chat/completions"
+                )
+                NovaMLXLog.info("[SSE:\(reqTag)] Stream complete — reason=\(lastFinishReason ?? "unknown") completionTokens=\(completionTokenCount) promptTokens=\(promptN) avgTPS=\(String(format: "%.1f", avgTps)) total=\(String(format: "%.2f", totalSec))s [DONE]+finish sent")
                 try await writer.finish(nil)
+                NovaMLXLog.info("[SSE:\(reqTag)] writer.finish(nil) returned — response body closed cleanly")
             } catch {
-                NovaMLXLog.error("Stream error: \(error)")
+                let totalElapsed = ContinuousClock.now - streamStart
+                let totalSec = Double(totalElapsed.components.seconds) + Double(totalElapsed.components.attoseconds) / 1e18
+                NovaMLXLog.error("[SSE:\(reqTag)] Stream error after \(completionTokenCount) tokens in \(String(format: "%.2f", totalSec))s: \(error) — \(type(of: error))")
                 let (message, type, code) = Self.streamErrorFields(error)
                 let errorDetail = OpenAIErrorDetail(message: message, type: type, code: code)
                 let errorResp = OpenAIErrorResponse(error: errorDetail)
@@ -376,6 +444,7 @@ extension NovaMLXAPIServer {
                 try? await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
                 Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
                 try? await writer.finish(nil)
+                NovaMLXLog.info("[SSE:\(reqTag)] error-path writer.finish(nil) returned")
             }
         }
 
@@ -389,7 +458,8 @@ extension NovaMLXAPIServer {
     static func handleStreamAnthropic(
         anthropicReq: AnthropicRequest, messages: [ChatMessage], inference: InferenceService,
         cfg: ServerConfig, clientType: ClientType,
-        coordinator: AutoLoadCoordinator
+        coordinator: AutoLoadCoordinator,
+        httpRequest: Request? = nil
     ) async throws -> Response {
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: anthropicReq.model,
@@ -407,11 +477,13 @@ extension NovaMLXAPIServer {
             stream: true, stop: ocrStop,
             thinkingBudget: anthropicReq.thinkingBudget,
             enableThinking: anthropicReq.resolvedEnableThinking,
-            preserveThinking: anthropicReq.resolvedPreserveThinking
+            preserveThinking: anthropicReq.resolvedPreserveThinking,
+            httpRequestId: HTTPHelpers.requestID(from: httpRequest)
         )
 
         let reqTag = request.id.uuidString.prefix(8)
-        NovaMLXLog.info("[SSE:\(reqTag)] Anthropic stream request started — model=\(anthropicReq.model), maxTokens=\(anthropicReq.maxTokens)")
+        let toolCount = anthropicReq.tools?.count ?? 0
+        NovaMLXLog.info("[SSE:\(reqTag)] Anthropic stream start — model=\(anthropicReq.model) client=\(clientType) maxTokens=\(anthropicReq.maxTokens) tools=\(toolCount) promptMsgs=\(messages.count)")
 
         let modelId = anthropicReq.model
         let autoLoadCfg = cfg.autoLoad
@@ -430,6 +502,8 @@ extension NovaMLXAPIServer {
             defer { CurrentInferenceModel.shared.modelID = nil }
             var tokenCount = 0
             let streamStart = Date()
+            var lastProgressAt = streamStart
+            var lastProgressCount = 0
             do {
                 try await writer.write(ByteBuffer(string: "event: ping\ndata: {\"type\":\"ping\"}\n\n"))
                 NovaMLXLog.debug("[SSE:\(reqTag)] Sent initial headers + ping")
@@ -508,6 +582,13 @@ extension NovaMLXAPIServer {
                             let deltaData = try JSONEncoder().encode(deltaEv)
                             try await writer.write(ByteBuffer(string: "event: message_delta\ndata: \(String(data: deltaData, encoding: .utf8) ?? "{}")\n\n"))
                             try await writer.write(ByteBuffer(string: "event: message_stop\ndata: {}\n\n"))
+                            Self.recordTokenUsage(
+                                request: httpRequest,
+                                promptTokens: scaledIn,
+                                completionTokens: scaledOut,
+                                model: anthropicReq.model,
+                                endpoint: "/v1/messages"
+                            )
                             let elapsed = Date().timeIntervalSince(streamStart)
                             NovaMLXLog.info("[SSE:\(reqTag)] Stream complete — \(tokenCount) tokens in \(String(format: "%.1f", elapsed))s, usage: input=\(scaledIn) output=\(scaledOut)")
                         } else if !token.text.isEmpty {
@@ -516,6 +597,16 @@ extension NovaMLXAPIServer {
                                 NovaMLXLog.info("[SSE:\(reqTag)] First token received (TTFT=\(String(format: "%.1f", ttft))s)")
                             }
                             tokenCount += 1
+                            // Periodic progress sampling — every 50 tokens or 5 s.
+                            let now = Date()
+                            let sinceLast = now.timeIntervalSince(lastProgressAt)
+                            if tokenCount - lastProgressCount >= 50 || sinceLast >= 5 {
+                                let delta = tokenCount - lastProgressCount
+                                let tps = sinceLast > 0 ? Double(delta) / sinceLast : 0
+                                NovaMLXLog.info("[SSE:\(reqTag)] Progress: \(tokenCount) tokens, \(String(format: "%.1f", tps)) tok/s (last \(delta) in \(String(format: "%.1f", sinceLast))s)")
+                                lastProgressCount = tokenCount
+                                lastProgressAt = now
+                            }
 
                             var cleanText = token.text
                             if cleanText.contains("<|") {
@@ -584,7 +675,7 @@ extension NovaMLXAPIServer {
                 Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
             } catch {
                 let elapsed = Date().timeIntervalSince(streamStart)
-                NovaMLXLog.error("[SSE:\(reqTag)] Stream ERROR after \(String(format: "%.1f", elapsed))s, \(tokenCount) tokens sent: \(error)")
+                NovaMLXLog.error("[SSE:\(reqTag)] Stream ERROR after \(String(format: "%.1f", elapsed))s, \(tokenCount) tokens sent: \(error) — \(type(of: error))")
                 let (message, errorType) = Self.anthropicStreamErrorFields(error)
                 let errorDetail = AnthropicErrorDetail(type: errorType, message: message)
                 let errorResp = AnthropicErrorResponse(error: errorDetail)
@@ -593,9 +684,11 @@ extension NovaMLXAPIServer {
                 }
                 Self.applyKeepAlive(anthropicReq.keepAlive, modelId: anthropicReq.model, pool: inference.engine.pool)
                 try? await writer.finish(nil)
+                NovaMLXLog.info("[SSE:\(reqTag)] error-path writer.finish(nil) returned")
                 return
             }
             try? await writer.finish(nil)
+            NovaMLXLog.info("[SSE:\(reqTag)] writer.finish(nil) returned — response body closed cleanly")
         }
 
         return Response(
@@ -619,7 +712,8 @@ extension NovaMLXAPIServer {
             presencePenalty: compReq.presencePenalty.map { Float($0) },
             repetitionPenalty: compReq.repetitionPenalty.map { Float($0) },
             seed: compReq.seed,
-            stream: false, stop: compReq.stop
+            stream: false, stop: compReq.stop,
+            httpRequestId: HTTPHelpers.requestID(from: nil)
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -658,7 +752,8 @@ extension NovaMLXAPIServer {
             presencePenalty: compReq.presencePenalty.map { Float($0) },
             repetitionPenalty: compReq.repetitionPenalty.map { Float($0) },
             seed: compReq.seed,
-            stream: true, stop: compReq.stop
+            stream: true, stop: compReq.stop,
+            httpRequestId: HTTPHelpers.requestID(from: nil)
         )
 
         let modelId = compReq.model

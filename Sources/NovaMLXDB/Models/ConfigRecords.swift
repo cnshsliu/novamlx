@@ -112,6 +112,142 @@ extension ConfigRecord: FetchableRecord, MutablePersistableRecord {
     }
 }
 
+// MARK: - API Key Usage Event
+
+public struct APIKeyUsageEvent: Codable, Sendable, PersistableRecord, FetchableRecord {
+    public static let databaseTableName = "api_key_usage_events"
+    public var id: Int64?
+    public var keyId: String?
+    public var recordedAt: Date
+    public var model: String?
+    public var endpoint: String
+    public var promptTokens: Int64
+    public var completionTokens: Int64
+    public var totalTokens: Int64
+
+    public init(
+        id: Int64? = nil,
+        keyId: String?,
+        recordedAt: Date = Date(),
+        model: String?,
+        endpoint: String,
+        promptTokens: Int64,
+        completionTokens: Int64
+    ) {
+        self.id = id
+        self.keyId = keyId
+        self.recordedAt = recordedAt
+        self.model = model
+        self.endpoint = endpoint
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = promptTokens + completionTokens
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case keyId = "key_id"
+        case recordedAt = "recorded_at"
+        case model, endpoint
+        case promptTokens = "prompt_tokens"
+        case completionTokens = "completion_tokens"
+        case totalTokens = "total_tokens"
+    }
+}
+
+extension APIKeyUsageEvent: MutablePersistableRecord {
+    public mutating func didInsert(_ inserted: InsertionSuccess) {
+        id = inserted.rowID
+    }
+}
+
+public struct UsageAggregate: Codable, Sendable, Equatable {
+    public var requests: Int64
+    public var promptTokens: Int64
+    public var completionTokens: Int64
+    public var totalTokens: Int64
+
+    public init(
+        requests: Int64 = 0,
+        promptTokens: Int64 = 0,
+        completionTokens: Int64 = 0,
+        totalTokens: Int64 = 0
+    ) {
+        self.requests = requests
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+    }
+
+    public mutating func add(
+        requests: Int64 = 1,
+        promptTokens: Int64,
+        completionTokens: Int64
+    ) {
+        self.requests += requests
+        self.promptTokens += promptTokens
+        self.completionTokens += completionTokens
+        self.totalTokens += promptTokens + completionTokens
+    }
+}
+
+public struct ModelUsageBreakdown: Codable, Sendable, Equatable {
+    public let model: String
+    public var usage: UsageAggregate
+
+    public init(model: String, usage: UsageAggregate) {
+        self.model = model
+        self.usage = usage
+    }
+}
+
+public struct KeyUsageBreakdown: Codable, Sendable, Equatable {
+    public let keyId: String?
+    public let keyName: String?
+    public var usage: UsageAggregate
+    public var byModel: [ModelUsageBreakdown]
+
+    public init(
+        keyId: String?,
+        keyName: String?,
+        usage: UsageAggregate,
+        byModel: [ModelUsageBreakdown] = []
+    ) {
+        self.keyId = keyId
+        self.keyName = keyName
+        self.usage = usage
+        self.byModel = byModel
+    }
+}
+
+public struct UsageReport: Codable, Sendable, Equatable {
+    public let from: Date
+    public let to: Date
+    public var total: UsageAggregate
+    public var attributed: UsageAggregate
+    public var unattributed: UsageAggregate
+    public var byKey: [KeyUsageBreakdown]
+    public var byModel: [ModelUsageBreakdown]
+
+    public init(
+        from: Date,
+        to: Date,
+        total: UsageAggregate = UsageAggregate(),
+        attributed: UsageAggregate = UsageAggregate(),
+        unattributed: UsageAggregate = UsageAggregate(),
+        byKey: [KeyUsageBreakdown] = [],
+        byModel: [ModelUsageBreakdown] = []
+    ) {
+        self.from = from
+        self.to = to
+        self.total = total
+        self.attributed = attributed
+        self.unattributed = unattributed
+        self.byKey = byKey
+        self.byModel = byModel
+    }
+}
+
 // MARK: - API Key Record
 
 public struct APIKeyRecord: Codable, Sendable, PersistableRecord {

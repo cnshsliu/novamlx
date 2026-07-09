@@ -862,7 +862,8 @@ extension NovaMLXAPIServer {
             topP: req.topP, stream: false,
             responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
-            enableThinking: req.reasoning != nil
+            enableThinking: req.reasoning != nil,
+            httpRequestId: HTTPHelpers.requestID(from: nil)
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -959,10 +960,12 @@ extension NovaMLXAPIServer {
             model: req.model, messages: messages,
             temperature: req.temperature, maxTokens: req.maxOutputTokens,
             topP: req.topP, stream: true,
-            enableThinking: req.reasoning != nil
+            enableThinking: req.reasoning != nil,
+            httpRequestId: HTTPHelpers.requestID(from: nil)
         )
 
         let reqTag = request.id.uuidString.prefix(8)
+        NovaMLXLog.info("[SSE:\(reqTag)] Responses stream start — model=\(req.model) client=\(clientType) maxTokens=\(req.maxOutputTokens ?? -1) promptMsgs=\(capturedMessages.count) previousResponseId=\(req.previousResponseId ?? "nil")")
         let responseId = "resp_\(request.id.uuidString.prefix(24))"
         let msgId = "msg_\(request.id.uuidString.prefix(24))"
         let rsId = "rs_\(request.id.uuidString.prefix(24))"
@@ -983,6 +986,11 @@ extension NovaMLXAPIServer {
             var fullText = ""
             var reasoningText = ""
             var tokenCount = 0
+            let streamStart = Date()
+            var firstTokenAt: Date? = nil
+            var lastProgressAt = streamStart
+            var lastProgressCount = 0
+            var lastFinishReason: String? = nil
             let encoder = JSONEncoder()
             let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: modelId)
             let thinkingParser = ThinkingParser(expectImplicitThinking: isImplicitModel)
@@ -1043,7 +1051,23 @@ extension NovaMLXAPIServer {
                             }
                         }
                         tokenCount += 1
+                        // TTFT + progress sampling
+                        if firstTokenAt == nil {
+                            firstTokenAt = Date()
+                            let ttftMs = firstTokenAt!.timeIntervalSince(streamStart) * 1000
+                            NovaMLXLog.info("[SSE:\(reqTag)] TTFT=\(String(format: "%.0f", ttftMs))ms — first content token")
+                        }
+                        let now = Date()
+                        let sinceLast = now.timeIntervalSince(lastProgressAt)
+                        if tokenCount - lastProgressCount >= 50 || sinceLast >= 5 {
+                            let delta = tokenCount - lastProgressCount
+                            let tps = sinceLast > 0 ? Double(delta) / sinceLast : 0
+                            NovaMLXLog.info("[SSE:\(reqTag)] Progress: \(tokenCount) tokens, \(String(format: "%.1f", tps)) tok/s (last \(delta) in \(String(format: "%.1f", sinceLast))s)")
+                            lastProgressCount = tokenCount
+                            lastProgressAt = now
+                        }
                         if token.finishReason != nil {
+                            lastFinishReason = token.finishReason?.rawValue ?? "unknown"
                             let finalParsed = thinkingParser.finalize()
                             if !finalParsed.thinking.isEmpty {
                                 if !reasoningStarted {
@@ -1111,8 +1135,12 @@ extension NovaMLXAPIServer {
                     }
                 }
                 try await writer.finish(nil)
+                let totalSec = Date().timeIntervalSince(streamStart)
+                let avgTps = totalSec > 0 ? Double(tokenCount) / totalSec : 0
+                NovaMLXLog.info("[SSE:\(reqTag)] Responses stream complete — reason=\(lastFinishReason ?? "unknown") completionTokens=\(tokenCount) avgTPS=\(String(format: "%.1f", avgTps)) total=\(String(format: "%.2f", totalSec))s writer.finish returned cleanly")
             } catch {
-                NovaMLXLog.error("[SSE:\(reqTag)] Responses stream error: \(error)")
+                let elapsed = Date().timeIntervalSince(streamStart)
+                NovaMLXLog.error("[SSE:\(reqTag)] Responses stream error after \(String(format: "%.2f", elapsed))s, \(tokenCount) tokens: \(error) — \(type(of: error))")
                 sequenceNumber += 1
                 let errEvent = ResponsesSSEError(code: "ERR_STREAM", message: error.localizedDescription)
                 if let errData = try? JSONEncoder().encode(errEvent) {
@@ -1123,6 +1151,7 @@ extension NovaMLXAPIServer {
                     }
                 }
                 try? await writer.finish(nil)
+                NovaMLXLog.info("[SSE:\(reqTag)] error-path writer.finish(nil) returned")
             }
         }
 
@@ -1161,7 +1190,8 @@ extension NovaMLXAPIServer {
             messages: [ChatMessage(role: .system, content: "You are a conversation compaction assistant. Produce dense, information-rich summaries."),
                        ChatMessage(role: .user, content: summaryPrompt)],
             maxTokens: 2048,
-            stream: false
+            stream: false,
+            httpRequestId: HTTPHelpers.requestID(from: nil)
         )
 
         let result: InferenceResult
