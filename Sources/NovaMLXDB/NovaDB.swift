@@ -27,19 +27,21 @@ public final class NovaDB: @unchecked Sendable {
     private let log = Logger(label: "NovaMLXDB")
     private let queue = DispatchQueue(label: "com.novamlx.db.setup")
     private var _isSetup = false
+    private var _baseDir: URL?
 
     private init() {}
 
     /// Whether `setup(baseDir:)` has successfully completed at least once.
     public var isSetup: Bool { queue.sync { _isSetup } }
 
-    /// Idempotent setup. Subsequent calls are no-ops (the existing DBs are
-    /// preserved). This lets eager property initializers in callers (e.g.
-    /// `MLXEngine` constructed as a stored property on AppDelegate) trigger
-    /// setup without coordinating with the init-body's explicit setup call.
+    /// Idempotent for the same `baseDir`. A different directory rebinds the
+    /// pools so tests can isolate via per-test temp dirs. Same-path no-op
+    /// keeps eager AppDelegate / MLXEngine setup calls from double-opening.
     public func setup(baseDir: URL) throws {
         try queue.sync {
-            guard !_isSetup else { return }
+            if _isSetup, _baseDir?.standardizedFileURL.path == baseDir.standardizedFileURL.path {
+                return
+            }
             let fm = FileManager.default
             try fm.createDirectory(at: baseDir, withIntermediateDirectories: true)
 
@@ -62,6 +64,7 @@ public final class NovaDB: @unchecked Sendable {
             initStores()
             try importLegacyJSON(baseDir: baseDir)
             cleanupOrphanedLegacyFiles(baseDir: baseDir)
+            _baseDir = baseDir
             _isSetup = true
         }
     }
@@ -118,6 +121,9 @@ public final class NovaDB: @unchecked Sendable {
         }
         configMigrator.registerMigration("v5_api_key_usage_events") { db in
             try ConfigDBSchema.v5APIKeyUsageEvents(in: db)
+        }
+        configMigrator.registerMigration("v6_allow_unlisted_downloads") { db in
+            try ConfigDBSchema.v6AllowUnlistedDownloads(in: db)
         }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")

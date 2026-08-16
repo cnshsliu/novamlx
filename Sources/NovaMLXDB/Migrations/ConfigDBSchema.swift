@@ -183,4 +183,10 @@ enum ConfigDBSchema {
             columns: ["model"]
         )
     }
+
+    static func v6AllowUnlistedDownloads(in db: Database) throws {
+        try db.alter(table: "config") { t in
+            t.add(column: "allow_unlisted_downloads", .boolean).notNull().defaults(to: false)
+        }
+    }
 }

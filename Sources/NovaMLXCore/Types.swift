@@ -824,6 +824,8 @@ public struct ServerConfig: Codable, Sendable {
     /// or `storeCache` calls are issued, and `getOrCreatePrefixCacheManager`
     /// returns `nil` for every model.
     public let prefixCacheEnabled: Bool
+    /// When `false` (default), only catalog-listed models may be downloaded.
+    public let allowUnlistedDownloads: Bool
     public let autoLoad: AutoLoadConfig
     public let cluster: ClusterSettings?
 
@@ -857,6 +859,7 @@ public struct ServerConfig: Codable, Sendable {
         case tlsCertPath, tlsKeyPath, tlsKeyPassword, maxRequestSizeMB
         case maxProcessMemory
         case prefixCacheEnabled
+        case allowUnlistedDownloads
         case autoLoad
         case cluster
     }
@@ -874,6 +877,7 @@ public struct ServerConfig: Codable, Sendable {
         maxRequestSizeMB: Double = 100,
         maxProcessMemory: String = "auto",
         prefixCacheEnabled: Bool = true,
+        allowUnlistedDownloads: Bool = false,
         autoLoad: AutoLoadConfig = .init(),
         cluster: ClusterSettings? = nil
     ) {
@@ -889,6 +893,7 @@ public struct ServerConfig: Codable, Sendable {
         self.maxRequestSizeMB = maxRequestSizeMB
         self.maxProcessMemory = maxProcessMemory
         self.prefixCacheEnabled = prefixCacheEnabled
+        self.allowUnlistedDownloads = allowUnlistedDownloads
         self.autoLoad = autoLoad
         self.cluster = cluster
     }
@@ -909,6 +914,7 @@ public struct ServerConfig: Codable, Sendable {
         maxRequestSizeMB = try container.decodeIfPresent(Double.self, forKey: .maxRequestSizeMB) ?? 100
         maxProcessMemory = try container.decodeIfPresent(String.self, forKey: .maxProcessMemory) ?? "auto"
         prefixCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .prefixCacheEnabled) ?? true
+        allowUnlistedDownloads = try container.decodeIfPresent(Bool.self, forKey: .allowUnlistedDownloads) ?? false
         autoLoad = try container.decodeIfPresent(AutoLoadConfig.self, forKey: .autoLoad) ?? .init()
         cluster = try container.decodeIfPresent(ClusterSettings.self, forKey: .cluster)
     }

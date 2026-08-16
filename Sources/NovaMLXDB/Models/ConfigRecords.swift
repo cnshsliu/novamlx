@@ -30,6 +30,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     public var maxRequestSizeMB: Double = 100
     public var maxProcessMemory: String = "auto"
     public var prefixCacheEnabled: Bool = true
+    public var allowUnlistedDownloads: Bool = false
 
     /// Explicit public memberwise initializer so cross-module callers
     /// (NovaMLXCore/Configuration.swift) can construct records. The
@@ -56,7 +57,8 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         tlsKeyPassword: String? = nil,
         maxRequestSizeMB: Double = 100,
         maxProcessMemory: String = "auto",
-        prefixCacheEnabled: Bool = true
+        prefixCacheEnabled: Bool = true,
+        allowUnlistedDownloads: Bool = false
     ) {
         self.id = id
         self.host = host
@@ -80,6 +82,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         self.maxRequestSizeMB = maxRequestSizeMB
         self.maxProcessMemory = maxProcessMemory
         self.prefixCacheEnabled = prefixCacheEnabled
+        self.allowUnlistedDownloads = allowUnlistedDownloads
     }
 
     enum CodingKeys: String, CodingKey {
@@ -103,6 +106,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         case maxRequestSizeMB = "max_request_size_mb"
         case maxProcessMemory = "max_process_memory"
         case prefixCacheEnabled = "prefix_cache_enabled"
+        case allowUnlistedDownloads = "allow_unlisted_downloads"
     }
 }
 

@@ -4,7 +4,7 @@ import GRDB
 import NovaMLXDB
 import NovaMLXCore
 
-@Suite("ConfigStore")
+@Suite("ConfigStore", .serialized)
 struct ConfigStoreTests {
 
     private func makeTmpDir() throws -> URL {
@@ -142,5 +142,24 @@ struct ConfigStoreTests {
 
         // File should be renamed to .migrated
         #expect(FileManager.default.fileExists(atPath: configURL.appendingPathExtension("migrated").path))
+    }
+
+    @Test("v6 migration defaults allowUnlistedDownloads to false")
+    func v6MigrationDefault() async throws {
+        let tmp = try makeTmpDir()
+        let nova = NovaDB.shared
+        try nova.setup(baseDir: tmp)
+        let record = try nova.configStore.get()
+        #expect(record.allowUnlistedDownloads == false)
+    }
+
+    @Test("ConfigStore persists allowUnlistedDownloads")
+    func persistAllowUnlisted() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+        try NovaDB.shared.configStore.update { rec in
+            rec.allowUnlistedDownloads = true
+        }
+        #expect(try NovaDB.shared.configStore.get().allowUnlistedDownloads == true)
     }
 }

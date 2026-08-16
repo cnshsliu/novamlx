@@ -123,7 +123,8 @@ public actor NovaMLXConfiguration {
             tlsKeyPassword: server.tlsKeyPassword,
             maxRequestSizeMB: server.maxRequestSizeMB,
             maxProcessMemory: server.maxProcessMemory,
-            prefixCacheEnabled: server.prefixCacheEnabled
+            prefixCacheEnabled: server.prefixCacheEnabled,
+            allowUnlistedDownloads: server.allowUnlistedDownloads
         )
         do {
             try NovaDB.shared.configStore.update { existing in
@@ -157,6 +158,7 @@ public actor NovaMLXConfiguration {
             maxRequestSizeMB: record.maxRequestSizeMB,
             maxProcessMemory: record.maxProcessMemory,
             prefixCacheEnabled: record.prefixCacheEnabled,
+            allowUnlistedDownloads: record.allowUnlistedDownloads,
             autoLoad: autoLoad,
             cluster: cluster
         )
