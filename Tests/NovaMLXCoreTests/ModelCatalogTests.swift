@@ -123,6 +123,49 @@ struct ModelCatalogTests {
         #expect(vlms[0].category == .vlm)
     }
 
+    @Test("Search matches description")
+    func searchByDescription() throws {
+        let file = try CatalogFile.decode(sampleJSON)
+        let hits = ModelCatalogPolicy.search(file.models, query: "Latest Qwen", category: nil)
+        #expect(hits.map(\.id) == ["mlx-community/Qwen3.6-27B-OptiQ-4bit"])
+    }
+
+    @Test("Search matches tags")
+    func searchByTag() throws {
+        let file = try CatalogFile.decode(sampleJSON)
+        let hits = ModelCatalogPolicy.search(file.models, query: "4-bit", category: nil)
+        #expect(hits.map(\.id) == ["mlx-community/Qwen3.6-27B-OptiQ-4bit"])
+    }
+
+    @Test("Search matches family rawValue")
+    func searchByFamily() throws {
+        let file = try CatalogFile.decode(sampleJSON)
+        let hits = ModelCatalogPolicy.search(file.models, query: "qwen", category: nil)
+        #expect(hits.count == 2)
+        #expect(hits.map(\.id) == [
+            "mlx-community/Qwen3.6-27B-OptiQ-4bit",
+            "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
+        ])
+    }
+
+    @Test("Whitespace-only query matches all like empty query")
+    func searchWhitespaceQuery() throws {
+        let file = try CatalogFile.decode(sampleJSON)
+        let all = ModelCatalogPolicy.search(file.models, query: "   ", category: nil)
+        #expect(all.count == 2)
+        let vlms = ModelCatalogPolicy.search(file.models, query: "   ", category: .vlm)
+        #expect(vlms.count == 1)
+        #expect(vlms[0].category == .vlm)
+    }
+
+    @Test("Search query combined with category filter")
+    func searchQueryAndCategory() throws {
+        let file = try CatalogFile.decode(sampleJSON)
+        let hits = ModelCatalogPolicy.search(file.models, query: "qwen", category: .llm)
+        #expect(hits.map(\.id) == ["mlx-community/Qwen3.6-27B-OptiQ-4bit"])
+        #expect(hits[0].category == .llm)
+    }
+
     @Test("Lookup by id")
     func lookup() throws {
         let file = try CatalogFile.decode(sampleJSON)
