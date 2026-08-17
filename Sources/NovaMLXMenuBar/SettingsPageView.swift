@@ -209,6 +209,7 @@ struct SettingsPageView: View {
             Toggle(isOn: Binding(
                 get: { appState.allowUnlistedDownloads },
                 set: { newValue in
+                    appState.allowUnlistedDownloads = newValue
                     Task { await appState.setAllowUnlistedDownloads(newValue) }
                 }
             )) {

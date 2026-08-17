@@ -25,6 +25,7 @@ struct DownloadsPageView: View {
     // Catalog (verified) listing
     @State private var catalogEpoch = 0
     @State private var catalogSearchQuery = ""
+    @State private var catalogDidLoad = false
 
     // Alert / API key
     @State private var showAlert = false
@@ -109,8 +110,15 @@ struct DownloadsPageView: View {
         .sheet(item: $selectedModelCard) { card in
             modelCardSheet(card)
         }
+        .onAppear {
+            if !modelManager.catalogStore.models.isEmpty {
+                catalogDidLoad = true
+                catalogEpoch += 1
+            }
+        }
         .task {
             await modelManager.fetchCatalog()
+            catalogDidLoad = true
             catalogEpoch += 1
         }
         .onChange(of: searchText) { _, newValue in
@@ -248,6 +256,16 @@ struct DownloadsPageView: View {
 
     // MARK: - Verified Catalog
 
+    private var catalogEmptyCopy: String {
+        if !catalogSearchQuery.isEmpty {
+            return "No matching models"
+        }
+        if catalogDidLoad {
+            return "No verified models"
+        }
+        return "Loading catalog…"
+    }
+
     private var displayedCatalogModels: [CatalogEntry] {
         _ = catalogEpoch
         if catalogSearchQuery.isEmpty {
@@ -267,7 +285,7 @@ struct DownloadsPageView: View {
             sectionHeader(l10n.tr("models.verifiedTitle"), icon: "checkmark.seal.fill", count: models.count)
 
             if models.isEmpty {
-                Text("Loading catalog…")
+                Text(catalogEmptyCopy)
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
             } else {
