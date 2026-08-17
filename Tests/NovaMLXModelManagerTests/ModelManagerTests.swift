@@ -5,6 +5,13 @@ import NovaMLXDB
 
 /// NovaDB is a process-wide singleton. Tests that construct ModelManager must
 /// install an isolated temp database before init (loadRegistry reads the store).
+private struct FixedTransport: CatalogTransport, Sendable {
+    let result: Result<Data, Error>
+    func data(from url: URL) async throws -> Data {
+        try result.get()
+    }
+}
+
 enum IsolatedTestDB {
     private static let lock = NSLock()
 
@@ -98,6 +105,33 @@ struct ModelManagerTests {
         manager.registerPopularModels()
         let models = manager.allRegisteredModels()
         #expect(models.isEmpty)
+    }
+
+    @Test("Register popular models from injected catalog store")
+    func registerPopularModelsFromInjectedCatalog() async {
+        let dir = IsolatedTestDB.run { $0 }
+        let cache = dir.appendingPathComponent("models.json")
+        let valid = """
+        {"schemaVersion":1,"updatedAt":"2026-08-16T00:00:00Z","models":[
+          {"id":"org/a","url":"https://huggingface.co/org/a","name":"A","category":"llm","family":"qwen","format":"mlx"}
+        ]}
+        """.data(using: .utf8)!
+        let store = ModelCatalogStore(
+            remoteURL: URL(string: "https://example.invalid/catalog/models.json")!,
+            cacheURL: cache,
+            bundleURL: nil,
+            transport: FixedTransport(result: .success(valid))
+        )
+        let manager = ModelManager(modelsDirectory: dir, catalogStore: store)
+        await manager.fetchCatalog()
+        manager.registerPopularModels()
+        let record = manager.getRecord("org/a")
+        #expect(record != nil)
+        #expect(record?.remoteURL == "https://huggingface.co/org/a")
+        #expect(record?.family == .qwen)
+        #expect(record?.modelType == .llm)
+        manager.registerPopularModels()
+        #expect(manager.allRegisteredModels().count == 1)
     }
 
     @Test("Model record properties")

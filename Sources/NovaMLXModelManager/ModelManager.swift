@@ -96,9 +96,9 @@ public final class ModelManager: @unchecked Sendable {
     private var _downloadStates: [String: DownloadStatus]
     private let lock = NovaMLXLock()
 
-    public init(modelsDirectory: URL) {
+    public init(modelsDirectory: URL, catalogStore: ModelCatalogStore = ModelCatalogStore()) {
         self.modelsDirectory = modelsDirectory
-        self.catalogStore = ModelCatalogStore()
+        self.catalogStore = catalogStore
         self.registryFile = modelsDirectory.appendingPathComponent("registry.json")
         let hubDownloadBase = modelsDirectory.appendingPathComponent("hub")
         self.hubApi = HubApi(downloadBase: hubDownloadBase, cache: nil)
