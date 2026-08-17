@@ -321,12 +321,6 @@ public final class ModelManager: @unchecked Sendable {
         }
     }
 
-    /// Thin wrappers kept so UI still compiles until the catalog UI rewrite.
-    public func fetchSuggestedModels() async { await fetchCatalog() }
-    public func suggestedModels(forCategory category: ModelType?) -> [CatalogEntry] {
-        catalogModels(forCategory: category)
-    }
-
     @discardableResult
     public func discoverModels() -> [DiscoveredModel] {
         let discovery = ModelDiscovery()

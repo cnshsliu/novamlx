@@ -278,6 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.isServerRunning = true
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
+            appState.allowUnlistedDownloads = serverConfig.allowUnlistedDownloads
             appState.apiKey = Self.firstRawAPIKey()
 
             NovaMLXLog.info("NovaMLX v\(NovaMLXCore.version) started")
@@ -442,6 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
+            appState.allowUnlistedDownloads = serverConfig.allowUnlistedDownloads
             appState.apiKey = Self.firstRawAPIKey()
 
             NovaMLXLog.info("Server restarted (apiKeys: \((try? NovaDB.shared.apiKeyStore.listAsAPIKey())?.count ?? 0))")

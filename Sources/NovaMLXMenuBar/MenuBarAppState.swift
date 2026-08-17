@@ -60,6 +60,10 @@ public final class MenuBarAppState: ObservableObject {
     // Cluster state — read from config, drives sidebar visibility
     @Published public var clusterEnabled: Bool = false
 
+    /// When true, Downloads can search/download any Hugging Face repo.
+    /// Live-synced with `ServerConfig.allowUnlistedDownloads`.
+    @Published public var allowUnlistedDownloads: Bool = false
+
     // Speed Boost state per model
     @Published public var specBoostStatus: [String: SpecBoostState] = [:]
 
@@ -183,6 +187,30 @@ public final class MenuBarAppState: ObservableObject {
 
     public func setHuggingfaceEndpoint(_ endpoint: String?) async {
         await NovaMLXConfiguration.shared.setHuggingfaceEndpoint(endpoint)
+        await NovaMLXConfiguration.shared.syncToStore()
+    }
+
+    public func setAllowUnlistedDownloads(_ enabled: Bool) async {
+        allowUnlistedDownloads = enabled
+        let current = await NovaMLXConfiguration.shared.serverConfig
+        let updated = ServerConfig(
+            host: current.host,
+            port: current.port,
+            adminPort: current.adminPort,
+            maxConcurrentRequests: current.maxConcurrentRequests,
+            requestTimeout: current.requestTimeout,
+            contextScalingTarget: current.contextScalingTarget,
+            tlsCertPath: current.tlsCertPath,
+            tlsKeyPath: current.tlsKeyPath,
+            tlsKeyPassword: current.tlsKeyPassword,
+            maxRequestSizeMB: current.maxRequestSizeMB,
+            maxProcessMemory: current.maxProcessMemory,
+            prefixCacheEnabled: current.prefixCacheEnabled,
+            allowUnlistedDownloads: enabled,
+            autoLoad: current.autoLoad,
+            cluster: current.cluster
+        )
+        await NovaMLXConfiguration.shared.setServerConfig(updated)
         await NovaMLXConfiguration.shared.syncToStore()
     }
 

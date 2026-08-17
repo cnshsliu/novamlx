@@ -22,9 +22,9 @@ struct DownloadsPageView: View {
     @State private var searchRegex = false        // treat input as regex
     @State private var suffixMlxCommunity = false // auto-prepend mlx-community/
 
-    // Compat warning
-    @State private var showCompatWarning = false
-    @State private var compatWarningRepoId = ""
+    // Catalog (verified) listing
+    @State private var catalogEpoch = 0
+    @State private var catalogSearchQuery = ""
 
     // Alert / API key
     @State private var showAlert = false
@@ -59,11 +59,11 @@ struct DownloadsPageView: View {
                 VStack(spacing: 20) {
                     searchSection
 
-                    // Show search results or suggested models
-                    if !searchResults.isEmpty {
+                    // Hub search results only when Advanced is on; otherwise catalog cards.
+                    if appState.allowUnlistedDownloads && !searchResults.isEmpty {
                         searchResultsSection
                     } else {
-                        suggestedModelsSection
+                        catalogModelsSection
                     }
 
                     if !activeOrFailed.isEmpty {
@@ -103,17 +103,6 @@ struct DownloadsPageView: View {
         .alert(alertMessage, isPresented: $showAlert) {
             Button("OK", role: .cancel) {}
         }
-        .alert("⚠️ Compatibility Notice", isPresented: $showCompatWarning) {
-            Button("Cancel", role: .cancel) {
-                showCompatWarning = false
-            }
-            Button("Download Anyway") {
-                showCompatWarning = false
-                appState.startDownload(repoId: compatWarningRepoId)
-            }
-        } message: {
-            Text("This model doesn't appear to be in MLX format.\nIt may not work with NovaMLX on macOS.")
-        }
         .sheet(isPresented: $showApiKeyPrompt) {
             apiKeySetupSheet
         }
@@ -121,7 +110,19 @@ struct DownloadsPageView: View {
             modelCardSheet(card)
         }
         .task {
-            await modelManager.fetchSuggestedModels()
+            await modelManager.fetchCatalog()
+            catalogEpoch += 1
+        }
+        .onChange(of: searchText) { _, newValue in
+            if newValue.trimmingCharacters(in: .whitespaces).isEmpty {
+                searchResults = []
+                catalogSearchQuery = ""
+            }
+        }
+        .onChange(of: appState.allowUnlistedDownloads) { _, enabled in
+            if !enabled {
+                searchResults = []
+            }
         }
     }
 
@@ -129,6 +130,18 @@ struct DownloadsPageView: View {
 
     private var searchSection: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if appState.allowUnlistedDownloads {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(NovaTheme.Colors.statusWarn)
+                        .font(.system(size: 12))
+                    Text(l10n.tr("models.unverifiedBanner"))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             // Search bar
             HStack(spacing: 12) {
                 HStack {
@@ -186,14 +199,16 @@ struct DownloadsPageView: View {
                         }
                     }
 
-                    Divider().frame(height: 14)
+                    if appState.allowUnlistedDownloads {
+                        Divider().frame(height: 14)
 
-                    Toggle("regex", isOn: $searchRegex)
-                        .toggleStyle(.switch)
-                        .help("Treat search as a regular expression matched against model ID")
-                    Toggle("mlx-community/", isOn: $suffixMlxCommunity)
-                        .toggleStyle(.switch)
-                        .help("Auto-prepend mlx-community/ so 'Qwen2-VL-7B' matches 'mlx-community/Qwen2-VL-7B-...'")
+                        Toggle("regex", isOn: $searchRegex)
+                            .toggleStyle(.switch)
+                            .help("Treat search as a regular expression matched against model ID")
+                        Toggle("mlx-community/", isOn: $suffixMlxCommunity)
+                            .toggleStyle(.switch)
+                            .help("Auto-prepend mlx-community/ so 'Qwen2-VL-7B' matches 'mlx-community/Qwen2-VL-7B-...'")
+                    }
                 }
                 .font(.caption)
 
@@ -231,21 +246,27 @@ struct DownloadsPageView: View {
         }
     }
 
-    // MARK: - Suggested Models
+    // MARK: - Verified Catalog
 
-    private var suggestedModelsSection: some View {
-        let models = modelManager.suggestedModels(forCategory: typeFilter.matchType)
+    private var displayedCatalogModels: [CatalogEntry] {
+        _ = catalogEpoch
+        if catalogSearchQuery.isEmpty {
+            return modelManager.catalogModels(forCategory: typeFilter.matchType)
+        }
+        return ModelCatalogPolicy.search(
+            modelManager.catalogStore.models,
+            query: catalogSearchQuery,
+            category: typeFilter.matchType
+        )
+    }
+
+    private var catalogModelsSection: some View {
+        let models = displayedCatalogModels
 
         return VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                sectionHeader("Suggested", icon: "star.fill", count: models.count)
-                Text("Reference picks — use the search above to find and download any model from Hugging Face.")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
+            sectionHeader(l10n.tr("models.verifiedTitle"), icon: "checkmark.seal.fill", count: models.count)
 
             if models.isEmpty {
-                // Remote catalog not loaded yet (or fetch failed). Per spec: suggest nothing.
                 Text("Loading catalog…")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
@@ -255,7 +276,7 @@ struct DownloadsPageView: View {
                     GridItem(.flexible(), spacing: 12),
                 ], spacing: 12) {
                     ForEach(models) { model in
-                        suggestedModelCard(model)
+                        catalogModelCard(model)
                     }
                 }
             }
@@ -263,18 +284,25 @@ struct DownloadsPageView: View {
         .sectionCard()
     }
 
-    private func suggestedModelCard(_ model: CatalogEntry) -> some View {
+    private func catalogModelCard(_ model: CatalogEntry) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Name + HF link
+            // Name + preview badge + origin link
             HStack {
                 Text(model.name)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
+                if model.status == .preview {
+                    Text(l10n.tr("models.previewBadge"))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
                 Spacer()
                 Button {
                     if let url = URL(string: model.url) {
-                        NSWorkspace.shared.open(url)
-                    } else if let url = URL(string: "https://huggingface.co/\(model.id)") {
                         NSWorkspace.shared.open(url)
                     }
                 } label: {
@@ -486,15 +514,6 @@ struct DownloadsPageView: View {
     }
 
     private func triggerDownload(repoId: String) {
-        // Heuristic compat check: if repo doesn't contain known MLX indicators, warn
-        let lower = repoId.lowercased()
-        let looksLikeMlx = lower.contains("mlx") || lower.contains("4bit") || lower.contains("8bit")
-            || lower.contains("gguf") || lower.contains("quant") || lower.contains("safetensors")
-        if !looksLikeMlx {
-            compatWarningRepoId = repoId
-            showCompatWarning = true
-            return
-        }
         appState.startDownload(repoId: repoId)
     }
 
@@ -814,6 +833,20 @@ struct DownloadsPageView: View {
     private func performSearch() {
         let rawQuery = searchText.trimmingCharacters(in: .whitespaces)
         guard !rawQuery.isEmpty else { return }
+
+        // Advanced off: filter the verified catalog locally. Do not call Hub search.
+        if !appState.allowUnlistedDownloads {
+            catalogSearchQuery = rawQuery
+            searchResults = []
+            let hits = displayedCatalogModels
+            if hits.isEmpty {
+                alertMessage = l10n.tr("models.noResults", rawQuery)
+                showAlert = true
+            }
+            return
+        }
+
+        catalogSearchQuery = ""
 
         if appState.apiKey == nil {
             newApiKey = "sk-novamlx-\(UUID().uuidString.prefix(8))"

@@ -91,6 +91,7 @@ struct SettingsPageView: View {
                 settingsRow(l10n.tr("settings.adminApi"), value: "http://127.0.0.1:\(String(appState.adminPort))")
 
                 configPathRow
+                allowUnlistedToggle
             }
 
             // Bottom action bar
@@ -200,6 +201,30 @@ struct SettingsPageView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
         }
+    }
+
+    private var allowUnlistedToggle: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Divider().padding(.bottom, 4)
+            Toggle(isOn: Binding(
+                get: { appState.allowUnlistedDownloads },
+                set: { newValue in
+                    Task { await appState.setAllowUnlistedDownloads(newValue) }
+                }
+            )) {
+                Text(l10n.tr("settings.allowUnlisted"))
+                    .font(.system(size: 13))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            Text(l10n.tr("settings.allowUnlistedCaption"))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var configEditorPanel: some View {
@@ -527,6 +552,7 @@ struct SettingsPageView: View {
 
             Task {
                 let config = NovaMLXConfiguration.shared
+                let current = await config.serverConfig
                 let clusterSettings: ServerConfig.ClusterSettings? = clusterEnabled
                     ? ServerConfig.ClusterSettings(
                         role: clusterRole,
@@ -542,8 +568,15 @@ struct SettingsPageView: View {
                     adminPort: cfgAdminPort,
                     maxConcurrentRequests: cfgMaxConcurrent,
                     requestTimeout: TimeInterval(cfgTimeout),
+                    contextScalingTarget: current.contextScalingTarget,
+                    tlsCertPath: current.tlsCertPath,
+                    tlsKeyPath: current.tlsKeyPath,
+                    tlsKeyPassword: current.tlsKeyPassword,
                     maxRequestSizeMB: cfgMaxBodyMB,
                     maxProcessMemory: buildMemoryLimitString(),
+                    prefixCacheEnabled: current.prefixCacheEnabled,
+                    allowUnlistedDownloads: appState.allowUnlistedDownloads,
+                    autoLoad: current.autoLoad,
                     cluster: clusterSettings
                 )
                 await config.setServerConfig(newServerConfig)
@@ -722,8 +755,15 @@ struct SettingsPageView: View {
                 adminPort: currentServer.adminPort,
                 maxConcurrentRequests: currentServer.maxConcurrentRequests,
                 requestTimeout: currentServer.requestTimeout,
+                contextScalingTarget: currentServer.contextScalingTarget,
+                tlsCertPath: currentServer.tlsCertPath,
+                tlsKeyPath: currentServer.tlsKeyPath,
+                tlsKeyPassword: currentServer.tlsKeyPassword,
                 maxRequestSizeMB: currentServer.maxRequestSizeMB,
                 maxProcessMemory: currentServer.maxProcessMemory,
+                prefixCacheEnabled: currentServer.prefixCacheEnabled,
+                allowUnlistedDownloads: appState.allowUnlistedDownloads,
+                autoLoad: currentServer.autoLoad,
                 cluster: clusterSettings
             )
             await config.setServerConfig(newServer)
