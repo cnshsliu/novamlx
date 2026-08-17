@@ -144,4 +144,14 @@ public enum ModelCatalogPolicy {
             return false
         }
     }
+
+    /// Hub-level heuristic: keep repos that advertise MLX, drop GGUF/transformers-only.
+    /// Not a substitute for the verified catalog — used when Advanced Hub search is on.
+    public static func looksLikeMLXRepo(id: String, tags: [String]) -> Bool {
+        let lowerID = id.lowercased()
+        let lowerTags = tags.map { $0.lowercased() }
+        if lowerID.contains("mlx") { return true }
+        if lowerTags.contains(where: { $0 == "mlx" || $0.contains("mlx") }) { return true }
+        return false
+    }
 }

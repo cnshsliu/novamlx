@@ -166,6 +166,18 @@ struct ModelCatalogTests {
         #expect(hits[0].category == .llm)
     }
 
+    @Test("looksLikeMLXRepo keeps mlx-tagged and mlx-community ids")
+    func looksLikeMLX() {
+        #expect(ModelCatalogPolicy.looksLikeMLXRepo(
+            id: "mlx-community/Qwen3.6-27B-OptiQ-4bit", tags: ["4-bit"]) == true)
+        #expect(ModelCatalogPolicy.looksLikeMLXRepo(
+            id: "Qwen/Qwen3-VL-4B", tags: ["mlx", "safetensors"]) == true)
+        #expect(ModelCatalogPolicy.looksLikeMLXRepo(
+            id: "Qwen/Qwen3.8-27B", tags: ["transformers", "safetensors"]) == false)
+        #expect(ModelCatalogPolicy.looksLikeMLXRepo(
+            id: "unsloth/Qwen3.8-27B-GGUF", tags: ["gguf", "llama.cpp"]) == false)
+    }
+
     @Test("Lookup by id")
     func lookup() throws {
         let file = try CatalogFile.decode(sampleJSON)

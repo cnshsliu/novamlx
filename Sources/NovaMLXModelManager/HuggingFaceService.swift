@@ -271,10 +271,9 @@ private struct HFMirrorAdapter: MirrorAdapter {
         var items: [URLQueryItem] = [URLQueryItem(name: "limit", value: String(limit))]
         if !query.isEmpty { items.append(URLQueryItem(name: "search", value: query)) }
 
-        // 搜索时默认不再强制加 filter=mlx
-        // 用户搜索 "Qwen"、"Llama" 这类通用词时，应该能搜到结果
-        // 如果以后加了 "只显示 MLX 模型" 的独立开关，再根据开关决定是否加 filter
-        // if mlxOnly { items.append(URLQueryItem(name: "filter", value: "mlx")) }
+        if mlxOnly {
+            items.append(URLQueryItem(name: "filter", value: "mlx"))
+        }
 
         components.queryItems = items
         return components.url!
@@ -411,7 +410,10 @@ public final class HuggingFaceService: @unchecked Sendable {
         let url = adapter.searchURL(query: query, limit: limit, mlxOnly: mlxOnly)
         let request = URLRequest(url: url)
         let (data, _) = try await session.data(for: request)
-        return try parseHuggingFaceStyleSearchResponse(data)
+        let parsed = try parseHuggingFaceStyleSearchResponse(data)
+        guard mlxOnly else { return parsed }
+        let kept = parsed.models.filter { ModelCatalogPolicy.looksLikeMLXRepo(id: $0.id, tags: $0.tags ?? []) }
+        return HFSearchResult(models: kept, total: kept.count)
     }
 
     // MARK: - 不同镜像的搜索解析

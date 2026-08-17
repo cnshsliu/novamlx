@@ -21,6 +21,7 @@ struct DownloadsPageView: View {
     // Search options
     @State private var searchRegex = false        // treat input as regex
     @State private var suffixMlxCommunity = false // auto-prepend mlx-community/
+    @State private var searchMlxOnly = true       // Hub search: keep mlx-tagged / mlx-community only
 
     // Catalog (verified) listing
     @State private var catalogEpoch = 0
@@ -222,6 +223,9 @@ struct DownloadsPageView: View {
                     if appState.allowUnlistedDownloads {
                         Divider().frame(height: 14)
 
+                        Toggle("MLX only", isOn: $searchMlxOnly)
+                            .toggleStyle(.switch)
+                            .help("Hide GGUF, official PyTorch, and other weights that will not load in NovaMLX")
                         Toggle("regex", isOn: $searchRegex)
                             .toggleStyle(.switch)
                             .help("Treat search as a regular expression matched against model ID")
@@ -929,7 +933,7 @@ struct DownloadsPageView: View {
             urlComps.queryItems = [
                 URLQueryItem(name: "q", value: encodedQuery),
                 URLQueryItem(name: "limit", value: String(limit)),
-                URLQueryItem(name: "mlx_only", value: "true"),
+                URLQueryItem(name: "mlx_only", value: searchMlxOnly ? "true" : "false"),
             ]
             if !encodedEndpoint.isEmpty {
                 urlComps.queryItems?.append(URLQueryItem(name: "endpoint", value: encodedEndpoint))
@@ -963,6 +967,11 @@ struct DownloadsPageView: View {
                     var results = resultsArray.compactMap { r -> HFSearchResult? in
                         guard let id = r["id"] as? String else { return nil }
                         return HFSearchResult(id: id, tags: r["tags"] as? [String] ?? [])
+                    }
+                    if searchMlxOnly {
+                        results = results.filter {
+                            ModelCatalogPolicy.looksLikeMLXRepo(id: $0.id, tags: $0.tags)
+                        }
                     }
                     searchTotalCount = results.count
 
