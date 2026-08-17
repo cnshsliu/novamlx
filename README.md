@@ -69,13 +69,13 @@ sudo ln -s /Applications/NovaMLX.app/Contents/MacOS/nova /usr/local/bin/nova
 ### 3. Download a model
 
 ```bash
-nova download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+nova download mlx-community/Qwen3.5-9B-OptiQ-4bit
 ```
 
 ### 4. Load it
 
 ```bash
-nova load mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+nova load mlx-community/Qwen3.5-9B-OptiQ-4bit
 ```
 
 ### 5. Use it
@@ -87,7 +87,7 @@ nova chat
 # Or via API
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", \
+  -d '{"model":"mlx-community/Qwen3.5-9B-OptiQ-4bit", \
        "messages":[{"role":"user","content":"Write a haiku about coding."}]}'
 ```
 
@@ -125,7 +125,7 @@ Add to your opencode config (`~/.config/opencode/config.json`):
     "baseURL": "http://localhost:8080/v1",
     "apiKey": "unused",
     "models": {
-      "default": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+      "default": "mlx-community/Qwen3.5-9B-OptiQ-4bit"
     }
   }
 }
@@ -163,7 +163,7 @@ Settings → Models → OpenAI API Compatible:
 | -------- | ----------------------------------------------- |
 | Base URL | `http://localhost:8080/v1`                      |
 | API Key  | `unused`                                        |
-| Model ID | `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` |
+| Model ID | `mlx-community/Qwen3.5-9B-OptiQ-4bit` |
 
 ### Continue.dev
 
@@ -177,7 +177,7 @@ Add to `~/.continue/config.json`:
       "provider": "openai",
       "apiBase": "http://localhost:8080/v1",
       "apiKey": "unused",
-      "model": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+      "model": "mlx-community/Qwen3.5-9B-OptiQ-4bit"
     }
   ]
 }
@@ -191,7 +191,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
 
 response = client.chat.completions.create(
-    model="mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+    model="mlx-community/Qwen3.5-9B-OptiQ-4bit",
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True
 )
@@ -208,7 +208,7 @@ import anthropic
 
 client = anthropic.Anthropic(base_url="http://localhost:8080", api_key="unused")
 response = client.messages.create(
-    model="mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+    model="mlx-community/Qwen3.5-9B-OptiQ-4bit",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
@@ -242,22 +242,22 @@ The `nova` CLI lets you manage everything from the terminal:
 
 ```bash
 # Browse / search the verified catalog
-nova search "llama 3.1 4bit"
+nova search "qwen 3.5"
 
 # Download (catalog models only by default)
-nova download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+nova download mlx-community/Qwen3.5-9B-OptiQ-4bit
 
 # Load into memory
-nova load mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+nova load mlx-community/Qwen3.5-9B-OptiQ-4bit
 
 # List loaded models
 nova models
 
 # Unload (free memory)
-nova unload mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+nova unload mlx-community/Qwen3.5-9B-OptiQ-4bit
 
 # Delete downloaded files
-nova delete mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+nova delete mlx-community/Qwen3.5-9B-OptiQ-4bit
 
 # Chat interactively
 nova chat
@@ -335,7 +335,7 @@ Send images with your messages — supports Qwen2-VL, Gemma3, LLaVA, Phi-3-Visio
 
 ```python
 response = client.chat.completions.create(
-    model="mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+    model="lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
     messages=[{
         "role": "user",
         "content": [
@@ -425,14 +425,14 @@ Automatically detects AI coding agents (Claude Code, OpenCode, OpenClaw, Hermes)
 
 Browse and search the verified catalog (4-bit, 8-bit, or FP16 SafeTensors). Popular catalog entries:
 
-| Model          | Size    | Download Command                                              |
-| -------------- | ------- | ------------------------------------------------------------- |
-| Llama 3.1 8B   | ~4.5 GB | `nova download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` |
-| Qwen 2.5 7B    | ~4.5 GB | `nova download mlx-community/Qwen2.5-7B-Instruct-4bit`        |
-| Gemma 2 9B     | ~5.5 GB | `nova download mlx-community/gemma-2-9b-it-4bit`              |
-| Phi 3.5 Mini   | ~2 GB   | `nova download mlx-community/Phi-3.5-mini-instruct-4bit`      |
-| Mistral 7B     | ~4 GB   | `nova download mlx-community/Mistral-7B-Instruct-v0.3-4bit`   |
-| Qwen 2.5 VL 7B | ~4.5 GB | `nova download mlx-community/Qwen2.5-VL-7B-Instruct-4bit`     |
+| Model                  | Size    | Download Command                                                          |
+| ---------------------- | ------- | ------------------------------------------------------------------------- |
+| Gemma-4-12B            | ~7 GB   | `nova download mlx-community/gemma-4-12B-it-OptiQ-4bit`                   |
+| Qwen3.5-9B             | ~5 GB   | `nova download mlx-community/Qwen3.5-9B-OptiQ-4bit`                       |
+| Qwen3-VL-4B            | ~2.5 GB | `nova download lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit`          |
+| Whisper-Large-V3-Turbo | 0.8 GB  | `nova download mlx-community/whisper-large-v3-turbo`                      |
+| Dots.TTS               | 4.0 GB  | `nova download smcleod/dots.tts-soar-mlx`                                 |
+| FLUX.1-schnell-4bit    | ~6 GB   | `nova download mzbac/flux1.schnell.4bit.mlx`                              |
 
 Search the catalog: `nova search "your model name"`. For models outside the catalog, enable **Settings → Allow unverified downloads**.
 

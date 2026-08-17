@@ -78,7 +78,7 @@ struct NovaMLXCLI {
 
         MODEL MANAGEMENT
           nova models                     List loaded models
-          nova search <query>             Search HuggingFace for models
+          nova search <query>             Search the verified catalog
           nova download <model-id>        Download a model
           nova load <model-id>            Load a model into memory
           nova unload <model-id>          Unload a model from memory

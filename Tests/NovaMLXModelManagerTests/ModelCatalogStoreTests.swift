@@ -85,4 +85,26 @@ struct ModelCatalogStoreTests {
         await store.refresh()
         #expect(store.models.isEmpty)
     }
+
+    @Test("Repo catalog snapshot decodes 24 preview models")
+    func repoSnapshotDecodes() throws {
+        // Tests/NovaMLXModelManagerTests/… → repo root is three levels up
+        let testFile = URL(fileURLWithPath: #filePath)
+        let repoRoot = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let snapshot = repoRoot
+            .appendingPathComponent("Sources/NovaMLXUtils/Resources/catalog/models.json")
+        let data = try Data(contentsOf: snapshot)
+        let file = try CatalogFile.decode(data)
+        #expect(file.models.count == 24)
+        #expect(file.models.allSatisfy { $0.status == .preview })
+        // When the Utils resource bundle is present, multi-path lookup must succeed.
+        // Under plain `swift test` the bundle may be missing — that is OK if decode above passes.
+        if let bundled = ModelCatalogStore.bundledSnapshotURL() {
+            let bundledFile = try CatalogFile.decode(Data(contentsOf: bundled))
+            #expect(bundledFile.models.count == 24)
+        }
+    }
 }

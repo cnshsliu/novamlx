@@ -46,12 +46,20 @@ public final class ModelCatalogStore: @unchecked Sendable {
     }
 
     public static func bundledSnapshotURL() -> URL? {
-        ResourceBundleLocator.url(
-            forResource: "models",
-            withExtension: "json",
-            subdirectory: "catalog",
-            inBundle: "NovaMLX_NovaMLXUtils"
-        )
+        // SPM may pack Resources/catalog/ as "catalog", "Resources/catalog",
+        // or flatten the file next to other resources depending on host layout.
+        let subdirs: [String?] = ["catalog", "Resources/catalog", nil]
+        for subdir in subdirs {
+            if let url = ResourceBundleLocator.url(
+                forResource: "models",
+                withExtension: "json",
+                subdirectory: subdir,
+                inBundle: "NovaMLX_NovaMLXUtils"
+            ) {
+                return url
+            }
+        }
+        return nil
     }
 
     public func refresh() async {
