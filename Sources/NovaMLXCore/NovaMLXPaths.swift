@@ -88,6 +88,15 @@ public enum NovaMLXPaths {
         return dir
     }
 
+    public static var catalogCacheDir: URL {
+        let dir = baseDir.appendingPathComponent("cache/catalog", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    public static var catalogCacheFile: URL {
+        catalogCacheDir.appendingPathComponent("models.json")
+    }
+
     // Auth & subscription
     public static var sessionFile: URL { baseDir.appendingPathComponent("session") }
     public static var authCacheFile: URL { baseDir.appendingPathComponent("auth_cache.json") }
