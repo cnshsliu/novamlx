@@ -122,9 +122,16 @@ struct DownloadsPageView: View {
             catalogEpoch += 1
         }
         .onChange(of: searchText) { _, newValue in
-            if newValue.trimmingCharacters(in: .whitespaces).isEmpty {
+            let trimmed = newValue.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
                 searchResults = []
                 catalogSearchQuery = ""
+                return
+            }
+            // Advanced off: filter the catalog as the user types. Do not call Hub.
+            if !appState.allowUnlistedDownloads {
+                catalogSearchQuery = trimmed
+                searchResults = []
             }
         }
         .onChange(of: appState.allowUnlistedDownloads) { _, enabled in
@@ -154,7 +161,12 @@ struct DownloadsPageView: View {
             HStack(spacing: 12) {
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                    TextField(l10n.tr("models.searchPlaceholder"), text: $searchText)
+                    TextField(
+                        appState.allowUnlistedDownloads
+                            ? l10n.tr("models.searchPlaceholder")
+                            : l10n.tr("models.searchCatalogPlaceholder"),
+                        text: $searchText
+                    )
                         .textFieldStyle(.plain)
                         .onSubmit { performSearch() }
                 }
