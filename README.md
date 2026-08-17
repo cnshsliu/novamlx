@@ -241,10 +241,10 @@ curl http://localhost:8080/v1/embeddings \
 The `nova` CLI lets you manage everything from the terminal:
 
 ```bash
-# Find models
+# Browse / search the verified catalog
 nova search "llama 3.1 4bit"
 
-# Download
+# Download (catalog models only by default)
 nova download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 # Load into memory
@@ -327,7 +327,7 @@ Click the icon to open the **Dashboard** window for detailed monitoring.
 
 ### 50+ Model Architectures
 
-Works with any SafeTensors model from HuggingFace — Llama 3, Qwen 2/2.5/3, Gemma 2/3, Phi 3.5/4, Mistral, Mixtral, DeepSeek, StarCoder2, and many more.
+Runs Llama 3, Qwen 2/2.5/3, Gemma 2/3, Phi 3.5/4, Mistral, Mixtral, DeepSeek, StarCoder2, and many more SafeTensors architectures. Downloads come from the verified catalog by default; enable **Settings → Allow unverified downloads** for arbitrary HuggingFace URLs.
 
 ### Vision (VLM)
 
@@ -423,7 +423,7 @@ Automatically detects AI coding agents (Claude Code, OpenCode, OpenClaw, Hermes)
 
 ## Supported Models
 
-Any SafeTensors model from HuggingFace in 4-bit, 8-bit, or FP16. Popular choices:
+Browse and search the verified catalog (4-bit, 8-bit, or FP16 SafeTensors). Popular catalog entries:
 
 | Model          | Size    | Download Command                                              |
 | -------------- | ------- | ------------------------------------------------------------- |
@@ -434,7 +434,7 @@ Any SafeTensors model from HuggingFace in 4-bit, 8-bit, or FP16. Popular choices
 | Mistral 7B     | ~4 GB   | `nova download mlx-community/Mistral-7B-Instruct-v0.3-4bit`   |
 | Qwen 2.5 VL 7B | ~4.5 GB | `nova download mlx-community/Qwen2.5-VL-7B-Instruct-4bit`     |
 
-Search for more: `nova search "your model name"`
+Search the catalog: `nova search "your model name"`. For models outside the catalog, enable **Settings → Allow unverified downloads**.
 
 ---
 

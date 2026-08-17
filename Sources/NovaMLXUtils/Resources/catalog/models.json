@@ -1,5 +1,433 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-16T00:00:00Z",
-  "models": []
+  "updatedAt": "2026-08-17T04:29:06Z",
+  "models": [
+    {
+      "id": "mlx-community/gemma-4-12B-it-OptiQ-4bit",
+      "url": "https://huggingface.co/mlx-community/gemma-4-12B-it-OptiQ-4bit",
+      "name": "Gemma-4-12B",
+      "description": "Google Gemma 4 12B dense, balanced quality and speed",
+      "size": "~7 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "OptiQ",
+        "Google"
+      ],
+      "category": "llm",
+      "sizeBytes": 7000000000,
+      "family": "gemma",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/Qwen3.5-9B-OptiQ-4bit",
+      "url": "https://huggingface.co/mlx-community/Qwen3.5-9B-OptiQ-4bit",
+      "name": "Qwen3.5-9B",
+      "description": "Most popular Qwen \u2014 versatile 9B with strong reasoning and multilingual support",
+      "size": "~5 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "OptiQ",
+        "Qwen"
+      ],
+      "category": "llm",
+      "sizeBytes": 5000000000,
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/gpt-oss-20b-MXFP4-Q8",
+      "url": "https://huggingface.co/mlx-community/gpt-oss-20b-MXFP4-Q8",
+      "name": "GPT-OSS-20B",
+      "description": "OpenAI's open-source 20B model \u2014 Harmony format, tool-use native, massively popular",
+      "size": "~13 GB",
+      "tags": [
+        "MLX",
+        "MXFP4",
+        "OpenAI",
+        "Tool-Use"
+      ],
+      "category": "llm",
+      "sizeBytes": 13000000000,
+      "family": "gptOss",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/Qwen3.6-27B-OptiQ-4bit",
+      "url": "https://huggingface.co/mlx-community/Qwen3.6-27B-OptiQ-4bit",
+      "name": "Qwen3.6-27B",
+      "description": "Latest Qwen 3.6 27B dense, excellent reasoning and coding",
+      "size": "15.2 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "OptiQ",
+        "Qwen"
+      ],
+      "category": "llm",
+      "sizeBytes": 15200000000,
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit",
+      "url": "https://huggingface.co/mlx-community/gemma-4-26B-A4B-it-OptiQ-4bit",
+      "name": "Gemma-4-26B-A4B",
+      "description": "Google Gemma 4 26B MoE with 4B active params \u2014 fast inference, big-model quality",
+      "size": "~14 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "OptiQ",
+        "MoE",
+        "Google"
+      ],
+      "category": "llm",
+      "sizeBytes": 14000000000,
+      "family": "gemma",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/GLM-4.7-Flash-4bit",
+      "url": "https://huggingface.co/mlx-community/GLM-4.7-Flash-4bit",
+      "name": "GLM-4.7-Flash",
+      "description": "Zhipu's fast GLM 4.7 \u2014 lightweight Chinese-English bilingual model",
+      "size": "~3 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "GLM",
+        "Zhipu"
+      ],
+      "category": "llm",
+      "sizeBytes": 3000000000,
+      "family": "other",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/gemma-4-31B-it-OptiQ-4bit",
+      "url": "https://huggingface.co/mlx-community/gemma-4-31B-it-OptiQ-4bit",
+      "name": "Gemma-4-31B",
+      "description": "Google Gemma 4 flagship dense 31B \u2014 top-tier reasoning quality",
+      "size": "~17 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "OptiQ",
+        "Google"
+      ],
+      "category": "llm",
+      "sizeBytes": 17000000000,
+      "family": "gemma",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+      "url": "https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+      "name": "Qwen3.6-35B-A3B",
+      "description": "Qwen 3.6 flagship MoE \u2014 35B total / 3B active, frontier-class reasoning at low cost",
+      "size": "~18 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "OptiQ",
+        "MoE",
+        "Qwen"
+      ],
+      "category": "llm",
+      "sizeBytes": 18000000000,
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/Nemotron-Cascade-2-30B-A3B-4bit",
+      "url": "https://huggingface.co/mlx-community/Nemotron-Cascade-2-30B-A3B-4bit",
+      "name": "Nemotron-Cascade-2-30B",
+      "description": "NVIDIA's reasoning-tuned MoE \u2014 30B total / 3B active, designed for agentic workflows",
+      "size": "~16 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "NVIDIA",
+        "MoE"
+      ],
+      "category": "llm",
+      "sizeBytes": 16000000000,
+      "family": "other",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/MiniMax-M3-4bit",
+      "url": "https://huggingface.co/mlx-community/MiniMax-M3-4bit",
+      "name": "MiniMax-M3",
+      "description": "MiniMax M3 \u2014 frontier Chinese LLM with strong long-context and tool use",
+      "size": "~20 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "MiniMax"
+      ],
+      "category": "llm",
+      "sizeBytes": 20000000000,
+      "family": "other",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/granite-4.1-8b-8bit",
+      "url": "https://huggingface.co/mlx-community/granite-4.1-8b-8bit",
+      "name": "Granite-4.1-8B",
+      "description": "IBM Granite 4.1 \u2014 enterprise-grade, strong at structured outputs and RAG",
+      "size": "~8 GB",
+      "tags": [
+        "MLX",
+        "8-bit",
+        "IBM",
+        "Enterprise"
+      ],
+      "category": "llm",
+      "sizeBytes": 8000000000,
+      "family": "other",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/Kimi-K2.7-Code-4bit",
+      "url": "https://huggingface.co/mlx-community/Kimi-K2.7-Code-4bit",
+      "name": "Kimi-K2.7-Code",
+      "description": "Moonshot's coding-specialized Kimi \u2014 frontier at code completion and refactoring",
+      "size": "~10 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Kimi",
+        "Code"
+      ],
+      "category": "llm",
+      "sizeBytes": 10000000000,
+      "family": "other",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/gpt-oss-120b-MXFP4-Q8",
+      "url": "https://huggingface.co/mlx-community/gpt-oss-120b-MXFP4-Q8",
+      "name": "GPT-OSS-120B",
+      "description": "OpenAI's flagship open-source 120B model \u2014 frontier-class, requires high RAM",
+      "size": "~75 GB",
+      "tags": [
+        "MLX",
+        "MXFP4",
+        "OpenAI",
+        "Flagship"
+      ],
+      "category": "llm",
+      "sizeBytes": 75000000000,
+      "family": "gptOss",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/DeepSeek-V4-Flash-4bit",
+      "url": "https://huggingface.co/mlx-community/DeepSeek-V4-Flash-4bit",
+      "name": "DeepSeek-V4-Flash",
+      "description": "DeepSeek V4 Flash MoE \u2014 strong reasoning at low cost, highly popular",
+      "size": "~30 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "DeepSeek",
+        "MoE"
+      ],
+      "category": "llm",
+      "sizeBytes": 30000000000,
+      "family": "other",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+      "url": "https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit",
+      "name": "Gemma-4-26B-A4B-VL",
+      "description": "Google Gemma 4 26B MoE with native vision capabilities",
+      "size": "14.5 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Vision",
+        "MoE",
+        "Google"
+      ],
+      "category": "vlm",
+      "sizeBytes": 14500000000,
+      "family": "gemma",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
+      "url": "https://huggingface.co/lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
+      "name": "Qwen3-VL-4B",
+      "description": "Most popular MLX VLM \u2014 compact 4B Qwen3-VL for image understanding",
+      "size": "~2.5 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Vision",
+        "Qwen"
+      ],
+      "category": "vlm",
+      "sizeBytes": 2500000000,
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",
+      "url": "https://huggingface.co/lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",
+      "name": "Qwen3-VL-8B",
+      "description": "Qwen3-VL 8B \u2014 strong document understanding and OCR at reasonable size",
+      "size": "~5 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Vision",
+        "Qwen"
+      ],
+      "category": "vlm",
+      "sizeBytes": 5000000000,
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-4bit",
+      "url": "https://huggingface.co/lmstudio-community/Qwen3-VL-30B-A3B-Instruct-MLX-4bit",
+      "name": "Qwen3-VL-30B-A3B",
+      "description": "Flagship Qwen3-VL MoE \u2014 30B total / 3B active, frontier vision-language quality",
+      "size": "~17 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Vision",
+        "MoE",
+        "Qwen"
+      ],
+      "category": "vlm",
+      "sizeBytes": 17000000000,
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/whisper-large-v3-turbo",
+      "url": "https://huggingface.co/mlx-community/whisper-large-v3-turbo",
+      "name": "Whisper-Large-V3-Turbo",
+      "description": "OpenAI's fast ASR model, excellent transcription quality",
+      "size": "0.8 GB",
+      "tags": [
+        "MLX",
+        "ASR"
+      ],
+      "category": "audio",
+      "sizeBytes": 800000000,
+      "family": "whisper",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/whisper-small",
+      "url": "https://huggingface.co/mlx-community/whisper-small",
+      "name": "Whisper-Small",
+      "description": "Lightweight ASR model for quick transcription",
+      "size": "0.24 GB",
+      "tags": [
+        "MLX",
+        "ASR"
+      ],
+      "category": "audio",
+      "sizeBytes": 244000000,
+      "family": "whisper",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "smcleod/dots.tts-soar-mlx",
+      "url": "https://huggingface.co/smcleod/dots.tts-soar-mlx",
+      "name": "Dots.TTS",
+      "description": "Voice cloning TTS model for natural speech synthesis",
+      "size": "4.0 GB",
+      "tags": [
+        "MLX",
+        "TTS",
+        "Voice Clone"
+      ],
+      "category": "audio",
+      "sizeBytes": 4000000000,
+      "family": "dotsTts",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mlx-community/Qwen3-ASR-1.7B-8bit",
+      "url": "https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-8bit",
+      "name": "Qwen3-ASR-1.7B",
+      "description": "Larger Qwen3 ASR with better accuracy",
+      "size": "3.2 GB",
+      "tags": [
+        "MLX",
+        "8-bit",
+        "ASR"
+      ],
+      "category": "audio",
+      "sizeBytes": 3200000000,
+      "family": "qwen3Asr",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mzbac/flux1.schnell.4bit.mlx",
+      "url": "https://huggingface.co/mzbac/flux1.schnell.4bit.mlx",
+      "name": "FLUX.1-schnell-4bit",
+      "description": "Fast 4-step image generation, quantized for Mac",
+      "size": "~6 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "FLUX"
+      ],
+      "category": "image",
+      "sizeBytes": 6000000000,
+      "family": "flux",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mzbac/flux1.dev.4bit.mlx",
+      "url": "https://huggingface.co/mzbac/flux1.dev.4bit.mlx",
+      "name": "FLUX.1-dev-4bit",
+      "description": "High-quality 28-step image generation, more detail than schnell",
+      "size": "~6 GB",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "FLUX"
+      ],
+      "category": "image",
+      "sizeBytes": 6000000000,
+      "family": "flux",
+      "format": "mlx",
+      "status": "preview"
+    }
+  ]
 }
