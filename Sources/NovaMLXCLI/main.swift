@@ -159,7 +159,7 @@ struct NovaMLXCLI {
             return
         }
         print("Downloading \(modelId)...")
-        let resp = try await CLIClient.post("/admin/models/download", body: "{\"modelId\":\"\(modelId)\"}", admin: true)
+        let resp = try await CLIClient.post("/admin/api/hf/download", body: "{\"repo_id\":\"\(modelId)\"}", admin: true)
         if resp.statusCode == 200 {
             print("Download started.")
         } else {

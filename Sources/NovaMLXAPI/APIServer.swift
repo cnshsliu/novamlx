@@ -2017,6 +2017,16 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let body = try await request.body.collect(upTo: .max)
                     let req = try JSONDecoder().decode(AdminDownloadRequest.self, from: body)
 
+                    if let refused = await self.refuseUnlistedIfNeeded(id: req.modelId) { return refused }
+
+                    if await self.catalogAllowUnlisted(), models.getRecord(req.modelId) == nil {
+                        models.register(
+                            id: req.modelId,
+                            family: .other,
+                            remoteURL: "https://huggingface.co/\(req.modelId)"
+                        )
+                    }
+
                     guard models.getRecord(req.modelId) != nil else {
                         throw NovaMLXError.modelNotFound(req.modelId)
                     }
@@ -2759,6 +2769,25 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let endpoint = params["endpoint"] ?? params["mirror"]
                             NovaMLXLog.info("[HF][Search] admin request q=\(q) endpoint=\(endpoint ?? "official") mlxOnly=\(mlxOnly) limit=\(limit)")
 
+                            if !(await self.catalogAllowUnlisted()) {
+                                let category = params["category"].flatMap(ModelType.init(rawValue:))
+                                let hits = ModelCatalogPolicy.search(
+                                    self.catalogEntries(),
+                                    query: q,
+                                    category: category
+                                )
+                                let limited = Array(hits.prefix(limit))
+                                let models = limited.map { entry in
+                                    HFModelInfo(
+                                        id: entry.id,
+                                        author: entry.id.split(separator: "/").first.map(String.init),
+                                        tags: entry.tags,
+                                        pipelineTag: entry.category.rawValue
+                                    )
+                                }
+                                return try Self.jsonResponse(HFSearchResult(models: models, total: hits.count))
+                            }
+
                             let searchService: HuggingFaceService = {
                                 if let ep = endpoint, !ep.isEmpty {
                                     return HuggingFaceService(modelDirectory: self.modelManager.modelsDirectory, endpoint: ep)
@@ -2806,6 +2835,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
                             }
 
+                            if let refused = await self.refuseUnlistedIfNeeded(id: repoId) { return refused }
+
                             if let ep = endpoint, !ep.isEmpty {
                                 NovaMLXLog.info("[HF] Download request for \(repoId) using custom endpoint: \(ep)")
                             }
@@ -2814,10 +2845,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             // ends up in the activeTasks that GET /admin/api/hf/tasks returns.
                             // The live mirrorEndpoint (if any) is passed down so ModelScope / custom
                             // mirrors still get the correct listing + resolve logic.
+                            let entry = ModelCatalogPolicy.entry(id: repoId, in: self.catalogEntries())
                             let task = try await hf.startDownload(
                                 repoId: repoId,
                                 hfToken: hfToken,
-                                mirrorEndpoint: endpoint
+                                mirrorEndpoint: endpoint,
+                                revision: entry?.revision
                             )
                             return try Self.jsonResponse(["success": "true", "task_id": task.id] as [String: String])
                         } catch {
@@ -3495,6 +3528,29 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
         return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+    }
+
+    private func catalogAllowUnlisted() async -> Bool {
+        await NovaMLXConfiguration.shared.serverConfig.allowUnlistedDownloads
+    }
+
+    private func catalogEntries() -> [CatalogEntry] {
+        modelManager.catalogStore.models
+    }
+
+    private func refuseUnlistedIfNeeded(id: String) async -> Response? {
+        let allowed = ModelCatalogPolicy.isDownloadAllowed(
+            id: id,
+            catalog: catalogEntries(),
+            allowUnlisted: await catalogAllowUnlisted()
+        )
+        guard allowed else {
+            return try? Self.jsonResponse(
+                ["error": ModelCatalogPolicy.refuseMessage(id: id)],
+                httpStatus: .forbidden
+            )
+        }
+        return nil
     }
 
     private static func extractRequestToken(_ request: Request) -> String? {

@@ -14,11 +14,42 @@ public struct HFModelInfo: Codable, Sendable {
     public let lastModified: String?
     public let privateRepo: Bool?
     public let gated: Bool?
+
+    public init(
+        id: String,
+        author: String? = nil,
+        downloads: Int? = nil,
+        likes: Int? = nil,
+        trendingScore: Double? = nil,
+        tags: [String]? = nil,
+        pipelineTag: String? = nil,
+        createdAt: String? = nil,
+        lastModified: String? = nil,
+        privateRepo: Bool? = false,
+        gated: Bool? = false
+    ) {
+        self.id = id
+        self.author = author
+        self.downloads = downloads
+        self.likes = likes
+        self.trendingScore = trendingScore
+        self.tags = tags
+        self.pipelineTag = pipelineTag
+        self.createdAt = createdAt
+        self.lastModified = lastModified
+        self.privateRepo = privateRepo
+        self.gated = gated
+    }
 }
 
 public struct HFSearchResult: Codable, Sendable {
     public let models: [HFModelInfo]
     public let total: Int?
+
+    public init(models: [HFModelInfo], total: Int? = nil) {
+        self.models = models
+        self.total = total
+    }
 }
 
 public struct HFModelDetail: Codable, Sendable {
@@ -222,7 +253,7 @@ protocol MirrorAdapter: Sendable {
     func searchURL(query: String, limit: Int, mlxOnly: Bool) -> URL
     func modelDetailURL(repoId: String) -> URL
     func fileListURL(repoId: String) -> URL
-    func resolveURL(repoId: String, filename: String) -> URL
+    func resolveURL(repoId: String, filename: String, revision: String?) -> URL
 }
 
 // HF-compatible mirrors (official, hf-mirror.com, custom)
@@ -259,8 +290,9 @@ private struct HFMirrorAdapter: MirrorAdapter {
         return modelDetailURL(repoId: repoId)
     }
 
-    func resolveURL(repoId: String, filename: String) -> URL {
-        return URL(string: "\(endpoint)/\(repoId)/resolve/\(defaultRevision)/\(filename)")!
+    func resolveURL(repoId: String, filename: String, revision: String?) -> URL {
+        let rev = revision ?? defaultRevision
+        return URL(string: "\(endpoint)/\(repoId)/resolve/\(rev)/\(filename)")!
     }
 }
 
@@ -290,8 +322,9 @@ private struct ModelScopeAdapter: MirrorAdapter {
         return URL(string: "\(endpoint)/api/v1/models/\(encoded)/repo/files?Revision=\(defaultRevision)&Recursive=true")!
     }
 
-    func resolveURL(repoId: String, filename: String) -> URL {
-        return URL(string: "\(endpoint)/models/\(repoId)/resolve/\(defaultRevision)/\(filename)")!
+    func resolveURL(repoId: String, filename: String, revision: String?) -> URL {
+        let rev = revision ?? defaultRevision
+        return URL(string: "\(endpoint)/models/\(repoId)/resolve/\(rev)/\(filename)")!
     }
 }
 
@@ -530,7 +563,8 @@ public final class HuggingFaceService: @unchecked Sendable {
     public func startDownload(
         repoId: String,
         hfToken: String? = nil,
-        mirrorEndpoint: String? = nil
+        mirrorEndpoint: String? = nil,
+        revision: String? = nil
     ) async throws -> HFDownloadTask {
         // Idempotent Resume: kill any in-flight tasks for the SAME repoId
         // before minting a new one. Without this, a user clicking Resume
@@ -562,7 +596,8 @@ public final class HuggingFaceService: @unchecked Sendable {
             await self.runDownload(
                 task: taskCopy,
                 hfToken: hfToken,
-                adapter: effectiveAdapter
+                adapter: effectiveAdapter,
+                revision: revision
             ) { [weak self] _ in
                 self?.onModelDownloaded?(repoId)
             }
@@ -637,6 +672,7 @@ public final class HuggingFaceService: @unchecked Sendable {
         task: HFDownloadTask,
         hfToken: String?,
         adapter: any MirrorAdapter,
+        revision: String?,
         onModelDownloaded: @Sendable @escaping (String) -> Void
     ) async {
         let targetDir = modelDirectory.appendingPathComponent(
@@ -670,7 +706,7 @@ public final class HuggingFaceService: @unchecked Sendable {
             var fileInfos: [FileToDownload] = []
             var estimatedTotal: Int64 = 0
             for file in allFiles {
-                let url = adapter.resolveURL(repoId: task.repoId, filename: file.rfilename)
+                let url = adapter.resolveURL(repoId: task.repoId, filename: file.rfilename, revision: revision)
                 if adapter.kind == .modelscope {
                     NovaMLXLog.info("[HF][ModelScope] Resolve URL for \(file.rfilename): \(url)")
                 }
