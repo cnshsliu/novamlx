@@ -88,6 +88,7 @@ public struct DownloadStatus: Codable, Sendable {
 
 public final class ModelManager: @unchecked Sendable {
     public let modelsDirectory: URL
+    public let catalogStore: ModelCatalogStore
     private let registryFile: URL
     private let hubApi: HubApi
     private var _registry: [String: ModelRecord]
@@ -97,6 +98,7 @@ public final class ModelManager: @unchecked Sendable {
 
     public init(modelsDirectory: URL) {
         self.modelsDirectory = modelsDirectory
+        self.catalogStore = ModelCatalogStore()
         self.registryFile = modelsDirectory.appendingPathComponent("registry.json")
         let hubDownloadBase = modelsDirectory.appendingPathComponent("hub")
         self.hubApi = HubApi(downloadBase: hubDownloadBase, cache: nil)
@@ -293,64 +295,36 @@ public final class ModelManager: @unchecked Sendable {
         FileManager.default.directorySize(at: modelsDirectory)
     }
 
-    // MARK: - Suggested Models (remote-loaded from suggested-models.json)
+    // MARK: - Model Catalog
 
-    /// Remote source of truth. Bumping this means breaking the cache for all users on next launch.
-    private static let suggestedModelsURL = URL(string: "https://raw.githubusercontent.com/cnshsliu/novamlx/main/suggested-models.json")!
-
-    public struct SuggestedModel: Codable, Sendable, Identifiable {
-        public let repo: String
-        public let name: String
-        public let description: String
-        public let size: String
-        public let tags: [String]
-        public let category: ModelType
-        public let sizeBytes: UInt64
-        public let family: ModelFamily
-
-        public var id: String { repo }
+    public func fetchCatalog() async {
+        await catalogStore.refresh()
     }
 
-    /// In-memory cache of the last successful remote fetch. Empty until `fetchSuggestedModels()` succeeds.
-    private var _suggestedModelsCache: [SuggestedModel] = []
-
-    /// Pull suggested models from the remote JSON catalog. On any failure (network, HTTP, decode),
-    /// the cache is left untouched — caller sees whatever was there before (likely empty).
-    /// Per the user's spec: no hardcoded fallback. If remote is unreachable, suggest nothing.
-    public func fetchSuggestedModels() async {
-        var request = URLRequest(url: Self.suggestedModelsURL)
-        request.timeoutInterval = 10
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                NovaMLXLog.error("[SuggestedModels] remote returned non-200")
-                return
-            }
-            let decoded = try JSONDecoder().decode([SuggestedModel].self, from: data)
-            lock.withLock { _suggestedModelsCache = decoded }
-            NovaMLXLog.info("[SuggestedModels] loaded \(decoded.count) models from remote")
-        } catch {
-            NovaMLXLog.error("[SuggestedModels] fetch failed: \(error)")
-        }
+    public func catalogModels(forCategory category: ModelType?) -> [CatalogEntry] {
+        ModelCatalogPolicy.search(catalogStore.models, query: "", category: category)
     }
 
-    /// Returns the cached remote list filtered by category, or an empty array if the remote
-    /// list hasn't been loaded yet. No hardcoded fallback — by design.
-    public func suggestedModels(forCategory category: ModelType?) -> [SuggestedModel] {
-        let cached = lock.withLock { _suggestedModelsCache }
-        guard let category else { return cached }
-        return cached.filter { $0.category == category }
-    }
-
-    /// Registers every cached suggested model into the local registry (idempotent — skips repos
-    /// already present). No-op until `fetchSuggestedModels()` has populated the cache.
+    /// Registers every catalog model into the local registry (idempotent — skips ids
+    /// already present). No-op until `fetchCatalog()` has populated the store.
     public func registerPopularModels() {
-        let cached = lock.withLock { _suggestedModelsCache }
-        for model in cached {
-            if lock.withLock({ _registry[model.repo] }) == nil {
-                register(id: model.repo, family: model.family, modelType: model.category, remoteURL: "https://huggingface.co/\(model.repo)", sizeBytes: model.sizeBytes)
+        for model in catalogStore.models {
+            if lock.withLock({ _registry[model.id] }) == nil {
+                register(
+                    id: model.id,
+                    family: model.family,
+                    modelType: model.category,
+                    remoteURL: model.url,
+                    sizeBytes: model.sizeBytes ?? 0
+                )
             }
         }
+    }
+
+    /// Thin wrappers kept so UI still compiles until the catalog UI rewrite.
+    public func fetchSuggestedModels() async { await fetchCatalog() }
+    public func suggestedModels(forCategory category: ModelType?) -> [CatalogEntry] {
+        catalogModels(forCategory: category)
     }
 
     @discardableResult

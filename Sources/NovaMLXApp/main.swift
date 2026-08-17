@@ -247,7 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             // API keys now live in SQLite (NovaDB.apiKeyStore); no JSON load step.
 
-            await modelManager.fetchSuggestedModels()
+            await modelManager.fetchCatalog()
             modelManager.registerPopularModels()
             modelManager.discoverModels()
             modelManager.cleanupEmptyDirectories()

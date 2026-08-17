@@ -263,7 +263,7 @@ struct DownloadsPageView: View {
         .sectionCard()
     }
 
-    private func suggestedModelCard(_ model: ModelManager.SuggestedModel) -> some View {
+    private func suggestedModelCard(_ model: CatalogEntry) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             // Name + HF link
             HStack {
@@ -272,7 +272,9 @@ struct DownloadsPageView: View {
                     .lineLimit(1)
                 Spacer()
                 Button {
-                    if let url = URL(string: "https://huggingface.co/\(model.repo)") {
+                    if let url = URL(string: model.url) {
+                        NSWorkspace.shared.open(url)
+                    } else if let url = URL(string: "https://huggingface.co/\(model.id)") {
                         NSWorkspace.shared.open(url)
                     }
                 } label: {
@@ -288,7 +290,7 @@ struct DownloadsPageView: View {
             }
 
             // Description
-            Text(model.description)
+            Text(model.description ?? "")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .lineLimit(2)
@@ -308,11 +310,11 @@ struct DownloadsPageView: View {
 
             // Size + Download button
             HStack {
-                Text(model.size)
+                Text(model.size ?? "")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                 Spacer()
-                downloadActionButton(for: model.repo)
+                downloadActionButton(for: model.id)
             }
         }
         .padding(12)

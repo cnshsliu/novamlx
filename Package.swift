@@ -263,7 +263,7 @@ let package = Package(
         ),
         .testTarget(
             name: "NovaMLXModelManagerTests",
-            dependencies: ["NovaMLXModelManager"],
+            dependencies: ["NovaMLXModelManager", "NovaMLXDB"],
             swiftSettings: concurrencySettings
         ),
         .testTarget(

@@ -1,12 +1,30 @@
 import Testing
 import Foundation
+import NovaMLXDB
 @testable import NovaMLXModelManager
 
-@Suite("ModelManager Tests")
+/// NovaDB is a process-wide singleton. Tests that construct ModelManager must
+/// install an isolated temp database before init (loadRegistry reads the store).
+enum IsolatedTestDB {
+    private static let lock = NSLock()
+
+    static func run<T>(_ body: (URL) throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("novamlx-mm-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try! NovaDB.shared.setup(baseDir: dir)
+        return try body(dir)
+    }
+}
+
+@Suite("ModelManager Tests", .serialized)
 struct ModelManagerTests {
     private func makeTempManager() -> ModelManager {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        return ModelManager(modelsDirectory: tempDir)
+        IsolatedTestDB.run { dir in
+            ModelManager(modelsDirectory: dir)
+        }
     }
 
     @Test("Register model")
@@ -272,7 +290,7 @@ struct ModelManagerTests {
 
     @Test("discoverModels registers found models in manager")
     func discoverModelsRegisters() throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let tempDir = IsolatedTestDB.run { $0 }
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let manager = ModelManager(modelsDirectory: tempDir)
@@ -294,7 +312,7 @@ struct ModelManagerTests {
 
     @Test("discoverModels does not overwrite existing loaded records")
     func discoverModelsPreservesExisting() throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let tempDir = IsolatedTestDB.run { $0 }
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let manager = ModelManager(modelsDirectory: tempDir)
@@ -307,6 +325,7 @@ struct ModelManagerTests {
 
         let record = manager.getRecord("test-model")
         #expect(record != nil)
-        #expect(record?.family == .mistral)
+        #expect(record?.remoteURL == "https://example.com/test")
+        #expect(record?.family == .llama)
     }
 }
