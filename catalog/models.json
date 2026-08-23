@@ -2,6 +2,33 @@
   "schemaVersion": 1,
   "models": [
     {
+      "id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+      "url": "https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-MLX",
+      "name": "Qwen3.8-27B Uncensored",
+      "description": "Abliterated (refusal-removed) MLX Qwen3.8-27B. Repo root is 4-bit (~15 GB); 2/6/8-bit live in subfolders.",
+      "category": "vlm",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "4bit",
+      "size": "~15 GB (4-bit)",
+      "sizeBytes": 15000000000,
+      "minRamGB": 24,
+      "addedAt": "2026-08-23T15:01:29Z",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Qwen",
+        "Uncensored",
+        "Vision"
+      ],
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
       "id": "mlx-community/gemma-4-12B-it-OptiQ-4bit",
       "url": "https://huggingface.co/mlx-community/gemma-4-12B-it-OptiQ-4bit",
       "name": "Gemma-4-12B",
@@ -485,5 +512,5 @@
       "status": "preview"
     }
   ],
-  "updatedAt": "2026-08-22T10:11:39Z"
+  "updatedAt": "2026-08-23T15:01:29Z"
 }
