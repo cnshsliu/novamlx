@@ -59,8 +59,10 @@ enum SharedControlTokenLogic {
         accumulated += text
         let totalLen = accumulated.count
 
-        // 1. Full control token match — trim and stop
+        // 1. Full control token match — trim and stop.
+        // Thinking close/open tags are phase markers, not EOS.
         for pattern in patterns {
+            if isThinkingStopPattern(pattern) { continue }
             if let range = accumulated.range(of: pattern) {
                 let safeEnd = accumulated.distance(from: accumulated.startIndex, to: range.lowerBound)
                 let cleanText: String
@@ -83,6 +85,7 @@ enum SharedControlTokenLogic {
                 let suffixStart = accumulated.index(accumulated.endIndex, offsetBy: -i)
                 let suffix = accumulated[suffixStart...]
                 for pattern in patterns {
+                    if isThinkingStopPattern(pattern) { continue }
                     if pattern.hasPrefix(suffix) {
                         safeEnd = min(safeEnd, totalLen - i)
                     }
@@ -151,8 +154,16 @@ enum SharedControlTokenLogic {
     /// Semantic content tags — parsed by ThinkingParser, not stream delimiters.
     static let semanticTags: Set<String> = [
         "<think", "</think",
+        "<think>", "</think>",
         "<thinking", "</thinking",
+        "<thinking>", "</thinking>",
         "<|begin_of_thought|>", "<|end_of_thought|>",
         "<|begin_of_think|>", "<|end_of_think|>",
     ]
+
+    /// Thinking delimiters must not be treated as generation-stop control tokens.
+    /// `</think>` is a phase marker; stopping on it yields empty `content`.
+    static func isThinkingStopPattern(_ pattern: String) -> Bool {
+        pattern.lowercased().contains("think")
+    }
 }

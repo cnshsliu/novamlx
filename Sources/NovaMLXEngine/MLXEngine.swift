@@ -16,6 +16,10 @@ public final class ModelContainer: @unchecked Sendable {
     public private(set) var mlxContainer: MLXLMCommon.ModelContainer?
     public private(set) var tokenizer: Tokenizer?
     public private(set) var isLoaded: Bool
+    /// In-graph MTP (HyV4 / models that are both MtpTarget and MtpDrafter).
+    public var hasNativeMtp = false
+    /// Compiled single-token decode segments from mlx-swift-lm (0 = general path).
+    public var compiledDecodeSegmentCount = 0
     public private(set) var wiredReservationTicket: WiredMemoryTicket?
     public var kvMemoryOverride: Int?
     /// Control tokens extracted from tokenizer.json + chat_template (e.g. "<|turn>", "<|im_end|>")
@@ -24,6 +28,11 @@ public final class ModelContainer: @unchecked Sendable {
     public private(set) var isThinkingModel: Bool = false
     /// Per-model-family chat template processor for control token handling
     public private(set) var chatTemplateProcessor: ChatTemplateProcessor?
+
+    /// NovaMLX-TIE: tier-inference policy. Non-nil if model was loaded from a
+    /// directory containing tier-manifest.json (produced by ExpertShardLayout).
+    /// Phase 1: detected + logged but no runtime behavior change.
+    public var tierPolicy: TieredOffloadPolicy?
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -60,6 +69,37 @@ public final class ModelContainer: @unchecked Sendable {
 
     public func setWiredReservation(_ ticket: WiredMemoryTicket) {
         self.wiredReservationTicket = ticket
+    }
+
+    /// NovaMLX-TIE: register the tier policy with the universal TierHookCoordinator.
+    /// Walks the model's module tree, finds every SwitchLinear (MoE) and Linear
+    /// (dense) instance, derives layer indices from path, and stores contexts
+    /// that the patched primitives consult at runtime.
+    ///
+    /// Works for ANY model — no per-class code. MoE models (Bailing, Qwen3-Next,
+    /// DeepseekV3, V4, PhiMoE, ...) get expert-level streaming; dense models
+    /// (Llama, Mistral, Gemma, Phi, Qwen-dense, ...) get layer-level streaming.
+    /// Called by WorkerMain after tierPolicy is attached.
+    public func applyTierPolicyToModel() async {
+        guard let policy = tierPolicy else { return }
+        guard let mlxContainer else { return }
+        TierHookInstallator.installIfNeeded()
+        // Wire Tier 1 budget to the wired-memory reservation. Tier 1 holds
+        // lazy-loaded Linear/SwitchLinear weights in unified memory; budget =
+        // reservation - safetyReserve (Tier 0 + KV cache come from reservation
+        // too, so leave 2GB headroom).
+        if let ticket = wiredReservationTicket?.size {
+            let safetyReserve: Int = 2 * 1024 * 1024 * 1024
+            let budget = max(512 * 1024 * 1024, ticket - safetyReserve)  // floor 512MB
+            policy.weightManager.tier1BudgetBytes = Int64(budget)
+            NovaMLXLog.info("[TIE] tier1BudgetBytes=\(budget / 1024 / 1024)MB (from wired reservation \(ticket / 1024 / 1024)MB - 2GB safety)")
+        }
+        let modelBox = await mlxContainer.perform { context in SendableBox(context.model) }
+        let strategy = policy.manifest.strategy
+        let result = await TierHookCoordinator.shared.register(
+            model: modelBox.value, policy: policy, strategy: strategy
+        )
+        NovaMLXLog.info("[TIE] applyTierPolicyToModel: strategy=\(strategy.rawValue), \(result.experts) SwitchLinear + \(result.linears) Linear registered")
     }
 
     public func unload() {
@@ -345,6 +385,22 @@ public final class ModelContainer: @unchecked Sendable {
             }
         }
 
+        // NovaMLX-TIE: V4 (and similar) templates use `<think>` only inside a
+        // `mode == 'thinking'` conditional. Default chat mode renders `</think>`
+        // (close-only), so output should NOT be treated as implicit thinking.
+        // Reject implicit when the template gates `<think>` behind a mode check.
+        if hasInjectedOpen {
+            let lower = template.lowercased()
+            let modeGated = lower.contains("mode == 'thinking'") || lower.contains("mode==\"thinking\"")
+                || lower.contains("thinking_mode == 'thinking'")
+                || lower.contains("thinking_mode==\"thinking\"")
+            let closesByDefault = lower.contains("</think>")
+            if modeGated && closesByDefault {
+                NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): template gates `<think>` behind thinking mode and defaults to `</think>` → false (explicit, chat mode)")
+                return false
+            }
+        }
+
         if hasInjectedOpen {
             NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): template injects opening think tag → true (implicit)")
             return true
@@ -439,7 +495,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let safetyReserve: UInt64 = 2 * 1024 * 1024 * 1024
         let mlxLimitBytes = physMem > safetyReserve ? physMem - safetyReserve : physMem / 2
         MLX.Memory.memoryLimit = Int(mlxLimitBytes)
-        MLX.Memory.cacheLimit = 512 * 1024 * 1024  // 512MB compute cache cap
+        MLX.Memory.cacheLimit = ResourceLimits.cacheLimitBytes(gpuLimit: mlxLimitBytes, autoExclusive: true)
 
         self.isReady = false
         self.pool = EnginePool(maxMemoryMB: maxMemoryMB)
@@ -656,12 +712,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let container = ModelContainer(identifier: config.identifier, config: config)
         NovaMLXLog.info("[Engine] Loading model from: \(url.path)")
 
+        if hasGGUFWeights(in: url) {
+            do {
+                try prepareGGUFModelDirectory(url)
+                NovaMLXLog.info("[Engine] Prepared GGUF sidecars (config/tokenizer) for \(config.identifier.id)")
+            } catch {
+                throw NovaMLXError.modelLoadFailed(config.identifier.id, underlying: error)
+            }
+        }
+
         // Ensure chat template exists — models without it will crash on inference.
         // Check tokenizer_config.json, chat_template.jinja, chat_template.json in order.
         let configJson = (try? Data(contentsOf: url.appendingPathComponent("config.json")))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let arch = (configJson?["architectures"] as? [String])?.first
-        Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family, architecture: arch)
+        if !isDFlashDraftConfig(at: url) {
+            Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family, architecture: arch)
+        }
 
         // --- Pre-load memory gate ---
         progress?(.feasibilityChecking)
@@ -713,6 +780,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // --- End pre-load memory gate ---
 
         progress?(.loadingWeights)
+        let activeBeforeLoad = MLX.Memory.activeMemory
 
         // VLM models must be loaded via VLMModelFactory — they need vision tower
         // and VLM-specific prepare()/callAsFunction implementations.
@@ -759,6 +827,21 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         container.setLoaded(mlxContainer: mlxContainer, tokenizer: tokenizer)
 
         progress?(.warmingUp)
+
+        let decodeInfo = await mlxContainer.perform { (context: ModelContext) -> SendableBox<(Int, Int, Bool)> in
+            // loadWeights already called prepare() except TIE, which now also prepares.
+            // Re-run is cheap/idempotent for fused GDN; required if a loader skipped it.
+            try? context.model.prepare()
+            let compiled = (context.model as? any CompiledDecodeReporting)?.compiledDecodeSegmentCount ?? 0
+            let mtpLen = (context.model as? any MtpDrafter)?.mtpBlockSize ?? 0
+            let nativeMtp = context.model is any MtpTarget && mtpLen >= 2
+            return SendableBox((compiled, mtpLen, nativeMtp))
+        }
+        container.compiledDecodeSegmentCount = decodeInfo.value.0
+        container.hasNativeMtp = decodeInfo.value.2
+        NovaMLXLog.info(
+            "[Engine] decode path \(config.identifier.id): compiledSegments=\(decodeInfo.value.0) nativeMtp=\(decodeInfo.value.2) mtpBlock=\(decodeInfo.value.1)"
+        )
 
         let model = await mlxContainer.perform { (context: ModelContext) in
             SendableBox(context.model)
@@ -845,21 +928,42 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             NovaMLXLog.info("[Engine] Auto-calculated KV memory: \(bytesPerToken / 1024)KB/token (\(numLayers) layers, \(kvHeadsSum) total kvHeads, headDim=\(headDim))")
         }
 
-        let weightsBytes = MLX.Memory.activeMemory
-        if weightsBytes > 0 {
-            let reservationTicket = wiredPolicy.ticket(size: Int(weightsBytes), kind: MLX.WiredMemoryTicketKind.reservation)
-            let availableMem = Self.getAvailablePhysicalMemory()
-            let neededMB = UInt64(weightsBytes) / 1_048_576
-            // Only wire if there's enough free physical memory. Wired reservation
-            // pins pages in RAM and will block indefinitely when free RAM is exhausted.
-            // We also keep a 1GB headroom so the OS has breathing room.
-            let headroom = UInt64(1024 * 1024 * 1024)
-            if availableMem > UInt64(weightsBytes) + headroom {
-                _ = await reservationTicket.start()
+        let thisModelBytes = WiredReservationPlanner.thisModelWeightBytes(
+            activeBefore: activeBeforeLoad,
+            activeAfter: MLX.Memory.activeMemory,
+            estimated: Self.estimateModelWeightSize(at: url)
+        )
+        let alreadyReserved = pool.reservedWiredBytes
+        let availableMem = Self.getAvailablePhysicalMemory()
+        let recommended = GPU.maxRecommendedWorkingSetBytes().map { Int($0) }
+        NovaMLXLog.info(
+            "[Engine] Wired reservation plan for \(config.identifier.displayName): thisModel=\(thisModelBytes / 1_048_576)MB alreadyReserved=\(alreadyReserved / 1_048_576)MB available=\(availableMem / 1_048_576)MB cap=\((recommended ?? 0) / 1_048_576)MB"
+        )
+        switch WiredReservationPlanner.decide(
+            thisModelBytes: thisModelBytes,
+            alreadyReservedBytes: alreadyReserved,
+            availablePhysicalBytes: availableMem,
+            recommendedWorkingSetBytes: recommended
+        ) {
+        case .skip(let reason):
+            NovaMLXLog.info(
+                "[Engine] Skipping wired reservation for \(config.identifier.displayName): \(reason). Model runs without wired memory guarantee."
+            )
+        case .reserve(let bytes):
+            let reservationTicket = wiredPolicy.ticket(
+                size: bytes, kind: MLX.WiredMemoryTicketKind.reservation
+            )
+            let acquired = await Self.startWiredReservation(reservationTicket)
+            if acquired {
                 container.setWiredReservation(reservationTicket)
-                NovaMLXLog.info("[Engine] Wired memory reservation: \(neededMB)MB for \(config.identifier.displayName)")
+                NovaMLXLog.info(
+                    "[Engine] Wired memory reservation: \(bytes / 1_048_576)MB for \(config.identifier.displayName)"
+                )
             } else {
-                NovaMLXLog.info("[Engine] Skipping wired reservation for \(config.identifier.displayName): only \(availableMem / 1_048_576)MB free, need \(neededMB)MB + 1GB headroom. Model runs without wired memory guarantee.")
+                _ = await reservationTicket.end()
+                NovaMLXLog.warning(
+                    "[Engine] Skipping wired reservation for \(config.identifier.displayName): admission timed out. Model runs without wired memory guarantee."
+                )
             }
         }
 
@@ -1226,6 +1330,28 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return wiredPolicy.ticket(size: estimatedBytes, kind: MLX.WiredMemoryTicketKind.active)
     }
 
+    /// Admit a wired reservation without blocking model load forever.
+    /// `WiredMemoryTicket.start()` waits until `canAdmit` succeeds; if the
+    /// working-set cap is already full that wait never ends.
+    private static func startWiredReservation(
+        _ ticket: WiredMemoryTicket,
+        timeoutNanoseconds: UInt64 = 8_000_000_000
+    ) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                _ = await ticket.start()
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+    }
+
     /// Returns the approximate free physical memory (free + inactive + purgeable) in bytes.
     private static func getAvailablePhysicalMemory() -> UInt64 {
         let hostPort = mach_host_self()
@@ -1246,6 +1372,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// Estimate model weight size from config.json params or directory size.
     /// Used by the pre-load memory gate to decide whether we need LRU eviction.
     public static func estimateModelWeightSize(at url: URL) -> UInt64? {
+        // NovaMLX-TIE: for tiered models, eager load only pulls tier0 (embed +
+        // norms + lm_head + per-layer norms). Per-shard weights stay on SSD,
+        // lazy-loaded via sync hooks. Return tier0 size from manifest.
+        let manifestURL = url.appendingPathComponent("tier-manifest.json")
+        if FileManager.default.fileExists(atPath: manifestURL.path),
+           let manifestData = try? Data(contentsOf: manifestURL),
+           let manifest = try? JSONDecoder().decode(TierManifest.self, from: manifestData) {
+            // Tier 0 eager load + estimated peak Tier 1 cache (capped 4GB).
+            let tier1PeakEstimate: UInt64 = 4 * 1024 * 1024 * 1024
+            return UInt64(manifest.tier0Bytes) + tier1PeakEstimate
+        }
+
         let configFile = url.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configFile),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -1408,7 +1546,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// Prompt tokens are already in activeMemory, so we only budget for output tokens.
     public func estimateRequestTokens(modelId: String, request: InferenceRequest) -> Int {
         let maxTokens = request.maxTokens ?? getContainer(for: modelId)?.config.maxTokens ?? 4096
-        return maxTokens
+        let promptGuess = request.messages.reduce(0) { $0 + ($1.content?.count ?? 0) } / 4
+        return maxTokens + promptGuess
     }
 
     func buildGenerateParameters(
@@ -1462,7 +1601,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let familyOpt = ModelFamilyRegistry.shared.optimization(
             for: config.identifier.id, family: config.identifier.family)
-        params.prefillStepSize = familyOpt.prefillStepSize
+        params.prefill.stepSize = ResourceLimits.prefillStepSize(
+            hasLinearAttention: config.hasLinearAttention,
+            familyDefault: familyOpt.prefillStepSize
+        )
+        if config.hasLinearAttention {
+            // Keep KV in fp16 through GDN prefill so full-attn layers use
+            // flash SDPA. 4-bit KV from token 0 was the 16k TTFT cliff.
+            if params.kvBits != nil {
+                params.quantizedKVStart = max(
+                    params.quantizedKVStart, ResourceLimits.hybridQuantizedKVStart)
+            }
+            NovaMLXLog.info(
+                "[Engine] hybrid prefill step=\(params.prefill.stepSize ?? 0) "
+                    + "kvBits=\(params.kvBits?.description ?? "nil") "
+                    + "quantizedKVStart=\(params.quantizedKVStart)"
+            )
+        }
 
         if let seed = request.seed ?? config.seed {
             MLXRandom.seed(seed)
@@ -1580,7 +1735,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Prefer container's processor-refined control tokens (which exclude
         // structural tokens like <|channel> for channel-thinking models).
         // Fall back to the static extraction if container isn't available.
-        let patterns = container?.controlTokens ?? Self.controlTokensForModel(modelId: modelId)
+        let patterns = (container?.controlTokens ?? Self.controlTokensForModel(modelId: modelId))
+            .filter { !SharedControlTokenLogic.isThinkingStopPattern($0) }
         guard !patterns.isEmpty else { return nil }
 
         var eosIds = Set<Int>()
@@ -1630,7 +1786,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 request: request,
                 container: container,
                 tokenizer: tokenizer,
-                parameters: parameters
+                parameters: parameters,
+                modelConfig: modelConfig
             )
         } else {
             budget = nil
@@ -1650,14 +1807,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     ///     `request.thinkingBudget == 0` (explicit disable).
     ///  2. Explicit budget: returns processor with `request.thinkingBudget`
     ///     when > 0, regardless of temperature.
-    ///  3. Smart default: when temperature == 0 AND the model is a thinking
-    ///     model AND user did not specify a budget, applies an automatic
-    ///     budget of `min(1024, max(256, maxTokens / 2))`. Greedy decoding on
-    ///     reasoning models can lock the model in chain-of-thought on complex
-    ///     prompts (Qwen team explicitly recommends `temperature ≥ 0.6` for
-    ///     thinking mode). Verified reproducible against Python `mlx_lm` 0.31.3
-    ///     on `mlx-community/Qwen3.6-27B-4bit` (T7 prompt: 2000 tokens, no
-    ///     `</think>` emitted, all chain-of-thought).
+    ///  3. Smart default: when the model is a thinking model AND user did
+    ///     not specify a budget, apply an automatic cap. `temperature == 0`
+    ///     uses `min(1024, max(256, maxTokens / 2))` (greedy CoT can fail to
+    ///     emit `</think>`). Other temperatures use `min(512, max(256, maxTokens / 4))`
+    ///     so `max_tokens=4000` implicit-think requests cannot run until the
+    ///     client HTTP timeout.
     ///  4. Returns nil if no close-marker token can be resolved from the
     ///     tokenizer (model has no recognizable thinking format, or close
     ///     markers are multi-token like Harmony's `<|channel|>final<|message|>`
@@ -1667,7 +1822,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         request: InferenceRequest,
         container: ModelContainer?,
         tokenizer: Tokenizer,
-        parameters: GenerateParameters
+        parameters: GenerateParameters,
+        modelConfig: ModelConfiguration
     ) -> ThinkingBudgetProcessor? {
         // Explicit opt-outs
         if request.enableThinking == false { return nil }
@@ -1680,10 +1836,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Determine effective budget
         let effective: Int? = {
             if let b = request.thinkingBudget, b > 0 { return b }
-            // Smart default: temp == 0 + thinking model only.
-            guard temperature == 0 else { return nil }
             guard ModelContainer.detectThinkingModel(for: modelId) else { return nil }
-            return min(1024, max(256, maxTokens / 2))
+            // Implicit thinking models emit CoT until </think> or maxTokens.
+            // temp==0 was the original hang; temp=0.7 + max_tokens=4000 times
+            // out the same way (non-stream clients wait for the whole CoT).
+            if temperature == 0 {
+                return min(1024, max(256, maxTokens / 2))
+            }
+            return min(256, max(128, maxTokens / 8))
         }()
 
         guard let budget = effective, budget > 0 else { return nil }
@@ -1709,14 +1869,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             // Logged at info level (one line per request) — avoids surprise
             // without spamming.
             NovaMLXLog.info(
-                "[ThinkingBudget] \(modelId): temp=0 + thinking model detected — applying smart-default budget=\(budget) (closeIds=\(closeIds.sorted())). Set thinking_budget=0 to disable, or set thinking_budget=N for a custom budget."
+                "[ThinkingBudget] \(modelId): thinking model detected (temp=\(String(format: "%.2f", temperature))) — applying smart-default budget=\(budget) (closeIds=\(closeIds.sorted())). Set thinking_budget=0 to disable, or set thinking_budget=N for a custom budget."
             )
         }
 
+        var eosIds = Set<Int>()
+        if let eos = tokenizer.eosTokenId { eosIds.insert(eos) }
+        if let container {
+            eosIds.formUnion(Self.defensiveEosTokenIds(for: modelConfig, container: container))
+        } else {
+            eosIds.formUnion(modelConfig.eosTokenIds)
+        }
         return ThinkingBudgetProcessor(
             budget: budget,
             closeTokenIds: closeIds,
-            modelId: modelId
+            modelId: modelId,
+            eosTokenIds: eosIds,
+            minResponseTokens: 24
         )
     }
 
@@ -1724,6 +1893,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         guard !patterns.isEmpty else { return text }
         var result = text
         for pattern in patterns {
+            if SharedControlTokenLogic.isThinkingStopPattern(pattern) { continue }
             if let range = result.range(of: pattern) {
                 result = String(result[..<range.lowerBound])
             }
@@ -2035,7 +2205,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Probe model cache type. If any layer is RotatingKVCache (sliding window),
         // prefix cache is incompatible — skip fetch to avoid wasted SSD I/O.
         let isVLM = container.config.modelType == .vlm
-        let probeCache = model.value.newCache(parameters: parameters)
+        let probeCache = try model.value.newCache(parameters: parameters)
         let modelUsesRotating = probeCache.contains { $0 is RotatingKVCache }
 
         // Report live activity so the status panel shows this non-streaming
@@ -2045,10 +2215,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         defer { metricsStore.clearActivity(forModel: request.model) }
 
         // Capture prompt tokens for prefix cache storage + loading.
-        // Skip for VLM (builds fresh cache in perform) and RotatingKVCache (incompatible).
+        // Skip for VLM, RotatingKVCache, and GatedDeltaNet — serializing
+        // hybrid conv/recurrent state after long prefill kills the worker.
         let allPromptTokens: [Int]?
         let prefixResult: PrefixCacheManager.PrefixResult?
-        if !isVLM, !modelUsesRotating,
+        if !isVLM, !modelUsesRotating, !container.config.hasLinearAttention,
            let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
             let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
             allPromptTokens = tokens
@@ -2074,7 +2245,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         var effectiveInput = input
         let kvCache: [KVCache]
         if let result = prefixResult, result.cachedTokenCount > 0, let restored = result.cache {
-            let freshCaches = model.value.newCache(parameters: parameters)
+            let freshCaches = try model.value.newCache(parameters: parameters)
             var cacheValid = restored.count == freshCaches.count
             // Validate: layer types must match, KV cache states must be 4D with 2 arrays
             if cacheValid {
@@ -2120,7 +2291,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 let hasRotating = restored.contains { $0 is RotatingKVCache }
                 if hasRotating {
                     NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: model has RotatingKVCache layers — skipping (incompatible with sliding window)")
-                    kvCache = model.value.newCache(parameters: parameters)
+                    kvCache = try model.value.newCache(parameters: parameters)
                 } else {
                     for layer in restored {
                         if let kv = layer as? BaseKVCache { kv.offset = cachedTokenCount }
@@ -2132,10 +2303,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
             } else {
                 NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: validation failed — using fresh cache")
-                kvCache = model.value.newCache(parameters: parameters)
+                kvCache = try model.value.newCache(parameters: parameters)
             }
         } else {
-            kvCache = model.value.newCache(parameters: parameters)
+            kvCache = try model.value.newCache(parameters: parameters)
         }
         let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
 
@@ -2148,21 +2319,71 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             let draftModel = await draftMlxContainer.perform { context in SendableBox(context.model) }
             var draftParams = parameters
             draftParams.kvBits = nil  // No quantized KV for draft
-            let draftCache = draftModel.value.newCache(parameters: draftParams)
+            let draftCache = try draftModel.value.newCache(parameters: draftParams)
             let numDraft = request.numDraftTokens ?? 4
 
             do {
-                let specIterator = try SpeculativeTokenIterator(
-                    input: effectiveInput,
-                    mainModel: model.value,
-                    draftModel: draftModel.value,
-                    mainCache: kvCache,
-                    draftCache: draftCache,
-                    parameters: parameters,
-                    numDraftTokens: numDraft
-                )
-                NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Speculative decoding: draft=\(draftModelId), numDraft=\(numDraft)")
-                iterator = specIterator
+                let tag = String(request.id.uuidString.prefix(8))
+                if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
+                   let target = model.value as? any DFlashTarget,
+                   let drafter = draftModel.value as? DFlashDraftModel
+                {
+                    var dflashIterator = try DFlashTokenIterator(
+                        input: effectiveInput,
+                        target: target,
+                        drafter: drafter,
+                        mainCache: kvCache,
+                        parameters: parameters,
+                        processor: processor
+                    )
+                    dflashIterator.onSpeculationRound = { proposed, accepted in
+                        NovaMLXLog.info("[DFlash:\(tag)] proposed=\(proposed) accepted=\(accepted)")
+                    }
+                    iterator = dflashIterator
+                    NovaMLXLog.info(
+                        "[GENERATE:\(tag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) cap=\(drafter.config.blockSize - 1)"
+                    )
+                } else if draftModel.value is DFlashDraftModel {
+                    NovaMLXLog.info(
+                        "[GENERATE:\(tag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"
+                    )
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                } else if let target = model.value as? any MtpTarget,
+                   let drafter = draftModel.value as? any MtpDrafter
+                {
+                    var mtpIterator = try MtpTokenIterator(
+                        input: effectiveInput,
+                        target: target,
+                        drafter: drafter,
+                        mainCache: kvCache,
+                        parameters: parameters,
+                        numDraftTokens: numDraft,
+                        processor: processor
+                    )
+                    let mtpTag = String(request.id.uuidString.prefix(8))
+                    mtpIterator.onSpeculationRound = { proposed, accepted in
+                        NovaMLXLog.info("[MTP:\(mtpTag)] proposed=\(proposed) accepted=\(accepted)")
+                    }
+                    iterator = mtpIterator
+                    NovaMLXLog.info("[GENERATE:\(mtpTag)] MTP draft=\(draftModelId), numDraft=\(numDraft)")
+                } else {
+                    let specIterator = try SpeculativeTokenIterator(
+                        input: effectiveInput,
+                        mainModel: model.value,
+                        draftModel: draftModel.value,
+                        mainCache: kvCache,
+                        draftCache: draftCache,
+                        parameters: parameters,
+                        numDraftTokens: numDraft
+                    )
+                    NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Speculative decoding: draft=\(draftModelId), numDraft=\(numDraft)")
+                    iterator = specIterator
+                }
             } catch {
                 NovaMLXLog.warning("[GENERATE:\(request.id.uuidString.prefix(8))] SpeculativeTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
                 do {
@@ -2174,7 +2395,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     )
                 } catch {
                     NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
-                    let freshCache = model.value.newCache(parameters: parameters)
+                    let freshCache = try model.value.newCache(parameters: parameters)
                     kvCacheBox.value = freshCache
                     iterator = try TokenIterator(
                         input: input, model: model.value,
@@ -2246,7 +2467,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         image: imageBox.value,
                         video: videoBox.value)
                     let prepareResult = try modelObj.prepare(
-                        vlmInput, cache: caches, windowSize: nil)
+                        vlmInput, cache: caches, state: nil, prefill: .init())
                     let logits: MLXArray
                     switch prepareResult {
                     case .logits(let output):
@@ -2335,15 +2556,33 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 )
             } else {
                 do {
-                    iterator = try TokenIterator(
-                        input: effectiveInput, model: model.value,
-                        cache: kvCache,
-                        processor: processor, sampler: sampler,
-                        maxTokens: maxTokens
-                    )
+                    if let target = model.value as? any MtpTarget,
+                       let drafter = model.value as? any MtpDrafter,
+                       drafter.mtpBlockSize >= 2
+                    {
+                        let numDraft = request.numDraftTokens ?? drafter.mtpBlockSize
+                        var mtpIterator = try MtpTokenIterator(
+                            input: effectiveInput,
+                            target: target,
+                            drafter: drafter,
+                            mainCache: kvCache,
+                            parameters: parameters,
+                            numDraftTokens: numDraft,
+                            processor: processor
+                        )
+                        iterator = mtpIterator
+                        NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] native MTP numDraft=\(numDraft)")
+                    } else {
+                        iterator = try TokenIterator(
+                            input: effectiveInput, model: model.value,
+                            cache: kvCache,
+                            processor: processor, sampler: sampler,
+                            maxTokens: maxTokens
+                        )
+                    }
                 } catch {
                     NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
-                    let freshCache = model.value.newCache(parameters: parameters)
+                    let freshCache = try model.value.newCache(parameters: parameters)
                     kvCacheBox.value = freshCache
                     iterator = try TokenIterator(
                         input: input, model: model.value,
@@ -2391,6 +2630,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 )
                 collectedToolCalls.append(tcResult)
                 finishReason = .toolCalls
+            case .rejectedToolCall:
+                break
             }
         }
 
@@ -2489,14 +2730,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     // Probe model cache type. If any layer is RotatingKVCache (sliding window),
                     // prefix cache is incompatible — skip fetch to avoid wasted SSD I/O.
                     let isVLM = container.config.modelType == .vlm
-                    let probeCache = model.value.newCache(parameters: parameters)
+                    let probeCache = try model.value.newCache(parameters: parameters)
                     let modelUsesRotating = probeCache.contains { $0 is RotatingKVCache }
 
                     // Capture prompt tokens for prefix cache storage + loading.
-                    // Skip for VLM (builds fresh cache in perform) and RotatingKVCache (incompatible).
+                    // Skip VLM, RotatingKVCache, and GatedDeltaNet (hybrid conv
+                    // state is not safe to serialize after a long prefill).
                     let allPromptTokens: [Int]?
                     let prefixResult: PrefixCacheManager.PrefixResult?
-                    if !isVLM, !modelUsesRotating,
+                    if !isVLM, !modelUsesRotating, !container.config.hasLinearAttention,
                        let _ = self.getOrCreatePrefixCacheManager(modelId: request.model),
                        promptTokenCount > 0 {
                         let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
@@ -2535,7 +2777,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }()
 
                         let startTime = Date()
-                        let kvCache = model.value.newCache(parameters: parameters)
+                        let kvCache = try model.value.newCache(parameters: parameters)
                         let cacheBox = MutableSendableBox<[KVCache]?>(kvCache)
                         let samplerBox = SamplerBox(sampler)
                         let unknownTokenId = mlxTokenizer.unknownTokenId
@@ -2576,7 +2818,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 image: imageBox.value,
                                 video: videoBox.value)
                             let prepareResult = try modelObj.prepare(
-                                vlmInput, cache: caches, windowSize: nil)
+                                vlmInput, cache: caches, state: nil, prefill: .init())
                             let logits: MLXArray
                             switch prepareResult {
                             case .logits(let output):
@@ -2656,6 +2898,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                         self.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
+                        RequestLogStore.shared.finish(
+                            request: request, model: request.model,
+                            kind: .vlm,
+                            tps: tps, promptTokens: Int(promptTokenCount),
+                            completionTokens: completionTokens, durationMs: elapsed * 1000,
+                            finishReason: finishReason.rawValue)
+
                         continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: Int(promptTokenCount)))
                         continuation.finish()
                         self.lock.withLock { self.activeCount -= 1 }
@@ -2667,7 +2916,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     var effectiveInput = input
                     let kvCache: [KVCache]
                     if let result = prefixResult, result.cachedTokenCount > 0, let restored = result.cache {
-                        let freshCaches = model.value.newCache(parameters: parameters)
+                        let freshCaches = try model.value.newCache(parameters: parameters)
                         var cacheValid = restored.count == freshCaches.count
                         if cacheValid {
                             for i in 0..<restored.count {
@@ -2693,7 +2942,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             let hasRotating = restored.contains { $0 is RotatingKVCache }
                             if hasRotating {
                                 NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache: model has RotatingKVCache layers — skipping (incompatible with sliding window)")
-                                kvCache = model.value.newCache(parameters: parameters)
+                                kvCache = try model.value.newCache(parameters: parameters)
                             } else {
                                 for layer in restored {
                                     if let kv = layer as? BaseKVCache { kv.offset = cachedTokenCount }
@@ -2705,10 +2954,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             }
                         } else {
                             NovaMLXLog.warning("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache: validation failed — using fresh cache")
-                            kvCache = model.value.newCache(parameters: parameters)
+                            kvCache = try model.value.newCache(parameters: parameters)
                         }
                     } else {
-                        kvCache = model.value.newCache(parameters: parameters)
+                        kvCache = try model.value.newCache(parameters: parameters)
                     }
                     let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
 
@@ -2721,23 +2970,71 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let draftModel = await draftMlxContainer.perform { context in SendableBox(context.model) }
                         var draftParams = parameters
                         draftParams.kvBits = nil
-                        let draftCache = draftModel.value.newCache(parameters: draftParams)
+                        let draftCache = try draftModel.value.newCache(parameters: draftParams)
                         let numDraft = request.numDraftTokens ?? 4
 
                         do {
-                            let specIterator = try SpeculativeTokenIterator(
-                                input: effectiveInput,
-                                mainModel: model.value,
-                                draftModel: draftModel.value,
-                                mainCache: kvCache,
-                                draftCache: draftCache,
-                                parameters: parameters,
-                                numDraftTokens: numDraft
-                            )
-                            NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Speculative decoding: draft=\(draftModelId), numDraft=\(numDraft)")
-                            iterator = specIterator
+                            let tag = String(request.id.uuidString.prefix(8))
+                            if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
+                               let target = model.value as? any DFlashTarget,
+                               let drafter = draftModel.value as? DFlashDraftModel
+                            {
+                                var dflashIterator = try DFlashTokenIterator(
+                                    input: effectiveInput,
+                                    target: target,
+                                    drafter: drafter,
+                                    mainCache: kvCache,
+                                    parameters: parameters,
+                                    processor: processor
+                                )
+                                dflashIterator.onSpeculationRound = { proposed, accepted in
+                                    NovaMLXLog.info("[DFlash:\(tag)] proposed=\(proposed) accepted=\(accepted)")
+                                }
+                                iterator = dflashIterator
+                                NovaMLXLog.info("[STREAM:\(tag)] DFlash2 draft=\(draftModelId)")
+                            } else if draftModel.value is DFlashDraftModel {
+                                NovaMLXLog.info(
+                                    "[STREAM:\(tag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"
+                                )
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            } else if let target = model.value as? any MtpTarget,
+                               let drafter = draftModel.value as? any MtpDrafter
+                            {
+                                var mtpIterator = try MtpTokenIterator(
+                                    input: effectiveInput,
+                                    target: target,
+                                    drafter: drafter,
+                                    mainCache: kvCache,
+                                    parameters: parameters,
+                                    numDraftTokens: numDraft,
+                                    processor: processor
+                                )
+                                let mtpTag = String(request.id.uuidString.prefix(8))
+                                mtpIterator.onSpeculationRound = { proposed, accepted in
+                                    NovaMLXLog.info("[MTP:\(mtpTag)] proposed=\(proposed) accepted=\(accepted)")
+                                }
+                                iterator = mtpIterator
+                                NovaMLXLog.info("[STREAM:\(mtpTag)] MTP draft=\(draftModelId), numDraft=\(numDraft)")
+                            } else {
+                                let specIterator = try SpeculativeTokenIterator(
+                                    input: effectiveInput,
+                                    mainModel: model.value,
+                                    draftModel: draftModel.value,
+                                    mainCache: kvCache,
+                                    draftCache: draftCache,
+                                    parameters: parameters,
+                                    numDraftTokens: numDraft
+                                )
+                                NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Speculative decoding: draft=\(draftModelId), numDraft=\(numDraft)")
+                                iterator = specIterator
+                            }
                         } catch {
-                            NovaMLXLog.warning("[STREAM:\(request.id.uuidString.prefix(8))] SpeculativeTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
+                            NovaMLXLog.warning("[STREAM:\(request.id.uuidString.prefix(8))] Speculative/MTP iterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
                             do {
                                 iterator = try TokenIterator(
                                     input: effectiveInput, model: model.value,
@@ -2747,7 +3044,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 )
                             } catch {
                                 NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] TokenIterator failed: \(error.localizedDescription) — falling back to full prefill")
-                                let freshCache = model.value.newCache(parameters: parameters)
+                                let freshCache = try model.value.newCache(parameters: parameters)
                                 kvCacheBox.value = freshCache
                                 iterator = try TokenIterator(
                                     input: input, model: model.value,
@@ -2759,15 +3056,33 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                     } else {
                         do {
-                            iterator = try TokenIterator(
-                                input: effectiveInput, model: model.value,
-                                cache: kvCache,
-                                processor: processor, sampler: sampler,
-                                maxTokens: maxTokens
-                            )
+                            if let target = model.value as? any MtpTarget,
+                               let drafter = model.value as? any MtpDrafter,
+                               drafter.mtpBlockSize >= 2
+                            {
+                                let numDraft = request.numDraftTokens ?? drafter.mtpBlockSize
+                                var mtpIterator = try MtpTokenIterator(
+                                    input: effectiveInput,
+                                    target: target,
+                                    drafter: drafter,
+                                    mainCache: kvCache,
+                                    parameters: parameters,
+                                    numDraftTokens: numDraft,
+                                    processor: processor
+                                )
+                                iterator = mtpIterator
+                                NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] native MTP numDraft=\(numDraft)")
+                            } else {
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
                         } catch {
                             NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
-                            let freshCache = model.value.newCache(parameters: parameters)
+                            let freshCache = try model.value.newCache(parameters: parameters)
                             kvCacheBox.value = freshCache
                             iterator = try TokenIterator(
                                 input: input, model: model.value,
@@ -2841,6 +3156,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
                 )
                 continuation.yield(Token(id: 0, text: "", toolCall: tcResult))
+                        case .rejectedToolCall:
+                            break
                         }
                     }
 
@@ -2862,9 +3179,27 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     self.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
+                    let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
+                    RequestLogStore.shared.finish(
+                        request: request, model: request.model,
+                        kind: isVLM ? .vlm : .llm,
+                        tps: tps, promptTokens: Int(promptTokenCount),
+                        completionTokens: completionTokens, durationMs: elapsed * 1000,
+                        finishReason: finishReason.rawValue)
+
                     continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: Int(promptTokenCount)))
                     continuation.finish()
                 } catch {
+                    // Variables from `do` scope (promptTokenCount, isVLM, startTime)
+                    // aren't accessible here — finalize with best-effort defaults.
+                    RequestLogStore.shared.finish(
+                        model: request.model,
+                        kind: .llm,
+                        status: .error,
+                        tps: 0, promptTokens: 0,
+                        completionTokens: 0, durationMs: 0,
+                        error: error.localizedDescription,
+                        requestId: request.httpRequestId)
                     continuation.finish(throwing: error)
                 }
 
@@ -2892,6 +3227,52 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public var currentActiveCount: Int { lock.withLock { activeCount } }
     public var loadedModelCount: Int { pool.loadedModelCount }
     public func listLoadedModels() -> [String] { pool.loadedModelIds }
+
+    /// Chat/backbone models only — MTP/DFlash companions do not count toward auto-exclusive.
+    public var chatLoadedCount: Int {
+        pool.loadedModelIds.filter { id in
+            let dir = NovaMLXPaths.modelsDir.appendingPathComponent(id)
+            return !isMtpDraftConfig(at: dir)
+                && !isDFlashDraftConfig(at: dir)
+                && !ResourceLimits.isCompanionDraftModelId(id)
+        }.count
+    }
+
+    public static func recommendedGpuBytes() -> UInt64 {
+        GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? 0
+    }
+
+    /// Apply GPU/RAM sliders. One loaded chat model fills the envelope (auto-exclusive).
+    public func applyResourceLimits(
+        gpuRaw: String? = nil,
+        ramRaw: String? = nil
+    ) async {
+        let cfg = await NovaMLXConfiguration.shared.serverConfig
+        let gpuSpec = gpuRaw ?? cfg.maxGpuMemory
+        let ramSpec = ramRaw ?? cfg.maxProcessMemory
+        let phys = ProcessInfo.processInfo.physicalMemory
+        let rec = Self.recommendedGpuBytes()
+        let ramBytes = ResourceLimits.resolvedBytes(raw: ramSpec, physicalRAM: phys)
+        let gpuUnclamped = ResourceLimits.resolvedBytes(
+            raw: gpuSpec, physicalRAM: phys,
+            recommendedGpuBytes: rec > 0 ? rec : nil
+        )
+        let gpuBytes = ResourceLimits.clampedGpuBytes(gpu: gpuUnclamped, ram: ramBytes)
+        let exclusive = ResourceLimits.isAutoExclusive(chatModelCount: chatLoadedCount)
+
+        MLX.Memory.memoryLimit = Int(gpuBytes)
+        MLX.Memory.cacheLimit = ResourceLimits.cacheLimitBytes(
+            gpuLimit: gpuBytes, autoExclusive: exclusive
+        )
+        await budgetTracker.setGpuLimit(gpuBytes)
+        await budgetTracker.setHeadroomPercent(ResourceLimits.kvHeadroomPercent(autoExclusive: exclusive))
+        await memoryEnforcer?.updateLimit(ProcessMemoryLimit.parse(ramSpec))
+
+        NovaMLXLog.info(
+            "[Engine] resourceLimits gpu=\(gpuBytes / 1_048_576)MB ram=\(ramBytes / 1_048_576)MB autoExclusive=\(exclusive) cache=\(MLX.Memory.cacheLimit) chatModels=\(chatLoadedCount)"
+        )
+    }
+
     public var gpuActiveMemory: UInt64 { UInt64(MLX.Memory.activeMemory) }
 
     /// Wire settings provider into the memory enforcer and start 1s polling.
@@ -2952,13 +3333,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let maxTokens = request.maxTokens ?? container.config.maxTokens
         try await preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
+        let sessionParams = buildGenerateParameters(
+            request: request, config: container.config, settings: settingsProvider?(request.model))
+        var sessionContext: [String: any Sendable] = [:]
+        sessionContext["enable_thinking"] = request.enableThinking ?? false
+        sessionContext["preserve_thinking"] = request.preserveThinking ?? false
+
         let sessionBox = sessionManager.getOrCreate(
             sessionId: sessionId,
             mlxContainer: mlxContainer,
             modelId: request.model,
             systemPrompt: systemPrompt,
-            kvBits: container.config.kvBits,
-            kvGroupSize: container.config.kvGroupSize
+            kvBits: sessionParams.kvBits,
+            kvGroupSize: sessionParams.kvGroupSize,
+            generateParameters: sessionParams,
+            additionalContext: sessionContext,
+            persistToDisk: ChatSessionManager.persistToDisk(
+                hasLinearAttention: container.config.hasLinearAttention)
         )
 
         // Report live activity (session path uses the engine VLM/non-VLM kind).
@@ -2981,6 +3372,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             case .info(let info):
                 promptTokens = info.promptTokenCount
                 completionTokens = info.generationTokenCount
+                if info.cachedPromptTokenCount > 0 {
+                    NovaMLXLog.info(
+                        "ChatSession \(sessionId): prefill=\(info.promptTokenCount) cached=\(info.cachedPromptTokenCount) efficiency=\(String(format: "%.2f", info.cacheEfficiency))"
+                    )
+                }
                 if case .length = info.stopReason { finishReason = .length }
             case .toolCall(let tc):
                 let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
@@ -2991,6 +3387,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 )
                 collectedToolCalls.append(tcResult)
                 finishReason = .toolCalls
+            case .rejectedToolCall:
+                break
             }
         }
 
@@ -3039,13 +3437,24 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let maxTokens = request.maxTokens ?? container.config.maxTokens
                     try await engine.preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
+                    let sessionParams = engine.buildGenerateParameters(
+                        request: request, config: container.config,
+                        settings: engine.settingsProvider?(request.model))
+                    var sessionContext: [String: any Sendable] = [:]
+                    sessionContext["enable_thinking"] = request.enableThinking ?? false
+                    sessionContext["preserve_thinking"] = request.preserveThinking ?? false
+
                     let sessionBox = engine.sessionManager.getOrCreate(
                         sessionId: sessionId,
                         mlxContainer: mlxContainer,
                         modelId: request.model,
                         systemPrompt: systemPrompt,
-                        kvBits: container.config.kvBits,
-                        kvGroupSize: container.config.kvGroupSize
+                        kvBits: sessionParams.kvBits,
+                        kvGroupSize: sessionParams.kvGroupSize,
+                        generateParameters: sessionParams,
+                        additionalContext: sessionContext,
+                        persistToDisk: ChatSessionManager.persistToDisk(
+                            hasLinearAttention: container.config.hasLinearAttention)
                     )
 
                     let startTime = Date()
@@ -3084,6 +3493,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         case .info(let info):
                             promptTokens = info.promptTokenCount
                             completionTokens = info.generationTokenCount
+                            if info.cachedPromptTokenCount > 0 {
+                                NovaMLXLog.info(
+                                    "ChatSession \(sessionId): prefill=\(info.promptTokenCount) cached=\(info.cachedPromptTokenCount) efficiency=\(String(format: "%.2f", info.cacheEfficiency))"
+                                )
+                            }
                             if case .length = info.stopReason { finishReason = .length }
                         case .toolCall(let tc):
                 let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
@@ -3093,6 +3507,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
                 )
                 continuation.yield(Token(id: 0, text: "", toolCall: tcResult))
+                        case .rejectedToolCall:
+                            break
                         }
                     }
 
@@ -3105,9 +3521,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     engine.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
+                    let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
+                    RequestLogStore.shared.finish(
+                        request: request, model: request.model,
+                        kind: .llm,
+                        tps: tps, promptTokens: promptTokens,
+                        completionTokens: completionTokens, durationMs: elapsed * 1000,
+                        finishReason: finishReason.rawValue)
+
                     continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: promptTokens))
                     continuation.finish()
                 } catch {
+                    RequestLogStore.shared.finish(
+                        model: request.model,
+                        kind: .llm,
+                        status: .error,
+                        tps: 0, promptTokens: 0,
+                        completionTokens: 0, durationMs: 0,
+                        error: error.localizedDescription,
+                        requestId: request.httpRequestId)
                     continuation.finish(throwing: error)
                 }
             }
@@ -3201,9 +3633,28 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             processor = grammarProcessor
         }
 
+        // Merge the JSON-mode instruction into the first existing system
+        // message rather than appending a second one. Qwen3.5/3.6 templates
+        // raise 'System message must be at the beginning.' for any system
+        // message at a non-first index, and the old append produced
+        // [system(original), system(json-instruction), ...] which surfaced
+        // as the Jinja.TemplateException crash on json_object / json_schema
+        // requests that included their own system message.
+        let jsonInstruction = "You must respond with valid JSON only. Do not include any text, explanation, or markdown outside the JSON object."
         var systemMessages = request.messages.filter { $0.role == .system }
         if request.responseFormat == .jsonObject {
-            systemMessages.append(ChatMessage(role: .system, content: "You must respond with valid JSON only. Do not include any text, explanation, or markdown outside the JSON object."))
+            if var first = systemMessages.first {
+                let existing = first.content ?? ""
+                first = ChatMessage(
+                    role: first.role,
+                    content: existing.isEmpty ? jsonInstruction : existing + "\n\n" + jsonInstruction,
+                    images: first.images, name: first.name,
+                    toolCallId: first.toolCallId, toolCalls: first.toolCalls
+                )
+                systemMessages[0] = first
+            } else {
+                systemMessages.append(ChatMessage(role: .system, content: jsonInstruction))
+            }
         }
         let allMessages = systemMessages + request.messages.filter { $0.role != .system }
         let mappedMessages: [Message] = allMessages.map { msg in
@@ -3294,6 +3745,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 )
                 collectedToolCalls.append(tcResult)
                 finishReason = .toolCalls
+            case .rejectedToolCall:
+                break
             }
         }
         _ = task
@@ -3391,9 +3844,27 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         processor = grammarProcessor
                     }
 
+                    // Merge the JSON-mode instruction into the first existing
+                    // system message rather than appending a second one — see
+                    // generateWithProcessor for the full rationale. Appending
+                    // here crashed Qwen3.5/3.6 templates with
+                    // 'System message must be at the beginning.' on requests
+                    // that already carried their own system message.
+                    let jsonInstruction = "You must respond with valid JSON only. Do not include any text, explanation, or markdown outside the JSON object."
                     var systemMessages = request.messages.filter { $0.role == .system }
                     if request.responseFormat == .jsonObject {
-                        systemMessages.append(ChatMessage(role: .system, content: "You must respond with valid JSON only. Do not include any text, explanation, or markdown outside the JSON object."))
+                        if var first = systemMessages.first {
+                            let existing = first.content ?? ""
+                            first = ChatMessage(
+                                role: first.role,
+                                content: existing.isEmpty ? jsonInstruction : existing + "\n\n" + jsonInstruction,
+                                images: first.images, name: first.name,
+                                toolCallId: first.toolCallId, toolCalls: first.toolCalls
+                            )
+                            systemMessages[0] = first
+                        } else {
+                            systemMessages.append(ChatMessage(role: .system, content: jsonInstruction))
+                        }
                     }
                     let allMessages = systemMessages + request.messages.filter { $0.role != .system }
                     let mappedMessages: [Message] = allMessages.map { msg in
@@ -3479,6 +3950,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
                 )
                 continuation.yield(Token(id: 0, text: "", toolCall: tcResult))
+                        case .rejectedToolCall:
+                            break
                         }
                     }
                     _ = genTask
@@ -3492,11 +3965,28 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     engine.metricsStore.recordRequest(model: request.model, tokens: UInt64(completionTokens), inferenceTime: elapsed)
 
+                    let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
+                    let procStreamKind: InferenceKind = container.config.modelType == .vlm ? .vlm : .llm
+                    RequestLogStore.shared.finish(
+                        request: request, model: request.model,
+                        kind: procStreamKind,
+                        tps: tps, promptTokens: Int(promptTokenCount),
+                        completionTokens: completionTokens, durationMs: elapsed * 1000,
+                        finishReason: finishReason.rawValue)
+
                     self.deferredClearCache()
 
                     continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: Int(promptTokenCount)))
                     continuation.finish()
                 } catch {
+                    RequestLogStore.shared.finish(
+                        model: request.model,
+                        kind: .llm,
+                        status: .error,
+                        tps: 0, promptTokens: 0,
+                        completionTokens: 0, durationMs: 0,
+                        error: error.localizedDescription,
+                        requestId: request.httpRequestId)
                     continuation.finish(throwing: error)
                 }
             }

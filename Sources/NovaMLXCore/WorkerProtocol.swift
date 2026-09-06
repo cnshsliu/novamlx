@@ -136,6 +136,7 @@ public struct WorkerMessage: Codable, Sendable {
     public let cpuUsage: Double?
     public let loadPhase: String?
     public let hasLinearAttention: Bool?
+    public let hasNativeMtp: Bool?
 
     public init(
         type: String,
@@ -157,7 +158,8 @@ public struct WorkerMessage: Codable, Sendable {
         memoryEvictions: UInt64? = nil,
         cpuUsage: Double? = nil,
         loadPhase: String? = nil,
-        hasLinearAttention: Bool? = nil
+        hasLinearAttention: Bool? = nil,
+        hasNativeMtp: Bool? = nil
     ) {
         self.type = type
         self.modelId = modelId
@@ -179,6 +181,7 @@ public struct WorkerMessage: Codable, Sendable {
         self.cpuUsage = cpuUsage
         self.loadPhase = loadPhase
         self.hasLinearAttention = hasLinearAttention
+        self.hasNativeMtp = hasNativeMtp
     }
 }
 

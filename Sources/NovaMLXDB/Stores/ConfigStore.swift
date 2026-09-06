@@ -46,7 +46,6 @@ public final class ConfigStore: Sendable {
             switch column {
             case "host": record.host = value ?? "0.0.0.0"
             case "default_model": record.defaultModel = value
-            case "models_dir": record.modelsDir = value
             case "hf_endpoint": record.hfEndpoint = value ?? "https://huggingface.co"
             case "auth_url": record.authUrl = value
             case "tknet_api_key": record.tknetApiKey = value

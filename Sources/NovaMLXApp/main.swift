@@ -39,6 +39,14 @@ struct NovaMLXApp: App {
             Button { appDelegate.openMainWindow(to: .localInference) } label: {
                 Label(l10n.tr("app.local_inference"), systemImage: "cube.box")
             }
+            Button { appDelegate.openMainWindow(to: .downloads) } label: {
+                Label(l10n.tr("app.downloads"), systemImage: "arrow.down.circle")
+            }
+            if appDelegate.appState.isCatalogAdmin {
+                Button { appDelegate.openMainWindow(to: .catalogAdmin) } label: {
+                    Label(l10n.tr("app.catalogAdmin"), systemImage: "checkmark.seal.fill")
+                }
+            }
             Button { appDelegate.openMainWindow(to: .tokenhub) } label: {
                 Label(l10n.tr("app.tokenhub"), systemImage: "server.rack")
             }
@@ -279,6 +287,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
             appState.allowUnlistedDownloads = serverConfig.allowUnlistedDownloads
+            appState.loadResourceLimits(from: serverConfig)
+            await inferenceService.applyResourceLimits()
             appState.apiKey = Self.firstRawAPIKey()
 
             NovaMLXLog.info("NovaMLX v\(NovaMLXCore.version) started")
@@ -444,6 +454,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
             appState.allowUnlistedDownloads = serverConfig.allowUnlistedDownloads
+            appState.loadResourceLimits(from: serverConfig)
+            await inferenceService.applyResourceLimits()
             appState.apiKey = Self.firstRawAPIKey()
 
             NovaMLXLog.info("Server restarted (apiKeys: \((try? NovaDB.shared.apiKeyStore.listAsAPIKey())?.count ?? 0))")
@@ -575,7 +587,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return isCoordinator ? .cluster : .status
         }()
 
-        appState.requestedPage = effectivePage
+        appState.refreshCatalogAdminGate()
+        if effectivePage == .catalogAdmin, !appState.isCatalogAdmin {
+            appState.requestedPage = .status
+        } else {
+            appState.requestedPage = effectivePage
+        }
 
         if let window = mainWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)

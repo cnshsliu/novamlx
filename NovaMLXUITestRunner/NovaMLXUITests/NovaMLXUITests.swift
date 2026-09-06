@@ -3,8 +3,7 @@ import XCTest
 /// Comprehensive XCUITest suite for the new "Model Source" (mirror) feature.
 /// This tests the ability to select different download/search mirrors:
 /// - Official Hugging Face
-/// - hf-mirror.com (China)
-/// - ModelScope (Alibaba)
+/// - ModelScope (China)
 /// - Custom URL
 ///
 /// The tests are fully automated and cover switching, custom input, search behavior,
@@ -66,36 +65,19 @@ final class NovaMLXMirrorFeatureTests: XCTestCase {
         XCTAssertTrue(officialItem.exists)
     }
 
-    /// 3. Switching to hf-mirror.com should show the correct toast and update the picker.
-    func testSwitchToHFMirrorChina() {
+    /// 3. Switching to ModelScope should show the correct toast and update the picker.
+    func testSwitchToModelScopeChina() {
         navigateToDownloadsTab()
 
         let picker = app.popUpButtons["model-source-picker"]
         picker.click()
 
-        let hfMirrorItem = app.menuItems["hf-mirror.com (China)"]
-        XCTAssertTrue(hfMirrorItem.exists, "hf-mirror.com option must exist")
-        hfMirrorItem.click()
-
-        // Verify the toast appears
-        let toast = app.staticTexts.containing(.staticText, identifier: "Mirror changed").firstMatch
-        XCTAssertTrue(toast.waitForExistence(timeout: 3), "Toast should appear after changing mirror")
-    }
-
-    /// 4. Switching to ModelScope (Alibaba) — the new first-class option.
-    func testSwitchToModelScopeAlibaba() {
-        navigateToDownloadsTab()
-
-        let picker = app.popUpButtons["model-source-picker"]
-        picker.click()
-
-        let modelScopeItem = app.menuItems["ModelScope (Alibaba)"]
-        XCTAssertTrue(modelScopeItem.exists, "ModelScope (Alibaba) must appear in the picker")
+        let modelScopeItem = app.menuItems["ModelScope (China)"]
+        XCTAssertTrue(modelScopeItem.exists, "ModelScope option must exist")
         modelScopeItem.click()
 
-        // Verify specific toast for ModelScope
         let toast = app.staticTexts.containing(.staticText, identifier: "ModelScope").firstMatch
-        XCTAssertTrue(toast.waitForExistence(timeout: 3))
+        XCTAssertTrue(toast.waitForExistence(timeout: 3), "Toast should appear after changing mirror")
     }
 
     /// 5. Custom URL flow: select Custom, type a URL, and verify it is accepted.
@@ -113,13 +95,13 @@ final class NovaMLXMirrorFeatureTests: XCTestCase {
         XCTAssertTrue(customField.waitForExistence(timeout: 2))
 
         customField.click()
-        customField.typeText("https://hf-mirror.com")
+        customField.typeText("https://www.modelscope.cn")
 
         // Press return to commit
         customField.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
 
         // The field should still exist and contain the value
-        XCTAssertEqual(customField.value as? String, "https://hf-mirror.com")
+        XCTAssertEqual(customField.value as? String, "https://www.modelscope.cn")
     }
 
     /// 6. End-to-end: Change mirror, then perform a search — the search should still succeed
@@ -130,7 +112,7 @@ final class NovaMLXMirrorFeatureTests: XCTestCase {
         // Switch to ModelScope
         let picker = app.popUpButtons["model-source-picker"]
         picker.click()
-        app.menuItems["ModelScope (Alibaba)"].click()
+        app.menuItems["ModelScope (China)"].click()
 
         // Wait for any toast to disappear
         sleep(1)
@@ -160,14 +142,11 @@ final class NovaMLXMirrorFeatureTests: XCTestCase {
 
         let picker = app.popUpButtons["model-source-picker"]
 
-        // Switch to hf-mirror
         picker.click()
-        app.menuItems["hf-mirror.com (China)"].click()
+        app.menuItems["ModelScope (China)"].click()
 
-        // Re-open and check selection (the title of the pop-up button usually reflects the chosen item)
         picker.click()
-        // The menu item should be marked as selected (we can check existence + state in some cases)
-        let selectedItem = app.menuItems["hf-mirror.com (China)"]
+        let selectedItem = app.menuItems["ModelScope (China)"]
         XCTAssertTrue(selectedItem.exists)
     }
 }

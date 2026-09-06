@@ -38,23 +38,35 @@ public final class ThinkingBudgetProcessor: LogitProcessor, @unchecked Sendable 
     private enum State {
         case active        // counting; haven't hit budget; close marker not seen
         case forceClose    // budget exceeded; force close-marker on next sample
-        case closed        // close marker emitted (organically or forced) — no-op
+        case responding    // close emitted; suppress EOS until min response tokens
+        case closed        // response phase allowed to emit EOS
     }
 
     private let budget: Int
     private let closeTokenIds: Set<Int>
+    private let eosTokenIds: Set<Int>
+    private let minResponseTokens: Int
     private let modelId: String
 
     private var state: State = .active
     private var generated: Int = 0
     private var forcedAt: Int? = nil
+    private var responseTokens: Int = 0
 
-    public init(budget: Int, closeTokenIds: Set<Int>, modelId: String = "<unknown>") {
+    public init(
+        budget: Int,
+        closeTokenIds: Set<Int>,
+        modelId: String = "<unknown>",
+        eosTokenIds: Set<Int> = [],
+        minResponseTokens: Int = 24
+    ) {
         precondition(budget > 0, "ThinkingBudgetProcessor: budget must be > 0")
         precondition(!closeTokenIds.isEmpty, "ThinkingBudgetProcessor: closeTokenIds must be non-empty")
         self.budget = budget
         self.closeTokenIds = closeTokenIds
         self.modelId = modelId
+        self.eosTokenIds = eosTokenIds
+        self.minResponseTokens = max(0, minResponseTokens)
     }
 
     public func prompt(_ prompt: MLXArray) {
@@ -64,72 +76,89 @@ public final class ThinkingBudgetProcessor: LogitProcessor, @unchecked Sendable 
         state = .active
         generated = 0
         forcedAt = nil
+        responseTokens = 0
     }
 
     public func process(logits: MLXArray) -> MLXArray {
+        if state == .responding, !eosTokenIds.isEmpty, responseTokens < minResponseTokens {
+            return Self.maskTokenIds(eosTokenIds, in: logits, allow: false) ?? logits
+        }
         guard state == .forceClose else { return logits }
 
-        let vocabSize = logits.shape.last ?? 0
-        guard vocabSize > 0 else { return logits }
-
-        // Build [1, V] bool mask: only close-token IDs allowed.
-        var maskValues = [Bool](repeating: false, count: vocabSize)
-        var allowedAny = false
-        for id in closeTokenIds where id >= 0 && id < vocabSize {
-            maskValues[id] = true
-            allowedAny = true
-        }
-
-        // Defensive: if NO close token id fits within vocab (vocab smaller than
-        // expected, or all close ids OOB), don't trap the sampler — let the
-        // model continue. Log so the misconfiguration is visible.
-        guard allowedAny else {
+        let result = Self.maskTokenIds(closeTokenIds, in: logits, allow: true)
+        if result == nil {
             NovaMLXLog.warning(
-                "[ThinkingBudget] \(modelId): no close-marker token id fits within vocab=\(vocabSize) (closeIds=\(closeTokenIds.sorted())). Falling back to no-op; thinking budget will not be enforced this request."
+                "[ThinkingBudget] \(modelId): no close-marker token id fits within vocab (closeIds=\(closeTokenIds.sorted())). Falling back to no-op; thinking budget will not be enforced this request."
             )
             state = .closed
             return logits
         }
 
-        let mask = MLXArray(maskValues)[.newAxis, 0...]
-        let result = TokenMaskBuilder.applyMask(mask, to: logits)
-
-        // The next sample call will pick one of the close tokens (we forced the
-        // mask). Transition to .closed so subsequent process() calls are no-ops.
-        // Confirmation happens in didSample(), but we transition pre-emptively
-        // since the mask makes the outcome deterministic — even with sampling
-        // noise, only allowed ids are reachable.
-        state = .closed
+        // After the close token is sampled, hold EOS so the model writes the
+        // actual answer instead of immediately stopping.
+        state = eosTokenIds.isEmpty || minResponseTokens == 0 ? .closed : .responding
         forcedAt = generated
         NovaMLXLog.info(
             "[ThinkingBudget] \(modelId): budget \(budget) tokens exhausted without organic close — forcing close-marker (allowed ids: \(closeTokenIds.sorted()))"
         )
-        return result
+        return result!
     }
 
     public func didSample(token: MLXArray) {
-        guard state != .closed else {
-            // Even after forcing close, count to keep `generated` accurate
-            // for diagnostics. State stays .closed.
-            generated += 1
-            return
-        }
-
         let tokenId = token.item(Int.self)
         generated += 1
 
-        // Organic close detection — model emitted a close-marker on its own.
-        if closeTokenIds.contains(tokenId) {
-            state = .closed
+        switch state {
+        case .closed:
             return
+        case .responding:
+            if closeTokenIds.contains(tokenId) { return }
+            responseTokens += 1
+            if responseTokens >= minResponseTokens {
+                state = .closed
+                NovaMLXLog.info(
+                    "[ThinkingBudget] \(modelId): released EOS holdoff after \(responseTokens) response tokens"
+                )
+            }
+            return
+        case .forceClose:
+            if closeTokenIds.contains(tokenId) {
+                enterResponsePhase()
+            }
+            return
+        case .active:
+            if closeTokenIds.contains(tokenId) {
+                enterResponsePhase()
+                return
+            }
+            if generated >= budget {
+                state = .forceClose
+            }
         }
+    }
 
-        // Trip the budget if we just crossed it. The actual mask is applied on
-        // the NEXT process() call, before the next sample. We use `>=` so a
-        // budget of N means "after N thinking tokens, force close on token N+1".
-        if state == .active, generated >= budget {
-            state = .forceClose
+    private func enterResponsePhase() {
+        if eosTokenIds.isEmpty || minResponseTokens == 0 {
+            state = .closed
+        } else {
+            state = .responding
+            responseTokens = 0
         }
+    }
+
+    /// `allow: true` keeps only `ids`; `allow: false` suppresses `ids` (EOS holdoff).
+    private static func maskTokenIds(_ ids: Set<Int>, in logits: MLXArray, allow: Bool) -> MLXArray? {
+        let vocabSize = logits.shape.last ?? 0
+        guard vocabSize > 0 else { return nil }
+        var maskValues = [Bool](repeating: !allow, count: vocabSize)
+        var any = false
+        for id in ids where id >= 0 && id < vocabSize {
+            maskValues[id] = allow
+            any = true
+        }
+        guard any else { return nil }
+        let mask = MLXArray(maskValues)[.newAxis, 0...]
+        return TokenMaskBuilder.applyMask(mask, to: logits)
     }
 
     /// Diagnostic: returns post-generation summary. Useful for tests and logs.

@@ -62,6 +62,14 @@ public final class EnginePool: @unchecked Sendable {
         lock.withLock { pool[modelId] != nil }
     }
 
+    /// Sum of live wired-memory reservation tickets. Used to refuse a new
+    /// reservation that would deadlock `WiredSumPolicy` admission.
+    public var reservedWiredBytes: Int {
+        lock.withLock {
+            pool.values.reduce(0) { $0 + ($1.container.wiredReservationTicket?.size ?? 0) }
+        }
+    }
+
     public func pin(_ modelId: String) {
         lock.withLock {
             pool[modelId]?.isPinned = true

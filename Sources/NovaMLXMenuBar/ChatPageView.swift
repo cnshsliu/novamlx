@@ -38,6 +38,9 @@ struct ChatPageView: View {
 
     @EnvironmentObject var l10n: L10n
     @State private var messages: [ChatMessageRow] = []
+    /// Pins local KV/GDN state across turns. Rotated on clear and model change.
+    @State private var conversationSessionId = UUID().uuidString
+    @State private var vlmSessionId = UUID().uuidString
     @State private var inputText = ""
     @State private var selectedModel = ""
     @State private var selectedTag = ""
@@ -363,6 +366,7 @@ struct ChatPageView: View {
             Button(l10n.tr("chat.clear")) {
                 cancelCurrentInference()
                 messages.removeAll()
+                conversationSessionId = UUID().uuidString
                 lastPayload = nil
                 lastResponse = nil
             }
@@ -396,24 +400,27 @@ struct ChatPageView: View {
         .background(NovaTheme.Colors.cardBackground)
         .overlay(Rectangle().fill(NovaTheme.Colors.cardBorder).frame(height: 1), alignment: .top)
         .onAppear {
-            if selectedModel.isEmpty {
-                if let first = appState.loadedModels.first {
+            if selectedModel.isEmpty || ResourceLimits.isCompanionDraftModelId(selectedModel) {
+                if let first = appState.playgroundModels.first {
                     selectedModel = first
                     loadDefaultsFromModel(first)
                 }
             }
             playgroundMode = autoDetectMode(selectedModel)
         }
-        .onChange(of: appState.loadedModels) { _, newModels in
+        .onChange(of: appState.loadedModels) { _, _ in
             let isTokenhub = selectedModel == "tknet" || selectedModel.hasPrefix("tknet:")
-            if !newModels.contains(selectedModel) && !isTokenhub {
-                if let first = newModels.first {
+            let playable = appState.playgroundModels
+            if !playable.contains(selectedModel) && !isTokenhub {
+                if let first = playable.first {
                     selectedModel = first
                     loadDefaultsFromModel(first)
                 }
             }
         }
         .onChange(of: selectedModel) { _, newModel in
+            conversationSessionId = UUID().uuidString
+            vlmSessionId = UUID().uuidString
             if !newModel.isEmpty && newModel != "tknet" && !newModel.hasPrefix("tknet:") {
                 loadDefaultsFromModel(newModel)
             }
@@ -421,11 +428,12 @@ struct ChatPageView: View {
         }
         .onReceive(appState.$requestedPlaygroundModel) { requested in
             guard let model = requested, !model.isEmpty else { return }
-            // Accept anything: loaded locals, tknet:* / lb:* routes go through
-            // the HTTP path even when not present in loadedModels. The picker
-            // already handles these prefixes via inferModeFromName.
-            selectedModel = model
-            playgroundMode = autoDetectMode(model)
+            if !ResourceLimits.isCompanionDraftModelId(model) {
+                // Accept anything else: loaded locals, tknet:* / lb:* routes go
+                // through the HTTP path even when not present in loadedModels.
+                selectedModel = model
+                playgroundMode = autoDetectMode(model)
+            }
             // Always clear — even if model wasn't applicable, don't leave
             // dangling state that re-triggers on next appear.
             DispatchQueue.main.async { appState.requestedPlaygroundModel = nil }
@@ -467,15 +475,15 @@ struct ChatPageView: View {
     /// to fit the full model name. Menu items mirror the original Picker sections.
     private var modelPickerMenu: some View {
         Menu {
-            if appState.loadedModels.isEmpty && tokenhubModels.isEmpty && loadBalancerEntries.isEmpty {
+            if appState.playgroundModels.isEmpty && tokenhubModels.isEmpty && loadBalancerEntries.isEmpty {
                 Button(action: {}) {
                     Text(l10n.tr("chat.noModels"))
                 }
                 .disabled(true)
             }
-            if !appState.loadedModels.isEmpty {
+            if !appState.playgroundModels.isEmpty {
                 Section("LOCAL — DIRECT IN-PROCESS") {
-                    ForEach(appState.loadedModels, id: \.self) { model in
+                    ForEach(appState.playgroundModels, id: \.self) { model in
                         Button(action: {
                             selectedModel = model
                             loadDefaultsFromModel(model)
@@ -630,6 +638,22 @@ struct ChatPageView: View {
     /// and the copied command works as-is.
     private var curlApiBase: String { "http://localhost:\(appState.serverPort)/v1" }
 
+    /// Local playground turns pin `session_id` so KV / GDN state is reused.
+    /// Tokenhub / load-balancer routes leave it off — upstreams don't own our cache.
+    private var usesLocalSession: Bool {
+        let m = selectedModel
+        if m.hasPrefix("tknet:Local ") { return true }
+        if m == "tknet" || m.hasPrefix("tknet:") { return false }
+        if m.hasPrefix("lb:") { return false }
+        return true
+    }
+
+    private func attachSessionId(_ body: inout [String: Any]) {
+        if usesLocalSession {
+            body["session_id"] = conversationSessionId
+        }
+    }
+
     private var openAICurlTemplate: String {
         let model = selectedModel.isEmpty ? "<model>" : selectedModel
         return """
@@ -639,6 +663,7 @@ struct ChatPageView: View {
           -d '{
             "model": "\(model)",
             "messages": [{"role": "user", "content": "Hello"}],
+            "session_id": "chat-1",
             "temperature": \(String(format: "%.2f", paramTemp)),
             "max_tokens": \(Int(paramMaxTokens))
           }'
@@ -1050,6 +1075,7 @@ struct ChatPageView: View {
                 "min_p": paramMinP,
                 "repetition_penalty": paramRepeatPenalty
             ]
+            attachSessionId(&payload)
             if paramDisableThinking { payload["enable_thinking"] = false }
             if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
                 lastPayload = String(data: data, encoding: .utf8)
@@ -1065,6 +1091,7 @@ struct ChatPageView: View {
                 minP: Float(paramMinP),
                 repetitionPenalty: Float(paramRepeatPenalty),
                 stream: true,
+                sessionId: conversationSessionId,
                 enableThinking: paramDisableThinking ? false : nil
             )
             currentRequestId = request.id
@@ -1231,6 +1258,7 @@ struct ChatPageView: View {
                     "min_p": paramMinP,
                     "repetition_penalty": paramRepeatPenalty
                 ]
+                attachSessionId(&body)
                 if paramDisableThinking { body["enable_thinking"] = false }
                 if let tag { body["tag"] = tag }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -1281,6 +1309,7 @@ struct ChatPageView: View {
                     "min_p": paramMinP,
                     "repetition_penalty": paramRepeatPenalty
                 ]
+                attachSessionId(&body)
                 if paramDisableThinking { body["enable_thinking"] = false }
                 if let tag { body["tag"] = tag }
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -2519,7 +2548,8 @@ struct ChatPageView: View {
             topK: Int(paramTopK),
             minP: Float(paramMinP),
             repetitionPenalty: Float(paramRepeatPenalty),
-            stream: true
+            stream: true,
+            sessionId: vlmSessionId
         )
 
         let imgBytes = vlmImageData?.count ?? 0
@@ -2568,6 +2598,7 @@ struct ChatPageView: View {
     private func clearVLMChat() {
         cancelVLMInference()
         vlmMessages.removeAll()
+        vlmSessionId = UUID().uuidString
         vlmLastPayload = nil
         vlmLastResponse = nil
         vlmError = nil

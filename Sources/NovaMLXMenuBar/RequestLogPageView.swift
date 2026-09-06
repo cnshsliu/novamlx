@@ -131,148 +131,332 @@ struct RequestLogPageView: View {
 
 /// A single active (in-flight) request row — shows model, kind, key, and a
 /// live duration/elapsed counter that re-renders via the parent timer tick.
+/// Click to expand the request body detail panel.
 private struct ActiveRequestRow: View {
     let entry: RequestLogEntry
     let now: Date
+    @State private var isExpanded: Bool = false
 
     private var elapsed: TimeInterval { now.timeIntervalSince(entry.startedAt) }
 
     var body: some View {
-        HStack(spacing: NovaTheme.Spacing.md) {
-            ProgressView()
-                .scaleEffect(0.55)
-                .frame(width: 14, height: 14)
+        VStack(spacing: 0) {
+            HStack(spacing: NovaTheme.Spacing.md) {
+                ProgressView()
+                    .scaleEffect(0.55)
+                    .frame(width: 14, height: 14)
 
-            kindBadge(entry.kind)
+                kindBadge(entry.kind)
 
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text(entry.model ?? "resolving…")
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundColor(NovaTheme.Colors.textPrimary)
-                        .lineLimit(1)
-                    Text(entry.endpoint)
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
-                        .foregroundColor(NovaTheme.Colors.textSecondary)
-                        .lineLimit(1)
-                }
-                HStack(spacing: 6) {
-                    Text(entry.apiKeyName ?? "no-key")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(NovaTheme.Colors.textTertiary)
-                    if entry.kind == nil {
-                        Text("pending")
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(entry.model ?? "resolving…")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundColor(NovaTheme.Colors.textPrimary)
+                            .lineLimit(1)
+                        Text(entry.endpoint)
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundColor(NovaTheme.Colors.textSecondary)
+                            .lineLimit(1)
+                    }
+                    HStack(spacing: 6) {
+                        Text(entry.apiKeyName ?? "no-key")
                             .font(.system(size: 10.5))
                             .foregroundColor(NovaTheme.Colors.textTertiary)
+                        if entry.kind == nil {
+                            Text("pending")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(NovaTheme.Colors.textTertiary)
+                        }
                     }
                 }
-            }
 
-            Spacer()
+                Spacer()
 
-            if entry.tps ?? 0 > 0 {
-                Text(String(format: "%.1f tok/s", entry.tps ?? 0))
+                if entry.tps ?? 0 > 0 {
+                    Text(String(format: "%.1f tok/s", entry.tps ?? 0))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                }
+                Text(String(format: "%.1fs", elapsed))
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(NovaTheme.Colors.accent)
+                    .foregroundColor(NovaTheme.Colors.textSecondary)
+
+                chevron
             }
-            Text(String(format: "%.1fs", elapsed))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(NovaTheme.Colors.textSecondary)
+            .padding(.horizontal, NovaTheme.Spacing.md)
+            .padding(.vertical, NovaTheme.Spacing.sm + 1)
+            .background(NovaTheme.Colors.rowBackground)
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }
+            .overlay(
+                RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
+                    .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
+            )
+
+            if isExpanded {
+                RequestDetailPanel(entry: entry)
+                    .padding(.top, 1)
+            }
         }
-        .padding(.horizontal, NovaTheme.Spacing.md)
-        .padding(.vertical, NovaTheme.Spacing.sm + 1)
-        .background(NovaTheme.Colors.rowBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
-                .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
-        )
         .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.md))
+    }
+
+    private var chevron: some View {
+        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(NovaTheme.Colors.textTertiary)
+            .frame(width: 12)
     }
 }
 
-/// A single completed request row.
+/// A single completed request row. Click to expand the request body detail.
 private struct CompletedRequestRow: View {
+    let entry: RequestLogEntry
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: NovaTheme.Spacing.md) {
+                statusIcon(entry.status)
+                    .frame(width: 14)
+
+                Text(relativeTime(entry.startedAt))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.textTertiary)
+                    .frame(width: 38, alignment: .leading)
+
+                Text(entry.method)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundColor(methodColor(entry.method))
+                    .frame(width: 42, alignment: .leading)
+
+                Text(entry.endpoint)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.textSecondary)
+                    .frame(minWidth: 130, alignment: .leading)
+                    .lineLimit(1)
+
+                kindBadge(entry.kind, placeholder: entry.kind == nil ? Color.clear : nil)
+
+                Text(entry.model ?? "")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(NovaTheme.Colors.textPrimary)
+                    .frame(minWidth: 90, alignment: .leading)
+                    .lineLimit(1)
+
+                Text(entry.apiKeyName ?? "no-key")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(NovaTheme.Colors.textTertiary)
+                    .frame(maxWidth: 110, alignment: .leading)
+                    .lineLimit(1)
+                    .help(entry.apiKeyName ?? "no-key")
+
+                Spacer()
+
+                if entry.tps ?? 0 > 0 {
+                    Text(String(format: "%.1f tok/s", entry.tps ?? 0))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                        .frame(width: 70, alignment: .trailing)
+                }
+
+                if let dur = entry.durationMs {
+                    Text(durationLabel(dur))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(NovaTheme.Colors.textSecondary)
+                        .frame(width: 56, alignment: .trailing)
+                }
+
+                if let err = entry.error, !err.isEmpty {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(NovaTheme.Colors.statusWarn)
+                        .help(err)
+                }
+
+                chevron
+            }
+            .padding(.horizontal, NovaTheme.Spacing.md)
+            .padding(.vertical, NovaTheme.Spacing.sm)
+            .background(NovaTheme.Colors.rowBackground)
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }
+            .overlay(
+                RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
+                    .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
+            )
+
+            if isExpanded {
+                RequestDetailPanel(entry: entry)
+                    .padding(.top, 1)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.md))
+    }
+
+    private var chevron: some View {
+        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(NovaTheme.Colors.textTertiary)
+            .frame(width: 12)
+    }
+}
+
+/// Expandable detail panel shown below a row when clicked. Shows HTTP status,
+/// content type, error message, and pretty-printed request body.
+private struct RequestDetailPanel: View {
     let entry: RequestLogEntry
 
     var body: some View {
-        HStack(spacing: NovaTheme.Spacing.md) {
-            statusIcon(entry.status)
-                .frame(width: 14)
-
-            Text(relativeTime(entry.startedAt))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(NovaTheme.Colors.textTertiary)
-                .frame(width: 38, alignment: .leading)
-
-            Text(entry.method)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundColor(methodColor(entry.method))
-                .frame(width: 42, alignment: .leading)
-
-            Text(entry.endpoint)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(NovaTheme.Colors.textSecondary)
-                .frame(minWidth: 130, alignment: .leading)
-                .lineLimit(1)
-
-            if let kind = entry.kind {
-                kindBadge(kind)
-            } else {
-                Text("—").font(.system(size: 11)).foregroundColor(NovaTheme.Colors.textTertiary)
-                    .frame(width: 36, alignment: .center)
+        VStack(alignment: .leading, spacing: 8) {
+            metaRow
+            if let err = entry.error, !err.isEmpty {
+                errorRow(err)
             }
+            bodySection
+        }
+        .padding(NovaTheme.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
+                .fill(NovaTheme.Colors.rowBackground.opacity(0.5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
+                        .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
+                )
+        )
+    }
 
-            Text(entry.model ?? "—")
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundColor(NovaTheme.Colors.textPrimary)
-                .frame(minWidth: 90, alignment: .leading)
-                .lineLimit(1)
+    private var metaRow: some View {
+        HStack(spacing: 12) {
+            if let status = entry.responseStatus {
+                statusBadge(status)
+            }
+            if let ct = entry.requestContentType, !ct.isEmpty {
+                metaTag("Content-Type", value: ct)
+            }
+            if let pt = entry.promptTokens {
+                metaTag("prompt", value: "\(pt) tok")
+            }
+            if let ct = entry.completionTokens {
+                metaTag("completion", value: "\(ct) tok")
+            }
+            if let tps = entry.tps, tps > 0 {
+                metaTag("speed", value: String(format: "%.1f tok/s", tps))
+            }
+            Spacer()
+        }
+    }
 
-            Text(entry.apiKeyName ?? "no-key")
+    private func statusBadge(_ code: Int) -> some View {
+        let color: Color = {
+            if (200..<300).contains(code) { return NovaTheme.Colors.statusOK }
+            if (400..<500).contains(code) { return NovaTheme.Colors.statusWarn }
+            return NovaTheme.Colors.statusError
+        }()
+        return Text("HTTP \(code)")
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .foregroundColor(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.15))
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+    }
+
+    private func metaTag(_ label: String, value: String) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(.system(size: 9.5))
+                .foregroundColor(NovaTheme.Colors.textTertiary)
+            Text(value)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(NovaTheme.Colors.textSecondary)
+        }
+    }
+
+    private func errorRow(_ err: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+                .foregroundColor(NovaTheme.Colors.statusError)
+            Text(err)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(NovaTheme.Colors.statusError)
+                .textSelection(.enabled)
+        }
+        .padding(6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NovaTheme.Colors.statusError.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    @ViewBuilder
+    private var bodySection: some View {
+        if let note = entry.requestBodyNote {
+            Text(note)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundColor(NovaTheme.Colors.textTertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(NovaTheme.Colors.rowBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        } else if let body = entry.requestBody, !body.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Request body")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(NovaTheme.Colors.textTertiary)
+                    Spacer()
+                    Button(action: {
+                        #if canImport(AppKit)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setData(body, forType: .string)
+                        #endif
+                    }) {
+                        Label("Copy", systemImage: "doc.on.doc")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+                Text(prettyBody(body))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.textPrimary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(NovaTheme.Colors.rowBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .lineLimit(40)
+            }
+        } else {
+            Text("No request body")
                 .font(.system(size: 10.5))
                 .foregroundColor(NovaTheme.Colors.textTertiary)
-                .frame(maxWidth: 110, alignment: .leading)
-                .lineLimit(1)
-                .help(entry.apiKeyName ?? "no-key")
-
-            Spacer()
-
-            if entry.tps ?? 0 > 0 {
-                Text(String(format: "%.1f tok/s", entry.tps ?? 0))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(NovaTheme.Colors.textSecondary)
-                    .frame(width: 70, alignment: .trailing)
-            }
-
-            if let dur = entry.durationMs {
-                Text(durationLabel(dur))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(NovaTheme.Colors.textSecondary)
-                    .frame(width: 56, alignment: .trailing)
-            }
-
-            if let err = entry.error, !err.isEmpty {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(NovaTheme.Colors.statusWarn)
-                    .help(err)
-            }
         }
-        .padding(.horizontal, NovaTheme.Spacing.md)
-        .padding(.vertical, NovaTheme.Spacing.sm)
-        .background(NovaTheme.Colors.rowBackground)
-        .overlay(
-            RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
-                .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.md))
+    }
+
+    /// Pretty-print JSON bodies; fall back to raw UTF-8 for non-JSON.
+    private func prettyBody(_ data: Data) -> String {
+        // Only attempt JSON reformatting if the content type suggests JSON.
+        let isJSON = (entry.requestContentType ?? "").lowercased().contains("json")
+            || String(data: data.prefix(1), encoding: .utf8) == "{"
+            || String(data: data.prefix(1), encoding: .utf8) == "["
+        if isJSON,
+           let parsed = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+           let pretty = try? JSONSerialization.data(withJSONObject: parsed, options: [.prettyPrinted, .sortedKeys]),
+           let str = String(data: pretty, encoding: .utf8) {
+            return str
+        }
+        return String(data: data, encoding: .utf8) ?? "<\(data.count) bytes binary>"
     }
 }
 
 // MARK: - Shared small components
 
-private func kindBadge(_ kind: InferenceKind?) -> some View {
-    let label = kind?.label ?? "—"
+private func kindBadge(_ kind: InferenceKind?, placeholder: Color? = nil) -> some View {
+    let label = kind?.label ?? ""
     let color: Color = {
         switch kind {
         case .asr: return NovaTheme.Colors.statusWarn
@@ -280,7 +464,7 @@ private func kindBadge(_ kind: InferenceKind?) -> some View {
         case .image: return .pink
         case .vlm: return .teal
         case .llm: return NovaTheme.Colors.accent
-        case nil: return NovaTheme.Colors.textTertiary
+        case nil: return placeholder ?? NovaTheme.Colors.textTertiary
         }
     }()
     return Text(label)

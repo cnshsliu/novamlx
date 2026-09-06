@@ -144,8 +144,13 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     // MARK: - Send Messages
 
+    public struct LoadFlags: Sendable {
+        public let hybrid: Bool
+        public let nativeMtp: Bool
+    }
+
     @discardableResult
-    public func sendLoad(modelId: String, path: String, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws -> Bool {
+    public func sendLoad(modelId: String, path: String, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws -> LoadFlags {
         let msg = WorkerMessage(type: WorkerMessageType.load, modelId: modelId, modelPath: path, modelConfig: config)
         pendingLoadModelId = modelId
 
@@ -162,7 +167,10 @@ public final class WorkerSupervisor: @unchecked Sendable {
         guard response.type == WorkerMessageType.loaded else {
             throw NovaMLXError.modelLoadFailed(modelId, underlying: NovaMLXError.apiError(response.errorMessage ?? "Unknown load error"))
         }
-        return response.hasLinearAttention ?? false
+        return LoadFlags(
+            hybrid: response.hasLinearAttention ?? false,
+            nativeMtp: response.hasNativeMtp ?? false
+        )
     }
 
     /// Stores a progress callback. Safe to call from any context (sync).

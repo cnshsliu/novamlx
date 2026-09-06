@@ -125,6 +125,15 @@ public final class NovaDB: @unchecked Sendable {
         configMigrator.registerMigration("v6_allow_unlisted_downloads") { db in
             try ConfigDBSchema.v6AllowUnlistedDownloads(in: db)
         }
+        configMigrator.registerMigration("v7_performance_mode") { db in
+            try ConfigDBSchema.v7PerformanceMode(in: db)
+        }
+        configMigrator.registerMigration("v8_max_gpu_memory") { db in
+            try ConfigDBSchema.v8MaxGpuMemory(in: db)
+        }
+        configMigrator.registerMigration("v9_drop_models_dir") { db in
+            try ConfigDBSchema.v9DropModelsDir(in: db)
+        }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")
 
@@ -226,11 +235,11 @@ public final class NovaDB: @unchecked Sendable {
                     let tlsKeyPassword: String?
                     let maxRequestSizeMB: Double?
                     let maxProcessMemory: String?
+                    let maxGpuMemory: String?
                     let prefixCacheEnabled: Bool?
                 }
                 let server: Server?
                 let defaultModel: String?
-                let modelsDirectory: String?
                 let huggingfaceEndpoint: String?
             }
             guard let parsed = try? JSONDecoder().decode(LegacyConfigImport.self, from: data) else { return }
@@ -252,10 +261,10 @@ public final class NovaDB: @unchecked Sendable {
                     if let v = s.tlsKeyPassword { record.tlsKeyPassword = v }
                     if let v = s.maxRequestSizeMB { record.maxRequestSizeMB = v }
                     if let v = s.maxProcessMemory { record.maxProcessMemory = v }
+                    if let v = s.maxGpuMemory { record.maxGpuMemory = v }
                     if let v = s.prefixCacheEnabled { record.prefixCacheEnabled = v }
                 }
                 if let v = parsed.defaultModel { record.defaultModel = v }
-                if let v = parsed.modelsDirectory { record.modelsDir = v }
                 if let v = parsed.huggingfaceEndpoint { record.hfEndpoint = v }
                 try record.save(db)
             }

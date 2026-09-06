@@ -42,6 +42,11 @@ extension NovaMLXAPIServer {
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = method
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Hard cap so a wedged admin server can't tie up the main API's worker
+        // thread (and the corresponding Request Log entry) indefinitely.
+        // Without this, a slow admin endpoint turns into "timeout" rows in the
+        // Request Log after cancelStale prunes them at 120s.
+        urlRequest.timeoutInterval = 10
         if let firstRecord = (try? NovaDB.shared.apiKeyStore.list())?.first,
            let raw = try? NovaDB.shared.apiKeyStore.getRawKey(id: firstRecord.id) {
             urlRequest.setValue("Bearer \(raw)", forHTTPHeaderField: "Authorization")

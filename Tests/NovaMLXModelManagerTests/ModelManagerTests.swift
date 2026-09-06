@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import NovaMLXCore
 import NovaMLXDB
 @testable import NovaMLXModelManager
 
@@ -134,6 +135,30 @@ struct ModelManagerTests {
         #expect(manager.allRegisteredModels().count == 1)
     }
 
+    @Test("Register popular models skips family glob ids")
+    func registerPopularModelsSkipsPatterns() async {
+        let dir = IsolatedTestDB.run { $0 }
+        let cache = dir.appendingPathComponent("models.json")
+        let valid = """
+        {"schemaVersion":1,"updatedAt":"2026-08-16T00:00:00Z","models":[
+          {"id":"org/a","url":"https://huggingface.co/org/a","name":"A","category":"llm","family":"qwen","format":"mlx"},
+          {"id":"mlx-community/Qwen3.8-*","url":"https://huggingface.co/models?search=Qwen3.8","name":"Qwen3.8","category":"llm","family":"qwen","format":"mlx"}
+        ]}
+        """.data(using: .utf8)!
+        let store = ModelCatalogStore(
+            remoteURL: URL(string: "https://example.invalid/catalog/models.json")!,
+            cacheURL: cache,
+            bundleURL: nil,
+            transport: FixedTransport(result: .success(valid))
+        )
+        let manager = ModelManager(modelsDirectory: dir, catalogStore: store)
+        await manager.fetchCatalog()
+        manager.registerPopularModels()
+        #expect(manager.getRecord("org/a") != nil)
+        #expect(manager.getRecord("mlx-community/Qwen3.8-*") == nil)
+        #expect(manager.allRegisteredModels().count == 1)
+    }
+
     @Test("Model record properties")
     func modelRecordProperties() {
         let record = ModelRecord(
@@ -259,6 +284,24 @@ struct ModelManagerTests {
         let models = discovery.discover(in: tempDir)
         #expect(models.count == 1)
         #expect(models[0].modelType == .embedding)
+    }
+
+    @Test("Model discovery detects Qwen3-Embedding from directory name")
+    func discoveryQwen3EmbeddingFromName() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        try createFakeModelConfig(
+            at: tempDir.appendingPathComponent("mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"),
+            architectures: ["Qwen3ForCausalLM"],
+            modelType: "qwen3"
+        )
+
+        let discovery = ModelDiscovery()
+        let models = discovery.discover(in: tempDir)
+        #expect(models.count == 1)
+        #expect(models[0].modelType == .embedding)
+        #expect(models[0].family == .qwen)
     }
 
     @Test("Model discovery detects embedding from model_type")

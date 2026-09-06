@@ -30,11 +30,11 @@ public actor MemoryBudgetTracker {
 
     // MARK: - State
 
-    private let gpuLimitBytes: UInt64
+    private var gpuLimitBytes: UInt64
     private var weightsMemoryBytes: UInt64 = 0
     private var committedKVBytes: UInt64 = 0
     private var models: [String: ModelBudget] = [:]
-    private let headroomPercent: Int  // e.g. 10 means keep 10% free
+    private var headroomPercent: Int  // e.g. 10 means keep 10% free
 
     // MARK: - Init
 
@@ -62,6 +62,14 @@ public actor MemoryBudgetTracker {
         let needed = UInt64(estimatedTokens) * UInt64(bytesPerToken)
         let usableBudget = availableKVBudget * UInt64(100 - headroomPercent) / 100
         return needed <= usableBudget
+    }
+
+    public func setGpuLimit(_ bytes: UInt64) {
+        gpuLimitBytes = max(bytes, 1)
+    }
+
+    public func setHeadroomPercent(_ percent: Int) {
+        headroomPercent = min(max(percent, 0), 50)
     }
 
     /// Current metrics snapshot.

@@ -13,7 +13,6 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     public var tlsCertPath: String?
     public var tlsKeyPath: String?
     public var defaultModel: String?
-    public var modelsDir: String?
     public var hfEndpoint: String
     public var authUrl: String?
     public var tknetApiKey: String?
@@ -29,8 +28,10 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     public var tlsKeyPassword: String? = nil
     public var maxRequestSizeMB: Double = 100
     public var maxProcessMemory: String = "auto"
+    public var maxGpuMemory: String = "auto"
     public var prefixCacheEnabled: Bool = true
     public var allowUnlistedDownloads: Bool = false
+    public var performanceMode: String = "balanced"
 
     /// Explicit public memberwise initializer so cross-module callers
     /// (NovaMLXCore/Configuration.swift) can construct records. The
@@ -44,7 +45,6 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         tlsCertPath: String? = nil,
         tlsKeyPath: String? = nil,
         defaultModel: String? = nil,
-        modelsDir: String? = nil,
         hfEndpoint: String,
         authUrl: String? = nil,
         tknetApiKey: String? = nil,
@@ -57,8 +57,10 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         tlsKeyPassword: String? = nil,
         maxRequestSizeMB: Double = 100,
         maxProcessMemory: String = "auto",
+        maxGpuMemory: String = "auto",
         prefixCacheEnabled: Bool = true,
-        allowUnlistedDownloads: Bool = false
+        allowUnlistedDownloads: Bool = false,
+        performanceMode: String = "balanced"
     ) {
         self.id = id
         self.host = host
@@ -68,7 +70,6 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         self.tlsCertPath = tlsCertPath
         self.tlsKeyPath = tlsKeyPath
         self.defaultModel = defaultModel
-        self.modelsDir = modelsDir
         self.hfEndpoint = hfEndpoint
         self.authUrl = authUrl
         self.tknetApiKey = tknetApiKey
@@ -81,8 +82,10 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         self.tlsKeyPassword = tlsKeyPassword
         self.maxRequestSizeMB = maxRequestSizeMB
         self.maxProcessMemory = maxProcessMemory
+        self.maxGpuMemory = maxGpuMemory
         self.prefixCacheEnabled = prefixCacheEnabled
         self.allowUnlistedDownloads = allowUnlistedDownloads
+        self.performanceMode = performanceMode
     }
 
     enum CodingKeys: String, CodingKey {
@@ -92,7 +95,6 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         case tlsCertPath = "tls_cert_path"
         case tlsKeyPath = "tls_key_path"
         case defaultModel = "default_model"
-        case modelsDir = "models_dir"
         case hfEndpoint = "hf_endpoint"
         case authUrl = "auth_url"
         case tknetApiKey = "tknet_api_key"
@@ -105,8 +107,10 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         case tlsKeyPassword = "tls_key_password"
         case maxRequestSizeMB = "max_request_size_mb"
         case maxProcessMemory = "max_process_memory"
+        case maxGpuMemory = "max_gpu_memory"
         case prefixCacheEnabled = "prefix_cache_enabled"
         case allowUnlistedDownloads = "allow_unlisted_downloads"
+        case performanceMode = "performance_mode"
     }
 }
 

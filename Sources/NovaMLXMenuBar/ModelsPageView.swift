@@ -10,7 +10,6 @@ struct ModelsPageView: View {
     let modelManager: ModelManager
     @EnvironmentObject var l10n: L10n
 
-    @State private var selectedTab: ModelsTab = .local
     @State private var showAlert = false
     @State private var alertMessage = ""
     @State private var refreshTrigger = false
@@ -20,11 +19,6 @@ struct ModelsPageView: View {
     @State private var showDeleteConfirmation = false
     @State private var loadingModelId: String?
     @State private var typeFilter: ModelTypeFilter = .all
-
-    enum ModelsTab: String, CaseIterable {
-        case local
-        case downloads
-    }
 
     enum ModelTypeFilter: String, CaseIterable {
         case all
@@ -81,88 +75,12 @@ struct ModelsPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Category filter — shared across tabs, topmost
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(ModelTypeFilter.allCases, id: \.self) { filter in
-                        Button {
-                            typeFilter = filter
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: filter.icon)
-                                    .font(.system(size: 9))
-                                Text(filter.label)
-                                    .font(.system(size: 11, weight: typeFilter == filter ? .semibold : .regular))
-                            }
-                            .foregroundColor(typeFilter == filter ? .white : NovaTheme.Colors.accent)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(typeFilter == filter ? NovaTheme.Colors.accent : NovaTheme.Colors.accent.opacity(0.15))
-                            .overlay(Capsule().stroke(NovaTheme.Colors.accent.opacity(typeFilter == filter ? 0 : 0.3), lineWidth: 0.5))
-                            .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 8)
-            }
+            ModelTypeFilterBar(filter: $typeFilter)
 
             Divider().padding(.horizontal, 24)
 
-            // Tab bar
-            HStack(spacing: 0) {
-                ForEach(ModelsTab.allCases, id: \.self) { tab in
-                    Button(action: { selectedTab = tab }) {
-                        HStack(spacing: 6) {
-                            if tab == .local {
-                                Image(systemName: "desktopcomputer")
-                                    .font(.system(size: 10))
-                            } else {
-                                Image(systemName: "arrow.down.circle")
-                                    .font(.system(size: 10))
-                            }
-                            Text(tab == .local ? l10n.tr("app.localModels") : l10n.tr("app.downloads"))
-                                .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
-                        }
-                        .foregroundColor(selectedTab == tab ? NovaTheme.Colors.accent : NovaTheme.Colors.textTertiary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(selectedTab == tab ? NovaTheme.Colors.accent.opacity(0.1) : Color.clear)
-                        .cornerRadius(6)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-                Spacer()
-
-                if appState.activeDownloadCount > 0 {
-                    Text("\(appState.activeDownloadCount)")
-                        .font(.caption2)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(NovaTheme.Colors.accent)
-                        .clipShape(Capsule())
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .padding(.bottom, 4)
-
-            Divider().padding(.horizontal, 24)
-
-            // Tab content
-            Group {
-                switch selectedTab {
-                case .local:
-                    localModelsContent
-                case .downloads:
-                    DownloadsPageView(appState: appState, modelManager: modelManager, typeFilter: $typeFilter)
-                        .environmentObject(l10n)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            localModelsContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .alert(alertMessage, isPresented: $showAlert) {
             Button("OK", role: .cancel) {}
@@ -243,6 +161,7 @@ struct ModelsPageView: View {
                         isLoaded: true,
                         actions: {
                             specBoostBadge(for: modelId)
+                            addToCatalogButton(modelId: modelId)
                             Button(l10n.tr("models.unload")) {
                                 Task {
                                     if let record = modelManager.getRecord(modelId) {
@@ -377,6 +296,7 @@ struct ModelsPageView: View {
                                         .lineLimit(1)
                                 }
                             } else {
+                                addToCatalogButton(modelId: record.id)
                                 Button(l10n.tr("models.load")) {
                                     loadingModelId = record.id
                                     NovaMLXLog.info("[ModelsPage] User clicked Load for \(record.id), type=\(record.modelType), family=\(record.family), url=\(record.localURL.path)")
@@ -418,6 +338,25 @@ struct ModelsPageView: View {
         .sectionCard()
     }
 
+    @ViewBuilder
+    private func addToCatalogButton(modelId: String) -> some View {
+        if appState.isCatalogAdmin,
+           !modelManager.catalogStore.containsExactId(modelId),
+           let record = modelManager.getRecord(modelId) {
+            Button(l10n.tr("catalogAdmin.addVerified")) {
+                appState.promoteToVerifiedCatalog(
+                    id: record.id,
+                    url: record.remoteURL,
+                    category: record.modelType,
+                    family: record.family,
+                    sizeBytes: record.sizeBytes
+                )
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
     private func modelRow(_ modelId: String, subtitle: String, isLoaded: Bool, @ViewBuilder actions: () -> some View) -> some View {
         HStack(spacing: 12) {
             Circle()
@@ -432,7 +371,7 @@ struct ModelsPageView: View {
                         .help(l10n.tr("models.clickDetails"))
                         .onTapGesture { fetchModelCard(repoId: modelId) }
                     CopyIDButton(id: modelId)
-                    if isLoaded {
+                    if isLoaded, !ResourceLimits.isCompanionDraftModelId(modelId) {
                         Button {
                             appState.pickInPlayground(modelId)
                         } label: {
@@ -661,6 +600,38 @@ struct ModelsPageView: View {
             Text(value)
                 .font(.caption)
             Spacer()
+        }
+    }
+}
+
+struct ModelTypeFilterBar: View {
+    @Binding var filter: ModelsPageView.ModelTypeFilter
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(ModelsPageView.ModelTypeFilter.allCases, id: \.self) { item in
+                    Button {
+                        filter = item
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 9))
+                            Text(item.label)
+                                .font(.system(size: 11, weight: filter == item ? .semibold : .regular))
+                        }
+                        .foregroundColor(filter == item ? .white : NovaTheme.Colors.accent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(filter == item ? NovaTheme.Colors.accent : NovaTheme.Colors.accent.opacity(0.15))
+                        .overlay(Capsule().stroke(NovaTheme.Colors.accent.opacity(filter == item ? 0 : 0.3), lineWidth: 0.5))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 8)
         }
     }
 }

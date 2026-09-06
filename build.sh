@@ -42,6 +42,44 @@ if [ "${1:-}" = "test" ]; then
 	exec swift test "$@"
 fi
 
+# Strip --restart so it is not forwarded to `swift build`.
+# After a successful build + dist sync: killall NovaMLX && open dist/NovaMLX.app
+# Bare `release` / `debug` is a shorthand for `-c release` / `-c debug`.
+RESTART=0
+PASS_ARGS=()
+PREV=""
+for arg in "$@"; do
+	if [ "$arg" = "--restart" ]; then
+		RESTART=1
+	elif { [ "$arg" = "release" ] || [ "$arg" = "debug" ]; } \
+		&& [ "$PREV" != "-c" ] && [ "$PREV" != "--configuration" ]; then
+		PASS_ARGS+=("-c" "$arg")
+		PREV="$arg"
+	else
+		PASS_ARGS+=("$arg")
+		PREV="$arg"
+	fi
+done
+# bash 3.2 (macOS) errors on "${arr[@]}" with set -u when arr is empty.
+if [ ${#PASS_ARGS[@]} -gt 0 ]; then
+	set -- "${PASS_ARGS[@]}"
+else
+	set --
+fi
+
+restart_app() {
+	[ "$RESTART" = "1" ] || return 0
+	if [ ! -d "dist/NovaMLX.app" ]; then
+		echo "→ --restart: dist/NovaMLX.app not found, skip"
+		return 0
+	fi
+	echo "→ restarting NovaMLX..."
+	killall NovaMLX 2>/dev/null || true
+	killall NovaMLXWorker 2>/dev/null || true
+	sleep 2
+	open dist/NovaMLX.app
+}
+
 # Resolve first (no compilation)
 swift package resolve 2>/dev/null || true
 
@@ -102,6 +140,7 @@ fi
 # Disable with NOVAMLX_SKIP_DIST_SYNC=1 (e.g. for CI / clean-room builds).
 # ─────────────────────────────────────────────────────────────────────────
 if [ "${NOVAMLX_SKIP_DIST_SYNC:-0}" = "1" ]; then
+	restart_app
 	exit 0
 fi
 
@@ -109,6 +148,7 @@ APP_MACOS="dist/NovaMLX.app/Contents/MacOS"
 if [ ! -d "$APP_MACOS" ]; then
 	# No packaged app yet — nothing to sync. First-time users should run
 	# Scripts/package.sh to produce dist/NovaMLX.app.
+	restart_app
 	exit 0
 fi
 
@@ -121,10 +161,9 @@ for arg in "$@"; do
 			# but POSIX-y for-loop can't shift. Use a flag instead.
 			CONFIG_NEXT=1 ;;
 		release|debug)
-			if [ "${CONFIG_NEXT:-0}" = "1" ]; then
-				CONFIG="$arg"
-				CONFIG_NEXT=0
-			fi ;;
+			# Either the value after `-c`/`--configuration`, or a bare shorthand.
+			CONFIG="$arg"
+			CONFIG_NEXT=0 ;;
 		-c=release|--configuration=release) CONFIG="release" ;;
 		-c=debug|--configuration=debug)     CONFIG="debug" ;;
 	esac
@@ -139,6 +178,7 @@ fi
 
 if [ ! -d "$BUILD_BIN_DIR" ]; then
 	echo "→ post-build sync: cannot locate build dir ($BUILD_BIN_DIR), skipping"
+	restart_app
 	exit 0
 fi
 
@@ -169,9 +209,6 @@ for bin in "${SYNC_BINARIES[@]}"; do
 		continue
 	fi
 	cp "$src" "$dst"
-	# Re-sign just this binary. --force overwrites the existing signature so
-	# Gatekeeper / launchd doesn't reject the bundle on next launch.
-	codesign --force --sign - "$dst" 2>/dev/null || true
 	UPDATED+=("$bin")
 done
 
@@ -200,26 +237,156 @@ for bundle_src in "$BUILD_BIN_DIR"/*.bundle; do
 	fi
 done
 
-# Re-sign the bundle as a whole if any contained binary changed, so the
-# bundle's CodeResources stays consistent with the new mach-o hashes.
-if [ ${#UPDATED[@]} -gt 0 ]; then
-		# Inject privacy usage descriptions into Info.plist
-		INFOPLIST="dist/NovaMLX.app/Contents/Info.plist"
-		if [ -f "$INFOPLIST" ]; then
-			plutil -insert NSMicrophoneUsageDescription -string "NovaMLX needs microphone access to record audio for voice cloning and speech recognition." "$INFOPLIST" 2>/dev/null || true
-		fi
+# Same stable Developer ID identity as Scripts/package.sh so macOS TCC
+# (Files and Folders / Removable Volumes) survives rebuilds. Ad-hoc
+# (`--sign -`) and `codesign --deep` without `--team-identifier`/`-r`
+# produce a new CDHash and a broken `certificate root = H<leaf>` DR,
+# which is why dist/NovaMLX.app re-prompted after every ./build.sh.
+APP_BUNDLE="dist/NovaMLX.app"
+APP_CONTENTS="$APP_BUNDLE/Contents"
+ENTITLEMENTS="NovaMLX.entitlements"
+APP_ID="com.novamlx.app"
 
-	if [ -f "NovaMLX.entitlements" ]; then
-		codesign --force --deep --entitlements "NovaMLX.entitlements" \
-			--sign - "dist/NovaMLX.app" 2>/dev/null || true
-	else
-		codesign --force --deep --sign - "dist/NovaMLX.app" 2>/dev/null || true
+write_designated_req() {
+	local ident="$1"
+	local path="$2"
+	cat > "$path" << REQEOF
+designated => anchor apple generic and identifier "$ident" and (certificate leaf[field.1.2.840.113635.100.6.1.9] exists or certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "$TEAM_ID")
+REQEOF
+}
+
+sign_leaf() {
+	local bin_path="$1"
+	local bin_name
+	bin_name=$(basename "$bin_path")
+	local bin_id="$bin_name"
+	if [[ "$bin_name" == *.metallib ]]; then
+		bin_id="${bin_name%.metallib}"
 	fi
-	echo "→ post-build sync: updated ${UPDATED[*]} in dist/NovaMLX.app"
-	echo "  (restart the app to pick up changes: killall NovaMLX; open dist/NovaMLX.app)"
+	if [ -n "$TEAM_ID" ]; then
+		local leaf_rqset
+		leaf_rqset=$(mktemp /tmp/novamlx_leaf_req.XXXXXX)
+		write_designated_req "$bin_id" "$leaf_rqset"
+		if [ -f "$ENTITLEMENTS" ]; then
+			codesign --force --options runtime \
+				-i "$bin_id" \
+				--entitlements "$ENTITLEMENTS" \
+				--team-identifier "$TEAM_ID" \
+				-r "$leaf_rqset" \
+				--sign "$DEVELOPER_ID" \
+				"$bin_path"
+		else
+			codesign --force --options runtime \
+				-i "$bin_id" \
+				--team-identifier "$TEAM_ID" \
+				-r "$leaf_rqset" \
+				--sign "$DEVELOPER_ID" \
+				"$bin_path"
+		fi
+		rm -f "$leaf_rqset"
+	elif [ -f "$ENTITLEMENTS" ]; then
+		codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$DEVELOPER_ID" "$bin_path"
+	else
+		codesign --force --options runtime --sign "$DEVELOPER_ID" "$bin_path"
+	fi
+}
+
+sign_dist_app() {
+	if [ -z "${DEVELOPER_ID:-}" ]; then
+		DEVELOPER_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+			| sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' \
+			| head -1)
+	fi
+	TEAM_ID=""
+	if [ -n "$DEVELOPER_ID" ]; then
+		TEAM_ID=$(echo "$DEVELOPER_ID" | grep -oE '\(([A-Z0-9]+)\)' | tr -d '()' || true)
+		if [ -z "$TEAM_ID" ]; then
+			echo "→ ⚠️  could not extract Team ID from: $DEVELOPER_ID"
+		fi
+	else
+		DEVELOPER_ID="-"
+		echo "→ no Developer ID cert; signing ad-hoc (TCC will re-prompt each rebuild)"
+	fi
+
+	for bin in "$APP_CONTENTS/MacOS/"*; do
+		[ -f "$bin" ] || continue
+		name=$(basename "$bin")
+		if [[ "$name" == *.metallib ]]; then
+			sign_leaf "$bin"
+			continue
+		fi
+		file "$bin" 2>/dev/null | grep -q "Mach-O" || continue
+		sign_leaf "$bin"
+	done
+
+	for bundle in "$APP_CONTENTS/Resources/"*.bundle; do
+		[ -d "$bundle" ] || continue
+		if ! find "$bundle" -type f -exec file {} \; 2>/dev/null | grep -q "Mach-O"; then
+			continue
+		fi
+		sign_leaf "$bundle"
+	done
+
+	RQSET_FILE=""
+	if [ -n "$TEAM_ID" ]; then
+		RQSET_FILE=$(mktemp /tmp/novamlx_req.XXXXXX)
+		write_designated_req "$APP_ID" "$RQSET_FILE"
+		if [ -f "$ENTITLEMENTS" ]; then
+			codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
+				--team-identifier "$TEAM_ID" -r "$RQSET_FILE" \
+				--sign "$DEVELOPER_ID" "$APP_BUNDLE"
+		else
+			codesign --force --options runtime \
+				--team-identifier "$TEAM_ID" -r "$RQSET_FILE" \
+				--sign "$DEVELOPER_ID" "$APP_BUNDLE"
+		fi
+		rm -f "$RQSET_FILE"
+	elif [ -f "$ENTITLEMENTS" ]; then
+		codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
+			--sign "$DEVELOPER_ID" "$APP_BUNDLE"
+	else
+		codesign --force --options runtime --sign "$DEVELOPER_ID" "$APP_BUNDLE"
+	fi
+
+	if [ -n "$TEAM_ID" ]; then
+		codesign --verify --deep --strict "$APP_BUNDLE"
+		echo "→ signed with: $DEVELOPER_ID (Team ID $TEAM_ID, stable DR)"
+	else
+		echo "→ signed with: $DEVELOPER_ID"
+	fi
+}
+
+dist_signature_is_stable() {
+	codesign -d -r- "$APP_BUNDLE" 2>&1 | grep -q 'subject.OU'
+}
+
+# Re-sign when binaries changed, or when the current signature is the
+# unstable `--deep` / no-Team-ID DR that causes TCC re-prompts.
+NEEDS_SIGN=0
+if [ ${#UPDATED[@]} -gt 0 ]; then
+	NEEDS_SIGN=1
+	INFOPLIST="$APP_CONTENTS/Info.plist"
+	if [ -f "$INFOPLIST" ]; then
+		plutil -insert NSMicrophoneUsageDescription -string "NovaMLX needs microphone access to record audio for voice cloning and speech recognition." "$INFOPLIST" 2>/dev/null || true
+	fi
+elif ! dist_signature_is_stable; then
+	NEEDS_SIGN=1
+fi
+
+if [ "$NEEDS_SIGN" = "1" ]; then
+	sign_dist_app
+	if [ ${#UPDATED[@]} -gt 0 ]; then
+		echo "→ post-build sync: updated ${UPDATED[*]} in dist/NovaMLX.app"
+	else
+		echo "→ post-build sync: binaries in sync; re-signed with stable identity"
+	fi
+	if [ "$RESTART" != "1" ]; then
+		echo "  (restart: ./build.sh --restart)"
+	fi
 else
 	echo "→ post-build sync: dist/NovaMLX.app already in sync"
 fi
 [ ${#SKIPPED[@]} -gt 0 ] && echo "  skipped: ${SKIPPED[*]}"
 
+restart_app
 exit 0

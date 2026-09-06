@@ -7,15 +7,19 @@ import NovaMLXUtils
 final class SessionBox: @unchecked Sendable {
     let sessionId: String
     let modelId: String
+    /// Hybrid GDN / linear-attention caches cannot be serialized; eviction
+    /// drops them instead of writing `.safetensors`.
+    let persistToDisk: Bool
     let createdAt: Date
     var lastAccessed: Date
     var messageCount: Int
     private let session: ChatSession
     private let lock = NovaMLXLock()
 
-    init(sessionId: String, modelId: String, session: ChatSession) {
+    init(sessionId: String, modelId: String, session: ChatSession, persistToDisk: Bool = true) {
         self.sessionId = sessionId
         self.modelId = modelId
+        self.persistToDisk = persistToDisk
         self.createdAt = Date()
         self.lastAccessed = Date()
         self.messageCount = 0
@@ -82,34 +86,45 @@ public final class ChatSessionManager: @unchecked Sendable {
         return cacheDirectory.appendingPathComponent("\(safeName).json")
     }
 
+    /// Hybrid GDN conv/recurrent state dies the worker if written to safetensors.
+    static func persistToDisk(hasLinearAttention: Bool) -> Bool {
+        !hasLinearAttention
+    }
+
     func getOrCreate(
         sessionId: String,
         mlxContainer: MLXLMCommon.ModelContainer,
         modelId: String,
         systemPrompt: String?,
         kvBits: Int? = nil,
-        kvGroupSize: Int = 64
+        kvGroupSize: Int = 64,
+        generateParameters: GenerateParameters? = nil,
+        additionalContext: [String: any Sendable]? = nil,
+        persistToDisk: Bool = true
     ) -> SessionBox {
         lock.withLock {
             if let box = sessions[sessionId] {
+                NovaMLXLog.info("ChatSession reused: \(sessionId) model=\(modelId) turns=\(box.messageCount)")
                 return box
             }
 
-            var params = GenerateParameters()
-            if let kvBits {
+            var params = generateParameters ?? GenerateParameters()
+            if generateParameters == nil, let kvBits {
                 params.kvBits = kvBits
                 params.kvGroupSize = kvGroupSize
             }
 
             let session: ChatSession
             let cacheFile = cacheURL(for: sessionId)
-            if FileManager.default.fileExists(atPath: cacheFile.path),
+            if persistToDisk,
+               FileManager.default.fileExists(atPath: cacheFile.path),
                let (cachedKV, _) = try? loadPromptCache(url: cacheFile) {
                 session = ChatSession(
                     mlxContainer,
                     instructions: nil,
                     cache: cachedKV,
-                    generateParameters: params
+                    generateParameters: params,
+                    additionalContext: additionalContext
                 )
                 NovaMLXLog.info("ChatSession restored from cache: \(sessionId)")
                 try? FileManager.default.removeItem(at: cacheFile)
@@ -117,12 +132,18 @@ public final class ChatSessionManager: @unchecked Sendable {
                 session = ChatSession(
                     mlxContainer,
                     instructions: systemPrompt,
-                    generateParameters: params
+                    generateParameters: params,
+                    additionalContext: additionalContext
                 )
-                NovaMLXLog.info("ChatSession created: \(sessionId) for model \(modelId)")
+                NovaMLXLog.info(
+                    "ChatSession created: \(sessionId) for model \(modelId)"
+                        + (persistToDisk ? "" : " (memory-only)")
+                )
             }
 
-            let box = SessionBox(sessionId: sessionId, modelId: modelId, session: session)
+            let box = SessionBox(
+                sessionId: sessionId, modelId: modelId, session: session,
+                persistToDisk: persistToDisk)
             sessions[sessionId] = box
 
             if sessions.count > maxSessions {
@@ -149,6 +170,10 @@ public final class ChatSessionManager: @unchecked Sendable {
         guard let box else {
             throw NovaMLXError.cacheError("Session not found: \(sessionId)")
         }
+        guard box.persistToDisk else {
+            throw NovaMLXError.cacheError(
+                "Hybrid linear-attention sessions stay in memory and cannot be saved to disk")
+        }
         let url = cacheURL(for: sessionId)
         try await box.saveCache(to: url)
         let meta: [String: String] = [
@@ -170,6 +195,10 @@ public final class ChatSessionManager: @unchecked Sendable {
         let sourceURL = cacheURL(for: sourceId)
 
         let sourceBox = lock.withLock { sessions[sourceId] }
+        if let sourceBox, !sourceBox.persistToDisk {
+            throw NovaMLXError.cacheError(
+                "Hybrid linear-attention sessions stay in memory and cannot be forked via disk cache")
+        }
         if let sourceBox {
             try await sourceBox.saveCache(to: sourceURL)
         }
@@ -193,7 +222,9 @@ public final class ChatSessionManager: @unchecked Sendable {
         )
 
         let sourceMeta = lock.withLock { sessions[sourceId]?.modelId ?? "unknown" }
-        let box = SessionBox(sessionId: targetId, modelId: sourceMeta, session: forkedSession)
+        let box = SessionBox(
+            sessionId: targetId, modelId: sourceMeta, session: forkedSession,
+            persistToDisk: true)
         lock.withLock {
             sessions[targetId] = box
         }
@@ -248,11 +279,13 @@ public final class ChatSessionManager: @unchecked Sendable {
         if let oldest = sorted.first {
             let box = oldest.value
             let url = cacheURL(for: box.sessionId)
-            if let sessionBox = sessions[oldest.key] {
+            if box.persistToDisk, let sessionBox = sessions[oldest.key] {
                 Task {
                     try? await sessionBox.saveCache(to: url)
                     NovaMLXLog.info("Evicted session saved to disk: \(box.sessionId)")
                 }
+            } else if !box.persistToDisk {
+                NovaMLXLog.info("Evicted memory-only session without disk persist: \(box.sessionId)")
             }
             sessions.removeValue(forKey: oldest.key)
             NovaMLXLog.info("Evicted oldest session: \(oldest.key)")

@@ -4,11 +4,12 @@
 
 <h1 align="center">NovaMLX</h1>
 
-<p align="center"><strong>The blazing fast pure-Swift LLM/VLM server for Apple Silicon.<br>It is written in Swift, and optimized for Apple silicon.<br>No Python. No cloud. No limits.</strong></p>
+<p align="center"><strong>The blazing fast pure-Swift LLM/VLM server for Apple Silicon.<br>Powered by NovaMLX-TIE — run models larger than unified memory.<br>No Python. No cloud. No limits.</strong></p>
 
 <p align="center">
-Run 50+ model families — Llama, Qwen, Gemma, DeepSeek, Mistral — natively on your Mac.<br>
-100% Swift. Zero Python dependencies. OpenAI & Anthropic compatible. Native menu bar app.
+Run 50+ model families — Llama, Qwen, Gemma, DeepSeek-V4-Pro (779GB!), Mistral — natively on your Mac.<br>
+100% Swift. Zero Python dependencies. OpenAI & Anthropic compatible. Native menu bar app.<br>
+<em>First Mac-native runtime with MoE-aware SSD streaming — beat llama.cpp's kernel panics on big MoE models.</em>
 </p>
 
 <p align="center">
@@ -16,7 +17,43 @@ Run 50+ model families — Llama, Qwen, Gemma, DeepSeek, Mistral — natively on
 <img src="https://img.shields.io/badge/Apple%20Silicon-M1%20%7C%20M2%20%7C%20M3%20%7C%20M4-green" alt="Apple Silicon">
 <img src="https://img.shields.io/badge/Swift-6.0-orange" alt="Swift 6.0">
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
+<img src="https://img.shields.io/badge/NovaMLX--TIE-SSD%20Streaming-red" alt="NovaMLX-TIE">
 </p>
+
+---
+
+## 🚀 NovaMLX-TIE: Run Models Larger Than RAM
+
+**NovaMLX-TIE** (Tiered Inference Engine) is a Mac-native SSD streaming architecture that lets you run models bigger than your unified memory — **the only path to run 141GB DeepSeek-V4-Flash-4bit or 779GB V4-Pro on a 128GB Mac**.
+
+### Why TIE is unique
+
+| | ollama / oMLX / llama.cpp | **NovaMLX-TIE** |
+|---|---|---|
+| Weight residency | OS page cache (MoE-blind) | **3-tier explicit: wired / LRU / SSD mmap** |
+| MoE awareness | None — evicts hot experts as readily as cold | **Router-driven prefetch + per-expert LRU** |
+| Load memory | Full model in RAM | **0MB delta** (tier0 only, ~700MB for 4.3GB model) |
+| Runtime overhead | n/a | **~2%** vs eager (byte-identical output) |
+| Models > unified memory | Kernel panics on MoE | **Runs** |
+
+### What it does
+
+- **Universal**: hooks on `SwitchLinear` + `Linear` (the universal MoE + dense primitives) — any of ~25 mlx-swift-lm model classes works automatically, zero per-model code
+- **Both strategies**: dense (`.layer`) for Llama/Mistral/Gemma/Phi/Qwen-dense, MoE (`.expert`) for V4/Bailing/Qwen3-MoE/PhiMoE/DeepseekV3
+- **Transparent**: convert any model dir via `scripts/expert_shard_layout.py`, then load normally — no API changes
+- **Production-validated**: live worker process, 252 lazy QuantizedLinear loads via sync hooks, byte-identical output vs eager baseline
+
+### Quick conversion
+
+```bash
+python3 scripts/expert_shard_layout.py \
+  --src ~/.nova/models/YourModel-4bit \
+  --dst ~/.nova/models/YourModel-4bit.tiered
+```
+
+Then load `YourModel-4bit.tiered` as usual. NovaMLX detects `tier-manifest.json` and activates TIE automatically.
+
+📖 **Full architecture**: see the design plan in `/Volumes/WD/claude-data/plans/mac-ollama-omlx-bubbly-raccoon.md` (or `project-novamlx-tie.md` in the dev memory).
 
 ---
 
@@ -327,7 +364,7 @@ Click the icon to open the **Dashboard** window for detailed monitoring.
 
 ### 50+ Model Architectures
 
-Runs Llama 3, Qwen 2/2.5/3, Gemma 2/3, Phi 3.5/4, Mistral, Mixtral, DeepSeek, StarCoder2, and many more SafeTensors architectures. Downloads come from the verified catalog by default; enable **Settings → Allow unverified downloads** for arbitrary HuggingFace URLs.
+Runs Llama 3, Qwen 2/2.5/3, Gemma 2/3, Phi 3.5/4, Mistral, Mixtral, DeepSeek, StarCoder2, and many more SafeTensors architectures. Downloads come from the verified catalog by default; enable **Download Models → Allow unverified downloads** for arbitrary HuggingFace URLs.
 
 ### Vision (VLM)
 
@@ -434,7 +471,7 @@ Browse and search the verified catalog (4-bit, 8-bit, or FP16 SafeTensors). Popu
 | Dots.TTS               | 4.0 GB  | `nova download smcleod/dots.tts-soar-mlx`                                 |
 | FLUX.1-schnell-4bit    | ~6 GB   | `nova download mzbac/flux1.schnell.4bit.mlx`                              |
 
-Search the catalog: `nova search "your model name"`. For models outside the catalog, enable **Settings → Allow unverified downloads**.
+Search the catalog: `nova search "your model name"`. For models outside the catalog, enable **Download Models → Allow unverified downloads**.
 
 ---
 

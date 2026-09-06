@@ -68,7 +68,9 @@ extension FileManager {
     }
 
     public func directorySize(at url: URL) -> UInt64 {
-        guard let enumerator = enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        // Resolve symlinks — FileManager.enumerator does not follow a top-level symlink URL.
+        let target = url.resolvingSymlinksInPath()
+        guard let enumerator = enumerator(at: target, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
         var total: UInt64 = 0
         for case let fileURL as URL in enumerator {
             if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {

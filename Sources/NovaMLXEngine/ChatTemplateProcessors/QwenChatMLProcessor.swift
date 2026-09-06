@@ -23,6 +23,7 @@ final class QwenChatMLProcessor: ChatTemplateProcessor, @unchecked Sendable {
         // Common hallucinated turn markers — some Qwen models generate these.
         tokens.formUnion(["<|turn|>", "<|turn>", "<|end_turn|>", "<|end_turn>"])
         tokens.subtract(SharedControlTokenLogic.semanticTags)
+        tokens = tokens.filter { !SharedControlTokenLogic.isThinkingStopPattern($0) }
         tokens.remove("")
         return tokens.sorted()
     }

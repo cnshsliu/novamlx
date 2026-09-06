@@ -82,6 +82,8 @@ struct CoreTypesTests {
         #expect(config.host == "127.0.0.1")
         #expect(config.port == 6590)
         #expect(config.maxConcurrentRequests == 16)
+        #expect(config.maxGpuMemory == "auto")
+        #expect(config.maxProcessMemory == "auto")
     }
 
     @Test("SystemStats memory calculation")

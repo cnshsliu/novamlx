@@ -5,17 +5,6 @@ import NovaMLXUtils
 import Logging
 import Hub
 
-private final class AtomicInt: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value: Int
-    init(_ value: Int = 0) { self._value = value }
-    func withLock<T>(_ body: (inout Int) -> T) -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return body(&_value)
-    }
-}
-
 public enum DownloadState: String, Codable, Sendable {
     case notDownloaded
     case downloading
@@ -124,7 +113,7 @@ public final class ModelManager: @unchecked Sendable {
     public func downloadedModels() -> [ModelRecord] {
         lock.withLock {
             _registry.values.filter {
-                $0.downloadedAt != nil && FileManager.default.fileExists(atPath: $0.localURL.path)
+                $0.downloadedAt != nil && (try? $0.localURL.checkResourceIsReachable()) == true
             }
         }
     }
@@ -132,7 +121,7 @@ public final class ModelManager: @unchecked Sendable {
     public func isDownloaded(_ modelId: String) -> Bool {
         lock.withLock {
             guard let record = _registry[modelId] else { return false }
-            return record.downloadedAt != nil && FileManager.default.fileExists(atPath: record.localURL.path)
+            return record.downloadedAt != nil && (try? record.localURL.checkResourceIsReachable()) == true
         }
     }
 
@@ -197,52 +186,44 @@ public final class ModelManager: @unchecked Sendable {
                 NovaMLXLog.info("[ModelManager] Found \(allFilenames.count) files in \(modelId)")
 
                 let totalFiles = allFilenames.count
-                let completedCount = AtomicInt(0)
-
+                var remaining: [Aria2DownloadFile] = []
+                var alreadyDone = 0
                 for filename in allFilenames {
                     let fileDest = destDir.appendingPathComponent(filename)
-                    let fileDir = fileDest.deletingLastPathComponent()
-                    try FileManager.default.createDirectory(at: fileDir, withIntermediateDirectories: true)
-
                     if FileManager.default.fileExists(atPath: fileDest.path) {
-                        NovaMLXLog.info("[ModelManager] Skip (exists): \(filename)")
-                        completedCount.withLock { $0 += 1 }
+                        alreadyDone += 1
                         continue
                     }
+                    remaining.append(Aria2DownloadFile(
+                        url: hubFileURL(repo: repo, filename: filename),
+                        relativePath: filename
+                    ))
+                }
 
-                    let sourceURL = hubFileURL(repo: repo, filename: filename)
-                    NovaMLXLog.info("[ModelManager] Downloading \(filename)...")
-
-                    let cc = completedCount.withLock { $0 }
-                    self.lock.withLock {
-                        self._downloadStates[modelId] = DownloadStatus(
-                            modelId: modelId, state: .downloading,
-                            progress: Double(cc) / Double(totalFiles),
-                            currentFile: filename,
-                            filesCompleted: cc, filesTotal: totalFiles
-                        )
-                    }
-
-                    try await downloadFile(url: sourceURL, to: fileDest) { bytesWritten, totalBytes in
-                        let fileProgress = totalBytes > 0 ? Double(bytesWritten) / Double(totalBytes) : 0
-                        let cc2 = completedCount.withLock { $0 }
-                        let overallProgress = (Double(cc2) + fileProgress) / Double(totalFiles)
+                if !remaining.isEmpty {
+                    let skipped = alreadyDone
+                    try await Aria2Downloader.download(
+                        files: remaining,
+                        destination: destDir
+                    ) { snapshot in
+                        let done = skipped + snapshot.files.filter(\.isComplete).count
+                        let progress: Double
+                        if snapshot.totalBytes > 0 {
+                            progress = Double(snapshot.downloadedBytes) / Double(snapshot.totalBytes)
+                        } else {
+                            progress = Double(done) / Double(max(totalFiles, 1))
+                        }
+                        let current = snapshot.files.first(where: { !$0.isComplete && $0.downloadedBytes > 0 })?.relativePath
                         self.lock.withLock {
                             self._downloadStates[modelId] = DownloadStatus(
                                 modelId: modelId, state: .downloading,
-                                progress: overallProgress,
-                                currentFile: filename,
-                                filesCompleted: cc2, filesTotal: totalFiles
+                                progress: progress,
+                                currentFile: current,
+                                filesCompleted: done, filesTotal: totalFiles
                             )
                         }
                     }
-
-                    let fileSize = fileSizeString(at: fileDest)
-                    NovaMLXLog.info("[ModelManager] Done: \(filename) (\(fileSize))")
-                    completedCount.withLock { $0 += 1 }
                 }
-
-                _ = completedCount.withLock { $0 }
 
                 let updatedRecord = ModelRecord(
                     id: record.id, family: record.family, modelType: record.modelType,
@@ -309,6 +290,7 @@ public final class ModelManager: @unchecked Sendable {
     /// already present). No-op until `fetchCatalog()` has populated the store.
     public func registerPopularModels() {
         for model in catalogStore.models {
+            if ModelCatalogPolicy.isIdPattern(model.id) { continue }
             if lock.withLock({ _registry[model.id] }) == nil {
                 register(
                     id: model.id,
@@ -453,69 +435,6 @@ public final class ModelManager: @unchecked Sendable {
         url = url.appendingPathComponent("main")
         url = url.appendingPathComponent(filename)
         return url
-    }
-
-    private func downloadFile(
-        url: URL, to destination: URL,
-        onProgress: @Sendable @escaping (UInt64, UInt64) -> Void
-    ) async throws {
-        let request = URLRequest(url: url)
-
-        let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NovaMLXError.downloadFailed("Invalid response", underlying: NSError(domain: "NovaMLX", code: -1))
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw NovaMLXError.downloadFailed("HTTP \(httpResponse.statusCode) for \(url.lastPathComponent)", underlying: NSError(domain: "NovaMLX", code: httpResponse.statusCode))
-        }
-
-        let totalBytes = UInt64(httpResponse.value(forHTTPHeaderField: "Content-Length") ?? "0") ?? 0
-        let tmpDest = destination.deletingLastPathComponent()
-            .appendingPathComponent(".\(destination.lastPathComponent).tmp")
-
-        NovaMLXLog.info("[ModelManager] Downloading \(url.lastPathComponent) (\(totalBytes.bytesFormatted)) from HTTP \(httpResponse.statusCode)")
-
-        try? FileManager.default.removeItem(at: tmpDest)
-        FileManager.default.createFile(atPath: tmpDest.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: tmpDest)
-        defer { try? handle.close() }
-
-        var bytesWritten: UInt64 = 0
-        var lastReportTime = ContinuousClock.now
-        var buffer = Data()
-        let flushSize = 1024 * 1024
-
-        for try await byte in asyncBytes {
-            buffer.append(byte)
-            bytesWritten += 1
-
-            if buffer.count >= flushSize {
-                try handle.write(contentsOf: buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-
-            let now = ContinuousClock.now
-            if now - lastReportTime > .milliseconds(500) {
-                lastReportTime = now
-                onProgress(bytesWritten, totalBytes)
-            }
-        }
-
-        if !buffer.isEmpty {
-            try handle.write(contentsOf: buffer)
-        }
-
-        onProgress(bytesWritten, totalBytes)
-        try? handle.close()
-
-        try FileManager.default.moveItem(at: tmpDest, to: destination)
-    }
-
-    private func fileSizeString(at url: URL) -> String {
-        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0
-        return size.bytesFormatted
     }
 
     private func loadRegistry() {

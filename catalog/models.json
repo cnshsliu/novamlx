@@ -2,6 +2,116 @@
   "schemaVersion": 1,
   "models": [
     {
+      "id": "Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX",
+      "url": "https://huggingface.co/Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX",
+      "name": "Qwythos-27B-v1",
+      "description": "Empero Qwythos-27B-v1 (Qwen3.5-27B SFT→DPO→ESFT): dense hybrid GDN + full attention, vision, 1M YaRN context, Apache-2.0. This entry is the MLX MXFP4 + BF16 vision conversion (~15.2 GB) that NovaMLX can load. Official empero-ai/Qwythos-27B-v1 is BF16 transformers (~56 GB); GGUF is llama.cpp-only.",
+      "category": "vlm",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "verified",
+      "quant": "mxfp4",
+      "size": "~15.2 GB (MXFP4)",
+      "sizeBytes": 15236030003,
+      "minRamGB": 24,
+      "addedAt": "2026-08-29T16:00:00Z",
+      "testedOn": "1.2.0",
+      "tags": [
+        "MLX",
+        "MXFP4",
+        "Qwen",
+        "Qwythos",
+        "Vision",
+        "Reasoning"
+      ],
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "id": "mlx-community/Hy4-preview-4bit",
+      "url": "https://huggingface.co/mlx-community/Hy4-preview-4bit",
+      "name": "Hy4-preview",
+      "description": "Tencent Hunyuan Hy4 preview (hy_v4): 770B-A49B MoE, gated MLA+DSA, iHC, native MTP. MLX 4-bit ~404 GB. Requires NovaMLX-TIE SSD streaming on 128 GB Macs. Merge official mtp_layers for in-graph MTP.",
+      "category": "llm",
+      "family": "hunyuan",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "4bit",
+      "size": "~404 GB (4-bit)",
+      "sizeBytes": 433354554484,
+      "minRamGB": 128,
+      "addedAt": "2026-08-29T12:00:00Z",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Hy4",
+        "Hunyuan",
+        "MoE",
+        "MTP",
+        "TIE"
+      ],
+      "capabilities": [
+        "tools",
+        "thinking"
+      ]
+    },
+    {
+      "id": "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+      "url": "https://huggingface.co/mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
+      "name": "Qwen3-Embedding-0.6B",
+      "description": "Qwen3 0.6B text embedding (1024-d, 32k context, 100+ languages). MLX 4-bit DWQ. Best small open embedding model on Apple Silicon; native in MLXEmbedders.",
+      "category": "embedding",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "verified",
+      "quant": "4bit",
+      "size": "~335 MB",
+      "sizeBytes": 335000000,
+      "minRamGB": 4,
+      "addedAt": "2026-08-27T10:25:13Z",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Qwen",
+        "Embedding",
+        "Multilingual"
+      ],
+      "capabilities": [],
+      "testedOn": "1.2.0"
+    },
+    {
+      "id": "orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX",
+      "url": "https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX",
+      "name": "Qwen3.8-Flash-Next Uncensored",
+      "description": "Abliterated MLX build of Qwen3.8-Flash-Next (qwen4_exp, 125B-A6B + 51B n-gram, vision). Repo root is 4-bit (~163 GB); 6/8-bit live in subfolders. Needs a high-RAM Mac (128 GB+).",
+      "category": "vlm",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "4bit",
+      "size": "~163 GB (4-bit)",
+      "sizeBytes": 163000000000,
+      "minRamGB": 128,
+      "addedAt": "2026-08-29T12:00:00Z",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Qwen",
+        "Flash",
+        "Uncensored",
+        "Vision",
+        "MoE"
+      ],
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
       "id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
       "url": "https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-MLX",
       "name": "Qwen3.8-27B Uncensored",
@@ -9,12 +119,13 @@
       "category": "vlm",
       "family": "qwen",
       "format": "mlx",
-      "status": "preview",
+      "status": "verified",
       "quant": "4bit",
       "size": "~15 GB (4-bit)",
       "sizeBytes": 15000000000,
       "minRamGB": 24,
       "addedAt": "2026-08-23T15:01:29Z",
+      "testedOn": "1.2.0",
       "tags": [
         "MLX",
         "4-bit",
@@ -86,6 +197,20 @@
       "family": "gptOss",
       "format": "mlx",
       "status": "preview"
+    },
+    {
+      "id": "incoai/Qwen3.8-27B-DFlash2",
+      "url": "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2",
+      "name": "Qwen3.8-27B DFlash2 drafter",
+      "description": "DFlash 2 speculative drafter for Qwen3.8-27B. Download only — attaches to the matching backbone and cannot load as chat. Enables ~3× decode vs plain 8-bit.",
+      "category": "llm",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "verified",
+      "size": "~1.5 GB",
+      "sizeBytes": 1500000000,
+      "testedOn": "1.2.0",
+      "tags": ["MLX", "DFlash", "Speculative", "Companion"]
     },
     {
       "id": "mlx-community/Qwen3.6-27B-OptiQ-4bit",
@@ -206,29 +331,110 @@
       ]
     },
     {
-      "id": "mlx-community/Qwen3.8-*",
-      "url": "https://huggingface.co/models?search=Qwen3.8&author=mlx-community",
-      "name": "Qwen3.8 family",
-      "description": "Every mlx-community/Qwen3.8-* MLX checkpoint (sizes, quants, MTP heads). Search Qwen3.8 to list variants. MTP repos download only — they attach to the matching backbone and cannot load as chat.",
+      "id": "pipenetwork/Qwen3.8-Flash-Next-*",
+      "url": "https://huggingface.co/models?search=Qwen3.8-Flash-Next&author=pipenetwork",
+      "name": "Qwen3.8-Flash-Next",
+      "description": "Qwen3.8-Flash-Next (qwen4_exp / Qwen4 preview): 125B MoE with 6B active + 51B n-gram embeddings, native vision, 256K context. mlx-community has no checkpoint yet — pipenetwork MLX 4/6/8-bit quants (~104–192 GB). Needs ~128 GB unified memory. Browse family to list quants.",
+      "category": "vlm",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "preview",
+      "quant": null,
+      "size": "~104 GB (4-bit)",
+      "sizeBytes": 104000000000,
+      "minRamGB": 128,
+      "addedAt": "2026-08-29T12:00:00Z",
+      "revision": null,
+      "testedOn": null,
+      "tags": [
+        "MLX",
+        "Qwen",
+        "Flash",
+        "Family",
+        "MoE",
+        "Vision"
+      ],
+      "capabilities": [
+        "tools",
+        "vision"
+      ]
+    },
+    {
+      "id": "mlx-community/Qwen3.8-27B-8bit",
+      "url": "https://huggingface.co/mlx-community/Qwen3.8-27B-8bit",
+      "name": "Qwen3.8-27B 8-bit",
+      "description": "mlx-community default 8-bit Qwen3.8-27B (dense hybrid GDN + full attention, vision). Best long-context TTFT of the 27B quants we measured; pair with incoai/Qwen3.8-27B-DFlash2 for short-context decode.",
+      "category": "vlm",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "verified",
+      "quant": "8bit",
+      "size": "~28 GB (8-bit)",
+      "sizeBytes": 28000000000,
+      "minRamGB": 32,
+      "addedAt": "2026-09-05T12:00:00Z",
+      "testedOn": "1.2.0",
+      "tags": [
+        "MLX",
+        "8-bit",
+        "Qwen",
+        "Vision"
+      ],
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "id": "mlx-community/Qwen3.8-27B-4bit",
+      "url": "https://huggingface.co/mlx-community/Qwen3.8-27B-4bit",
+      "name": "Qwen3.8-27B 4-bit",
+      "description": "mlx-community default affine 4-bit Qwen3.8-27B. Short-context DFlash decode matches 8-bit; 16k TTFT is slower. Not the OptiQ mixed quant (removed — slower decode on this hybrid).",
+      "category": "vlm",
+      "family": "qwen",
+      "format": "mlx",
+      "status": "verified",
+      "quant": "4bit",
+      "size": "~16 GB (4-bit)",
+      "sizeBytes": 16100000000,
+      "minRamGB": 24,
+      "addedAt": "2026-09-05T12:00:00Z",
+      "testedOn": "1.2.0",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Qwen",
+        "Vision"
+      ],
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "id": "mlx-community/Qwen3.8-27B-MTP-*",
+      "url": "https://huggingface.co/models?search=Qwen3.8-27B-MTP&author=mlx-community",
+      "name": "Qwen3.8-27B MTP heads",
+      "description": "MTP speculation heads for Qwen3.8-27B (4-bit / 8-bit). Download only — they attach to the matching backbone and cannot load as chat. Does not include OptiQ quants.",
       "category": "llm",
       "family": "qwen",
       "format": "mlx",
       "status": "preview",
       "quant": null,
-      "size": "many variants",
-      "sizeBytes": null,
+      "size": "~0.3 GB",
+      "sizeBytes": 300000000,
       "minRamGB": null,
       "revision": null,
       "testedOn": null,
       "tags": [
         "MLX",
         "Qwen",
-        "Family",
-        "MTP"
+        "MTP",
+        "Companion"
       ],
-      "capabilities": [
-        "tools"
-      ]
+      "capabilities": []
     },
     {
       "id": "mlx-community/Nemotron-Cascade-2-30B-A3B-4bit",
@@ -512,5 +718,5 @@
       "status": "preview"
     }
   ],
-  "updatedAt": "2026-08-23T15:01:29Z"
+  "updatedAt": "2026-09-05T12:00:00Z"
 }

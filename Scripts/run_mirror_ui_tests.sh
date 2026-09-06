@@ -177,8 +177,7 @@ main() {
 
     log "\nRunning mirror tests..."
 
-    test_mirror_switch "hf-mirror.com (China)" "Switch to hf-mirror.com"
-    test_mirror_switch "ModelScope (Alibaba)" "Switch to ModelScope (Alibaba)"
+    test_mirror_switch "ModelScope (China)" "Switch to ModelScope (China)"
     test_mirror_switch "Custom URL..." "Select Custom URL option"
 
     # Custom input
@@ -189,7 +188,7 @@ main() {
             set frontmost to true
             delay 1
             try
-                keystroke "https://hf-mirror.com"
+                keystroke "https://www.modelscope.cn"
                 delay 0.4
                 key code 36
                 delay 1

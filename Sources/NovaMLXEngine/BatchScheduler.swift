@@ -113,7 +113,7 @@ public final class BatchScheduler: @unchecked Sendable {
         }()
 
         let stream = try await mlxContainer.perform(nonSendable: input) { context, input in
-            let cache = context.model.newCache(parameters: prefillParams)
+            let cache = try context.model.newCache(parameters: prefillParams)
             cachesBox.value = cache
             return try MLXLMCommon.generate(
                 input: input,
@@ -129,6 +129,7 @@ public final class BatchScheduler: @unchecked Sendable {
             case .chunk(let text): firstTokenText = text
             case .info: break
             case .toolCall: break
+            case .rejectedToolCall: break
             }
         }
 

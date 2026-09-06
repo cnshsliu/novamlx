@@ -152,6 +152,31 @@ struct ThinkingBudgetProcessorTests {
             "after forced close, response phase should not be re-masked")
     }
 
+    @Test("After close, EOS is suppressed until minResponseTokens")
+    func eosHoldoffAfterClose() {
+        let eosId = 9
+        let proc = ThinkingBudgetProcessor(
+            budget: 2,
+            closeTokenIds: [42],
+            eosTokenIds: [eosId],
+            minResponseTokens: 3
+        )
+        proc.prompt(MLXArray(0))
+        for _ in 0..<2 { proc.didSample(token: MLXArray(7)) }
+        _ = proc.process(logits: logits(vocabSize: 50, winnerId: 7))
+        proc.didSample(token: MLXArray(42))
+        #expect(proc.summary.closed == false)
+
+        let eosWins = logits(vocabSize: 50, winnerId: eosId)
+        let held = proc.process(logits: eosWins)
+        #expect(argmaxId(held) != eosId, "EOS must be masked during response holdoff")
+
+        for _ in 0..<3 { proc.didSample(token: MLXArray(3)) }
+        #expect(proc.summary.closed == true)
+        let after = proc.process(logits: eosWins)
+        #expect(argmaxId(after) == eosId, "EOS allowed after min response tokens")
+    }
+
     // MARK: - Vocab-size mismatches
 
     @Test("Close token id outside vocab: graceful no-op + warning")

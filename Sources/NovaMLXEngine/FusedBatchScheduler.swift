@@ -202,7 +202,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     private let engine: MLXEngine
     private let budgetTracker: MemoryBudgetTracker
-    private let maxConcurrentPerModel: Int  // Hard upper bound
+    private let maxConcurrentPerModel: Int  // Safety bound; GPU/RAM sliders are the real limit
     private let lock = NovaMLXLock()
 
     // Active sequences grouped by model
@@ -224,7 +224,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     // MARK: - Init
 
-    public init(engine: MLXEngine, maxConcurrentPerModel: Int = 4) {
+    public init(engine: MLXEngine, maxConcurrentPerModel: Int = ResourceLimits.safetyConcurrentCap) {
         self.engine = engine
         self.budgetTracker = engine.budgetTracker
         self.maxConcurrentPerModel = maxConcurrentPerModel
@@ -258,15 +258,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     // MARK: - Auto Concurrency
 
-    /// Calculate optimal concurrent sequences for a model based on available memory.
-    /// More KV-hungry models get fewer slots; small models get more.
-    /// Bounded by `maxConcurrentPerModel` hard limit.
+    /// Concurrent sequences that fit in the remaining GPU KV budget.
+    /// Safety-capped only — GPU/RAM sliders are the real limit.
     private func optimalConcurrency(for modelId: String) async -> Int {
         let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
-        let budget = await budgetTracker.availableKVBudget
-        let usable = budget * 90 / 100  // 10% headroom
+        let usable = await budgetTracker.availableKVBudget
 
-        // Estimate tokens per sequence: use a reasonable default context
+        if engine.getContainer(for: modelId)?.config.hasLinearAttention == true {
+            return 1
+        }
+
         let estimatedTokensPerSeq = 4096
         let bytesPerSeq = UInt64(estimatedTokensPerSeq) * UInt64(bytesPerToken)
 
@@ -281,10 +282,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     public func submit(_ request: InferenceRequest) async throws -> InferenceResult {
         let modelId = request.model
 
-        // Atomic admission check + slot reserve — if memory/concurrency tight, fall back to engine
+        // Atomic admission check + slot reserve — if GPU/RAM is tight, queue
         guard await canAdmitAndReserve(request) else {
-            NovaMLXLog.info("FusedScheduler: submit(\(request.id.uuidString.prefix(8))) can't admit — falling back to engine")
-            return try await engine.generate(request)
+            NovaMLXLog.info("FusedScheduler: submit(\(request.id.uuidString.prefix(8))) can't admit — queuing")
+            return try await enqueueGenerateAndWait(request: request, priority: .normal)
         }
 
         let startTime = Date()
@@ -437,9 +438,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     private func canAdmit(_ request: InferenceRequest) async -> Bool {
         let modelId = request.model
+
         let activeForModel = lock.withLock { activeModelCounts[modelId] ?? 0 }
 
-        // Use auto-tuned concurrency limit instead of static max
         let concurrentLimit = await optimalConcurrency(for: modelId)
         if activeForModel >= concurrentLimit {
             NovaMLXLog.info("FusedScheduler: queuing \(request.id.uuidString.prefix(8)) — model at concurrency limit (\(activeForModel)/\(concurrentLimit))")
@@ -602,8 +603,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
             // Validate restored caches are compatible with the current model
             // Check layer count matches and caches are non-empty
-            let freshCachesBox = await mlxContainer.perform { context in
-                FusedCachesBox(caches: context.model.newCache(parameters: parameters))
+            let freshCachesBox = try await mlxContainer.perform { context in
+                FusedCachesBox(caches: try context.model.newCache(parameters: parameters))
             }
             let freshCaches = freshCachesBox.caches
             let cacheCompatible = restoredCaches.count == freshCaches.count &&
@@ -650,7 +651,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         prefillParamsMut.kvBits = nil
         let prefillParams = prefillParamsMut
 
-        let chunkSize = prefillParams.prefillStepSize
+        let chunkSize = prefillParams.prefill.resolvedStepSize()
         let tokenIds = input.text.tokens.asArray(Int32.self)
         let prefillTimeoutSeconds: Double = 120  // 2 minute timeout for prefill
 
@@ -667,9 +668,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         // Run entire prefill + first token sampling inside perform to ensure
         // correct MLX lazy evaluation context.
         let cachesBox = MutableSendableBox<[KVCache]?>(nil)
-        let prefillResultBox = await mlxContainer.perform { context in
+        let prefillResultBox = try await mlxContainer.perform { context in
             let model = context.model
-            let caches = model.newCache(parameters: prefillParams)
+            let caches = try model.newCache(parameters: prefillParams)
 
             // Chunked forward pass with timeout checks between chunks
             var lastLogits: MLXArray = MLXArray()

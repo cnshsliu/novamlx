@@ -140,6 +140,7 @@ let package = Package(
                 "NovaMLXUtils",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Hub", package: "swift-transformers"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
             ],
             swiftSettings: concurrencySettings
         ),
@@ -253,7 +254,13 @@ let package = Package(
         ),
         .testTarget(
             name: "NovaMLXEngineTests",
-            dependencies: ["NovaMLXEngine", "NovaMLXInference", "NovaMLXCore"],
+            dependencies: [
+                "NovaMLXEngine",
+                "NovaMLXInference",
+                "NovaMLXCore",
+                "NovaMLXUtils",
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+            ],
             swiftSettings: concurrencySettings
         ),
         .testTarget(

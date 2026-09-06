@@ -23,18 +23,18 @@ public actor NovaMLXConfiguration {
     public static let shared = NovaMLXConfiguration()
 
     private let log = Logger(subsystem: "com.novamlx", category: "Configuration")
-    private var _modelsDirectory: URL
     private var _serverConfig: ServerConfig
     private var _defaultModel: String?
     private var _huggingfaceEndpoint: String?
 
     private init() {
-        _modelsDirectory = NovaMLXPaths.modelsDir
         _serverConfig = ServerConfig()
     }
 
+    /// Always `~/.config/novamlx/models-path` (see `NovaMLXPaths.modelsDir`).
+    /// Not stored in SQLite — a DB copy used to diverge from the file.
     public var modelsDirectory: URL {
-        get async { _modelsDirectory }
+        get async { NovaMLXPaths.modelsDir }
     }
 
     public var serverConfig: ServerConfig {
@@ -47,10 +47,6 @@ public actor NovaMLXConfiguration {
 
     public var huggingfaceEndpoint: String? {
         get async { _huggingfaceEndpoint }
-    }
-
-    public func setModelsDirectory(_ url: URL) {
-        _modelsDirectory = url
     }
 
     public func setServerConfig(_ config: ServerConfig) {
@@ -66,17 +62,17 @@ public actor NovaMLXConfiguration {
     }
 
     public func initializeDirectories() throws {
-        let fm = FileManager.default
-        try fm.createDirectory(at: _modelsDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: NovaMLXPaths.modelsDir, withIntermediateDirectories: true)
     }
 
     /// Serialize current state to the same JSON shape config.json used.
     /// Used by `/admin/api/config` GET to preserve API compatibility.
+    /// `modelsDirectory` is reported from the file locator, not SQLite.
     public func serializedConfigJSON() throws -> Data {
         let persisted = PersistedConfig(
             server: _serverConfig,
             defaultModel: _defaultModel,
-            modelsDirectory: _modelsDirectory.path,
+            modelsDirectory: NovaMLXPaths.modelsDir.path,
             huggingfaceEndpoint: _huggingfaceEndpoint,
             language: nil
         )
@@ -85,21 +81,17 @@ public actor NovaMLXConfiguration {
 
     /// Apply a PersistedConfig-shaped JSON blob to current state and persist
     /// to the SQLite store. Used by `/admin/api/config` PUT.
+    /// `modelsDirectory` in the payload is ignored — change
+    /// `~/.config/novamlx/models-path` and restart.
     public func applySerializedConfigJSON(_ data: Data) throws {
         let persisted = try JSONDecoder().decode(PersistedConfig.self, from: data)
         _serverConfig = persisted.server
         _defaultModel = persisted.defaultModel
-        if let dir = persisted.modelsDirectory, !dir.isEmpty {
-            _modelsDirectory = URL(fileURLWithPath: dir)
-        }
         _huggingfaceEndpoint = persisted.huggingfaceEndpoint
         syncToStore()
     }
 
-    /// Bridge Phase: shadow-write current state into the SQLite configStore.
-    /// JSON remains authoritative; this only populates the DB so future Phase B
-    /// cutover tasks can validate reads against it. Errors are tolerated via
-    /// `try?` semantics so a DB issue doesn't break the primary JSON code path.
+    /// Persist runtime server settings to SQLite. Model root is not stored.
     public func syncToStore() {
         let server = _serverConfig
         let record: ConfigRecord = ConfigRecord(
@@ -110,7 +102,6 @@ public actor NovaMLXConfiguration {
             tlsCertPath: server.tlsCertPath,
             tlsKeyPath: server.tlsKeyPath,
             defaultModel: _defaultModel,
-            modelsDir: _modelsDirectory.path,
             hfEndpoint: _huggingfaceEndpoint ?? "https://huggingface.co",
             authUrl: nil,
             tknetApiKey: nil,
@@ -123,6 +114,7 @@ public actor NovaMLXConfiguration {
             tlsKeyPassword: server.tlsKeyPassword,
             maxRequestSizeMB: server.maxRequestSizeMB,
             maxProcessMemory: server.maxProcessMemory,
+            maxGpuMemory: server.maxGpuMemory,
             prefixCacheEnabled: server.prefixCacheEnabled,
             allowUnlistedDownloads: server.allowUnlistedDownloads
         )
@@ -133,13 +125,11 @@ public actor NovaMLXConfiguration {
             }
         } catch {
             // Bridge phase: tolerate DB failures so JSON path stays authoritative.
-            log.warning("[Configuration] syncToStore failed (Bridge tolerated): \(String(describing: error))")
+            log.warning("[Configuration] syncToStore failed: \(String(describing: error))")
         }
     }
 
-    /// Read state from the SQLite configStore into in-memory properties.
-    /// Used by Phase B cutover as the JSON replacement. Throws on DB errors
-    /// (unlike syncToStore) so callers can decide policy.
+    /// Read runtime server settings from SQLite. Does not touch the model root.
     public func loadFromStore() throws {
         let record = try NovaDB.shared.configStore.get()
         let cluster: ServerConfig.ClusterSettings? = decodeJSONString(record.clusterConfig, nil as ServerConfig.ClusterSettings?)
@@ -157,13 +147,13 @@ public actor NovaMLXConfiguration {
             tlsKeyPassword: record.tlsKeyPassword,
             maxRequestSizeMB: record.maxRequestSizeMB,
             maxProcessMemory: record.maxProcessMemory,
+            maxGpuMemory: record.maxGpuMemory,
             prefixCacheEnabled: record.prefixCacheEnabled,
             allowUnlistedDownloads: record.allowUnlistedDownloads,
             autoLoad: autoLoad,
             cluster: cluster
         )
         if let model = record.defaultModel, !model.isEmpty { _defaultModel = model }
-        if let dir = record.modelsDir, !dir.isEmpty { _modelsDirectory = URL(fileURLWithPath: dir) }
         if !record.hfEndpoint.isEmpty { _huggingfaceEndpoint = record.hfEndpoint }
     }
 }

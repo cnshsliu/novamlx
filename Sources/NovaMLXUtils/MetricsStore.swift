@@ -110,6 +110,11 @@ public final class MetricsStore: @unchecked Sendable {
     private var _liveActivity: LiveActivity? = nil
     private var _lastActivityUpdate: Date = Date.distantPast
 
+    // NovaMLX-TIE: live tier-inference metrics. Separate lock so high-frequency
+    // SSD/prefetch updates don't contend with the main metrics lock.
+    internal var _tierMetrics = TierMetrics()
+    internal let tierLock = NovaMLXLock()
+
     /// Seconds after which a cached TPS value is considered stale and returned as 0
     private let tpsStaleThreshold: TimeInterval = 5
 

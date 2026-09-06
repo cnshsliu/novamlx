@@ -118,12 +118,46 @@ public final class TranscriptionService: @unchecked Sendable {
         let audioURL = try writeTempAudio(audioData)
         defer { try? FileManager.default.removeItem(at: audioURL) }
 
-        let (_, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
+        let (sr, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
+        // Audio duration (seconds) — used to compute the real-time factor once
+        // generation finishes. Whisper pads/trims to 30 mel frames per 0.1s, but
+        // the recorded wall-clock ÷ source-audio length is the meaningful ×RT.
+        let audioDurationSec = Double(audioArray.count) / Double(sr)
+
+        // ── Pre-inference silence gate ─────────────────────────────────────
+        // Two cheap checks that short-circuit before loading the model:
+        //   1. Duration < 0.3s → too short to be intelligible speech.
+        //   2. RMS energy < 0.01 (-40dB) → effectively digital silence or
+        //      microphone floor noise. Real speech sits well above this;
+        //      a typical quiet whisper is ~0.02-0.05.
+        // Without this gate, clients that fire-and-forget silent/quiet audio
+        // (VoiceVibeCode on ambient noise, malformed uploads, etc.) burn a
+        // full Qwen3-ASR forward pass (~500-1000ms) per request and produce
+        // 0-token outputs anyway.
+        if audioDurationSec < 0.3 {
+            NovaMLXLog.info("[Transcription] rejecting \(String(format: "%.2f", audioDurationSec))s clip (too short)")
+            return TranscriptionResult(text: "", language: nil, duration: 0)
+        }
+        let rmsEnergy = Self.computeRMS(audioArray.asArray(Float.self))
+        if rmsEnergy < 0.01 {
+            NovaMLXLog.info("[Transcription] rejecting clip: RMS \(String(format: "%.4f", rmsEnergy)) below silence threshold (duration=\(String(format: "%.2f", audioDurationSec))s)")
+            return TranscriptionResult(text: "", language: nil, duration: 0)
+        }
 
         let startTime = Date()
-        // Report live activity so the status panel shows ASR is running.
+        // Report activity up front (speed 0) so the live panel reacts even on
+        // fast transcriptions: the hero line shows whenever any activity exists,
+        // and the store keeps the record for 5s after the final update below.
         metricsStore?.reportActivity(model: modelId, kind: .asr, speed: 0, unit: "×RT")
-        defer { metricsStore?.clearActivity(forModel: modelId) }
+        defer {
+            // Publish the real ×RT once we know the wall time, and DO NOT clear
+            // immediately — the 2s UI poll needs a window to pick it up, and the
+            // store's 5s staleness threshold will retire the record cleanly
+            // (same contract as StreamTracker.finish for the LLM path).
+            let elapsed = Date().timeIntervalSince(startTime)
+            let rt = MetricsStore.realTimeFactor(outputSeconds: audioDurationSec, wallSeconds: elapsed)
+            metricsStore?.reportActivity(model: modelId, kind: .asr, speed: rt, unit: "×RT")
+        }
 
         let output: STTOutput
         switch model {
@@ -167,13 +201,23 @@ public final class TranscriptionService: @unchecked Sendable {
         let sendableModel = SendableBox(model)
         let sendableLanguage = language
 
+        let sendableMetricsStore = metricsStore
+        let sendableModelId = modelId
+
         return AsyncThrowingStream { continuation in
             let task = Task.detached {
                 let model = sendableModel.value
                 do {
                     let audioURL = try sendableSelf.writeTempAudio(audioData)
                     defer { try? FileManager.default.removeItem(at: audioURL) }
-                    let (_, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
+                    let (sr, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
+                    let audioDurationSec = Double(audioArray.count) / Double(sr)
+
+                    // Mark activity immediately so the live panel reacts on the
+                    // next UI poll (≤2s) and shows the ASR hero/kind while we work.
+                    sendableMetricsStore?.reportActivity(
+                        model: sendableModelId, kind: .asr, speed: 0, unit: "×RT")
+                    let streamStart = Date()
 
                     let sttStream: AsyncThrowingStream<STTGeneration, Error>
                     switch model {
@@ -195,12 +239,31 @@ public final class TranscriptionService: @unchecked Sendable {
                         switch event {
                         case .token(let text):
                             continuation.yield(text)
-                        case .info, .result:
+                        case .result(let output):
+                            // Refresh live speed with the real ×RT the model just
+                            // reported so the panel value converges beforeDone.
+                            let rt = MetricsStore.realTimeFactor(
+                                outputSeconds: audioDurationSec, wallSeconds: output.totalTime)
+                            sendableMetricsStore?.reportActivity(
+                                model: sendableModelId, kind: .asr, speed: rt, unit: "×RT")
+                        case .info:
                             break
                         }
                     }
+                    // Final ×RT from wall time in case .result was skipped or
+                    // underreported; again NOT immediately cleared — the store's
+                    // 5s staleness retires it so the last value stays visible.
+                    let elapsed = Date().timeIntervalSince(streamStart)
+                    let rt = MetricsStore.realTimeFactor(
+                        outputSeconds: audioDurationSec, wallSeconds: elapsed)
+                    sendableMetricsStore?.reportActivity(
+                        model: sendableModelId, kind: .asr, speed: rt, unit: "×RT")
                     continuation.finish()
                 } catch {
+                    // Still publish whatever ×RT we achieved so the panel doesn't
+                    // strand on speed 0 if a request errors late.
+                    sendableMetricsStore?.reportActivity(
+                        model: sendableModelId, kind: .asr, speed: 0, unit: "×RT")
                     continuation.finish(throwing: error)
                 }
             }
@@ -323,5 +386,17 @@ public final class TranscriptionService: @unchecked Sendable {
             return concatenated([array, padding], axis: 0)
         }
         return array
+    }
+
+    /// RMS energy of a PCM audio buffer. Used by the silence gate to reject
+    /// effectively-silent inputs before running ASR (saves ~500-1000ms of
+    /// model compute per request). Input is Float32 samples in [-1, 1].
+    static func computeRMS(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sumSq: Double = 0
+        for s in samples {
+            sumSq += Double(s) * Double(s)
+        }
+        return Float(sqrt(sumSq / Double(samples.count)))
     }
 }

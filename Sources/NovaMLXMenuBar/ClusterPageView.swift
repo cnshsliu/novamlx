@@ -424,8 +424,6 @@ struct ClusterPageView: View {
         }
         .onAppear { startPolling() }
         .onDisappear { stopPolling() }
-        // Also kick off discovery immediately when the view struct is created
-        .task { startPolling() }
         .sheet(isPresented: $showCredentialDialog) {
             credentialDialogSheet
         }
@@ -1415,6 +1413,11 @@ struct ClusterPageView: View {
 
     private func startPolling() {
         NovaMLXLog.info("[ClusterPage] startPolling() called (isRunning=\(isRunning), clusterEnabled=\(appState.clusterEnabled))")
+        // Invalidate any timers left over from a previous appearance. SwiftUI
+        // re-creates view structs frequently, and without this guard each
+        // re-creation would leak another pair of poll/scan timers into the
+        // current RunLoop — producing N duplicate log lines per cycle.
+        stopPolling()
         loadThunderboltSubnetInfo()
         if clusterRole == "coordinator" {
             startSSHAgentMonitoring()

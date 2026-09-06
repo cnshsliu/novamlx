@@ -59,10 +59,17 @@ public final class MenuBarAppState: ObservableObject {
 
     // Cluster state — read from config, drives sidebar visibility
     @Published public var clusterEnabled: Bool = false
+    /// Hidden catalog-admin UI. True only when `~/liukehongistheking.txt` exists.
+    @Published public var isCatalogAdmin: Bool = CatalogAdminGate.isEnabled()
+    @Published public var pendingCatalogEntry: CatalogEntry? = nil
 
     /// When true, Downloads can search/download any Hugging Face repo.
     /// Live-synced with `ServerConfig.allowUnlistedDownloads`.
     @Published public var allowUnlistedDownloads: Bool = false
+    @Published public var gpuLimitGB: Double = ResourceLimits.sliderMaxGB()
+    @Published public var ramLimitGB: Double = ResourceLimits.sliderMaxGB()
+    @Published public var gpuLimitIsAuto: Bool = true
+    @Published public var ramLimitIsAuto: Bool = true
 
     // Speed Boost state per model
     @Published public var specBoostStatus: [String: SpecBoostState] = [:]
@@ -78,9 +85,16 @@ public final class MenuBarAppState: ObservableObject {
 
     /// Jump to Playground and request that this model be pre-selected.
     /// Used by play.circle buttons in Models / Tokenhub / LoadBalancers pages.
+    /// DFlash / MTP companions are draft-only and cannot be opened as chat models.
     public func pickInPlayground(_ modelId: String) {
+        guard !ResourceLimits.isCompanionDraftModelId(modelId) else { return }
         requestedPlaygroundModel = modelId
         requestedPage = .chat
+    }
+
+    /// Loaded models that can be selected in Playground (excludes DFlash / MTP drafts).
+    public var playgroundModels: [String] {
+        loadedModels.filter { !ResourceLimits.isCompanionDraftModelId($0) }
     }
 
     // MARK: - Stats Monitoring
@@ -205,6 +219,7 @@ public final class MenuBarAppState: ObservableObject {
             tlsKeyPassword: current.tlsKeyPassword,
             maxRequestSizeMB: current.maxRequestSizeMB,
             maxProcessMemory: current.maxProcessMemory,
+            maxGpuMemory: current.maxGpuMemory,
             prefixCacheEnabled: current.prefixCacheEnabled,
             allowUnlistedDownloads: enabled,
             autoLoad: current.autoLoad,
@@ -212,6 +227,81 @@ public final class MenuBarAppState: ObservableObject {
         )
         await NovaMLXConfiguration.shared.setServerConfig(updated)
         await NovaMLXConfiguration.shared.syncToStore()
+    }
+
+    public func loadResourceLimits(from config: ServerConfig) {
+        let phys = ProcessInfo.processInfo.physicalMemory
+        let maxGB = ResourceLimits.sliderMaxGB(physicalRAM: phys)
+        let minGB = ResourceLimits.sliderMinGB()
+        gpuLimitIsAuto = ProcessMemoryLimit.parse(config.maxGpuMemory).isAuto
+        ramLimitIsAuto = ProcessMemoryLimit.parse(config.maxProcessMemory).isAuto
+        let ramBytes = ResourceLimits.resolvedBytes(raw: config.maxProcessMemory, physicalRAM: phys)
+        let gpuBytes = ResourceLimits.clampedGpuBytes(
+            gpu: ResourceLimits.resolvedBytes(raw: config.maxGpuMemory, physicalRAM: phys),
+            ram: ramBytes
+        )
+        ramLimitGB = max(minGB, min(maxGB, ResourceLimits.bytesToGB(ramBytes)))
+        gpuLimitGB = max(minGB, min(ramLimitGB, ResourceLimits.bytesToGB(gpuBytes)))
+    }
+
+    public func setResourceLimits(
+        gpuRaw: String,
+        ramRaw: String,
+        inferenceService: InferenceService
+    ) async {
+        let current = await NovaMLXConfiguration.shared.serverConfig
+        let updated = ServerConfig(
+            host: current.host,
+            port: current.port,
+            adminPort: current.adminPort,
+            maxConcurrentRequests: current.maxConcurrentRequests,
+            requestTimeout: current.requestTimeout,
+            contextScalingTarget: current.contextScalingTarget,
+            tlsCertPath: current.tlsCertPath,
+            tlsKeyPath: current.tlsKeyPath,
+            tlsKeyPassword: current.tlsKeyPassword,
+            maxRequestSizeMB: current.maxRequestSizeMB,
+            maxProcessMemory: ramRaw,
+            maxGpuMemory: gpuRaw,
+            prefixCacheEnabled: current.prefixCacheEnabled,
+            allowUnlistedDownloads: current.allowUnlistedDownloads,
+            autoLoad: current.autoLoad,
+            cluster: current.cluster
+        )
+        await NovaMLXConfiguration.shared.setServerConfig(updated)
+        await NovaMLXConfiguration.shared.syncToStore()
+        await inferenceService.applyResourceLimits()
+    }
+
+    public func refreshCatalogAdminGate() {
+        isCatalogAdmin = CatalogAdminGate.isEnabled()
+    }
+
+    public func promoteToVerifiedCatalog(
+        id: String,
+        url: String,
+        category: ModelType,
+        family: ModelFamily,
+        sizeBytes: UInt64
+    ) {
+        guard isCatalogAdmin else { return }
+        pendingCatalogEntry = CatalogEntry.verifiedDraft(
+            id: id,
+            url: url,
+            category: category,
+            family: family,
+            sizeBytes: sizeBytes
+        )
+        requestedPage = .catalogAdmin
+    }
+
+    public func persistSliderLimits(inferenceService: InferenceService) async {
+        if gpuLimitGB > ramLimitGB { gpuLimitGB = ramLimitGB }
+        let gpuRaw = gpuLimitIsAuto ? "auto" : ResourceLimits.formatGB(min(gpuLimitGB, ramLimitGB))
+        let ramRaw = ramLimitIsAuto ? "auto" : ResourceLimits.formatGB(ramLimitGB)
+        await setResourceLimits(gpuRaw: gpuRaw, ramRaw: ramRaw, inferenceService: inferenceService)
+        let cfg = await NovaMLXConfiguration.shared.serverConfig
+        loadResourceLimits(from: cfg)
     }
 
     public func startDownload(repoId: String) {

@@ -20,9 +20,9 @@ public actor ProcessMemoryEnforcer {
     private let pool: EnginePool
     private let settingsProvider: (@Sendable (String) -> ModelSettings?)?
     private var enforcerSettingsProvider: (@Sendable (String) -> ModelSettings?)?
-    private let softLimitBytes: UInt64
-    private let hardLimitBytes: UInt64
-    private let enabled: Bool
+    private var softLimitBytes: UInt64
+    private var hardLimitBytes: UInt64
+    private var enabled: Bool
     private let physicalRAM: UInt64
     private let pollInterval: Duration
 
@@ -83,6 +83,23 @@ public actor ProcessMemoryEnforcer {
 
     public func updateSettingsProvider(_ provider: @escaping @Sendable (String) -> ModelSettings?) {
         self.enforcerSettingsProvider = provider
+    }
+
+    public func updateLimit(_ limit: ProcessMemoryLimit) {
+        if case .disabled = limit {
+            enabled = false
+            softLimitBytes = 0
+            hardLimitBytes = 0
+            stop()
+            return
+        }
+        enabled = true
+        softLimitBytes = limit.resolveBytes(physicalRAM: physicalRAM) ?? 0
+        hardLimitBytes = limit.resolveHardLimit(physicalRAM: physicalRAM)
+        NovaMLXLog.info("[MemoryEnforcer] limit updated (soft: \(softLimitBytes / 1024 / 1024)MB, hard: \(hardLimitBytes / 1024 / 1024)MB)")
+        if timerTask == nil {
+            start()
+        }
     }
 
     public var status: Status {

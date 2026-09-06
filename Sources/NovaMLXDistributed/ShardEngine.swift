@@ -144,8 +144,8 @@ public final class FitInMemoryPolicy: ComputePolicy, @unchecked Sendable {
             throw ShardEngineError.modelNotAvailable(modelId)
         }
         // Create fresh KV caches for this inference session
-        let cacheBox = await mlxContainer.perform { context in
-            return KVCacheBox(context.model.newCache(parameters: nil))
+        let cacheBox = try await mlxContainer.perform { context in
+            return KVCacheBox(try context.model.newCache(parameters: nil))
         }
         self.kvCaches = cacheBox.caches
         isReady = true

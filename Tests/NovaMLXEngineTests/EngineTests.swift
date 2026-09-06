@@ -307,6 +307,12 @@ struct ChatSessionManagerTests {
         #expect(manager.sessionCount == 0)
     }
 
+    @Test("Hybrid linear-attention sessions do not persist to disk")
+    func hybridSessionsStayInMemory() {
+        #expect(ChatSessionManager.persistToDisk(hasLinearAttention: true) == false)
+        #expect(ChatSessionManager.persistToDisk(hasLinearAttention: false) == true)
+    }
+
     @Test("Session info is codable")
     func sessionInfoCodable() throws {
         let info = SessionInfo(

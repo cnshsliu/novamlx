@@ -8,7 +8,7 @@ struct DownloadsPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let modelManager: ModelManager
     @EnvironmentObject var l10n: L10n
-    @Binding var typeFilter: ModelsPageView.ModelTypeFilter
+    @State private var typeFilter: ModelsPageView.ModelTypeFilter = .all
 
     @State private var searchText = ""
     @State private var searchResults: [HFSearchResult] = []
@@ -27,6 +27,8 @@ struct DownloadsPageView: View {
     @State private var catalogEpoch = 0
     @State private var catalogSearchQuery = ""
     @State private var catalogDidLoad = false
+    @State private var hubSearchAttempted = false
+    @State private var hubSearchError: String?
 
     // Alert / API key
     @State private var showAlert = false
@@ -38,8 +40,7 @@ struct DownloadsPageView: View {
     // Model card
     @State private var selectedModelCard: ModelCardData?
 
-    // Backend activity
-    @State private var isBackendActivityExpanded = false
+    // Live Hub query (shown in the combined activity section)
     @State private var currentSearchEndpoint: String?
     @State private var lastSearchSourceName = ""
 
@@ -57,32 +58,25 @@ struct DownloadsPageView: View {
             .sorted { $0.startedAt > $1.startedAt }
 
         VStack(spacing: 0) {
+            ModelTypeFilterBar(filter: $typeFilter)
+            Divider().padding(.horizontal, 24)
             ScrollView {
                 VStack(spacing: 20) {
                     searchSection
 
-                    // Hub search results only when Advanced is on; otherwise catalog cards.
-                    if appState.allowUnlistedDownloads && !searchResults.isEmpty {
+                    // Hub list after an Advanced / family-glob search. Empty Hub
+                    // must not hide behind the verified catalog — that is what
+                    // made "Allow unverified downloads" look like a no-op.
+                    if hubSearchAttempted || !searchResults.isEmpty {
                         searchResultsSection
-                    } else {
+                    }
+                    if searchResults.isEmpty || !displayedCatalogModels.isEmpty {
                         catalogModelsSection
                     }
 
-                    if !activeOrFailed.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            sectionHeader(
-                                activeOrFailed.allSatisfy(\.isActive) ? l10n.tr("models.downloading") : l10n.tr("models.downloads"),
-                                icon: "arrow.down.circle",
-                                count: activeOrFailed.count
-                            )
-                            ForEach(activeOrFailed, id: \.repoId) { task in
-                                topDownloadRow(task)
-                            }
-                        }
-                        .sectionCard()
+                    if !activeOrFailed.isEmpty || isSearching {
+                        activitySection(activeOrFailed: activeOrFailed)
                     }
-
-                    backendActivitySection
 
                     if !completed.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
@@ -94,7 +88,9 @@ struct DownloadsPageView: View {
                         .sectionCard()
                     }
 
-                    if searchResults.isEmpty && activeOrFailed.isEmpty && appState.downloadTasks.isEmpty {
+                    if searchResults.isEmpty && activeOrFailed.isEmpty && appState.downloadTasks.isEmpty
+                        && displayedCatalogModels.isEmpty && !hubSearchAttempted
+                    {
                         emptyState(l10n.tr("models.noDownloads"), subtitle: l10n.tr("models.noDownloadsSub"))
                             .padding(.top, 60)
                     }
@@ -124,20 +120,25 @@ struct DownloadsPageView: View {
         }
         .onChange(of: searchText) { _, newValue in
             let trimmed = newValue.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty {
-                searchResults = []
-                catalogSearchQuery = ""
-                return
-            }
-            // Advanced off: filter the catalog as the user types. Do not call Hub.
-            if !appState.allowUnlistedDownloads {
-                catalogSearchQuery = trimmed
-                searchResults = []
-            }
+            catalogSearchQuery = trimmed
+            // Drop stale Hub rows when the query changes; Search / toggle re-runs Hub.
+            searchResults = []
+            hubSearchAttempted = false
+            hubSearchError = nil
         }
         .onChange(of: appState.allowUnlistedDownloads) { _, enabled in
-            if !enabled {
-                searchResults = []
+            Task {
+                await appState.setAllowUnlistedDownloads(enabled)
+                if enabled {
+                    let q = searchText.trimmingCharacters(in: .whitespaces)
+                    if !q.isEmpty {
+                        performSearch()
+                    }
+                } else {
+                    searchResults = []
+                    hubSearchAttempted = false
+                    hubSearchError = nil
+                }
             }
         }
     }
@@ -146,6 +147,21 @@ struct DownloadsPageView: View {
 
     private var searchSection: some View {
         VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(isOn: $appState.allowUnlistedDownloads) {
+                    Text(l10n.tr("settings.allowUnlisted"))
+                        .font(.system(size: 13))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .accessibilityIdentifier("downloads-allow-unlisted-toggle")
+
+                Text(l10n.tr("settings.allowUnlistedCaption"))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if appState.allowUnlistedDownloads {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -169,6 +185,7 @@ struct DownloadsPageView: View {
                         text: $searchText
                     )
                         .textFieldStyle(.plain)
+                        .accessibilityIdentifier("downloads-search-field")
                         .onSubmit { performSearch() }
                 }
                 .padding(.horizontal, 10)
@@ -196,23 +213,21 @@ struct DownloadsPageView: View {
                             .foregroundColor(.secondary)
                         Picker("", selection: $selectedMirrorOption) {
                             Text("Official (huggingface.co)").tag("official")
-                            Text("hf-mirror.com (China)").tag("hf-mirror")
+                            Text("ModelScope (China)").tag("modelscope")
                             Text("Custom URL...").tag("custom")
                         }
                         .pickerStyle(.menu)
+                        .accessibilityIdentifier("model-source-picker")
                         .onChange(of: selectedMirrorOption) { _, newOption in
-                            let endpoint: String? = {
-                                switch newOption {
-                                case "official": return nil
-                                case "hf-mirror": return "https://hf-mirror.com"
-                                case "custom": return customMirrorURL.isEmpty ? nil : customMirrorURL
-                                default: return nil
-                                }
-                            }()
-                            Task { await appState.setHuggingfaceEndpoint(endpoint) }
-                            mirrorChangeMessage = (newOption == "official")
-                                ? "Switched to official Hugging Face"
-                                : "Mirror changed. New downloads will use the selected source."
+                            Task { await appState.setHuggingfaceEndpoint(endpointForMirrorOption(newOption)) }
+                            switch newOption {
+                            case "official":
+                                mirrorChangeMessage = "Switched to official Hugging Face"
+                            case "modelscope":
+                                mirrorChangeMessage = "Switched to ModelScope. New downloads will use modelscope.cn."
+                            default:
+                                mirrorChangeMessage = "Mirror changed. New downloads will use the selected source."
+                            }
                             showMirrorChangeNote = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                                 showMirrorChangeNote = false
@@ -225,7 +240,7 @@ struct DownloadsPageView: View {
 
                         Toggle("MLX only", isOn: $searchMlxOnly)
                             .toggleStyle(.switch)
-                            .help("Hide GGUF, official PyTorch, and other weights that will not load in NovaMLX")
+                            .help("Hide GGUF and PyTorch-only repos. GGUF can load (dequantized to FP16) but is not catalog-verified.")
                         Toggle("regex", isOn: $searchRegex)
                             .toggleStyle(.switch)
                             .help("Treat search as a regular expression matched against model ID")
@@ -237,9 +252,10 @@ struct DownloadsPageView: View {
                 .font(.caption)
 
                 if selectedMirrorOption == "custom" {
-                    TextField("Custom endpoint (e.g. https://hf-mirror.com)", text: $customMirrorURL)
+                    TextField("Custom endpoint (e.g. https://www.modelscope.cn)", text: $customMirrorURL)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 11, design: .monospaced))
+                        .accessibilityIdentifier("model-source-custom-field")
                         .onSubmit {
                             Task {
                                 let trimmed = customMirrorURL.trimmingCharacters(in: .whitespaces)
@@ -258,8 +274,8 @@ struct DownloadsPageView: View {
         .sectionCard()
         .task {
             if let endpoint = await appState.huggingfaceEndpoint {
-                if endpoint == "https://hf-mirror.com" {
-                    selectedMirrorOption = "hf-mirror"
+                if endpoint.contains("modelscope") {
+                    selectedMirrorOption = "modelscope"
                 } else {
                     selectedMirrorOption = "custom"
                     customMirrorURL = endpoint
@@ -296,9 +312,12 @@ struct DownloadsPageView: View {
 
     private var catalogModelsSection: some View {
         let models = displayedCatalogModels
+        let catalogTitle = (hubSearchAttempted && appState.allowUnlistedDownloads)
+            ? "Also in catalog"
+            : l10n.tr("models.verifiedTitle")
 
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(l10n.tr("models.verifiedTitle"), icon: "checkmark.seal.fill", count: models.count)
+            sectionHeader(catalogTitle, icon: "checkmark.seal.fill", count: models.count)
 
             if models.isEmpty {
                 Text(catalogEmptyCopy)
@@ -325,6 +344,15 @@ struct DownloadsPageView: View {
                 Text(model.name)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
+                if ModelCatalogPolicy.isIdPattern(model.id) {
+                    Text(l10n.tr("models.familyBadge"))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(NovaTheme.Colors.accent.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                }
                 if model.status == .preview {
                     Text(l10n.tr("models.previewBadge"))
                         .font(.system(size: 9, weight: .semibold))
@@ -376,7 +404,16 @@ struct DownloadsPageView: View {
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                 Spacer()
-                downloadActionButton(for: model.id)
+                if ModelCatalogPolicy.isIdPattern(model.id) {
+                    Button(l10n.tr("models.browseFamily")) {
+                        searchText = ModelCatalogPolicy.hubSearchQuery(forPattern: model.id)
+                        performSearch()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    downloadActionButton(for: model.id)
+                }
             }
         }
         .padding(12)
@@ -421,6 +458,21 @@ struct DownloadsPageView: View {
                 Text("Regex: \(searchText) — \(searchResults.count) of \(searchTotalCount) models")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+
+            if let hubSearchError {
+                Text(hubSearchError)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            } else if searchResults.isEmpty && !isSearching {
+                Text(l10n.tr("models.noResults", searchText))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                if appState.allowUnlistedDownloads {
+                    Text("Hub search lists Hugging Face repos. Matching catalog entries stay below.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             ForEach(searchResults, id: \.id) { result in
@@ -551,138 +603,79 @@ struct DownloadsPageView: View {
         appState.startDownload(repoId: repoId)
     }
 
-    // MARK: - Backend Activity Panel
+    // MARK: - Activity (downloads + live search)
 
-    private var backendActivitySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isBackendActivityExpanded.toggle()
-                }
-            } label: {
-                HStack {
-                    Text(backendActivityTitle)
-                        .font(.headline)
-                    Spacer()
-                    if !isBackendActivityExpanded {
-                        Text(backendActivitySummary)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
-                    Image(systemName: isBackendActivityExpanded ? "chevron.up" : "chevron.down")
-                        .foregroundColor(.secondary)
-                }
+    private func activitySection(activeOrFailed: [DownloadTaskInfo]) -> some View {
+        let header = activeOrFailed.isEmpty
+            ? l10n.tr("models.search")
+            : (activeOrFailed.allSatisfy(\.isActive)
+                ? l10n.tr("models.downloading")
+                : l10n.tr("models.downloads"))
+
+        return VStack(alignment: .leading, spacing: 10) {
+            sectionHeader(
+                header,
+                icon: "arrow.down.circle",
+                count: activeOrFailed.isEmpty ? nil : activeOrFailed.count
+            )
+
+            HStack(spacing: 6) {
+                Text("Mirror")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(currentMirrorDisplayName)
+                    .font(.caption2)
             }
-            .buttonStyle(.plain)
 
-            if isBackendActivityExpanded {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Mirror:")
+            if isSearching, let url = currentSearchEndpoint {
+                HStack(alignment: .top, spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(l10n.tr("models.search"))
                             .font(.caption2)
                             .foregroundColor(.secondary)
-                        Text(currentMirrorDisplayName)
-                            .font(.caption2)
-                            .foregroundColor(.primary)
-                    }
-
-                    if isSearching, let url = currentSearchEndpoint {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Search")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                            Text("Querying: \(url)")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.primary)
-                                .lineLimit(3)
-                        }
-                    }
-
-                    let active = activeDownloadFileDetails
-                    if !active.isEmpty {
-                        Text("Active Downloads")
-                            .font(.caption2)
+                        Text("Querying \(url)")
+                            .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(.secondary)
-                        ForEach(active) { detail in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(detail.filename)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .lineLimit(1)
-                                if let url = detail.currentURL {
-                                    Text(url)
-                                        .font(.system(size: 9, design: .monospaced))
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(2)
-                                }
-                                HStack(spacing: 12) {
-                                    Text("\(detail.progress, specifier: "%.1f")%")
-                                    if detail.speed > 0 {
-                                        Text("\(formatBytes(Int64(detail.speed)))/s")
-                                    }
-                                }
-                                .font(.caption2)
-                            }
-                            .padding(8)
-                            .background(Color.gray.opacity(0.08))
-                            .cornerRadius(6)
-                        }
-                    } else if !isSearching {
-                        Text("No active backend operations")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                            .lineLimit(2)
                     }
                 }
             }
-        }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(8)
-    }
 
-    private var backendActivitySummary: String {
-        if isSearching { return "Searching..." }
-        let count = appState.downloadTasks.values.filter { $0.isActive }.count
-        if count > 0 { return "\(count) active" }
-        return "Idle"
-    }
-
-    private var backendActivityTitle: String {
-        if isSearching, let endpoint = currentSearchEndpoint {
-            if endpoint.contains("hf-mirror") { return "hf-mirror.com" }
-            return endpoint.contains("huggingface") ? "huggingface.co" : "Custom Mirror"
+            ForEach(activeOrFailed, id: \.repoId) { task in
+                topDownloadRow(task)
+            }
         }
-        let active = appState.downloadTasks.values.filter { $0.isActive }
-        if !active.isEmpty { return currentMirrorDisplayName }
-        return "Backend Activities"
+        .sectionCard()
     }
 
     private var currentMirrorDisplayName: String {
         switch selectedMirrorOption {
         case "official": return "Official (huggingface.co)"
-        case "hf-mirror": return "hf-mirror.com"
+        case "modelscope": return "ModelScope (China)"
         case "custom": return "Custom"
         default: return "Official"
         }
     }
 
-    private var activeDownloadFileDetails: [DownloadFileDetail] {
-        appState.downloadTasks.values
-            .filter { $0.isActive }
-            .flatMap { task in
-                task.fileProgresses
-                    .filter { $0.status == "downloading" || $0.status == "waiting" }
-                    .map { file in
-                        DownloadFileDetail(
-                            filename: file.filename,
-                            currentURL: file.currentURL,
-                            speed: file.speed,
-                            progress: task.totalBytes > 0 ? Double(file.downloadedBytes) / Double(task.totalBytes) * 100 : 0,
-                            retryCount: file.retryCount,
-                            isResuming: file.isResuming
-                        )
-                    }
-            }
+    private var currentMirrorHostName: String {
+        switch selectedMirrorOption {
+        case "official": return "huggingface.co"
+        case "modelscope": return "modelscope.cn"
+        case "custom": return customMirrorURL.isEmpty ? "Custom" : "Custom Mirror"
+        default: return "huggingface.co"
+        }
+    }
+
+    /// `nil` means official huggingface.co (server default).
+    private func endpointForMirrorOption(_ option: String) -> String? {
+        switch option {
+        case "modelscope": return "https://www.modelscope.cn"
+        case "custom":
+            let trimmed = customMirrorURL.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : trimmed
+        default: return nil
+        }
     }
 
     // MARK: - Download Rows
@@ -739,7 +732,9 @@ struct DownloadsPageView: View {
             }
 
             if task.isActive {
-                let activeFiles = task.fileProgresses.filter { $0.status == "downloading" }
+                let activeFiles = task.fileProgresses.filter {
+                    $0.status == "downloading" || $0.status == "waiting"
+                }
                 let completedCount = task.fileProgresses.filter { $0.status == "completed" }.count
                 let total = task.fileProgresses.count
 
@@ -773,24 +768,39 @@ struct DownloadsPageView: View {
             ? min(Double(file.downloadedBytes) / Double(file.totalBytes) * 100, 100)
             : 0
 
-        return HStack(spacing: 8) {
-            Image(systemName: "arrow.down")
-                .font(.system(size: 9)).foregroundColor(NovaTheme.Colors.accent)
-            Text(file.filename)
-                .font(.system(size: 11, design: .monospaced))
-                .lineLimit(1)
-                .frame(maxWidth: 180, alignment: .leading)
-            ProgressView(value: filePercent, total: 100)
-                .frame(maxWidth: 120)
-            Text(file.totalBytes > 0 ? "\(Int(filePercent))%" : "—")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 32, alignment: .trailing)
-            Text(file.totalBytes > 0
-                 ? "\(formatBytes(file.downloadedBytes))/\(formatBytes(file.totalBytes))"
-                 : "\(formatBytes(file.downloadedBytes)) \(l10n.tr("models.downloadedLabel"))")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundColor(.secondary)
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Image(systemName: file.status == "waiting" ? "clock" : "arrow.down")
+                    .font(.system(size: 9)).foregroundColor(NovaTheme.Colors.accent)
+                Text(file.filename)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+                    .frame(maxWidth: 180, alignment: .leading)
+                ProgressView(value: filePercent, total: 100)
+                    .frame(maxWidth: 120)
+                Text(file.totalBytes > 0 ? "\(Int(filePercent))%" : "—")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .frame(width: 32, alignment: .trailing)
+                Text(file.totalBytes > 0
+                     ? "\(formatBytes(file.downloadedBytes))/\(formatBytes(file.totalBytes))"
+                     : "\(formatBytes(file.downloadedBytes)) \(l10n.tr("models.downloadedLabel"))")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+                if file.speed > 0 {
+                    Text("\(formatBytes(Int64(file.speed)))/s")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            if let url = file.currentURL, !url.isEmpty {
+                Text(url)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .padding(.leading, 18)
+                    .help(url)
+            }
         }
     }
 
@@ -814,6 +824,23 @@ struct DownloadsPageView: View {
             }
 
             Spacer()
+
+            if appState.isCatalogAdmin,
+               task.status == .completed,
+               !modelManager.catalogStore.containsExactId(task.repoId) {
+                Button(l10n.tr("catalogAdmin.addVerified")) {
+                    let record = modelManager.getRecord(task.repoId)
+                    appState.promoteToVerifiedCatalog(
+                        id: task.repoId,
+                        url: record?.remoteURL ?? "",
+                        category: record?.modelType ?? .llm,
+                        family: record?.family ?? .other,
+                        sizeBytes: record?.sizeBytes ?? UInt64(max(0, task.downloadedBytes))
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
 
             if task.status == .failed {
                 Button(l10n.tr("models.retry")) { appState.startDownload(repoId: task.repoId) }
@@ -867,44 +894,54 @@ struct DownloadsPageView: View {
     private func performSearch() {
         let rawQuery = searchText.trimmingCharacters(in: .whitespaces)
         guard !rawQuery.isEmpty else { return }
+        guard !isSearching else { return }
 
-        // Advanced off: filter the verified catalog locally. Do not call Hub search.
+        isSearching = true
+        Task {
+            await modelManager.fetchCatalog()
+            catalogDidLoad = true
+            catalogEpoch += 1
+            await finishSearch(rawQuery: rawQuery)
+        }
+    }
+
+    @MainActor
+    private func finishSearch(rawQuery: String) async {
+        // Advanced off: filter the catalog locally. Hub is only used to expand
+        // a family glob when the query is about that family (e.g. "qwen3.8").
+        // Searching "ornith" must not miss the catalog row because Qwen3.8-* exists.
         if !appState.allowUnlistedDownloads {
             catalogSearchQuery = rawQuery
-            searchResults = []
-            let hits = displayedCatalogModels
-            if hits.isEmpty {
-                alertMessage = l10n.tr("models.noResults", rawQuery)
-                showAlert = true
+            let expandFamilies = ModelCatalogPolicy.shouldExpandFamilyGlobs(
+                query: rawQuery,
+                catalog: modelManager.catalogStore.models
+            )
+            if !expandFamilies {
+                searchResults = []
+                let hits = displayedCatalogModels
+                if hits.isEmpty {
+                    alertMessage = l10n.tr("models.noResults", rawQuery)
+                    showAlert = true
+                }
+                isSearching = false
+                return
             }
-            return
         }
 
-        catalogSearchQuery = ""
+        catalogSearchQuery = rawQuery
+        hubSearchAttempted = true
+        hubSearchError = nil
 
         if appState.apiKey == nil {
             newApiKey = "sk-novamlx-\(UUID().uuidString.prefix(8))"
             showApiKeyPrompt = true
+            isSearching = false
             return
         }
 
-        isSearching = true
         searchRegexError = nil
-        currentSearchEndpoint = {
-            switch selectedMirrorOption {
-            case "hf-mirror": return "https://hf-mirror.com"
-            case "custom": return customMirrorURL.isEmpty ? nil : customMirrorURL
-            default: return "https://huggingface.co"
-            }
-        }()
-        lastSearchSourceName = {
-            switch selectedMirrorOption {
-            case "official": return "huggingface.co"
-            case "hf-mirror": return "hf-mirror.com"
-            case "custom": return customMirrorURL.isEmpty ? "Custom" : "Custom Mirror"
-            default: return "huggingface.co"
-            }
-        }()
+        currentSearchEndpoint = endpointForMirrorOption(selectedMirrorOption) ?? "https://huggingface.co"
+        lastSearchSourceName = currentMirrorHostName
 
         Task {
             let adminPort = appState.adminPort
@@ -914,29 +951,21 @@ struct DownloadsPageView: View {
             if suffixMlxCommunity && !serverQuery.hasPrefix("mlx-community/") {
                 serverQuery = "mlx-community/" + serverQuery
             }
-            let encodedQuery = serverQuery.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? serverQuery
-
-            let searchEndpoint: String? = {
-                switch selectedMirrorOption {
-                case "official": return nil
-                case "hf-mirror": return "https://hf-mirror.com"
-                case "custom": return customMirrorURL.isEmpty ? nil : customMirrorURL
-                default: return nil
-                }
-            }()
-            let encodedEndpoint = searchEndpoint?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let searchEndpoint = endpointForMirrorOption(selectedMirrorOption)
 
             // Regex mode: fetch a wider pool so local filtering has more to match
             let limit = searchRegex ? 200 : 50
 
             var urlComps = URLComponents(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/search")!
+            // URLQueryItem percent-encodes; do not pre-encode or "qwen3.8 flash"
+            // becomes a search for the literal "qwen3.8%20flash".
             urlComps.queryItems = [
-                URLQueryItem(name: "q", value: encodedQuery),
+                URLQueryItem(name: "q", value: serverQuery),
                 URLQueryItem(name: "limit", value: String(limit)),
                 URLQueryItem(name: "mlx_only", value: searchMlxOnly ? "true" : "false"),
             ]
-            if !encodedEndpoint.isEmpty {
-                urlComps.queryItems?.append(URLQueryItem(name: "endpoint", value: encodedEndpoint))
+            if let searchEndpoint, !searchEndpoint.isEmpty {
+                urlComps.queryItems?.append(URLQueryItem(name: "endpoint", value: searchEndpoint))
             }
             guard let url = urlComps.url else {
                 alertMessage = l10n.tr("models.invalidUrl")
@@ -990,11 +1019,17 @@ struct DownloadsPageView: View {
 
                     searchResults = results
 
-                    if searchResults.isEmpty && searchRegexError == nil {
+                    if let apiError = json["error"] as? String, !apiError.isEmpty {
+                        hubSearchError = apiError
+                    } else if searchResults.isEmpty && searchRegexError == nil
+                        && !appState.allowUnlistedDownloads
+                        && displayedCatalogModels.isEmpty
+                    {
                         alertMessage = l10n.tr("models.noResults", rawQuery)
                         showAlert = true
                     }
                 } else {
+                    hubSearchError = l10n.tr("models.unexpectedFormat")
                     alertMessage = l10n.tr("models.unexpectedFormat")
                     showAlert = true
                 }
@@ -1066,13 +1101,7 @@ struct DownloadsPageView: View {
         selectedModelCard = ModelCardData(repoId: repoId)
         Task {
             let adminPort = appState.adminPort
-            let cardEndpoint: String? = {
-                switch selectedMirrorOption {
-                case "hf-mirror": return "https://hf-mirror.com"
-                case "custom": return customMirrorURL.isEmpty ? nil : customMirrorURL
-                default: return nil
-                }
-            }()
+            let cardEndpoint = endpointForMirrorOption(selectedMirrorOption)
             let cardQuery = cardEndpoint != nil ? "&endpoint=\(cardEndpoint!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" : ""
             guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/model-card?repo_id=\(repoId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? repoId)\(cardQuery)") else { return }
             do {
@@ -1240,12 +1269,4 @@ private struct ModelCardFile: Identifiable {
     let size: Int64
 }
 
-struct DownloadFileDetail: Identifiable {
-    let id = UUID()
-    let filename: String
-    let currentURL: String?
-    let speed: Double
-    let progress: Double
-    let retryCount: Int
-    let isResuming: Bool
-}
+

@@ -92,6 +92,10 @@ public final class EmbeddingService: @unchecked Sendable {
         }
     }
 
+    public func loadedModelIds() -> [String] {
+        lock.withLock { Array(containers.keys) }
+    }
+
     public func embed(model: String, inputs: [String]) async throws -> EmbeddingResult {
         let container = lock.withLock { containers[model] }
         guard let container, container.isLoaded else {

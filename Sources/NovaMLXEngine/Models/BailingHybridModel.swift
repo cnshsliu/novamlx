@@ -619,11 +619,23 @@ private class BailingHybridSparseMoeBlock: Module {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, scores) = gate(x)
+        // TIE-PHASE-2 (ensureExpertsLoaded):
+        //   Before switchMlp runs, ensure the experts referenced by `indices`
+        //   are resident in Tier 1. If TIE is active and any are missing,
+        //   this is the synchronous stall point that triggers Tier 2 fault-in.
+        //   Hook signature (planned):
+        //     await tierContext?.ensureExpertsLoaded(layer: layerIdx, indices: indices)
+        //   For Phase 1: no-op (TIE not active; weights are eagerly loaded).
         var y = switchMlp(x, indices)
         y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
         if let sharedExperts {
             y = y + sharedExperts(x)
         }
+        // TIE-PHASE-2 (heatMap.record):
+        //   After MoE dispatch, record activated expert indices so the heat map
+        //   can promote/demote at request boundary.
+        //   Hook signature (planned):
+        //     tierContext?.heatMap.record(layer: layerIdx, experts: indicesAsArray)
         return y
     }
 }
@@ -709,6 +721,8 @@ public class BailingHybridModelInner: Module {
         }
 
         for (i, layer) in layers.enumerated() {
+            // NovaMLX-TIE: hooks fire from SwitchLinear/Linear themselves (patched
+            // in mlx-swift-lm + mlx-swift). No model-class-specific code needed.
             hiddenStates = layer(hiddenStates, cache: cacheArray[i], offset: globalOffset)
         }
 
@@ -750,7 +764,7 @@ public class BailingHybridModel: Module, LLMModel, KVCacheDimensionProvider, LoR
         return out
     }
 
-    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         return model.layers.map { layer in
             if layer.isGlobal {
                 return KVCacheSimple()

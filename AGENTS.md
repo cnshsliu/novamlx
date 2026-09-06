@@ -39,6 +39,7 @@ Key library targets:
 ./build.sh
 ./build.sh -c debug
 ./build.sh -c release
+./build.sh release          # shorthand for -c release
 
 # Skip dist sync (CI / clean-room)
 NOVAMLX_SKIP_DIST_SYNC=1 ./build.sh -c release

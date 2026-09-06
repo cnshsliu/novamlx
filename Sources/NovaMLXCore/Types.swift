@@ -4,7 +4,7 @@ import Logging
 
 public enum NovaMLX {}
 
-public let version = "1.2.0"
+public let version = "1.3.0"
 
 public var buildTimestamp: String {
     guard let execURL = Bundle.main.executableURL,
@@ -29,6 +29,7 @@ public enum NovaMLXError: Error, LocalizedError {
     case insufficientMemory(neededMB: UInt64, availableMB: UInt64, modelId: String)
     case modelNotLoaded(String)
     case modelLoadInProgress(modelId: String, etaSeconds: Int?)
+    case mtpCompanionNotLoadable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +49,8 @@ public enum NovaMLXError: Error, LocalizedError {
             "Model '\(id)' is not loaded. Send the request again with auto-load enabled or use POST /admin/models/load first."
         case .modelLoadInProgress(let id, let eta):
             "Model '\(id)' is loading. Retry in approximately \(eta ?? 60) seconds."
+        case .mtpCompanionNotLoadable(let id):
+            "MTP companion '\(id)' cannot be loaded directly. Load the matching backbone instead; the MTP head attaches automatically."
         }
     }
 
@@ -82,6 +85,8 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case starcoder
     case claude
     case bailing
+    case deepseek
+    case hunyuan
     case gptOss
     case whisper
     case qwen3Asr
@@ -97,7 +102,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     }
 }
 
-public enum ModelType: String, Codable, Sendable {
+public enum ModelType: String, Codable, Sendable, CaseIterable {
     case llm
     case vlm
     case embedding
@@ -774,6 +779,143 @@ public enum ProcessMemoryLimit: Codable, Sendable, Equatable {
     ) -> UInt64 {
         return physicalRAM > Self._4GB ? physicalRAM - Self._4GB : physicalRAM / 2
     }
+
+    public var isAuto: Bool {
+        if case .auto = self { return true }
+        return false
+    }
+}
+
+/// GPU + RAM envelopes for inference. On Apple Silicon both are slices of
+/// unified memory: GPU is the MLX/Metal working set, RAM is the process ceiling.
+/// A single loaded chat model (MTP companions ignored) automatically owns the
+/// full envelope — there is no Exclusive toggle.
+public enum ResourceLimits: Sendable {
+    public static let bytesPerGB: UInt64 = 1024 * 1024 * 1024
+    public static let minBytes: UInt64 = 4 * bytesPerGB
+    public static let systemReserveBytes: UInt64 = 4 * bytesPerGB
+    /// Safety bound only — admission is driven by GPU/RAM budget, not this cap.
+    public static let safetyConcurrentCap = 128
+
+    /// Qwen3.5 GatedDeltaNet and DFlash2 share module conv/recurrent state.
+    /// Two overlapping `dflashVerify` calls reshape a mismatched conv output
+    /// and SIGTRAP the worker (`mlx_reshape` → `ErrorHandler.dispatch`).
+    public static func decodeConcurrencyCap(
+        hasDraftModel: Bool,
+        hasLinearAttention: Bool
+    ) -> Int {
+        if hasDraftModel || hasLinearAttention { return 1 }
+        return safetyConcurrentCap
+    }
+
+    /// DFlash2 verify through Qwen3.5 GatedDeltaNet after a long prefill
+    /// has been observed to kill the worker (no IPS). Vanilla decode is used above this.
+    public static let dflashMaxPromptTokens = 8192
+
+    /// Prefill chunk for hybrid GDN (Qwen3.5/3.8). Each chunk re-reads the
+    /// full 8-bit weight set (~28GB on Qwen3.8-27B), so a 512-token stride
+    /// turns 16k into ~32 weight passes. 32k covers a 16k prompt in one
+    /// forward (plus the iterator's reserved last token).
+    public static let hybridPrefillStepSize = 32768
+
+    /// Qwen family default is `kvBits=4` with `quantizedKVStart=0`, which
+    /// runs quantized attention for the entire prefill. Hybrid models only
+    /// have KV on 1/4 of layers; flash SDPA until this offset is far cheaper
+    /// than 4-bit attention against a growing 16k cache.
+    public static let hybridQuantizedKVStart = 32768
+
+    public static func prefillStepSize(hasLinearAttention: Bool, familyDefault: Int) -> Int {
+        if hasLinearAttention { return max(familyDefault, hybridPrefillStepSize) }
+        return familyDefault
+    }
+
+    public static func isAutoExclusive(chatModelCount: Int) -> Bool {
+        chatModelCount <= 1
+    }
+
+    public static func bytesToGB(_ bytes: UInt64) -> Double {
+        Double(bytes) / Double(bytesPerGB)
+    }
+
+    public static func gbToBytes(_ gb: Double) -> UInt64 {
+        UInt64(max(0, gb) * Double(bytesPerGB))
+    }
+
+    public static func formatGB(_ gb: Double) -> String {
+        "\(Int(gb.rounded()))GB"
+    }
+
+    public static func sliderMaxGB(
+        physicalRAM: UInt64 = UInt64(ProcessInfo.processInfo.physicalMemory)
+    ) -> Double {
+        let maxBytes = physicalRAM > systemReserveBytes
+            ? physicalRAM - systemReserveBytes
+            : physicalRAM / 2
+        return max(4, bytesToGB(maxBytes))
+    }
+
+    public static func sliderMinGB() -> Double { 4 }
+
+    /// Resolve a `ProcessMemoryLimit` string to bytes. `recommendedGpuBytes`
+    /// (Metal working set) is used only for GPU `"auto"`.
+    public static func resolvedBytes(
+        raw: String,
+        physicalRAM: UInt64 = UInt64(ProcessInfo.processInfo.physicalMemory),
+        recommendedGpuBytes: UInt64? = nil
+    ) -> UInt64 {
+        let parsed = ProcessMemoryLimit.parse(raw)
+        let cap = physicalRAM > systemReserveBytes
+            ? physicalRAM - systemReserveBytes
+            : physicalRAM / 2
+        switch parsed {
+        case .auto:
+            if let rec = recommendedGpuBytes, rec > 0 {
+                return min(max(rec, minBytes), cap)
+            }
+            return parsed.resolveBytes(physicalRAM: physicalRAM) ?? cap
+        case .disabled:
+            return cap
+        case .percent, .bytes:
+            return parsed.resolveBytes(physicalRAM: physicalRAM) ?? cap
+        }
+    }
+
+    public static func clampedGpuBytes(gpu: UInt64, ram: UInt64) -> UInt64 {
+        min(max(gpu, minBytes), ram)
+    }
+
+    public static func kvHeadroomPercent(autoExclusive: Bool) -> Int {
+        autoExclusive ? 5 : 10
+    }
+
+    public static func cacheLimitBytes(gpuLimit: UInt64, autoExclusive: Bool) -> Int {
+        if autoExclusive {
+            let target = gpuLimit / 4
+            let floor = 512 * bytesPerGB / 1024
+            // 16k GDN KV is ~4GB at 256KB/token; a 4GB ceiling thrashes the
+            // Metal cache during decode and kills the worker with no IPS.
+            let ceiling = 16 * bytesPerGB
+            return Int(max(floor, min(target, ceiling)))
+        }
+        return Int(512 * bytesPerGB / 1024)
+    }
+
+    /// Hub/MTP draft ids are not counted as a loaded chat model for auto-exclusive.
+    public static func isMtpModelId(_ id: String) -> Bool {
+        let name = (id.split(separator: "/").last.map(String.init) ?? id).uppercased()
+        return name.contains("-MTP-") || name.contains("-MTP_") || name.hasSuffix("-MTP")
+    }
+
+    /// DFlash2 block-diffusion draft ids (e.g. `incoai/Qwen3.8-27B-DFlash2`).
+    public static func isDFlashModelId(_ id: String) -> Bool {
+        let name = (id.split(separator: "/").last.map(String.init) ?? id).uppercased()
+        return name.contains("DFLASH")
+    }
+
+    /// Draft companions cannot be opened in Playground or counted as chat models.
+    public static func isCompanionDraftModelId(_ id: String) -> Bool {
+        isMtpModelId(id) || isDFlashModelId(id)
+    }
 }
 
 public struct AutoLoadConfig: Codable, Sendable {
@@ -819,6 +961,8 @@ public struct ServerConfig: Codable, Sendable {
     public let tlsKeyPassword: String?
     public let maxRequestSizeMB: Double
     public let maxProcessMemory: String
+    /// MLX/Metal working-set ceiling (`auto` / `70%` / `48GB`). Clamped to RAM.
+    public let maxGpuMemory: String
     /// Operational kill switch for the prefix cache subsystem.
     /// When `false`, no SSD cache directories are created, no `fetchPrefix`
     /// or `storeCache` calls are issued, and `getOrCreatePrefixCacheManager`
@@ -858,6 +1002,7 @@ public struct ServerConfig: Codable, Sendable {
         case requestTimeout, contextScalingTarget
         case tlsCertPath, tlsKeyPath, tlsKeyPassword, maxRequestSizeMB
         case maxProcessMemory
+        case maxGpuMemory
         case prefixCacheEnabled
         case allowUnlistedDownloads
         case autoLoad
@@ -876,6 +1021,7 @@ public struct ServerConfig: Codable, Sendable {
         tlsKeyPassword: String? = nil,
         maxRequestSizeMB: Double = 100,
         maxProcessMemory: String = "auto",
+        maxGpuMemory: String = "auto",
         prefixCacheEnabled: Bool = true,
         allowUnlistedDownloads: Bool = false,
         autoLoad: AutoLoadConfig = .init(),
@@ -892,6 +1038,7 @@ public struct ServerConfig: Codable, Sendable {
         self.tlsKeyPassword = tlsKeyPassword
         self.maxRequestSizeMB = maxRequestSizeMB
         self.maxProcessMemory = maxProcessMemory
+        self.maxGpuMemory = maxGpuMemory
         self.prefixCacheEnabled = prefixCacheEnabled
         self.allowUnlistedDownloads = allowUnlistedDownloads
         self.autoLoad = autoLoad
@@ -913,6 +1060,7 @@ public struct ServerConfig: Codable, Sendable {
         tlsKeyPassword = try container.decodeIfPresent(String.self, forKey: .tlsKeyPassword)
         maxRequestSizeMB = try container.decodeIfPresent(Double.self, forKey: .maxRequestSizeMB) ?? 100
         maxProcessMemory = try container.decodeIfPresent(String.self, forKey: .maxProcessMemory) ?? "auto"
+        maxGpuMemory = try container.decodeIfPresent(String.self, forKey: .maxGpuMemory) ?? "auto"
         prefixCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .prefixCacheEnabled) ?? true
         allowUnlistedDownloads = try container.decodeIfPresent(Bool.self, forKey: .allowUnlistedDownloads) ?? false
         autoLoad = try container.decodeIfPresent(AutoLoadConfig.self, forKey: .autoLoad) ?? .init()
@@ -993,8 +1141,7 @@ public struct DownloadTaskInfo: Sendable {
     public var isActive: Bool { status == .downloading || status == .pending }
 }
 
-/// Lightweight per-file progress info for UI display.
-/// Enhanced to expose backend details for the "Backend Activity" panel.
+/// Lightweight per-file progress info for the Downloads activity list.
 public struct FileDownloadInfo: Sendable, Identifiable, Codable {
     public var id: String { filename }
     public let filename: String

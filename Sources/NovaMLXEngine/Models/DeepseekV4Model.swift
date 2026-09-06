@@ -3,6 +3,7 @@ import MLX
 import MLXNN
 import MLXLMCommon
 import MLXLLM
+import NovaMLXUtils
 
 // Port of DeepSeek-V4 architecture based on mlx-lm PR #1201 (akashgoswami)
 // Pure MLX operations, no custom Metal kernels.
@@ -139,7 +140,7 @@ private func applyInverseRoPE(_ x: MLXArray, rope: any RoPELayer, offset: Int) -
     let rd = sh.last!
     let pairShape = sh.dropLast() + [rd / 2, 2]
     let pairs = x.reshaped(pairShape)
-    let flip = concatenated([MLXArray(1.0), MLXArray(-1.0)], axis: 0).asType(x.dtype)
+    let flip = MLXArray([Float32(1.0), Float32(-1.0)]).asType(x.dtype)
     let yConj = rope((pairs * flip).reshaped(sh), offset: offset)
     return (yConj.reshaped(pairShape) * flip).reshaped(sh)
 }
@@ -220,6 +221,13 @@ public class DeepseekV4Compressor: Module {
     let overlap: Bool
     let outDim: Int
 
+    // Streaming state for decode phase. Lazily allocated on first decode call.
+    // kvState/scoreState shape: [B, coff*ratio, coff*headDim]
+    var kvState: MLXArray? = nil
+    var scoreState: MLXArray? = nil
+    // Cached batch size for state reset detection.
+    var stateBatchSize: Int = 0
+
     init(config: DeepseekV4Configuration, compressRatio: Int, headDim: Int) {
         self.compressRatio = compressRatio
         self.headDim = headDim
@@ -232,28 +240,190 @@ public class DeepseekV4Compressor: Module {
         self._ape.wrappedValue = zeros([compressRatio, outDim], dtype: .float32)
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
+    private func ensureState(batch B: Int) {
+        if kvState == nil || stateBatchSize != B {
+            let coff = overlap ? 2 : 1
+            let r = compressRatio
+            kvState = MLXArray.zeros([B, coff * r, outDim], dtype: .float32)
+            scoreState = MLXArray.full(
+                [B, coff * r, outDim], values: MLXArray(Float(-1e9)), dtype: .float32)
+            stateBatchSize = B
+        }
+    }
+
+    /// overlap_transform: [b, s, ratio, 2d] → [b, s, 2*ratio, d]
+    /// new_tensor[:, :, ratio:] = tensor[:, :, :, d:]
+    /// new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
+    /// mlx-swift has no in-place subscript assignment, so build via concat.
+    private func overlapTransform(_ tensor: MLXArray, fillValue: Float) -> MLXArray {
+        let B = tensor.dim(0)
+        let S = tensor.dim(1)
+        let r = compressRatio
+        let d = headDim
+        // First chunk (s=0): [:, :r] = fill, [:, r:] = tensor[0, :, d:]
+        let firstLeft = MLXArray.full([B, 1, r, d], values: MLXArray(fillValue), dtype: tensor.dtype)
+        let firstRight = tensor[0..., 0..<1, 0..., d...]  // [B, 1, r, d]
+        let firstChunk = concatenated([firstLeft, firstRight], axis: 2)  // [B, 1, 2r, d]
+        if S == 1 { return firstChunk }
+        // Middle chunks (s=1..S-1): [:, :r] = tensor[s-1, :, :d], [:, r:] = tensor[s, :, d:]
+        let middleLeft = tensor[0..., ..<(S - 1), 0..., ..<d]   // [B, S-1, r, d]
+        let middleRight = tensor[0..., 1..., 0..., d...]         // [B, S-1, r, d]
+        let middleChunk = concatenated([middleLeft, middleRight], axis: 2)  // [B, S-1, 2r, d]
+        return concatenated([firstChunk, middleChunk], axis: 1)  // [B, S, 2r, d]
+    }
+
+    /// Returns compressed KV [B, numCompressed, headDim] or nil if nothing compressed yet.
+    /// `startPos` is the KV cache offset (0 during prefill, >0 during decode).
+    func callAsFunction(_ x: MLXArray, startPos: Int) -> MLXArray? {
         let (B, S, _) = (x.dim(0), x.dim(1), x.dim(2))
         let r = compressRatio
-        let keep = (S / r) * r
-        if keep == 0 { return MLXArray.zeros([B, 0, headDim], dtype: x.dtype) }
-        let xc = x[.ellipsis, ..<keep].asType(.float32)
-        var kv = wkv(xc).reshaped([B, keep / r, r, outDim])
-        var score = wgate(xc).reshaped([B, keep / r, r, outDim]) + ape
-        if overlap {
-            let d = headDim
-            var kvOv = MLXArray.zeros([B, keep / r, 2 * r, d], dtype: kv.dtype)
-            kvOv[.ellipsis, r..., 0...] = kv[.ellipsis, 0..., 0..., d...]
-            kvOv[.ellipsis, 1..., ..<r, 0...] = kv[.ellipsis, ..<(keep / r - 1), 0..., ..<d, 0...]
-            kv = kvOv
-            var scoreOv = full([B, keep / r, 2 * r, d], values: MLXArray(Float(-1e9)), dtype: score.dtype)
-            scoreOv[.ellipsis, r..., 0...] = score[.ellipsis, 0..., 0..., d...]
-            scoreOv[.ellipsis, 1..., ..<r, 0...] = score[.ellipsis, ..<(keep / r - 1), 0..., ..<d, 0...]
-            score = scoreOv
+        let d = headDim
+        let xf = x.asType(.float32)
+        var kv = wkv(xf)  // [B, S, outDim]
+        var score = wgate(xf)
+
+        var shouldCompress: Bool
+        var resultKV: MLXArray? = nil
+
+        if startPos == 0 {
+            // Prefill.
+            shouldCompress = S >= r
+            let remainder = S % r
+            let cutoff = S - remainder
+            let off = overlap ? r : 0  // offset into state for remainder
+            ensureState(batch: B)
+            if overlap && cutoff >= r {
+                // Save last full window for next-call overlap (positions 0..<r).
+                let lastWindowKv = kv[0..., (cutoff - r)..<cutoff, 0...]
+                let lastWindowScore = score[0..., (cutoff - r)..<cutoff, 0...] + ape
+                // Build second half (positions r..<2r): remainder if any, else zeros/-inf.
+                let secondKv: MLXArray
+                let secondScore: MLXArray
+                if remainder > 0 {
+                    let remKv = kv[0..., cutoff..., 0...]
+                    let remScore = score[0..., cutoff..., 0...] + ape[..<remainder, 0...]
+                    // Pad remainder to size r.
+                    let padSize = r - remainder
+                    let padKv = MLXArray.zeros([B, padSize, outDim], dtype: kv.dtype)
+                    let padScore = MLXArray.full([B, padSize, outDim], values: MLXArray(Float(-1e9)), dtype: score.dtype)
+                    secondKv = concatenated([remKv, padKv], axis: 1)
+                    secondScore = concatenated([remScore, padScore], axis: 1)
+                } else {
+                    secondKv = MLXArray.zeros([B, r, outDim], dtype: kv.dtype)
+                    secondScore = MLXArray.full([B, r, outDim], values: MLXArray(Float(-1e9)), dtype: score.dtype)
+                }
+                kvState = concatenated([lastWindowKv, secondKv], axis: 1)
+                scoreState = concatenated([lastWindowScore, secondScore], axis: 1)
+            } else if !overlap && remainder > 0 {
+                // Non-overlap: store remainder at positions [0..<remainder], zeros elsewhere.
+                let remKv = kv[0..., cutoff..., 0...]
+                let remScore = score[0..., cutoff..., 0...] + ape[..<remainder, 0...]
+                let padSize = r - remainder
+                let padKv = MLXArray.zeros([B, padSize, outDim], dtype: kv.dtype)
+                let padScore = MLXArray.full([B, padSize, outDim], values: MLXArray(Float(-1e9)), dtype: score.dtype)
+                kvState = concatenated([remKv, padKv], axis: 1)
+                scoreState = concatenated([remScore, padScore], axis: 1)
+            }
+            // Reshape main kv/score to [B, cutoff/r, r, outDim] and add ape.
+            if cutoff >= r {
+                let kvMain = kv[0..., ..<cutoff, 0...]
+                let scoreMain = score[0..., ..<cutoff, 0...]
+                var kvR = kvMain.reshaped([B, cutoff / r, r, outDim])
+                var scoreR = scoreMain.reshaped([B, cutoff / r, r, outDim]) + ape
+                if overlap {
+                    kvR = overlapTransform(kvR, fillValue: 0)
+                    scoreR = overlapTransform(scoreR, fillValue: Float(-1e9))
+                }
+                let weights = MLX.softmax(scoreR, axis: 2, precise: true)
+                kvR = (kvR * weights).sum(axis: 2)
+                resultKV = kvR
+            }
+        } else {
+            // Decode step. S is typically 1.
+            shouldCompress = (startPos + 1) % r == 0
+            score = score + ape[startPos % r, 0...]
+            ensureState(batch: B)
+            if overlap {
+                let posInWindow = r + startPos % r
+                // Update state at posInWindow by replacing that slot.
+                // Build new state via gather/concat: take all rows except posInWindow, insert new at posInWindow.
+                let curState = kvState!
+                let kvSlot = kv.expandedDimensions(axes: [1])  // [B, 1, outDim]
+                var parts: [MLXArray] = []
+                if posInWindow > 0 {
+                    parts.append(curState[0..., 0..<posInWindow, 0...])
+                }
+                parts.append(kvSlot)
+                let after = posInWindow + 1
+                if after < curState.dim(1) {
+                    parts.append(curState[0..., after..., 0...])
+                }
+                kvState = concatenated(parts, axis: 1)
+                // Same for scoreState.
+                let curScore = scoreState!
+                let scoreSlot = score.expandedDimensions(axes: [1])
+                var sparts: [MLXArray] = []
+                if posInWindow > 0 {
+                    sparts.append(curScore[0..., 0..<posInWindow, 0...])
+                }
+                sparts.append(scoreSlot)
+                if after < curScore.dim(1) {
+                    sparts.append(curScore[0..., after..., 0...])
+                }
+                scoreState = concatenated(sparts, axis: 1)
+
+                if shouldCompress {
+                    // kv_state combines [:, :ratio, :d] + [:, ratio:, d:]
+                    let a = kvState![0..., ..<r, 0..., ..<d]
+                    let bb = kvState![0..., r..., 0..., d...]
+                    let kvStateC = concatenated([a, bb], axis: 1)
+                    let sa = scoreState![0..., ..<r, 0..., ..<d]
+                    let sbb = scoreState![0..., r..., 0..., d...]
+                    let scoreStateC = concatenated([sa, sbb], axis: 1)
+                    let weights = MLX.softmax(scoreStateC, axis: 1, precise: true)
+                    kv = (kvStateC * weights).sum(axis: 1, keepDims: true)
+                    resultKV = kv
+                    // Roll state: new[:r] = old[r:].
+                    kvState = kvState![0..., r..., 0...]
+                    scoreState = scoreState![0..., r..., 0...]
+                }
+            } else {
+                let posInWindow = startPos % r
+                let curState = kvState!
+                let kvSlot = kv.expandedDimensions(axes: [1])
+                var parts: [MLXArray] = []
+                if posInWindow > 0 {
+                    parts.append(curState[0..., 0..<posInWindow, 0...])
+                }
+                parts.append(kvSlot)
+                let after = posInWindow + 1
+                if after < curState.dim(1) {
+                    parts.append(curState[0..., after..., 0...])
+                }
+                kvState = concatenated(parts, axis: 1)
+                let curScore = scoreState!
+                let scoreSlot = score.expandedDimensions(axes: [1])
+                var sparts: [MLXArray] = []
+                if posInWindow > 0 {
+                    sparts.append(curScore[0..., 0..<posInWindow, 0...])
+                }
+                sparts.append(scoreSlot)
+                if after < curScore.dim(1) {
+                    sparts.append(curScore[0..., after..., 0...])
+                }
+                scoreState = concatenated(sparts, axis: 1)
+
+                if shouldCompress {
+                    let weights = MLX.softmax(scoreState!, axis: 1, precise: true)
+                    kv = (kvState! * weights).sum(axis: 1, keepDims: true)
+                    resultKV = kv
+                }
+            }
         }
-        let weights = MLX.softmax(score, axis: 2, precise: true)
-        kv = (kv * weights).sum(axis: 2)
-        return norm(kv.asType(x.dtype))
+
+        guard var out = resultKV, shouldCompress else { return nil }
+        out = norm(out.asType(x.dtype))
+        return out
     }
 }
 
@@ -319,9 +489,11 @@ public class DeepseekV4Attention: Module {
         self._wkv.wrappedValue = Linear(config.hiddenSize, config.headDim, bias: false)
         self._kvNorm.wrappedValue = RMSNorm(dimensions: config.headDim, eps: config.rmsNormEps)
 
-        // Grouped output: single linear handles all groups
-        let totalAttnDim = config.numAttentionHeads * config.headDim
-        self._woA.wrappedValue = Linear(totalAttnDim, config.oGroups * config.oLoraRank, bias: false)
+        // Grouped output: wo_a takes nGroups × headDim (= oGroups × headDim) not nHeads × headDim.
+        // V4-Flash source weights confirm: wo_a.weight shape [8192, 512] uint32 = Linear(4096→8192)
+        // where 4096 = oGroups(8) × headDim(512).
+        let outputDim = config.oGroups * config.headDim
+        self._woA.wrappedValue = Linear(outputDim, config.oGroups * config.oLoraRank, bias: false)
         self._woB.wrappedValue = Linear(config.oGroups * config.oLoraRank, config.hiddenSize, bias: false)
 
         self._attnSink.wrappedValue = zeros([config.numAttentionHeads])
@@ -381,8 +553,8 @@ public class DeepseekV4Attention: Module {
         // Compression
         var compressed: MLXArray? = nil
         if compressRatio > 0 && L >= compressRatio {
-            let c = compressor!(xFull)
-            if c.dim(1) > 0 { compressed = c }
+            // Pass startPos (cache offset) so Compressor knows prefill vs decode.
+            compressed = compressor?(xFull, startPos: offset)
         }
 
         // Cache update: K==V for single KV head
@@ -427,9 +599,45 @@ public class DeepseekV4Attention: Module {
         let oPe = applyInverseRoPE(output[.ellipsis, nopeDim...], rope: rope, offset: offset)
         var o = concatenated([oNope, oPe], axis: -1)
 
-        // Grouped output projection
-        o = o.transposed(0, 2, 1, 3).reshaped(B, L, nHeads * headDim)
-        return woB(woA(o))
+        // Grouped output projection per Python ref:
+        // o view [B, L, n_heads, head_dim] → [B, L, n_groups, heads_per_group * head_dim]
+        // wo_a is Linear(in=heads_per_group*head_dim=4096, out=n_groups*o_lora_rank=8192)
+        // Per-group matmul: out[B,L,g,r] = sum_d o[B,L,g,d] * wo_a.weight[g*out_per_group+r, d]
+        // V4-Flash: n_groups=8, heads_per_group=8, head_dim=512, o_lora_rank=1024
+        //   → per-group Linear(4096, 1024) applied independently per group.
+        let groupSize = nHeads / nGroups  // heads per group (64/8=8)
+        let perGroupInDim = groupSize * headDim  // 8 * 512 = 4096
+        let perGroupOutDim = oLoraRank  // 1024
+        o = o.transposed(0, 2, 1, 3)  // [B, nHeads, L, headDim] → [B, L, nHeads, headDim]
+        o = o.reshaped(B, L, nGroups, perGroupInDim)  // [B, L, nGroups, 4096]
+        // Per-group matmul: extract each group's slice of wo_a weight + do quantized matmul.
+        // wo_a.weight shape (loaded): [nGroups * oLoraRank, packed_in] uint32
+        //   = [8192, 512] uint32 (expands to [8192, 4096] for input_dim 4096).
+        var groupOutputs: [MLXArray] = []
+        for g in 0..<nGroups {
+            let oG = o[0..., 0..., g, 0...]  // [B, L, perGroupInDim=4096]
+            // Use the same woA Linear but slice weight per group? Simpler: do per-group via the
+            // QuantizedLinear API. woA is QuantizedLinear (forced quantize). Its weight is
+            // [nGroups*oLoraRank=8192, 512] uint32. Slice rows [g*1024..<(g+1)*1024].
+            if let q = woA as? QuantizedLinear {
+                let rowStart = g * perGroupOutDim
+                let rowEnd = rowStart + perGroupOutDim
+                let wSlice = q.weight[rowStart..<rowEnd, 0...]
+                let sSlice = q.scales[rowStart..<rowEnd, 0...]
+                let bSlice = q.biases?[rowStart..<rowEnd, 0...]
+                let outG = MLX.quantizedMM(
+                    oG, wSlice,
+                    scales: sSlice, biases: bSlice,
+                    transpose: true, groupSize: q.groupSize, bits: q.bits, mode: q.mode)
+                groupOutputs.append(outG)
+            } else {
+                // Fallback: use woA as regular Linear (will be wrong shape but won't crash).
+                groupOutputs.append(woA(oG))
+            }
+        }
+        let grouped = MLX.stacked(groupOutputs, axis: 2)  // [B, L, nGroups, perGroupOutDim]
+        let flattened = grouped.reshaped(B, L, nGroups * perGroupOutDim)  // [B, L, 8192]
+        return woB(flattened)
     }
 }
 

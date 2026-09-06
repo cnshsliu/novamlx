@@ -286,10 +286,10 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
             throw ShardEngineError.modelNotAvailable(modelId)
         }
 
-        let shardableBox = await mlxContainer.perform { context in
+        let shardableBox = try await mlxContainer.perform { context in
             let shardable = ShardableModel(model: context.model)
             // Create caches for the assigned layer range (clamped to actual layer count)
-            let allCaches = context.model.newCache(parameters: nil)
+            let allCaches = try context.model.newCache(parameters: nil)
             let clampedRange = Swift.min(layerRange.lowerBound, allCaches.count)..<Swift.min(layerRange.upperBound, allCaches.count)
             let slicedCaches = Array(allCaches[clampedRange])
             return (SendableBox(shardable), KVCacheBox(slicedCaches))
@@ -311,8 +311,8 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
               let mlxContainer = container.mlxContainer else { return }
 
         let range = self.layerRange
-        let cacheBox = await mlxContainer.perform { context in
-            let allCaches = context.model.newCache(parameters: nil)
+        let cacheBox = try await mlxContainer.perform { context in
+            let allCaches = try context.model.newCache(parameters: nil)
             let clampedRange = Swift.min(range.lowerBound, allCaches.count)..<Swift.min(range.upperBound, allCaches.count)
             return KVCacheBox(Array(allCaches[clampedRange]))
         }
@@ -531,7 +531,7 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
         let range = self.layerRange
         let extraLayers = extraPredictionLayers
 
-        let result = await mlxContainer.perform { context in
+        let result = try await mlxContainer.perform { context in
             var h = hiddenBox.value
 
             // Step 1: Run extra worker layers for better first-token prediction
@@ -539,7 +539,7 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
                 let workerStart = range.upperBound
                 let extraEnd = min(workerStart + extraLayers, shardable.count)
                 if workerStart < extraEnd {
-                    let allCaches = context.model.newCache(parameters: nil)
+                    let allCaches = try context.model.newCache(parameters: nil)
                     let extraRange = workerStart..<extraEnd
                     let clamped = Swift.min(extraRange.lowerBound, allCaches.count)..<Swift.min(extraRange.upperBound, allCaches.count)
                     let tempCaches = Array(allCaches[clamped])

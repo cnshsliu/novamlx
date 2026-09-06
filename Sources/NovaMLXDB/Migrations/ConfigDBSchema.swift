@@ -189,4 +189,23 @@ enum ConfigDBSchema {
             t.add(column: "allow_unlisted_downloads", .boolean).notNull().defaults(to: false)
         }
     }
+
+    static func v7PerformanceMode(in db: Database) throws {
+        try db.alter(table: "config") { t in
+            t.add(column: "performance_mode", .text).notNull().defaults(to: "balanced")
+        }
+    }
+
+    static func v8MaxGpuMemory(in db: Database) throws {
+        try db.alter(table: "config") { t in
+            t.add(column: "max_gpu_memory", .text).notNull().defaults(to: "auto")
+        }
+    }
+
+    /// Model root lives in `~/.config/novamlx/models-path`, not SQLite.
+    static func v9DropModelsDir(in db: Database) throws {
+        let columns = try db.columns(in: "config").map(\.name)
+        guard columns.contains("models_dir") else { return }
+        try db.execute(sql: "ALTER TABLE config DROP COLUMN models_dir")
+    }
 }

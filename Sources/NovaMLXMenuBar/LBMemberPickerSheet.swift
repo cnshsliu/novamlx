@@ -100,7 +100,7 @@ struct LBMemberPickerSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 4) {
                 if localModels.isEmpty {
-                    emptyHint("No downloaded local models. Use the Local Inference page to download one first.")
+                    emptyHint("No downloaded local models. Use Download Models to fetch one first.")
                 } else if filteredLocalModels.isEmpty {
                     emptyHint("No local models match \"\(searchText)\".")
                 } else {

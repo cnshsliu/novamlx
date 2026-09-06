@@ -61,7 +61,16 @@ extension NovaMLXAPIServer {
 
         // Scrub control tokens from raw output
         var scrubbedText = result.text
-        let shouldParseThinking = openAIReq.resolvedEnableThinking != false
+        // Grammar/schema/regex/gbnf processors and JSONLogitProcessor emit
+        // pure structured output (the template's empty <think></think> prefix
+        // aside). Running ThinkingParser on that output misroutes JSON tokens
+        // into reasoning_content and leaves message.content empty — see
+        // /tmp/json_problem.md §3.4.
+        let isStructuredMode = responseFormat == .jsonObject
+            || jsonSchemaDef != nil
+            || regexPattern != nil
+            || gbnfGrammar != nil
+        let shouldParseThinking = !isStructuredMode && openAIReq.resolvedEnableThinking != false
         if scrubbedText.contains("<|") || (!shouldParseThinking && scrubbedText.contains("<think")) {
             if let regex = try? NSRegularExpression(pattern: shouldParseThinking ? "<\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)" : "<(?:\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)|/?think[^>]*)>") {
                 let nsRange = NSRange(scrubbedText.startIndex..., in: scrubbedText)
@@ -227,6 +236,16 @@ extension NovaMLXAPIServer {
         let maxTok = ocrSampling.maxTokens ?? openAIReq.maxTokens ?? -1
         NovaMLXLog.info("[SSE:\(reqTag)] OpenAI stream start — model=\(openAIReq.model) client=\(clientType) maxTokens=\(maxTok) tools=\(toolCount) promptMsgs=\(messages.count)")
 
+        // Bypass ThinkingParser in structured-output mode — see handleChat
+        // for the full rationale. Computed outside the ResponseBody closure
+        // so we capture only a Bool (the [String: Any]? schema dict is not
+        // Sendable).
+        let isStructuredMode = responseFormat == .jsonObject
+            || jsonSchemaDef != nil
+            || regexPattern != nil
+            || gbnfGrammar != nil
+        let shouldParseThinking = !isStructuredMode && openAIReq.resolvedEnableThinking != false
+
         let body: ResponseBody = .init { writer in
             CurrentInferenceModel.shared.modelID = openAIReq.model
             defer { CurrentInferenceModel.shared.modelID = nil }
@@ -248,7 +267,6 @@ extension NovaMLXAPIServer {
                 let roleData = try JSONEncoder().encode(roleChunk)
                 try await writer.write(ByteBuffer(string: "data: \(String(data: roleData, encoding: .utf8) ?? "")\n\n"))
 
-                let shouldParseThinking = openAIReq.resolvedEnableThinking != false
                 let isImplicitModel = ModelContainer.isImplicitThinkingModel(for: openAIReq.model)
                 let thinkingParser = shouldParseThinking ? ThinkingParser(expectImplicitThinking: isImplicitModel) : nil
                 var streamedResponse = ""
@@ -428,6 +446,25 @@ extension NovaMLXAPIServer {
                     endpoint: "/v1/chat/completions"
                 )
                 NovaMLXLog.info("[SSE:\(reqTag)] Stream complete — reason=\(lastFinishReason ?? "unknown") completionTokens=\(completionTokenCount) promptTokens=\(promptN) avgTPS=\(String(format: "%.1f", avgTps)) total=\(String(format: "%.2f", totalSec))s [DONE]+finish sent")
+                // Finalize the request log entry from the SSE handler. The
+                // engine's StreamTracker is supposed to do this, but when the
+                // SSE writer errors mid-stream (client disconnect, ChannelError)
+                // the upstream task can get stuck mid-yield and tracker.finish
+                // never fires — leaving the entry orphaned in `active` until
+                // cancelStale prunes it as "timeout" 120s later. Calling
+                // finishHTTP here is idempotent: if StreamTracker already
+                // finalized, this is a no-op; if not, we close the entry.
+                RequestLogStore.shared.finish(
+                    model: openAIReq.model,
+                    kind: .llm,
+                    status: .success,
+                    tps: avgTps,
+                    promptTokens: promptN,
+                    completionTokens: completionTokenCount,
+                    durationMs: totalSec * 1000,
+                    error: nil,
+                    requestId: HTTPHelpers.requestID(from: httpRequest)
+                )
                 try await writer.finish(nil)
                 NovaMLXLog.info("[SSE:\(reqTag)] writer.finish(nil) returned — response body closed cleanly")
             } catch {
@@ -443,6 +480,20 @@ extension NovaMLXAPIServer {
                 }
                 try? await writer.write(ByteBuffer(string: "data: [DONE]\n\n"))
                 Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
+                // Even on stream error, finalize the log entry — otherwise it
+                // hangs in `active` and shows as "timeout" later. Partial
+                // tokens still count as work done.
+                RequestLogStore.shared.finish(
+                    model: openAIReq.model,
+                    kind: .llm,
+                    status: .error,
+                    tps: totalSec > 0 ? Double(completionTokenCount) / totalSec : 0,
+                    promptTokens: promptTokenCount ?? 0,
+                    completionTokens: completionTokenCount,
+                    durationMs: totalSec * 1000,
+                    error: "\(message) (\(type))",
+                    requestId: HTTPHelpers.requestID(from: httpRequest)
+                )
                 try? await writer.finish(nil)
                 NovaMLXLog.info("[SSE:\(reqTag)] error-path writer.finish(nil) returned")
             }

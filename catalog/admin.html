@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NovaMLX catalog admin</title>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --ink: #1a1916;
+      --muted: #6b655c;
+      --line: #d9d3c7;
+      --card: #fffcf6;
+      --accent: #1f4b99;
+      --danger: #9b2c2c;
+      --ok: #1f6b3a;
+      --chip: #ece6d8;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font: 13px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--card);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -0.02em; }
+    header .meta { color: var(--muted); margin-left: auto; }
+    button, select, input, textarea {
+      font: inherit;
+      color: inherit;
+    }
+    button {
+      background: var(--chip);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.danger { color: var(--danger); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .layout {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      height: calc(100% - 49px);
+    }
+    .list {
+      border-right: 1px solid var(--line);
+      overflow: auto;
+      background: var(--card);
+    }
+    .filters {
+      display: flex;
+      gap: 6px;
+      padding: 10px;
+      position: sticky;
+      top: 0;
+      background: var(--card);
+      border-bottom: 1px solid var(--line);
+    }
+    .filters input, .filters select { flex: 1; min-width: 0; }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: #fff;
+    }
+    textarea { min-height: 72px; resize: vertical; }
+    .row {
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+    }
+    .row:hover { background: #f6f0e4; }
+    .row.active { background: #e8eef8; }
+    .row .id { color: var(--muted); font-size: 11px; word-break: break-all; }
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: var(--chip);
+      margin-left: 6px;
+    }
+    .badge.verified { background: #d7eadc; color: var(--ok); }
+    .form {
+      overflow: auto;
+      padding: 16px 20px 48px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 14px;
+    }
+    .span2 { grid-column: 1 / -1; }
+    label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chips label.inline {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--ink);
+      font-size: 13px;
+      margin: 0;
+    }
+    .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    .toast {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      background: var(--ink);
+      color: #fff;
+      padding: 10px 14px;
+      border-radius: 8px;
+      max-width: 420px;
+      white-space: pre-wrap;
+      display: none;
+    }
+    .toast.err { background: var(--danger); }
+    .empty { color: var(--muted); padding: 24px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Catalog admin</h1>
+    <span class="meta" id="meta"></span>
+    <button type="button" id="add">Add model</button>
+    <button type="button" id="dup">Duplicate</button>
+    <button type="button" class="danger" id="del">Delete</button>
+    <button type="button" class="primary" id="save">Save to Git file</button>
+    <button type="button" id="sync">Copy into app bundle</button>
+  </header>
+  <div class="layout">
+    <aside class="list">
+      <div class="filters">
+        <input id="q" placeholder="Search id, name, tags" />
+        <select id="cat">
+          <option value="">All</option>
+        </select>
+      </div>
+      <div id="rows"></div>
+    </aside>
+    <main class="form" id="formWrap">
+      <p class="empty" id="empty">Select a model or add one.</p>
+      <form id="form" hidden>
+        <div class="grid">
+          <div class="span2">
+            <label>id (Hub id, or owner/prefix* family — e.g. mlx-community/Qwen3.8-*)</label>
+            <input name="id" required />
+          </div>
+          <div class="span2">
+            <label>url</label>
+            <input name="url" required />
+          </div>
+          <div>
+            <label>name</label>
+            <input name="name" required />
+          </div>
+          <div>
+            <label>status</label>
+            <select name="status"></select>
+          </div>
+          <div>
+            <label>category</label>
+            <select name="category"></select>
+          </div>
+          <div>
+            <label>family</label>
+            <select name="family"></select>
+          </div>
+          <div>
+            <label>format</label>
+            <select name="format"></select>
+          </div>
+          <div>
+            <label>quant</label>
+            <input name="quant" placeholder="4bit / 8bit / fp16" />
+          </div>
+          <div class="span2">
+            <label>description</label>
+            <textarea name="description"></textarea>
+          </div>
+          <div>
+            <label>size (display)</label>
+            <input name="size" placeholder="~29.5 GB" />
+          </div>
+          <div>
+            <label>sizeBytes</label>
+            <input name="sizeBytes" type="number" min="0" step="1" />
+          </div>
+          <div>
+            <label>minRamGB</label>
+            <input name="minRamGB" type="number" min="0" step="1" />
+          </div>
+          <div>
+            <label>revision (optional SHA)</label>
+            <input name="revision" />
+          </div>
+          <div>
+            <label>testedOn</label>
+            <input name="testedOn" placeholder="NovaMLX version" />
+          </div>
+          <div>
+            <label>addedAt (ISO — newest first in the app)</label>
+            <input name="addedAt" placeholder="2026-08-22T12:00:00Z" />
+          </div>
+          <div class="span2">
+            <label>tags (comma-separated)</label>
+            <input name="tags" />
+          </div>
+          <div class="span2">
+            <label>capabilities</label>
+            <div class="chips" id="caps"></div>
+          </div>
+        </div>
+      </form>
+    </main>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let meta = null;
+    let doc = { schemaVersion: 1, models: [] };
+    let selected = -1;
+    let dirty = false;
+
+    function toast(msg, err) {
+      const el = $("toast");
+      el.textContent = msg;
+      el.className = "toast" + (err ? " err" : "");
+      el.style.display = "block";
+      setTimeout(() => { el.style.display = "none"; }, err ? 8000 : 2500);
+    }
+
+    function fillSelect(sel, values) {
+      sel.innerHTML = values.map((v) => `<option value="${v}">${v}</option>`).join("");
+    }
+
+    async function load() {
+      const [m, c] = await Promise.all([
+        fetch("/api/meta").then((r) => r.json()),
+        fetch("/api/catalog").then((r) => r.json()),
+      ]);
+      meta = m;
+      doc = c;
+      $("meta").textContent = `${m.catalogPath} · ${c.models.length} models · ${c.updatedAt || ""}`;
+      fillSelect($("cat"), [""].concat(m.categories));
+      $("cat").options[0].textContent = "All";
+      const f = $("form");
+      fillSelect(f.status, m.statuses);
+      fillSelect(f.category, m.categories);
+      fillSelect(f.family, m.families);
+      fillSelect(f.format, m.formats);
+      $("caps").innerHTML = m.capabilities.map((cap) =>
+        `<label class="inline"><input type="checkbox" value="${cap}" /> ${cap}</label>`
+      ).join("");
+      renderList();
+      if (doc.models.length) select(0);
+    }
+
+    function filtered() {
+      const q = $("q").value.trim().toLowerCase();
+      const cat = $("cat").value;
+      return doc.models
+        .map((m, i) => ({ m, i }))
+        .filter(({ m }) => {
+          if (cat && m.category !== cat) return false;
+          if (!q) return true;
+          const blob = [m.id, m.name, m.description, ...(m.tags || [])].join(" ").toLowerCase();
+          return blob.includes(q);
+        })
+        .sort((a, b) => {
+          const at = a.m.addedAt || "";
+          const bt = b.m.addedAt || "";
+          if (at !== bt) return bt.localeCompare(at);
+          return a.i - b.i;
+        });
+    }
+
+    function renderList() {
+      const rows = filtered();
+      $("rows").innerHTML = rows.map(({ m, i }) => `
+        <div class="row ${i === selected ? "active" : ""}" data-i="${i}">
+          <div>${escapeHtml(m.name || "(untitled)")}${String(m.id || "").endsWith("*") ? `<span class="badge">family</span>` : ""}<span class="badge ${m.status || ""}">${m.status || "verified"}</span></div>
+          <div class="id">${escapeHtml(m.id)} · ${m.category} · ${m.size || ""}</div>
+        </div>
+      `).join("") || `<div class="empty">No matches</div>`;
+    }
+
+    function escapeHtml(s) {
+      return String(s || "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    function readForm() {
+      const f = $("form");
+      const caps = [...$("caps").querySelectorAll("input:checked")].map((x) => x.value);
+      const tags = f.tags.value.split(",").map((t) => t.trim()).filter(Boolean);
+      const sizeBytes = f.sizeBytes.value === "" ? null : Number(f.sizeBytes.value);
+      const minRamGB = f.minRamGB.value === "" ? null : Number(f.minRamGB.value);
+      const emptyToNull = (v) => (v && v.trim()) ? v.trim() : null;
+      return {
+        id: f.id.value.trim(),
+        url: f.url.value.trim(),
+        name: f.name.value.trim(),
+        description: emptyToNull(f.description.value),
+        category: f.category.value,
+        family: f.family.value,
+        format: f.format.value,
+        status: f.status.value,
+        quant: emptyToNull(f.quant.value),
+        size: emptyToNull(f.size.value),
+        sizeBytes,
+        minRamGB,
+        revision: emptyToNull(f.revision.value),
+        testedOn: emptyToNull(f.testedOn.value),
+        addedAt: emptyToNull(f.addedAt.value),
+        tags,
+        capabilities: caps,
+      };
+    }
+
+    function writeForm(m) {
+      const f = $("form");
+      f.hidden = false;
+      $("empty").hidden = true;
+      f.id.value = m.id || "";
+      f.url.value = m.url || "";
+      f.name.value = m.name || "";
+      f.description.value = m.description || "";
+      f.category.value = m.category || "llm";
+      f.family.value = m.family || "other";
+      f.format.value = m.format || "mlx";
+      f.status.value = m.status || "preview";
+      f.quant.value = m.quant || "";
+      f.size.value = m.size || "";
+      f.sizeBytes.value = m.sizeBytes ?? "";
+      f.minRamGB.value = m.minRamGB ?? "";
+      f.revision.value = m.revision || "";
+      f.testedOn.value = m.testedOn || "";
+      f.addedAt.value = m.addedAt || "";
+      f.tags.value = (m.tags || []).join(", ");
+      $("caps").querySelectorAll("input").forEach((box) => {
+        box.checked = (m.capabilities || []).includes(box.value);
+      });
+    }
+
+    function commitForm() {
+      if (selected < 0) return;
+      doc.models[selected] = readForm();
+      dirty = true;
+      renderList();
+    }
+
+    function select(i) {
+      if (selected >= 0) commitForm();
+      selected = i;
+      writeForm(doc.models[i]);
+      renderList();
+    }
+
+    function blank() {
+      return {
+        id: "",
+        url: "",
+        name: "",
+        category: "llm",
+        family: "qwen",
+        format: "mlx",
+        status: "preview",
+        tags: ["MLX"],
+        capabilities: [],
+        addedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      };
+    }
+
+    $("rows").addEventListener("click", (e) => {
+      const row = e.target.closest(".row");
+      if (!row) return;
+      select(Number(row.dataset.i));
+    });
+    $("q").addEventListener("input", renderList);
+    $("cat").addEventListener("change", renderList);
+    function defaultUrlForId(id) {
+      if (id.endsWith("*")) {
+        const prefix = id.slice(0, -1);
+        const slash = prefix.indexOf("/");
+        if (slash > 0) {
+          const owner = prefix.slice(0, slash);
+          const stem = prefix.slice(slash + 1).replace(/-+$/, "");
+          return "https://huggingface.co/models?search=" + encodeURIComponent(stem)
+            + "&author=" + encodeURIComponent(owner);
+        }
+      }
+      return "https://huggingface.co/" + id;
+    }
+
+    $("form").addEventListener("input", () => {
+      const id = $("form").id.value.trim();
+      const url = $("form").url;
+      if (id && !url.value) url.value = defaultUrlForId(id);
+      commitForm();
+    });
+    $("add").onclick = () => {
+      commitForm();
+      doc.models.unshift(blank());
+      select(0);
+    };
+    $("dup").onclick = () => {
+      if (selected < 0) return;
+      commitForm();
+      const copy = { ...doc.models[selected], id: doc.models[selected].id + "-copy" };
+      doc.models.splice(selected + 1, 0, copy);
+      select(selected + 1);
+    };
+    $("del").onclick = () => {
+      if (selected < 0) return;
+      if (!confirm("Delete " + (doc.models[selected].id || "this entry") + "?")) return;
+      doc.models.splice(selected, 1);
+      dirty = true;
+      selected = Math.min(selected, doc.models.length - 1);
+      if (selected < 0) {
+        $("form").hidden = true;
+        $("empty").hidden = false;
+      } else {
+        writeForm(doc.models[selected]);
+      }
+      renderList();
+    };
+    $("save").onclick = async () => {
+      commitForm();
+      const res = await fetch("/api/catalog", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schemaVersion: 1, models: doc.models }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        toast(body.error || "Save failed", true);
+        return;
+      }
+      doc = body;
+      dirty = false;
+      $("meta").textContent = `${meta.catalogPath} · ${doc.models.length} models · ${doc.updatedAt}`;
+      renderList();
+      toast("Saved catalog/models.json");
+    };
+    $("sync").onclick = async () => {
+      if (dirty) {
+        toast("Save the Git file first", true);
+        return;
+      }
+      const res = await fetch("/api/sync-bundle", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) {
+        toast(body.error || "Sync failed", true);
+        return;
+      }
+      toast("Copied into Sources/NovaMLXUtils/Resources/catalog/models.json");
+    };
+    window.addEventListener("beforeunload", (e) => {
+      if (dirty) e.preventDefault();
+    });
+    load().catch((err) => toast(String(err), true));
+  </script>
+</body>
+</html>

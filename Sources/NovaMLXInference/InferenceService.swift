@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXLMCommon
 import NovaMLXCore
 import NovaMLXDB
 import NovaMLXUtils
@@ -48,6 +49,7 @@ public final class InferenceService: @unchecked Sendable {
     private var workerLoadedModels: Set<String> = []
     private var workerModelTypes: [String: ModelType] = [:]
     private var workerHybridModels: Set<String> = []
+    private var workerNativeMtpModels: Set<String> = []
     private let loadDedup = LoadDedup()
     private var ttlSweepTask: Task<Void, Never>?
 
@@ -58,7 +60,7 @@ public final class InferenceService: @unchecked Sendable {
     public init(engine: MLXEngine, settingsManager: ModelSettingsManager, maxBatchSize: Int = 8, workerMode: Bool = false, workerBinaryPath: String? = nil, clusterMode: Bool = false, clusterConfig: ClusterConfig? = nil) {
         self.engine = engine
         self.batcher = ContinuousBatcher(engine: engine, maxBatchSize: maxBatchSize)
-        self.fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
+        self.fusedScheduler = FusedBatchScheduler(engine: engine)
         self.settingsManager = settingsManager
         self.transcriptionService = TranscriptionService()
         self.ttsService = TTSService()
@@ -123,6 +125,7 @@ public final class InferenceService: @unchecked Sendable {
             self.workerLoadedModels.removeAll()
             self.workerModelTypes.removeAll()
             self.workerHybridModels.removeAll()
+            self.workerNativeMtpModels.removeAll()
             // Do NOT saveLoadedModelsList() here — on crash/exit, the persisted file
             // should keep the model list so restoreModels() can reload on next launch.
             // The terminationHandler fires on normal app exit too, which would wipe the list.
@@ -137,6 +140,7 @@ public final class InferenceService: @unchecked Sendable {
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
         let resolvedId = settingsManager.resolveModelId(request.model)
+        try Self.rejectMtpAsChat(resolvedId)
         let settings = settingsManager.getSettings(resolvedId)
         var finalRequest = settings.applySamplingOverrides(to: request)
         finalRequest = InferenceRequest(
@@ -209,8 +213,10 @@ public final class InferenceService: @unchecked Sendable {
         // Hybrid linear attention models (e.g. Qwen3.5) mix MambaCache + KVCacheSimple layers.
         // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
         let hasLinearAttention = container?.config.hasLinearAttention == true
+        let nativeMtp = hasNativeMtp(resolvedId)
 
-        // Session, grammar, VLM, hybrid, and draft-model paths use engine directly (specialized execution)
+        // Session, grammar, VLM, hybrid, native MTP, and draft-model paths use
+        // engine TokenIterator (compiled decode + MtpTokenIterator).
         let hasDraftModel = finalRequest.draftModel != nil
         let needsSpecialized = finalRequest.sessionId != nil ||
             finalRequest.jsonSchemaDef != nil ||
@@ -219,10 +225,11 @@ public final class InferenceService: @unchecked Sendable {
             finalRequest.gbnfGrammar != nil ||
             isVLM ||
             hasLinearAttention ||
-            hasDraftModel
+            hasDraftModel ||
+            nativeMtp
 
         if needsSpecialized {
-            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (finalRequest.sessionId != nil ? "session" : "grammar")))
+            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (nativeMtp ? "native-mtp" : (finalRequest.sessionId != nil ? "session" : "grammar"))))
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher (reason=\(reason), model=\(resolvedId))")
             return try await batcher.submit(finalRequest)
         }
@@ -234,6 +241,14 @@ public final class InferenceService: @unchecked Sendable {
 
     public func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
         let resolvedId = settingsManager.resolveModelId(request.model)
+        let mtpDir = NovaMLXPaths.modelsDir.appendingPathComponent(resolvedId)
+        if isMtpDraftConfig(at: mtpDir) {
+            return AsyncThrowingStream { continuation in
+                continuation.finish(
+                    throwing: NovaMLXError.unsupportedModel(
+                        "MTP draft head cannot be used as a chat model: \(resolvedId)"))
+            }
+        }
         let settings = settingsManager.getSettings(resolvedId)
         var finalRequest = settings.applySamplingOverrides(to: request)
         finalRequest = InferenceRequest(
@@ -316,8 +331,9 @@ public final class InferenceService: @unchecked Sendable {
         // Hybrid linear attention models (e.g. Qwen3.5) mix MambaCache + KVCacheSimple layers.
         // FusedBatchScheduler only supports KVCacheSimple — hybrid models must use ContinuousBatcher.
         let hasLinearAttention = container?.config.hasLinearAttention == true
+        let nativeMtp = hasNativeMtp(resolvedId)
 
-        // Session, grammar, VLM, hybrid, and draft-model paths use engine directly (specialized execution)
+        // Session, grammar, VLM, hybrid, native MTP, and draft-model paths use engine directly.
         let hasDraftModel = finalRequest.draftModel != nil
         let localKind: InferenceKind = isVLM ? .vlm : .llm
         let needsSpecialized = finalRequest.sessionId != nil ||
@@ -327,12 +343,13 @@ public final class InferenceService: @unchecked Sendable {
             finalRequest.gbnfGrammar != nil ||
             isVLM ||
             hasLinearAttention ||
-            hasDraftModel
+            hasDraftModel ||
+            nativeMtp
 
         // Wrap any local stream with a log-tracking shim that finalizes the
         // RequestLogEntry on completion (token count + timing + HTTP request id).
         if needsSpecialized {
-            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (finalRequest.sessionId != nil ? "session" : "grammar")))
+            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (nativeMtp ? "native-mtp" : (finalRequest.sessionId != nil ? "session" : "grammar"))))
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher stream (reason=\(reason), model=\(resolvedId))")
             return Self.trackStream(batcher.submitStream(finalRequest), tracker: StreamTracker(model: resolvedId, kind: localKind, metricsStore: engine.metricsStore), request: finalRequest)
         }
@@ -390,7 +407,7 @@ public final class InferenceService: @unchecked Sendable {
         // Skip when model is actively served by distributed runner.
         // When cluster is idle (no model activated), requests fall through to
         // local inference where speculative decoding works fine.
-        if clusterMode, let runner = distributedRunner {
+        if clusterMode, distributedRunner != nil {
             let clusterState = ClusterModelManager.shared.getStatus()
             if clusterState.state == .ready, clusterState.activeModel == settingsManager.resolveModelId(request.model) {
                 return request
@@ -398,6 +415,29 @@ public final class InferenceService: @unchecked Sendable {
         }
 
         guard isModelLoaded(request.model) else { return request }
+
+        let mainId = settingsManager.resolveModelId(request.model)
+        if let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId),
+           isModelLoaded(dflash.draftModelId)
+        {
+            NovaMLXLog.info("[SpecBoost] Auto-injecting DFlash2 draft '\(dflash.draftModelId)' for '\(request.model)'")
+            return withDraft(request, draftId: dflash.draftModelId)
+        }
+        // Qwen MTP heads are greedy. Auto-injecting them at temp>0 ignores the
+        // requested sampler and often loops after </think>, leaving message.content
+        // empty or a few characters. Keep MTP for greedy (temp==0) decode.
+        if let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId),
+           isModelLoaded(mtp.draftModelId)
+        {
+            let temp = request.temperature ?? 1
+            if temp > 0 {
+                NovaMLXLog.info("[SpecBoost] Skipping MTP auto-inject for '\(mainId)' (temp=\(temp) > 0; Qwen MTP is greedy-only)")
+            } else {
+                NovaMLXLog.info("[SpecBoost] Auto-injecting MTP draft '\(mtp.draftModelId)' for '\(request.model)'")
+                return withDraft(request, draftId: mtp.draftModelId)
+            }
+        }
+
         guard !isHybridModel(request.model) else { return request }
 
         // Look up recommendation from registry
@@ -423,7 +463,6 @@ public final class InferenceService: @unchecked Sendable {
         guard isModelLoaded(candidate.draftModelId) else { return request }
 
         // Validate vocab_size match from config.json on disk
-        let mainId = settingsManager.resolveModelId(request.model)
         let mainDir = NovaMLXPaths.modelsDir.appendingPathComponent(mainId)
         let draftDir = NovaMLXPaths.modelsDir.appendingPathComponent(candidate.draftModelId)
         guard let mainVocab = DraftModelRegistry.readVocabSize(from: mainDir),
@@ -434,7 +473,11 @@ public final class InferenceService: @unchecked Sendable {
         }
 
         NovaMLXLog.info("[SpecBoost] Auto-injecting draft '\(candidate.draftModelId)' for '\(request.model)'")
-        return InferenceRequest(
+        return withDraft(request, draftId: candidate.draftModelId)
+    }
+
+    private func withDraft(_ request: InferenceRequest, draftId: String) -> InferenceRequest {
+        InferenceRequest(
             id: request.id, model: request.model, messages: request.messages,
             tools: request.tools,
             temperature: request.temperature, maxTokens: request.maxTokens,
@@ -450,13 +493,21 @@ public final class InferenceService: @unchecked Sendable {
             thinkingBudget: request.thinkingBudget,
             enableThinking: request.enableThinking,
             preserveThinking: request.preserveThinking,
-            draftModel: candidate.draftModelId,
+            draftModel: draftId,
             numDraftTokens: request.numDraftTokens ?? 4
         )
     }
 
-    public func loadModel(at url: URL, config: ModelConfig, progress: (@Sendable (LoadPhase) -> Void)? = nil) async throws {
+    public func loadModel(
+        at url: URL,
+        config: ModelConfig,
+        progress: (@Sendable (LoadPhase) -> Void)? = nil,
+        asMtpCompanion: Bool = false
+    ) async throws {
         let modelId = config.identifier.id
+        if !asMtpCompanion, isMtpDraftConfig(at: url) || isDFlashDraftConfig(at: url) {
+            throw NovaMLXError.mtpCompanionNotLoadable(modelId)
+        }
 
         // Audio models bypass engine entirely — route to specialized services
         if config.modelType == .audio {
@@ -483,12 +534,18 @@ public final class InferenceService: @unchecked Sendable {
         }
 
         try await loadDedup.ensureSingle(modelId: modelId) { [self] in
+            if !asMtpCompanion, config.modelType == .llm || config.modelType == .vlm {
+                await self.evictOthersForExclusive(keeping: modelId)
+            }
             if self.workerMode, let worker = self.worker {
-                let isHybrid = try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
+                let flags = try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
                 self.workerLoadedModels.insert(modelId)
                 self.workerModelTypes[modelId] = config.modelType
-                if isHybrid {
+                if flags.hybrid {
                     self.workerHybridModels.insert(modelId)
+                }
+                if flags.nativeMtp {
+                    self.workerNativeMtpModels.insert(modelId)
                 }
             } else {
                 _ = try await self.engine.loadModel(from: url, config: config, progress: progress)
@@ -499,6 +556,131 @@ public final class InferenceService: @unchecked Sendable {
             }
             self.saveLoadedModelsList()
         }
+
+        await loadCompanionDFlashIfPresent(mainId: modelId)
+        await loadCompanionMtpIfPresent(mainId: modelId)
+        await applyResourceLimits()
+    }
+
+    private static func rejectMtpAsChat(_ modelId: String) throws {
+        let dir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        if isMtpDraftConfig(at: dir) {
+            throw NovaMLXError.unsupportedModel(
+                "MTP draft head cannot be used as a chat model: \(modelId)"
+            )
+        }
+    }
+
+    private func loadCompanionDFlashIfPresent(mainId: String) async {
+        guard let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId) else { return }
+        guard !isModelLoaded(dflash.draftModelId) else { return }
+        let dir = NovaMLXPaths.modelsDir.appendingPathComponent(dflash.draftModelId)
+        guard FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("config.json").path)
+        else {
+            NovaMLXLog.info(
+                "[SpecBoost] DFlash2 companion '\(dflash.draftModelId)' not on disk — download it to unlock ~3× decode on Qwen3.8-27B"
+            )
+            return
+        }
+        NovaMLXLog.info("[SpecBoost] Loading DFlash2 companion '\(dflash.draftModelId)' for '\(mainId)'")
+        let config = ModelConfig(
+            identifier: ModelIdentifier(id: dflash.draftModelId, family: .qwen),
+            modelType: .llm
+        )
+        do {
+            try await loadModel(at: dir, config: config, asMtpCompanion: true)
+            await unloadMtpCompanions(of: mainId)
+        } catch {
+            NovaMLXLog.warning("[SpecBoost] DFlash2 companion load failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func unloadMtpCompanions(of mainId: String) async {
+        guard let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId) else { return }
+        guard isModelLoaded(mtp.draftModelId) else { return }
+        NovaMLXLog.info(
+            "[SpecBoost] Unloading MTP '\(mtp.draftModelId)' because DFlash2 is active for '\(mainId)'"
+        )
+        await unloadModel(ModelIdentifier(id: mtp.draftModelId, family: .qwen))
+    }
+
+    /// MTP is only a fallback when DFlash2 is not loaded.
+    public static func shouldLoadMtpCompanion(hasDFlash: Bool) -> Bool {
+        !hasDFlash
+    }
+
+    /// Companions kept with a chat backbone. DFlash2 replaces MTP when present.
+    public static func companionKeepIds(
+        backboneId: String, dflashId: String?, mtpId: String?
+    ) -> Set<String> {
+        var keep: Set<String> = [backboneId]
+        if let dflashId {
+            keep.insert(dflashId)
+        } else if let mtpId {
+            keep.insert(mtpId)
+        }
+        return keep
+    }
+
+    private func loadCompanionMtpIfPresent(mainId: String) async {
+        let mainDir = NovaMLXPaths.modelsDir.appendingPathComponent(mainId)
+        guard !isMtpDraftConfig(at: mainDir) else { return }
+        let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId)
+        let dflashLoaded = dflash.map { isModelLoaded($0.draftModelId) } ?? false
+        guard Self.shouldLoadMtpCompanion(hasDFlash: dflashLoaded) else {
+            if let dflash {
+                NovaMLXLog.info(
+                    "[SpecBoost] Skipping MTP companion for '\(mainId)' — DFlash2 '\(dflash.draftModelId)' is loaded"
+                )
+            }
+            return
+        }
+        guard let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId) else { return }
+        guard !isModelLoaded(mtp.draftModelId) else { return }
+        let mtpDir = NovaMLXPaths.modelsDir.appendingPathComponent(mtp.draftModelId)
+        guard FileManager.default.fileExists(
+            atPath: mtpDir.appendingPathComponent("config.json").path)
+        else { return }
+        NovaMLXLog.info("[SpecBoost] Loading companion MTP '\(mtp.draftModelId)' for '\(mainId)'")
+        let config = ModelConfig(
+            identifier: ModelIdentifier(id: mtp.draftModelId, family: .qwen),
+            modelType: .llm
+        )
+        do {
+            try await loadModel(at: mtpDir, config: config, asMtpCompanion: true)
+        } catch {
+            NovaMLXLog.warning("[SpecBoost] MTP companion load failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Exclusive mode: one chat/backbone model plus DFlash2, or MTP if no DFlash.
+    public static func exclusiveKeepIds(for modelId: String) -> Set<String> {
+        companionKeepIds(
+            backboneId: modelId,
+            dflashId: DraftModelRegistry.shared.dflashCandidate(forMainId: modelId)?.draftModelId,
+            mtpId: DraftModelRegistry.shared.mtpCandidate(forMainId: modelId)?.draftModelId
+        )
+    }
+
+    public func evictOthersForExclusive(keeping modelId: String) async {
+        let keep = Self.exclusiveKeepIds(for: modelId)
+        for id in listLoadedModels() where !keep.contains(id) {
+            NovaMLXLog.info("[Exclusive] unloading '\(id)' to keep '\(modelId)'")
+            await unloadModel(ModelIdentifier(id: id, family: .other))
+        }
+    }
+
+    public func applyResourceLimits() async {
+        await engine.applyResourceLimits()
+    }
+
+    public func chatLoadedCount() -> Int {
+        listLoadedModels().filter { id in
+            !isMtpDraftConfig(at: NovaMLXPaths.modelsDir.appendingPathComponent(id))
+                && !isDFlashDraftConfig(at: NovaMLXPaths.modelsDir.appendingPathComponent(id))
+                && !ResourceLimits.isMtpModelId(id)
+        }.count
     }
 
     public func unloadModel(_ identifier: ModelIdentifier) async {
@@ -530,10 +712,12 @@ public final class InferenceService: @unchecked Sendable {
             workerLoadedModels.remove(identifier.id)
             workerModelTypes.removeValue(forKey: identifier.id)
             workerHybridModels.remove(identifier.id)
+            workerNativeMtpModels.remove(identifier.id)
         } else {
             engine.unloadModel(identifier)
         }
         saveLoadedModelsList()
+        await applyResourceLimits()
     }
 
     public func isModelLoaded(_ modelId: String) -> Bool {
@@ -554,6 +738,14 @@ public final class InferenceService: @unchecked Sendable {
             return workerHybridModels.contains(resolvedId)
         }
         return engine.getContainer(for: resolvedId)?.config.hasLinearAttention ?? false
+    }
+
+    public func hasNativeMtp(_ modelId: String) -> Bool {
+        let resolvedId = settingsManager.resolveModelId(modelId)
+        if workerMode {
+            return workerNativeMtpModels.contains(resolvedId)
+        }
+        return engine.getContainer(for: resolvedId)?.hasNativeMtp == true
     }
 
     /// Check if a model can be loaded given current memory constraints.
@@ -645,6 +837,11 @@ public final class InferenceService: @unchecked Sendable {
                 continue
             }
             progress?(modelId, .started)
+            if isMtpDraftConfig(at: record.localURL) {
+                NovaMLXLog.info("[InferenceService] Skipping restore of MTP companion '\(modelId)'")
+                progress?(modelId, .skipped)
+                continue
+            }
             let config = ModelConfig(
                 identifier: ModelIdentifier(id: modelId, family: record.family),
                 modelType: record.modelType

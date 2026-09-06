@@ -128,7 +128,7 @@ public final class BenchmarkService: @unchecked Sendable {
             let isCancelled = lock.withLock { activeRun?.status == "cancelled" }
             if isCancelled { return }
 
-            let dummyPrompt = String(repeating: "Hello world. ", count: promptLength / 12)
+            let dummyPrompt = String(repeating: "Hello world. ", count: max(1, promptLength / 12))
             let messages = [ChatMessage(role: .user, content: dummyPrompt)]
 
             let inferenceRequest = InferenceRequest(
@@ -136,27 +136,40 @@ public final class BenchmarkService: @unchecked Sendable {
                 messages: messages,
                 temperature: 0.0,
                 maxTokens: request.generationLength,
-                stream: false
+                stream: true
             )
 
             let startTime = Date()
             let memoryBefore = UInt64(MLX.Memory.activeMemory)
+            let compiled = inferenceService.engine.getContainer(for: request.modelId)?.compiledDecodeSegmentCount ?? 0
+            let nativeMtp = inferenceService.hasNativeMtp(request.modelId)
 
             do {
-                let result = try await inferenceService.generate(inferenceRequest)
+                var firstTokenAt: Date?
+                var completionTokens = 0
+                for try await token in inferenceService.stream(inferenceRequest) {
+                    if firstTokenAt == nil { firstTokenAt = Date() }
+                    if !token.text.isEmpty { completionTokens += 1 }
+                }
 
                 let endTime = Date()
                 let e2eLatency = endTime.timeIntervalSince(startTime)
-                let promptTokens = max(result.promptTokens, 1)
-                let completionTokens = max(result.completionTokens, 1)
-
-                let processingTps = Double(promptTokens) / max(e2eLatency * 0.5, 0.001)
+                let ttft = firstTokenAt.map { $0.timeIntervalSince(startTime) } ?? e2eLatency
+                let decodeElapsed = firstTokenAt.map { endTime.timeIntervalSince($0) } ?? e2eLatency
+                let decodeTokens = max(completionTokens - 1, 1)
+                let decodeTps = Double(decodeTokens) / max(decodeElapsed, 0.001)
+                let promptTokens = max(promptLength, 1)
+                let processingTps = Double(promptTokens) / max(ttft, 0.001)
                 let peakMemory = Double(memoryBefore) / (1024 * 1024 * 1024)
+
+                NovaMLXLog.info(
+                    "[Bench] model=\(request.modelId) prompt~\(promptLength) TTFT=\(String(format: "%.0f", ttft * 1000))ms decode=\(String(format: "%.1f", decodeTps)) tok/s compiledSegments=\(compiled) nativeMtp=\(nativeMtp) genTokens=\(completionTokens)"
+                )
 
                 let benchResult = BenchmarkResult(
                     promptLength: promptLength,
-                    ttftMs: e2eLatency * 500,
-                    generationTps: result.tokensPerSecond,
+                    ttftMs: ttft * 1000,
+                    generationTps: decodeTps,
                     processingTps: processingTps,
                     totalTokens: promptTokens + completionTokens,
                     peakMemoryGB: peakMemory,

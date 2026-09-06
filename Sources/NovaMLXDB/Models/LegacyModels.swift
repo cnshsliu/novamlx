@@ -5,7 +5,6 @@ import Foundation
 struct LegacyConfig: Codable {
     var server: LegacyServer?
     var huggingfaceEndpoint: String?
-    var modelsDirectory: String?
     var apiKeys: [String]?
     var authUrl: String?
     var tknetApiKey: String?
@@ -17,7 +16,6 @@ struct LegacyConfig: Codable {
     var tlsCertPath: String? { server?.tlsCertPath }
     var tlsKeyPath: String? { server?.tlsKeyPath }
     var defaultModel: String? { server?.defaultModel }
-    var modelsDir: String? { modelsDirectory }
     var hfEndpoint: String? { huggingfaceEndpoint }
     var clusterConfig: String? { server?.clusterJSON }
     var autoLoad: String? { server?.autoLoadJSON }

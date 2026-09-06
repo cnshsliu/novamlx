@@ -29,6 +29,15 @@ public struct RequestLogEntry: Identifiable, Sendable {
     public var tps: Double?
     public var error: String?
 
+    /// Raw request body bytes (only set for small text/JSON payloads).
+    public var requestBody: Data?
+    /// `Content-Type` of the request body (e.g. "application/json").
+    public var requestContentType: String?
+    /// Why the request body was not captured (e.g. "[audio/wav · 2.3 MB — body not captured]").
+    public var requestBodyNote: String?
+    /// HTTP status code of the response (200, 404, 401, …).
+    public var responseStatus: Int?
+
     public init(
         id: String,
         method: String,
@@ -37,7 +46,10 @@ public struct RequestLogEntry: Identifiable, Sendable {
         kind: InferenceKind? = nil,
         apiKeyId: String? = nil,
         apiKeyName: String? = nil,
-        startedAt: Date = Date()
+        startedAt: Date = Date(),
+        requestBody: Data? = nil,
+        requestContentType: String? = nil,
+        requestBodyNote: String? = nil
     ) {
         self.id = id
         self.method = method
@@ -48,6 +60,9 @@ public struct RequestLogEntry: Identifiable, Sendable {
         self.apiKeyName = apiKeyName
         self.startedAt = startedAt
         self.status = .pending
+        self.requestBody = requestBody
+        self.requestContentType = requestContentType
+        self.requestBodyNote = requestBodyNote
     }
 
     /// Short path label for the UI (e.g. "/v1/chat/completions").
@@ -90,7 +105,10 @@ public final class RequestLogStore: @unchecked Sendable {
         method: String,
         path: String,
         apiKeyToken: String?,
-        model: String? = nil
+        model: String? = nil,
+        requestBody: Data? = nil,
+        requestContentType: String? = nil,
+        requestBodyNote: String? = nil
     ) {
         let keyInfo = Self.resolveApiKey(token: apiKeyToken)
         let entry = RequestLogEntry(
@@ -99,9 +117,23 @@ public final class RequestLogStore: @unchecked Sendable {
             path: path,
             model: model,
             apiKeyId: keyInfo?.id,
-            apiKeyName: keyInfo?.displayName
+            apiKeyName: keyInfo?.displayName,
+            requestBody: requestBody,
+            requestContentType: requestContentType,
+            requestBodyNote: requestBodyNote
         )
         lock.withLock {
+            active[id] = entry
+        }
+    }
+
+    /// Attach the HTTP response status to an in-flight entry (so the detail
+    /// panel can show 200 / 401 / 404 etc.). No-op if the entry is already
+    /// gone (e.g. finalized by the inference layer first).
+    public func recordResponse(id: String, status: Int) {
+        lock.withLock {
+            guard var entry = active[id] else { return }
+            entry.responseStatus = status
             active[id] = entry
         }
     }
@@ -113,10 +145,12 @@ public final class RequestLogStore: @unchecked Sendable {
         id: String,
         status: RequestStatus,
         error: String? = nil,
-        durationMs: Double? = nil
+        durationMs: Double? = nil,
+        responseStatus: Int? = nil
     ) {
         lock.withLock {
             guard var entry = active[id] else { return }
+            if let rs = responseStatus { entry.responseStatus = rs }
             finalizeLocked(&entry, status: status, error: error, durationMs: durationMs)
             active.removeValue(forKey: id)
             if let idx = activeByModel[entry.model ?? ""]?.firstIndex(of: id) {

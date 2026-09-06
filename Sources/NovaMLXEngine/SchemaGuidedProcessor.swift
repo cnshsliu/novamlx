@@ -72,17 +72,49 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
     private let maskBuilder: TokenMaskBuilder
     private var escapeNext = false
 
-    enum SchemaState {
+    /// Parent-aware FSM states.
+    ///
+    /// Every object/array state, and every value-internal state
+    /// (`.inString`, `.inNumber`, `.inLiteral`), carries a `returnTo`
+    /// state — the state the FSM transitions to when the current value
+    /// completes or the current structure closes. Without that outer
+    /// context, value/structure completion collapsed to `.done`
+    /// regardless of whether the value was an object field, an array
+    /// element, or the top-level value, which made it impossible for the
+    /// model to ever emit a structural terminator (``,``, `}`, `]`)
+    /// after a value. The Qwen3.6-35B `json_schema` failure — `{"`
+    /// followed by infinite whitespace — was the visible symptom:
+    /// `.objectKey` treated the opening `"` as a *close* quote
+    /// (transitioning to `.objectColon` with an empty key) and then
+    /// `.objectColon` only admitted `:` or whitespace, so the model
+    /// saturated on whitespace.
+    ///
+    /// `.inObjectKey` is dedicated to "inside the quoted key string", so
+    /// the opening `"` from `.objectKey` properly enters the string body,
+    /// accumulates characters, and only the matching close `"` transitions
+    /// to `.objectColon` with the accumulated key.
+    indirect enum SchemaState {
         case expectValue(SchemaNode)
-        case objectKey(SchemaNode, [String: SchemaNode], Set<String>, String)
-        case objectColon(SchemaNode, [String: SchemaNode], Set<String>, String)
-        case objectValue(SchemaNode, [String: SchemaNode], Set<String>, SchemaNode)
-        case objectComma(SchemaNode, [String: SchemaNode], Set<String>)
-        case arrayValue(SchemaNode, SchemaNode?)
-        case arrayComma(SchemaNode, SchemaNode?)
-        case inString(Bool)
-        case inNumber
-        case inLiteral(String, Int)
+        /// Object opened; expecting either `"` (to open a key string) or
+        /// `}` (to close an empty object). `returnTo` is the outer state
+        /// to resume when `}` closes this object.
+        case objectKey(SchemaNode, [String: SchemaNode], Set<String>, returnTo: SchemaState)
+        /// Inside a quoted key string — accumulating chars until close `"`
+        /// transitions to `.objectColon`.
+        case inObjectKey(SchemaNode, [String: SchemaNode], Set<String>, String, returnTo: SchemaState)
+        case objectColon(SchemaNode, [String: SchemaNode], Set<String>, String, returnTo: SchemaState)
+        case objectValue(SchemaNode, [String: SchemaNode], Set<String>, SchemaNode, returnTo: SchemaState)
+        case objectComma(SchemaNode, [String: SchemaNode], Set<String>, returnTo: SchemaState)
+        case arrayValue(SchemaNode, SchemaNode?, returnTo: SchemaState)
+        case arrayComma(SchemaNode, SchemaNode?, returnTo: SchemaState)
+        /// Inside a value string; on close `"` transitions to `returnTo`.
+        case inString(returnTo: SchemaState)
+        /// Inside a number; on termination (ws or structural char) transitions
+        /// to `returnTo`.
+        case inNumber(returnTo: SchemaState)
+        /// Inside a multi-char literal (`true`/`false`/`null`); on completion
+        /// transitions to `returnTo`.
+        case inLiteral(String, Int, returnTo: SchemaState)
         case done
     }
 
@@ -197,7 +229,7 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
 
     /// Walk every char of `text` through the strict stepper from the current
     /// `state` / `escapeNext`. Returns `false` on any grammar violation.
-    private func simulateTokenIsValid(text: String) -> Bool {
+    internal func simulateTokenIsValid(text: String) -> Bool {
         var simState = state
         var simEscape = escapeNext
         for c in text {
@@ -209,23 +241,47 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
         return true
     }
 
+    /// Test hook — read-only access to the current FSM state.
+    internal var stateForTesting: SchemaState { state }
+
     private func allowedChars() -> Set<Character> {
         let ws = Self.ws
         switch state {
         case .expectValue(let node): return startChars(for: node).union(ws)
         case .objectKey: return Set<Character>(["\"", "}"]).union(ws)
+        case .inObjectKey: return printableChars().union(Set<Character>(["\""]))
         case .objectColon: return Set<Character>([":"]).union(ws)
-        case .objectValue(_, _, _, let vnode): return startChars(for: vnode).union(ws)
+        case .objectValue(_, _, _, let vnode, _): return startChars(for: vnode).union(ws)
         case .objectComma: return Set<Character>([",", "}"]).union(ws)
-        case .arrayValue(_, let item): return startChars(for: item ?? SchemaNode(type: .anything)).union(ws).union(Set<Character>(["]"]))
+        case .arrayValue(_, let item, _): return startChars(for: item ?? SchemaNode(type: .anything)).union(ws).union(Set<Character>(["]"]))
         case .arrayComma: return Set<Character>([",", "]"]).union(ws)
-        case .inString: return printableChars()
-        case .inNumber: return Self.digits.union(Set<Character>([".", "e", "E", "+", "-"]))
-        case .inLiteral(let lit, let idx):
+        case .inString: return printableChars().union(Set<Character>(["\""]))
+        case .inNumber(let returnTo):
+            // Admit digit-shaped chars plus anything the `returnTo` state
+            // would accept (so a single token like `1}` or `1,` can complete
+            // the number AND transition through the post-value state).
+            return Self.digits.union(Set<Character>([".", "e", "E", "+", "-"]))
+                .union(ws)
+                .union(allowedCharsForTerminators(of: returnTo))
+        case .inLiteral(let lit, let idx, let returnTo):
             let i = lit.index(lit.startIndex, offsetBy: min(idx, lit.count))
             if i < lit.endIndex { return Set<Character>([lit[i]]) }
             return Set<Character>([",", "}", "]"]).union(ws)
+                .union(allowedCharsForTerminators(of: returnTo))
         case .done: return ws
+        }
+    }
+
+    /// Compute the set of structural terminator chars (``,``, `}`, `]`)
+    /// admissible from `state`. Used by `.inNumber`/`.inLiteral` masks so a
+    /// structural terminator token can complete the value AND close the
+    /// surrounding structure in one step.
+    private func allowedCharsForTerminators(of state: SchemaState) -> Set<Character> {
+        switch state {
+        case .objectComma: return [",", "}"]
+        case .arrayComma: return [",", "]"]
+        case .done: return []
+        default: return []
         }
     }
 
@@ -273,71 +329,73 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
 
         case .expectValue(let node):
             if isWhitespace(c) { return state }
-            return handleValueStartPure(c, node: node)
+            return handleValueStartPure(c, node: node, returnTo: .done)
 
-        case .objectKey(let parent, let props, let req, let accumulatedKey):
+        case .objectKey(let parent, let props, let req, let returnTo):
+            if isWhitespace(c) { return state }
+            if c == "\"" {
+                // Opening quote of the key string. Enter the string body,
+                // preserving the outer returnTo through every inner state.
+                return .inObjectKey(parent, props, req, "", returnTo: returnTo)
+            }
+            if c == "}" {
+                // Empty object — close and resume the outer context.
+                return returnTo
+            }
+            return nil
+
+        case .inObjectKey(let parent, let props, let req, let accumulatedKey, let returnTo):
             if escapeNext {
                 escapeNext = false
-                return .objectKey(parent, props, req, accumulatedKey + String(c))
+                return .inObjectKey(parent, props, req, accumulatedKey + String(c), returnTo: returnTo)
             }
             if c == "\\" {
                 escapeNext = true
                 return state
             }
             if c == "\"" {
-                return .objectColon(parent, props, req, accumulatedKey)
-            }
-            if c == "}" {
-                // Match legacy `advance` behavior: any `}` in `.objectKey`
-                // closes the object. (The legacy state machine doesn't
-                // distinguish between "before the key opens" and "in the
-                // key body" — both share `.objectKey`.)
-                return .done
+                // Close quote — transition to colon with the accumulated key.
+                return .objectColon(parent, props, req, accumulatedKey, returnTo: returnTo)
             }
             // RFC 8259 §7: unescaped control chars (< 0x20) are rejected
             // inside strings.
             if let ascii = c.asciiValue, ascii < 0x20 { return nil }
-            return .objectKey(parent, props, req, accumulatedKey + String(c))
+            return .inObjectKey(parent, props, req, accumulatedKey + String(c), returnTo: returnTo)
 
-        case .objectColon(let parent, let props, let req, let keyName):
+        case .objectColon(let parent, let props, let req, let keyName, let returnTo):
             if isWhitespace(c) { return state }
             if c == ":" {
                 let valueSchema = props[keyName] ?? SchemaNode(type: .anything)
-                return .objectValue(parent, props, req, valueSchema)
+                return .objectValue(parent, props, req, valueSchema, returnTo: returnTo)
             }
             return nil
 
-        case .objectValue(let parent, let props, var req, let vnode):
+        case .objectValue(let parent, let props, let req, let vnode, let returnTo):
             if isWhitespace(c) { return state }
-            guard let inner = handleValueStartPure(c, node: vnode) else { return nil }
-            if case .done = inner {
-                if let keyName = req.first { req.remove(keyName) }
-                return .objectComma(parent, props, req)
-            }
-            return inner
+            // When the value completes, we transition to .objectComma which
+            // itself returns to `returnTo` once `}` closes the object.
+            let innerReturnTo = SchemaState.objectComma(parent, props, req, returnTo: returnTo)
+            return handleValueStartPure(c, node: vnode, returnTo: innerReturnTo)
 
-        case .objectComma(let parent, let props, let req):
+        case .objectComma(let parent, let props, let req, let returnTo):
             if isWhitespace(c) { return state }
-            if c == "," { return .objectKey(parent, props, req, "") }
-            if c == "}" { return .done }
+            if c == "," { return .objectKey(parent, props, req, returnTo: returnTo) }
+            if c == "}" { return returnTo }
             return nil
 
-        case .arrayValue(let parent, let item):
+        case .arrayValue(let parent, let item, let returnTo):
             if isWhitespace(c) { return state }
-            if c == "]" { return .done }
-            guard let inner = handleValueStartPure(c, node: item ?? SchemaNode(type: .anything)) else {
-                return nil
-            }
-            if case .done = inner { return .arrayComma(parent, item) }
-            return inner
+            if c == "]" { return returnTo }
+            let innerReturnTo = SchemaState.arrayComma(parent, item, returnTo: returnTo)
+            return handleValueStartPure(c, node: item ?? SchemaNode(type: .anything), returnTo: innerReturnTo)
 
-        case .arrayComma(let parent, let item):
+        case .arrayComma(let parent, let item, let returnTo):
             if isWhitespace(c) { return state }
-            if c == "," { return .arrayValue(parent, item) }
-            if c == "]" { return .done }
+            if c == "," { return .arrayValue(parent, item, returnTo: returnTo) }
+            if c == "]" { return returnTo }
             return nil
 
-        case .inString(let isKey):
+        case .inString(let returnTo):
             if escapeNext {
                 escapeNext = false
                 // RFC 8259 §7: escapes are limited to "\/, \\, \", \b, \f, \n, \r, \t, \uXXXX
@@ -351,44 +409,25 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
                 return state
             }
             if c == "\"" {
-                // Distinguish key-string from value-string (tracked via
-                // the associated bool). Matches the original `advance`
-                // which transitions to `.done` for both — schema-aware
-                // continuation (`.objectColon` for keys, `.objectComma`/
-                // `.arrayComma` for values) is handled by the surrounding
-                // states (.objectKey explicitly produces .objectColon when
-                // the close-quote arrives without going through `.inString`).
-                _ = isKey  // intentionally unused — both branches finish the string
-                return .done
+                // Close quote — return to the post-value state.
+                return returnTo
             }
             if let ascii = c.asciiValue, ascii < 0x20 { return nil }
             return state
 
-        case .inNumber:
+        case .inNumber(let returnTo):
             if Self.digits.contains(c) || c == "." || c == "e" || c == "E" || c == "+" || c == "-" {
                 return state
             }
-            // Number ends. The original advance transitioned to .done here
-            // unconditionally (and SchemaGuided's .inNumber state doesn't
-            // carry parent context). Whitespace cleanly ends the number;
-            // any other char would require knowing the parent frame to
-            // re-process correctly. For now we accept whitespace only at
-            // the end of a number — structural terminators (`,`/`}`/`]`)
-            // are rejected here at the precompute level. The runtime
-            // safety net in `didSample` clamps to `.done` if a structural
-            // char is encountered, which forces EOS.
-            //
-            // Practical note: at runtime the model usually emits a separate
-            // token for the structural terminator after the number, so
-            // this restriction rarely matters. The Qwen3.6-27B "30.0000…"
-            // runaway is fixed in `JSONLogitProcessor` (parent-frame-aware
-            // masks); SchemaGuidedProcessor is mainly used for
-            // `json_schema` mode where the schema constrains structure
-            // more tightly anyway.
-            if isWhitespace(c) { return .done }
-            return nil
+            if isWhitespace(c) { return returnTo }
+            // Structuralchar (`,`, `}`, `]`): finish the number AND
+            // re-process the char in the post-value state, exactly mirroring
+            // `JSONLogitProcessor.step`'s re-process trick. This lets a
+            // single token like `1}` or `1,` complete the number AND close
+            // the object / advance to the next key.
+            return stepStrict(state: returnTo, escapeNext: &escapeNext, char: c)
 
-        case .inLiteral(let lit, let idx):
+        case .inLiteral(let lit, let idx, let returnTo):
             // STRICT validation — original `advance` advanced the index for
             // ANY char, which let ` thoughtful` (after first-char `t`)
             // breeze through 8 unrelated chars. Now we require the char to
@@ -396,8 +435,11 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
             let i = lit.index(lit.startIndex, offsetBy: min(idx, lit.count))
             guard i < lit.endIndex else { return nil }
             guard c == lit[i] else { return nil }
-            if idx + 1 >= lit.count { return .done }
-            return .inLiteral(lit, idx + 1)
+            if idx + 1 >= lit.count {
+                // Literal completed. Hand control to `returnTo`.
+                return returnTo
+            }
+            return .inLiteral(lit, idx + 1, returnTo: returnTo)
 
         case .done:
             // Trailing whitespace tolerated, anything else is a violation.
@@ -407,41 +449,48 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
     }
 
     /// Pure version of `handleValueStart`. Returns the entered state on a
-    /// valid value-start char, or `nil` if no transition matches.
-    private static func handleValueStartPure(_ c: Character, node: SchemaNode) -> SchemaState? {
+    /// valid value-start char, or `nil` if no transition matches. `returnTo`
+    /// is the state the FSM should transition to once the value completes —
+    /// plumbed through `.inString`/`.inNumber`/`.inLiteral` so they can find
+    /// their way back to the correct post-value state, and through
+    /// `.objectKey`/`.arrayValue` so nested structures resume the right
+    /// outer context when they close.
+    private static func handleValueStartPure(
+        _ c: Character, node: SchemaNode, returnTo: SchemaState
+    ) -> SchemaState? {
         switch node.type {
         case .object(let props, let req):
-            if c == "{" { return .objectKey(node, props, req, "") }
+            if c == "{" { return .objectKey(node, props, req, returnTo: returnTo) }
             return nil
         case .array(let items):
-            if c == "[" { return .arrayValue(node, items) }
+            if c == "[" { return .arrayValue(node, items, returnTo: returnTo) }
             return nil
         case .string, .stringEnum:
-            if c == "\"" { return .inString(false) }
+            if c == "\"" { return .inString(returnTo: returnTo) }
             return nil
         case .integer, .number:
-            if c == "-" || Self.digits.contains(c) { return .inNumber }
+            if c == "-" || Self.digits.contains(c) { return .inNumber(returnTo: returnTo) }
             return nil
         case .boolean:
-            if c == "t" { return .inLiteral("true", 1) }
-            if c == "f" { return .inLiteral("false", 1) }
+            if c == "t" { return .inLiteral("true", 1, returnTo: returnTo) }
+            if c == "f" { return .inLiteral("false", 1, returnTo: returnTo) }
             return nil
         case .null:
-            if c == "n" { return .inLiteral("null", 1) }
+            if c == "n" { return .inLiteral("null", 1, returnTo: returnTo) }
             return nil
         case .anything:
-            if c == "{" { return .objectKey(node, [:], [], "") }
-            if c == "[" { return .arrayValue(node, nil) }
-            if c == "\"" { return .inString(false) }
-            if c == "-" || Self.digits.contains(c) { return .inNumber }
-            if c == "t" { return .inLiteral("true", 1) }
-            if c == "f" { return .inLiteral("false", 1) }
-            if c == "n" { return .inLiteral("null", 1) }
+            if c == "{" { return .objectKey(node, [:], [], returnTo: returnTo) }
+            if c == "[" { return .arrayValue(node, nil, returnTo: returnTo) }
+            if c == "\"" { return .inString(returnTo: returnTo) }
+            if c == "-" || Self.digits.contains(c) { return .inNumber(returnTo: returnTo) }
+            if c == "t" { return .inLiteral("true", 1, returnTo: returnTo) }
+            if c == "f" { return .inLiteral("false", 1, returnTo: returnTo) }
+            if c == "n" { return .inLiteral("null", 1, returnTo: returnTo) }
             return nil
         case .anyOf(let nodes):
             // Try each branch; first that admits the char wins.
             for n in nodes {
-                if let entered = handleValueStartPure(c, node: n) {
+                if let entered = handleValueStartPure(c, node: n, returnTo: returnTo) {
                     return entered
                 }
             }

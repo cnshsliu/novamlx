@@ -384,6 +384,10 @@ private struct RequestLogMiddleware: RouterMiddleware {
     typealias Context = AppContext
     let store: RequestLogStore
 
+    /// Hard cap on body capture. Anything larger than this (audio uploads,
+    /// image generation payloads, etc.) gets a placeholder note instead.
+    static let maxCaptureBytes: Int = 256 * 1024
+
     func handle(
         _ request: Request,
         context: Context,
@@ -398,37 +402,126 @@ private struct RequestLogMiddleware: RouterMiddleware {
 
         let token = APIKeyAuthMiddleware.extractToken(from: request)
         let path = request.uri.path
+        let method = request.method.rawValue
+
+        // Filter noise: CORS preflight, UI polling, browser probes — these
+        // drown out real user requests and always look like errors.
+        if Self.shouldSkip(method: method, path: path) {
+            return try await next(request, context)
+        }
+
+        // Decide whether to capture the request body. We only capture text/JSON
+        // bodies under 256KB so audio uploads, image bytes etc. don't bloat
+        // memory.
+        let contentType = request.headers[fields: HTTPField.Name("content-type")!].first?.value ?? ""
+        let contentLength = Int(request.headers[fields: HTTPField.Name("content-length")!].first?.value ?? "") ?? 0
+        let shouldCaptureBody = method.uppercased() != "GET"
+            && Self.isTextContentType(contentType)
+            && contentLength <= Self.maxCaptureBytes
+
+        var requestToForward = request
+        var bodyData: Data? = nil
+        var bodyNote: String? = nil
+
+        if shouldCaptureBody {
+            do {
+                // collectBody collects the streaming body into a ByteBuffer and
+                // stores it back on the request, so the downstream handler can
+                // still call request.body.collect() and get the same bytes.
+                let buffer = try await requestToForward.collectBody(upTo: Self.maxCaptureBytes)
+                if buffer.readableBytes > 0 {
+                    bodyData = Data(buffer: buffer)
+                }
+            } catch {
+                // If collection fails (too large, client disconnect, etc.) fall
+                // through to the handler with the original request and no body.
+                requestToForward = request
+                bodyNote = "body capture failed: \(error.localizedDescription)"
+            }
+        } else if method.uppercased() != "GET", !contentType.isEmpty {
+            // Record why we skipped, so the UI can show "[audio/wav · 2.3 MB — body not captured]".
+            let sizeLabel: String = contentLength > 0 ? ByteCountFormatter.string(fromByteCount: Int64(contentLength), countStyle: .file) : "unknown size"
+            bodyNote = "[\(contentType) · \(sizeLabel) — body not captured]"
+        }
 
         // Record the start. We don't always know the model at middleware time
         // (LB/modelfile resolution happens inside the handler) — inference
         // completion re-finalizes with the exact model.
-        store.start(id: requestID, method: request.method.rawValue, path: path, apiKeyToken: token)
+        store.start(
+            id: requestID,
+            method: method,
+            path: path,
+            apiKeyToken: token,
+            requestBody: bodyData,
+            requestContentType: contentType.isEmpty ? nil : contentType,
+            requestBodyNote: bodyNote
+        )
 
         let start = Date()
         do {
-            let response = try await next(request, context)
-            // Finalize failed HTTP responses here (4xx/5xx). Successful inference
-            // responses are finalized by the engine with richer data; if for any
-            // reason they aren't, fall through to the 200 path below.
+            let response = try await next(requestToForward, context)
             let httpStatus = response.status
             let isSuccess = (200..<300).contains(httpStatus.code)
+            store.recordResponse(id: requestID, status: httpStatus.code)
             if path.isInferenceEndpoint {
-                if isSuccess {
-                    // Engine is expected to finalize; nothing to do here.
-                } else {
-                    store.finishHTTP(
-                        id: requestID,
-                        status: .error,
-                        error: "HTTP \(httpStatus.code)",
-                        durationMs: Date().timeIntervalSince(start) * 1000)
+                // Wrap inference response bodies so the request-log entry is
+                // finalized when the body is fully written — whether that's a
+                // 50ms JSON response, a 30s SSE stream, or a stream that errors
+                // mid-write (client disconnect, ChannelError, etc.).
+                //
+                // The engine's StreamTracker is supposed to fire `finish` for
+                // local inference, but coverage is patchy: SSE handlers throw
+                // on writer errors without finalizing, Tokenhub/LB proxies
+                // never touch the engine, and `/v1/responses` doesn't even
+                // thread the HTTP request id through. Wrapping the body here
+                // covers ALL of them.
+                //
+                // Idempotent: if StreamTracker already moved the entry to
+                // `recent`, this finishHTTP is a no-op.
+                let capturedStore = store
+                let capturedID = requestID
+                let capturedStart = start
+                let capturedCode = httpStatus.code
+                let capturedIsSuccess = isSuccess
+                let originalBody = response.body
+                var wrappedResponse = response
+                wrappedResponse.body = ResponseBody(contentLength: originalBody.contentLength) { writer in
+                    do {
+                        try await originalBody.write(writer)
+                    } catch {
+                        // Body write failed (client disconnect, channel error,
+                        // upstream timeout). Finalize the entry before re-throwing
+                        // so the log reflects the actual outcome rather than
+                        // hanging in `active` until cancelStale prunes it.
+                        capturedStore.finishHTTP(
+                            id: capturedID,
+                            status: .error,
+                            error: "stream write failed: \(error.localizedDescription)",
+                            durationMs: Date().timeIntervalSince(capturedStart) * 1000,
+                            responseStatus: capturedCode)
+                        throw error
+                    }
+                    // Body written cleanly. If the engine already finalized
+                    // (typical for local non-streaming), this is a no-op.
+                    // Otherwise (proxy paths, SSE that closed without engine
+                    // callback), this is the actual finalization.
+                    capturedStore.finishHTTP(
+                        id: capturedID,
+                        status: capturedIsSuccess ? .success : .error,
+                        error: capturedIsSuccess ? nil : "HTTP \(capturedCode)",
+                        durationMs: Date().timeIntervalSince(capturedStart) * 1000,
+                        responseStatus: capturedCode)
                 }
+                return wrappedResponse
             } else {
-                // Non-inference endpoints (models list, stats, etc.) — finalize now.
+                // Non-inference endpoints (models list, stats, etc.) — finalize
+                // immediately on response return, no body wrapping needed.
                 store.finishHTTP(
                     id: requestID,
                     status: isSuccess ? .success : .error,
                     error: isSuccess ? nil : "HTTP \(httpStatus.code)",
-                    durationMs: Date().timeIntervalSince(start) * 1000)
+                    durationMs: Date().timeIntervalSince(start) * 1000,
+                    responseStatus: httpStatus.code)
             }
             return response
         } catch {
@@ -439,6 +532,67 @@ private struct RequestLogMiddleware: RouterMiddleware {
                 durationMs: Date().timeIntervalSince(start) * 1000)
             throw error
         }
+    }
+
+    /// Filter CORS preflight, health polling, and browser auto-probes. These
+    /// generate dozens of "error" rows in the log that aren't actionable.
+    static func shouldSkip(method: String, path: String) -> Bool {
+        if method.uppercased() == "OPTIONS" { return true }
+        let skipExact: Set<String> = [
+            "/health", "/ready",
+            "/favicon.ico", "/robots.txt",
+            "/v1/models", "/v1/stats"
+        ]
+        if skipExact.contains(path) { return true }
+        let skipPrefixes = [
+            "/.well-known/",
+            "/admin/api/metrics",
+            "/admin/api/health",
+            "/admin/api/hf/tasks",
+            "/admin/api/spec-boost",
+            // UI polling endpoints (cluster status, model status, discovery,
+            // HF tasks). These fire every 2-10s and are pure infrastructure
+            // noise — if logged, they bury real user requests.
+            "/admin/api/cluster/",
+            "/admin/api/hf/model",
+            // Admin model/session listing endpoints polled by the UI menu bar
+            // and various pages. GET only — POST to these is user-initiated
+            // (model load, download, etc.) and still gets logged.
+        ]
+        if skipPrefixes.contains(where: { path.hasPrefix($0) }) { return true }
+        // GET to /admin/models and /admin/sessions is always UI polling.
+        if method.uppercased() == "GET" {
+            if path == "/admin/models" || path.hasPrefix("/admin/sessions") {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True for content types whose body is human-readable text worth capturing
+    /// (JSON, form data, plain text, XML). False for binary uploads.
+    static func isTextContentType(_ contentType: String) -> Bool {
+        let lower = contentType.lowercased()
+        if lower.isEmpty { return false }
+        if lower.contains("application/json") { return true }
+        if lower.contains("text/") { return true }
+        if lower.contains("xml") { return true }
+        if lower.contains("application/x-www-form-urlencoded") { return true }
+        // Audio, image, video, multipart → skip (binary or huge).
+        return false
+    }
+
+    /// Detect `"stream": true` in a captured JSON request body, so the
+    /// middleware knows to leave finalization to the engine (which fires
+    /// store.finish at SSE stream end) rather than finalizing eagerly.
+    /// Falls back to false when the body wasn't captured (e.g. audio upload).
+    static func isStreamingRequest(bodyData: Data?, contentType: String) -> Bool {
+        guard let data = bodyData, !data.isEmpty else { return false }
+        // Cheap substring check — avoids a full JSON parse per request.
+        // Match `"stream":true` and `"stream" : true` with arbitrary whitespace.
+        guard let s = String(data: data, encoding: .utf8) else { return false }
+        let compact = s.replacingOccurrences(of: " ", with: "")
+        return compact.contains("\"stream\":true")
     }
 }
 
@@ -482,6 +636,7 @@ extension NovaMLXError {
         case .insufficientMemory: .serviceUnavailable
         case .modelNotLoaded: .notFound
         case .modelLoadInProgress: .serviceUnavailable
+        case .mtpCompanionNotLoadable: .badRequest
         }
     }
 
@@ -499,6 +654,7 @@ extension NovaMLXError {
         case .insufficientMemory: "server_error"
         case .modelNotLoaded: "not_found_error"
         case .modelLoadInProgress: "server_error"
+        case .mtpCompanionNotLoadable: "invalid_request_error"
         }
     }
 
@@ -516,6 +672,7 @@ extension NovaMLXError {
         case .insufficientMemory: "insufficient_memory"
         case .modelNotLoaded: "model_not_loaded"
         case .modelLoadInProgress: "model_load_in_progress"
+        case .mtpCompanionNotLoadable: "mtp_companion_not_loadable"
         }
     }
 }
@@ -1977,6 +2134,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 family: record.family,
                                 isHybrid: isHybrid,
                                 modelType: record.modelType,
+                                modelId: record.id,
+                                nativeMtp: isLoaded && inference.hasNativeMtp(record.id),
                                 draftModelLoaded: { id in inference.isModelLoaded(id) },
                                 draftModelOnDisk: { id in models.isDownloaded(id) }
                             )
@@ -2019,13 +2178,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                     if let refused = await self.refuseUnlistedIfNeeded(id: req.modelId) { return refused }
 
-                    if await self.catalogAllowUnlisted(), models.getRecord(req.modelId) == nil {
-                        models.register(
-                            id: req.modelId,
-                            family: .other,
-                            remoteURL: "https://huggingface.co/\(req.modelId)"
-                        )
-                    }
+                    await self.ensureRegisteredForAllowedDownload(id: req.modelId)
 
                     guard models.getRecord(req.modelId) != nil else {
                         throw NovaMLXError.modelNotFound(req.modelId)
@@ -2227,7 +2380,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         identifier: ModelIdentifier(id: candidate.draftModelId, family: candidate.family),
                         modelType: .llm
                     )
-                    try await inference.loadModel(at: draftRecord.localURL, config: config)
+                    try await inference.loadModel(
+                        at: draftRecord.localURL,
+                        config: config,
+                        asMtpCompanion: true
+                    )
                     return try Self.jsonResponse(SpecBoostInfo(
                         status: "active",
                         draftModelId: candidate.draftModelId,
@@ -2769,15 +2926,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let endpoint = params["endpoint"] ?? params["mirror"]
                             NovaMLXLog.info("[HF][Search] admin request q=\(q) endpoint=\(endpoint ?? "official") mlxOnly=\(mlxOnly) limit=\(limit)")
 
+                            await self.modelManager.fetchCatalog()
+
                             if !(await self.catalogAllowUnlisted()) {
+                                let catalog = self.catalogEntries()
                                 let category = params["category"].flatMap(ModelType.init(rawValue:))
-                                let hits = ModelCatalogPolicy.search(
-                                    self.catalogEntries(),
+                                let localHits = ModelCatalogPolicy.search(
+                                    catalog,
                                     query: q,
                                     category: category
-                                )
-                                let limited = Array(hits.prefix(limit))
-                                let models = limited.map { entry in
+                                ).filter { !ModelCatalogPolicy.isIdPattern($0.id) }
+
+                                var models: [HFModelInfo] = localHits.map { entry in
                                     HFModelInfo(
                                         id: entry.id,
                                         author: entry.id.split(separator: "/").first.map(String.init),
@@ -2785,7 +2945,47 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                         pipelineTag: entry.category.rawValue
                                     )
                                 }
-                                return try Self.jsonResponse(HFSearchResult(models: models, total: hits.count))
+                                var seen = Set(models.map(\.id))
+
+                                // Family globs expand via Hub only when the query is about that
+                                // family. Hub failures must not hide local catalog hits (e.g. Ornith).
+                                if ModelCatalogPolicy.shouldExpandFamilyGlobs(query: q, catalog: catalog) {
+                                    do {
+                                        let searchService: HuggingFaceService = {
+                                            if let ep = endpoint, !ep.isEmpty {
+                                                return HuggingFaceService(
+                                                    modelDirectory: self.modelManager.modelsDirectory,
+                                                    endpoint: ep
+                                                )
+                                            }
+                                            return hf
+                                        }()
+                                        let hub = try await searchService.searchModels(
+                                            query: q,
+                                            limit: max(limit, 100),
+                                            mlxOnly: false
+                                        )
+                                        for info in hub.models {
+                                            guard seen.insert(info.id).inserted else { continue }
+                                            guard ModelCatalogPolicy.isDownloadAllowed(
+                                                id: info.id,
+                                                catalog: catalog,
+                                                allowUnlisted: false
+                                            ) else { continue }
+                                            if let category,
+                                               let match = ModelCatalogPolicy.entry(id: info.id, in: catalog),
+                                               match.category != category {
+                                                continue
+                                            }
+                                            models.append(info)
+                                        }
+                                    } catch {
+                                        NovaMLXLog.error("[HF][Search] family glob expand failed: \(error)")
+                                    }
+                                }
+
+                                let limited = Array(models.prefix(limit))
+                                return try Self.jsonResponse(HFSearchResult(models: limited, total: models.count))
                             }
 
                             let searchService: HuggingFaceService = {
@@ -2845,12 +3045,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             // ends up in the activeTasks that GET /admin/api/hf/tasks returns.
                             // The live mirrorEndpoint (if any) is passed down so ModelScope / custom
                             // mirrors still get the correct listing + resolve logic.
-                            let entry = ModelCatalogPolicy.entry(id: repoId, in: self.catalogEntries())
+                            let catalog = self.catalogEntries()
+                            let exact = catalog.first {
+                                $0.id == repoId && !ModelCatalogPolicy.isIdPattern($0.id)
+                            }
                             let task = try await hf.startDownload(
                                 repoId: repoId,
                                 hfToken: hfToken,
                                 mirrorEndpoint: endpoint,
-                                revision: entry?.revision
+                                revision: exact?.revision
                             )
                             return try Self.jsonResponse(["success": "true", "task_id": task.id] as [String: String])
                         } catch {
@@ -3539,6 +3742,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     }
 
     private func refuseUnlistedIfNeeded(id: String) async -> Response? {
+        await modelManager.fetchCatalog()
         let allowed = ModelCatalogPolicy.isDownloadAllowed(
             id: id,
             catalog: catalogEntries(),
@@ -3551,6 +3755,31 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             )
         }
         return nil
+    }
+
+    /// Prefix-allowed (or Advanced) ids are not pre-registered from the catalog
+    /// file — register them on first download so `/admin/models/download` works.
+    private func ensureRegisteredForAllowedDownload(id: String) async {
+        if modelManager.getRecord(id) != nil { return }
+        let catalog = catalogEntries()
+        guard ModelCatalogPolicy.isDownloadAllowed(
+            id: id,
+            catalog: catalog,
+            allowUnlisted: await catalogAllowUnlisted()
+        ) else { return }
+        let match = ModelCatalogPolicy.entry(id: id, in: catalog)
+        let remoteURL: String
+        if let match, !ModelCatalogPolicy.isIdPattern(match.id) {
+            remoteURL = match.url
+        } else {
+            remoteURL = "https://huggingface.co/\(id)"
+        }
+        modelManager.register(
+            id: id,
+            family: match?.family ?? .other,
+            modelType: match?.category ?? .llm,
+            remoteURL: remoteURL
+        )
     }
 
     private static func extractRequestToken(_ request: Request) -> String? {

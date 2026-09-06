@@ -8,12 +8,14 @@ import NovaMLXUtils
 public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
     case localInference = "Local Inference"   // was: models = "Models"
+    case downloads = "Downloads"
     case tokenhub = "Tokenhub"
     case loadBalancers = "Load Balancers"     // NEW — placeholder until Task 10
     case chat = "Playground"
     case cluster = "Cluster"
     case requests = "Requests"
     case apiKeys = "API Keys"
+    case catalogAdmin = "Catalog Admin"
     case settings = "Settings"
 
     public var id: String { rawValue }
@@ -22,12 +24,14 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
         case .localInference: return "cube.box"
+        case .downloads: return "arrow.down.circle"
         case .tokenhub: return "server.rack"
         case .loadBalancers: return "scalemass"
         case .chat: return "cpu"
         case .cluster: return "xserve"
         case .requests: return "list.bullet.rectangle"
         case .apiKeys: return "key.fill"
+        case .catalogAdmin: return "checkmark.seal.fill"
         case .settings: return "gearshape"
         }
     }
@@ -75,7 +79,11 @@ public struct NovaAppView: View {
 
             VStack(spacing: 2) {
                 ForEach(AppPage.allCases) { page in
-                    if page != .cluster || appState.clusterEnabled {
+                    if page == .cluster && !appState.clusterEnabled {
+                        EmptyView()
+                    } else if page == .catalogAdmin && !appState.isCatalogAdmin {
+                        EmptyView()
+                    } else {
                         sidebarItem(page)
                     }
                 }
@@ -107,7 +115,7 @@ public struct NovaAppView: View {
 
                 Spacer()
 
-                if page == .localInference && appState.activeDownloadCount > 0 {
+                if page == .downloads && appState.activeDownloadCount > 0 {
                     Text("\(appState.activeDownloadCount)")
                         .font(.caption2)
                         .foregroundColor(.white)
@@ -244,29 +252,48 @@ public struct NovaAppView: View {
             StatusPageView(appState: appState, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .status ? 1 : 0)
+                .allowsHitTesting(selectedPage == .status)
             ClusterPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .cluster ? 1 : 0)
+                .allowsHitTesting(selectedPage == .cluster)
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .localInference ? 1 : 0)
+                .allowsHitTesting(selectedPage == .localInference)
+            DownloadsPageView(appState: appState, modelManager: modelManager)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .downloads ? 1 : 0)
+                .allowsHitTesting(selectedPage == .downloads)
             TokenhubPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .tokenhub ? 1 : 0)
+                .allowsHitTesting(selectedPage == .tokenhub)
             LoadBalancersPageView(appState: appState)
                 .opacity(selectedPage == .loadBalancers ? 1 : 0)
+                .allowsHitTesting(selectedPage == .loadBalancers)
             ChatPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
+                .allowsHitTesting(selectedPage == .chat)
             RequestLogPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .requests ? 1 : 0)
+                .allowsHitTesting(selectedPage == .requests)
             APIKeysPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .apiKeys ? 1 : 0)
+                .allowsHitTesting(selectedPage == .apiKeys)
             SettingsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .settings ? 1 : 0)
+                .allowsHitTesting(selectedPage == .settings)
+            if appState.isCatalogAdmin {
+                CatalogAdminPageView(appState: appState, modelManager: modelManager)
+                    .environmentObject(l10n)
+                    .opacity(selectedPage == .catalogAdmin ? 1 : 0)
+                    .allowsHitTesting(selectedPage == .catalogAdmin)
+            }
         }
     }
 
@@ -275,11 +302,13 @@ public struct NovaAppView: View {
         case .status: return l10n.tr("app.status")
         case .cluster: return l10n.tr("app.cluster")
         case .localInference: return l10n.tr("app.local_inference")
+        case .downloads: return l10n.tr("app.downloads")
         case .tokenhub: return l10n.tr("app.tokenhub")
         case .loadBalancers: return l10n.tr("app.load_balancers")
         case .chat: return l10n.tr("app.chat")
         case .requests: return l10n.tr("app.requests")
         case .apiKeys: return "API Keys"
+        case .catalogAdmin: return l10n.tr("app.catalogAdmin")
         case .settings: return l10n.tr("app.settings")
         }
     }

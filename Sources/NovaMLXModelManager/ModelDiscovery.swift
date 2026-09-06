@@ -1,4 +1,5 @@
 import Foundation
+import MLXLMCommon
 import NovaMLXCore
 import NovaMLXUtils
 
@@ -55,10 +56,12 @@ public final class ModelDiscovery: Sendable {
         "Mistral3ForConditionalGeneration",
         "LlavaQwen2ForCausalLM",
         "Gemma4ForConditionalGeneration",
+        "Qwen4ExpForConditionalGeneration",
     ]
 
     private static let vlmModelTypes: Set<String> = [
         "qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe",
+        "qwen4_exp",
         "gemma3", "llava", "llava_next", "llava-qwen2", "mllama",
         "idefics3", "internvl_chat", "phi3_v", "paligemma", "mistral3",
         "gemma4",
@@ -113,10 +116,13 @@ public final class ModelDiscovery: Sendable {
         "mistral": .mistral, "mixtral": .mistral,
         "phi": .phi, "phi3": .phi, "phi3_v": .phi, "phi4mm": .phi,
         "qwen2": .qwen, "qwen2_vl": .qwen, "qwen2_5_vl": .qwen, "qwen3": .qwen, "qwen3_vl": .qwen,
+        "qwen3_5": .qwen, "qwen3_5_moe": .qwen, "qwen3_5_mtp": .qwen,
+        "qwen4_exp": .qwen, "qwen4_exp_text": .qwen,
         "gemma": .gemma, "gemma2": .gemma, "gemma3": .gemma, "gemma4": .gemma, "gemma3_text": .gemma, "gemma3n": .gemma, "gemma4_text": .gemma,
         "starcoder2": .starcoder,
         "bailing_moe": .bailing, "bailing_hybrid": .bailing,
-        "deepseek_v3": .qwen, "deepseek_v4": .qwen,
+        "deepseek_v3": .deepseek, "deepseek_v4": .deepseek,
+        "hy_v4": .hunyuan,
         "gpt_oss": .gptOss,
         "whisper": .whisper,
         "qwen3_asr": .qwen3Asr,
@@ -140,7 +146,9 @@ public final class ModelDiscovery: Sendable {
         "Gemma3ForConditionalGeneration": .gemma,
         "Gemma4ForConditionalGeneration": .gemma,
         "GptOssForCausalLM": .gptOss,
-        "DeepseekV4ForCausalLM": .qwen,
+        "DeepseekV4ForCausalLM": .deepseek,
+        "HYV4ForCausalLM": .hunyuan,
+        "Qwen4ExpForConditionalGeneration": .qwen,
         "Qwen3ASRForConditionalGeneration": .qwen3Asr,
         "Qwen3TTSForConditionalGeneration": .qwen3Tts,
         "DotsTTSForConditionalGeneration": .dotsTts,
@@ -162,7 +170,7 @@ public final class ModelDiscovery: Sendable {
             guard subdir.directoryExists, !subdir.lastPathComponent.hasPrefix(".") else { continue }
             let configPath = subdir.appendingPathComponent("config.json")
 
-            if configPath.fileExists {
+            if configPath.fileExists || hasGGUFWeights(in: subdir) {
                 let adapterConfigPath = subdir.appendingPathComponent("adapter_config.json")
                 let adapterWeightsPath = subdir.appendingPathComponent("adapters.safetensors")
                 if adapterConfigPath.fileExists && adapterWeightsPath.fileExists {
@@ -181,7 +189,8 @@ public final class ModelDiscovery: Sendable {
                     let childConfig = child.appendingPathComponent("config.json")
                     let unetConfig = child.appendingPathComponent("unet/config.json")
                     let fluxTransformerConfig = child.appendingPathComponent("transformer/config.json")
-                    guard childConfig.fileExists || unetConfig.fileExists || fluxTransformerConfig.fileExists else { continue }
+                    guard childConfig.fileExists || unetConfig.fileExists || fluxTransformerConfig.fileExists
+                        || hasGGUFWeights(in: child) else { continue }
                     let adapterConfigPath = child.appendingPathComponent("adapter_config.json")
                     let adapterWeightsPath = child.appendingPathComponent("adapters.safetensors")
                     let isAdapter = adapterConfigPath.fileExists && adapterWeightsPath.fileExists
@@ -197,7 +206,7 @@ public final class ModelDiscovery: Sendable {
 
         if models.isEmpty {
             let rootConfig = directory.appendingPathComponent("config.json")
-            if rootConfig.fileExists {
+            if rootConfig.fileExists || hasGGUFWeights(in: directory) {
                 if let model = registerModel(at: directory, id: directory.lastPathComponent) {
                     models.append(model)
                 }
@@ -222,6 +231,9 @@ public final class ModelDiscovery: Sendable {
             let vaeDir = path.appendingPathComponent("vae")
             if transformerConfig.fileExists && vaeDir.directoryExists {
                 return registerDiffusersModel(at: path, id: id)
+            }
+            if hasGGUFWeights(in: path) {
+                return registerGGUFModel(at: path, id: id)
             }
             return nil
         }
@@ -256,6 +268,38 @@ public final class ModelDiscovery: Sendable {
         )
     }
 
+    private func registerGGUFModel(at path: URL, id: String) -> DiscoveredModel? {
+        guard let ggufURL = try? FileManager.default.contentsOfDirectory(
+            at: path, includingPropertiesForKeys: nil
+        ).first(where: { $0.pathExtension.lowercased() == "gguf" }) else {
+            return nil
+        }
+        guard let gguf = try? GGUFFile.parse(url: ggufURL) else {
+            NovaMLXLog.warning("[Discovery] Failed to parse GGUF header for \(id)")
+            return nil
+        }
+        let hfType = GGUFHuggingFaceConfig.hfModelType(ggufArch: gguf.architecture ?? "llama")
+        let family = detectFamily(
+            config: HFConfig(architectures: nil, modelType: hfType, visionConfig: nil),
+            modelId: id)
+        let size = estimateSize(at: path)
+        let complete = Self.checkCompleteness(at: path, isAdapter: false)
+        NovaMLXLog.info(
+            "[Discovery] Discovered GGUF \(id): arch=\(gguf.architecture ?? "?") type=\(hfType) family=\(family.rawValue) size=\(size.bytesFormatted) complete=\(complete)"
+        )
+        return DiscoveredModel(
+            modelId: id,
+            modelPath: path,
+            modelType: .llm,
+            family: family,
+            estimatedSizeBytes: size,
+            architectures: [GGUFHuggingFaceConfig.architectureName(hfType: hfType)],
+            configModelType: hfType,
+            isAdapter: false,
+            isComplete: complete
+        )
+    }
+
     /// Register a diffusers-format model (e.g. SDXL-Turbo) that has no root config.json.
     /// Uses unet/config.json to infer model metadata.
     private func registerDiffusersModel(at path: URL, id: String) -> DiscoveredModel? {
@@ -284,20 +328,25 @@ public final class ModelDiscovery: Sendable {
     /// - No zero-byte weight files (indicates interrupted download)
     private static func checkCompleteness(at path: URL, isAdapter: Bool) -> Bool {
         let fm = FileManager.default
+        // Resolve symlinks — contentsOfDirectory works on the symlink itself but
+        // subsequent per-file attribute checks may use the un-resolved URL.
+        let resolved = path.resolvingSymlinksInPath()
 
         if isAdapter {
-            let adapterFile = path.appendingPathComponent("adapters.safetensors")
+            let adapterFile = resolved.appendingPathComponent("adapters.safetensors")
             guard let size = fm.fileSize(at: adapterFile), size > 0 else { return false }
             return true
         }
 
         // Check for weight files
-        guard let contents = try? fm.contentsOfDirectory(at: path, includingPropertiesForKeys: nil) else {
+        guard let contents = try? fm.contentsOfDirectory(at: resolved, includingPropertiesForKeys: nil) else {
             return false
         }
 
         // If ANY .download temp files exist, download is still in progress — not complete
-        let hasTempFiles = contents.contains { $0.pathExtension == "download" }
+        let hasTempFiles = contents.contains {
+            $0.pathExtension == "download" || $0.pathExtension == "aria2"
+        }
         if hasTempFiles {
             #if DEBUG
             NovaMLXLog.info("[Discovery] Incomplete model: .download temp files found in \(path.lastPathComponent)")
@@ -402,10 +451,11 @@ public final class ModelDiscovery: Sendable {
         }
 
         let dirName = path.lastPathComponent.lowercased()
-        if dirName.contains("embedding") || dirName.contains("embed") {
-            for arch in architectures {
-                if Self.embeddingArchitectures.contains(arch) { return .embedding }
-            }
+        // Qwen3-Embedding / EmbeddingGemma checkpoints often keep a CausalLM
+        // architecture string. The directory name is the reliable signal.
+        if dirName.contains("embedding") || dirName.contains("-embed-")
+            || dirName.contains("_embed_") || dirName.hasSuffix("-embed") {
+            return .embedding
         }
 
         return .llm

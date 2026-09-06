@@ -91,7 +91,7 @@ struct SettingsPageView: View {
                 settingsRow(l10n.tr("settings.adminApi"), value: "http://127.0.0.1:\(String(appState.adminPort))")
 
                 configPathRow
-                allowUnlistedToggle
+                resourceLimitSliders
             }
 
             // Bottom action bar
@@ -203,29 +203,89 @@ struct SettingsPageView: View {
         }
     }
 
-    private var allowUnlistedToggle: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var resourceLimitSliders: some View {
+        let phys = ProcessInfo.processInfo.physicalMemory
+        let minGB = ResourceLimits.sliderMinGB()
+        let maxGB = ResourceLimits.sliderMaxGB(physicalRAM: phys)
+        let chatCount = appState.loadedModels.filter { !ResourceLimits.isCompanionDraftModelId($0) }.count
+        return VStack(alignment: .leading, spacing: 10) {
             Divider().padding(.bottom, 4)
-            Toggle(isOn: Binding(
-                get: { appState.allowUnlistedDownloads },
-                set: { newValue in
-                    appState.allowUnlistedDownloads = newValue
-                    Task { await appState.setAllowUnlistedDownloads(newValue) }
-                }
-            )) {
-                Text(l10n.tr("settings.allowUnlisted"))
-                    .font(.system(size: 13))
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
 
-            Text(l10n.tr("settings.allowUnlistedCaption"))
+            resourceSliderRow(
+                title: l10n.tr("settings.gpuLimit"),
+                caption: l10n.tr("settings.gpuLimitCaption"),
+                value: $appState.gpuLimitGB,
+                isAuto: $appState.gpuLimitIsAuto,
+                range: minGB...min(maxGB, appState.ramLimitGB)
+            )
+
+            resourceSliderRow(
+                title: l10n.tr("settings.ramLimit"),
+                caption: l10n.tr("settings.ramLimitCaption"),
+                value: $appState.ramLimitGB,
+                isAuto: $appState.ramLimitIsAuto,
+                range: minGB...maxGB
+            )
+
+            Text(chatCount <= 1
+                 ? l10n.tr("settings.resourceAutoExclusiveCaption")
+                 : l10n.tr("settings.resourceSharedCaption"))
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .onChange(of: appState.ramLimitGB) {
+            if appState.gpuLimitGB > appState.ramLimitGB {
+                appState.gpuLimitGB = appState.ramLimitGB
+            }
+        }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private func resourceSliderRow(
+        title: String,
+        caption: String,
+        value: Binding<Double>,
+        isAuto: Binding<Bool>,
+        range: ClosedRange<Double>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 13))
+                Spacer()
+                if isAuto.wrappedValue {
+                    Text(l10n.tr("settings.resourceAuto"))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                Text("\(Int(value.wrappedValue.rounded())) GB")
+                    .font(.system(size: 12).monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: value, in: range, step: 1) { editing in
+                if editing {
+                    isAuto.wrappedValue = false
+                } else {
+                    Task { await appState.persistSliderLimits(inferenceService: inferenceService) }
+                }
+            }
+            HStack {
+                Button(l10n.tr("settings.resourceAuto")) {
+                    isAuto.wrappedValue = true
+                    Task { await appState.persistSliderLimits(inferenceService: inferenceService) }
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11))
+                .disabled(isAuto.wrappedValue)
+                Spacer()
+            }
+            Text(caption)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var configEditorPanel: some View {
@@ -250,60 +310,6 @@ struct SettingsPageView: View {
             HStack(spacing: 12) {
                 configField(l10n.tr("settings.defaultModel"), text: $cfgDefaultModel, width: nil, placeholder: l10n.tr("settings.modelPlaceholder"))
             }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(l10n.tr("settings.memoryLimit")).font(.system(size: 11)).foregroundColor(.secondary)
-                        Picker("", selection: $memoryLimitMode) {
-                            Text(l10n.tr("settings.memoryLimitAuto")).tag(MemoryLimitMode.auto)
-                            Text(l10n.tr("settings.memoryLimitPercent")).tag(MemoryLimitMode.percent)
-                            Text(l10n.tr("settings.memoryLimitFixed")).tag(MemoryLimitMode.fixed)
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 150)
-                    }
-
-                    if memoryLimitMode == .percent {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(l10n.tr("settings.memoryLimitPercentLabel")).font(.system(size: 11)).foregroundColor(.secondary)
-                            HStack(spacing: 4) {
-                                TextField("", value: $memoryLimitPercent, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.system(size: 12))
-                                    .frame(width: 60)
-                                Text("%").font(.system(size: 12)).foregroundColor(.secondary)
-                            }
-                        }
-                    }
-
-                    if memoryLimitMode == .fixed {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(l10n.tr("settings.memoryLimitValueLabel")).font(.system(size: 11)).foregroundColor(.secondary)
-                            HStack(spacing: 4) {
-                                TextField("", value: $memoryLimitValue, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.system(size: 12))
-                                    .frame(width: 80)
-                                Picker("", selection: $memoryLimitUnit) {
-                                    Text(l10n.tr("settings.memoryLimitGB")).tag("GB")
-                                    Text(l10n.tr("settings.memoryLimitMB")).tag("MB")
-                                }
-                                .pickerStyle(.menu)
-                                .frame(width: 70)
-                            }
-                        }
-                    }
-                }
-
-                if memoryLimitMode == .auto {
-                    Text(l10n.tr("settings.memoryLimitAutoDesc"))
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
         }
     }
 
@@ -335,15 +341,6 @@ struct SettingsPageView: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12))
                 .frame(width: width)
-        }
-    }
-
-    private func buildMemoryLimitString() -> String {
-        switch memoryLimitMode {
-        case .auto: return "auto"
-        case .disabled: return "disabled"
-        case .percent: return "\(Int(memoryLimitPercent))%"
-        case .fixed: return "\(Int(memoryLimitValue))\(memoryLimitUnit)"
         }
     }
 
@@ -509,7 +506,8 @@ struct SettingsPageView: View {
             "maxConcurrentRequests": cfgMaxConcurrent,
             "requestTimeout": cfgTimeout,
             "maxRequestSizeMB": cfgMaxBodyMB,
-            "maxProcessMemory": buildMemoryLimitString()
+            "maxProcessMemory": appState.ramLimitIsAuto ? "auto" : ResourceLimits.formatGB(appState.ramLimitGB),
+            "maxGpuMemory": appState.gpuLimitIsAuto ? "auto" : ResourceLimits.formatGB(min(appState.gpuLimitGB, appState.ramLimitGB))
         ]
 
         // Cluster settings — nested inside server dict so ServerConfig.Codable can decode it
@@ -574,7 +572,8 @@ struct SettingsPageView: View {
                     tlsKeyPath: current.tlsKeyPath,
                     tlsKeyPassword: current.tlsKeyPassword,
                     maxRequestSizeMB: cfgMaxBodyMB,
-                    maxProcessMemory: buildMemoryLimitString(),
+                    maxProcessMemory: appState.ramLimitIsAuto ? "auto" : ResourceLimits.formatGB(appState.ramLimitGB),
+                    maxGpuMemory: appState.gpuLimitIsAuto ? "auto" : ResourceLimits.formatGB(min(appState.gpuLimitGB, appState.ramLimitGB)),
                     prefixCacheEnabled: current.prefixCacheEnabled,
                     allowUnlistedDownloads: appState.allowUnlistedDownloads,
                     autoLoad: current.autoLoad,
@@ -762,6 +761,7 @@ struct SettingsPageView: View {
                 tlsKeyPassword: currentServer.tlsKeyPassword,
                 maxRequestSizeMB: currentServer.maxRequestSizeMB,
                 maxProcessMemory: currentServer.maxProcessMemory,
+                maxGpuMemory: currentServer.maxGpuMemory,
                 prefixCacheEnabled: currentServer.prefixCacheEnabled,
                 allowUnlistedDownloads: appState.allowUnlistedDownloads,
                 autoLoad: currentServer.autoLoad,

@@ -75,9 +75,7 @@ struct ConfigStoreTests {
         ))
         await config.setDefaultModel("test-model")
         await config.setHuggingfaceEndpoint("https://test.hf.co")
-        await config.setModelsDirectory(URL(fileURLWithPath: "/tmp/models"))
 
-        // Bridge: syncToStore pushes to configStore
         await config.syncToStore()
 
         // Verify by reading the store directly
@@ -93,7 +91,6 @@ struct ConfigStoreTests {
         #expect(record.maxProcessMemory == "8G")
         #expect(record.prefixCacheEnabled == false)
         #expect(record.defaultModel == "test-model")
-        #expect(record.modelsDir == "/tmp/models")
         #expect(record.hfEndpoint == "https://test.hf.co")
     }
 
@@ -117,7 +114,6 @@ struct ConfigStoreTests {
                 "prefixCacheEnabled": false
             },
             "defaultModel": "legacy-qwen",
-            "modelsDirectory": "/legacy/models",
             "huggingfaceEndpoint": "https://legacy.hf.co"
         }
         """
@@ -137,7 +133,6 @@ struct ConfigStoreTests {
         #expect(record.maxProcessMemory == "16G")
         #expect(record.prefixCacheEnabled == false)
         #expect(record.defaultModel == "legacy-qwen")
-        #expect(record.modelsDir == "/legacy/models")
         #expect(record.hfEndpoint == "https://legacy.hf.co")
 
         // File should be renamed to .migrated
@@ -161,5 +156,64 @@ struct ConfigStoreTests {
             rec.allowUnlistedDownloads = true
         }
         #expect(try NovaDB.shared.configStore.get().allowUnlistedDownloads == true)
+    }
+
+    @Test("v7 migration defaults performanceMode to balanced")
+    func v7MigrationDefault() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+        let record = try NovaDB.shared.configStore.get()
+        #expect(record.performanceMode == "balanced")
+    }
+
+    @Test("ConfigStore persists performanceMode")
+    func persistPerformanceMode() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+        try NovaDB.shared.configStore.update { rec in
+            rec.performanceMode = "exclusive"
+        }
+        #expect(try NovaDB.shared.configStore.get().performanceMode == "exclusive")
+    }
+
+    @Test("v8 migration defaults maxGpuMemory to auto")
+    func v8MigrationDefault() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+        let record = try NovaDB.shared.configStore.get()
+        #expect(record.maxGpuMemory == "auto")
+    }
+
+    @Test("ConfigStore persists maxGpuMemory")
+    func persistMaxGpuMemory() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+        try NovaDB.shared.configStore.update { rec in
+            rec.maxGpuMemory = "48GB"
+        }
+        #expect(try NovaDB.shared.configStore.get().maxGpuMemory == "48GB")
+    }
+
+    @Test("v9 migration drops models_dir; model root stays on the file locator")
+    func v9DropsModelsDir() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+
+        let columns = try await NovaDB.shared.configDB.read { db in
+            try db.columns(in: "config").map(\.name)
+        }
+        #expect(!columns.contains("models_dir"))
+
+        let config = NovaMLXConfiguration.shared
+        let before = await config.modelsDirectory
+        #expect(before.path == NovaMLXPaths.modelsDir.path)
+
+        let payload = """
+        {"server":{"host":"0.0.0.0","port":6590,"adminPort":6591},"modelsDirectory":"/tmp/should-not-apply"}
+        """.data(using: .utf8)!
+        try await config.applySerializedConfigJSON(payload)
+        let after = await config.modelsDirectory
+        #expect(after.path == NovaMLXPaths.modelsDir.path)
+        #expect(after.path != "/tmp/should-not-apply")
     }
 }

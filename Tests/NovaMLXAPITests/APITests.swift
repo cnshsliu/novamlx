@@ -168,6 +168,7 @@ struct APITypesTests {
         #expect(NovaMLXError.apiError("x").httpStatus == .badRequest)
         #expect(NovaMLXError.downloadFailed("x", underlying: NSError(domain: "", code: 0)).httpStatus == .badGateway)
         #expect(NovaMLXError.unsupportedModel("x").httpStatus == .badRequest)
+        #expect(NovaMLXError.mtpCompanionNotLoadable("x").httpStatus == .badRequest)
     }
 
     @Test("NovaMLXError error type and code mapping")
@@ -183,6 +184,11 @@ struct APITypesTests {
         let unsupported = NovaMLXError.unsupportedModel("bad")
         #expect(unsupported.apiErrorType == "invalid_request_error")
         #expect(unsupported.apiErrorCode == "unsupported_model")
+
+        let mtp = NovaMLXError.mtpCompanionNotLoadable("org/Foo-MTP-8bit")
+        #expect(mtp.apiErrorType == "invalid_request_error")
+        #expect(mtp.apiErrorCode == "mtp_companion_not_loadable")
+        #expect(mtp.errorDescription?.contains("cannot be loaded directly") == true)
     }
 
     @Test("NovaMLXError produces valid error detail")

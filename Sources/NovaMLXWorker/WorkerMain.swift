@@ -25,14 +25,15 @@ struct NovaMLXWorker {
 
         let engine = MLXEngine()
         let batcher = ContinuousBatcher(engine: engine, maxBatchSize: 8)
-        let fusedScheduler = FusedBatchScheduler(engine: engine, maxConcurrentPerModel: 4)
+        let fusedScheduler = FusedBatchScheduler(engine: engine)
         let writer = LineWriter()
 
         do {
             try await NovaMLXConfiguration.shared.loadFromStore()
             let cfg = await NovaMLXConfiguration.shared.serverConfig
             engine.setPrefixCacheEnabled(cfg.prefixCacheEnabled)
-            NovaMLXLog.info("[Worker] prefixCacheEnabled=\(cfg.prefixCacheEnabled)")
+            await engine.applyResourceLimits(gpuRaw: cfg.maxGpuMemory, ramRaw: cfg.maxProcessMemory)
+            NovaMLXLog.info("[Worker] prefixCacheEnabled=\(cfg.prefixCacheEnabled) gpu=\(cfg.maxGpuMemory) ram=\(cfg.maxProcessMemory)")
         } catch {
             NovaMLXLog.warning("[Worker] failed to load config (\(error)) — prefix cache stays at default")
         }
@@ -87,7 +88,7 @@ struct NovaMLXWorker {
                     await handleLoad(msg, engine: engine, writer: writer)
 
                 case WorkerMessageType.unload:
-                    handleUnload(msg, engine: engine, writer: writer)
+                    await handleUnload(msg, engine: engine, writer: writer)
 
                 case WorkerMessageType.generate:
                     group.addTask {
@@ -128,9 +129,25 @@ struct NovaMLXWorker {
         do {
             let url = URL(fileURLWithPath: path)
             NovaMLXLog.info("[Worker] Loading \(modelId), MLX active=\(MLX.Memory.activeMemory / 1_048_576)MB, peak=\(MLX.Memory.peakMemory / 1_048_576)MB")
+            // NovaMLX-TIE: bind BEFORE loadModel so shards move into tie-shards/
+            // before MLX's eager loadWeights scans the directory. If we bind
+            // after, loadWeights sees the per-shard files and loads everything
+            // eagerly (defeats the purpose).
+            let tierPolicy = await TieredOffloadPolicy.bindIfTiered(
+                modelDir: url, metrics: engine.metricsStore
+            )
             _ = try await engine.loadModel(from: url, config: config)
-            let isHybrid = engine.getContainer(for: modelId)?.config.hasLinearAttention ?? false
-            writer.write(WorkerMessage(type: WorkerMessageType.loaded, modelId: modelId, hasLinearAttention: isHybrid))
+            let loaded = engine.getContainer(for: modelId)
+            let isHybrid = loaded?.config.hasLinearAttention ?? false
+            let nativeMtp = loaded?.hasNativeMtp ?? false
+            if let container = loaded {
+                container.tierPolicy = tierPolicy
+                await container.applyTierPolicyToModel()
+            }
+            await engine.applyResourceLimits()
+            writer.write(WorkerMessage(
+                type: WorkerMessageType.loaded, modelId: modelId,
+                hasLinearAttention: isHybrid, hasNativeMtp: nativeMtp))
             NovaMLXLog.info("[Worker] Loaded model: \(modelId), MLX active=\(MLX.Memory.activeMemory / 1_048_576)MB, peak=\(MLX.Memory.peakMemory / 1_048_576)MB")
         } catch {
             writer.write(WorkerMessage(type: WorkerMessageType.error, modelId: modelId, errorMessage: error.localizedDescription))
@@ -140,10 +157,11 @@ struct NovaMLXWorker {
 
     // MARK: - Unload
 
-    private static func handleUnload(_ msg: WorkerMessage, engine: MLXEngine, writer: LineWriter) {
+    private static func handleUnload(_ msg: WorkerMessage, engine: MLXEngine, writer: LineWriter) async {
         guard let modelId = msg.modelId else { return }
         let identifier = ModelIdentifier(id: modelId, family: .other)
         engine.unloadModel(identifier)
+        await engine.applyResourceLimits()
         writer.write(WorkerMessage(type: WorkerMessageType.unloaded, modelId: modelId))
         NovaMLXLog.info("[Worker] Unloaded model: \(modelId)")
     }
@@ -164,6 +182,8 @@ struct NovaMLXWorker {
 
         let request = codableReq.toInferenceRequest()
         let reqTag = request.id.uuidString.prefix(8)
+        try? await NovaMLXConfiguration.shared.loadFromStore()
+        await engine.applyResourceLimits()
 
         do {
             let result: InferenceResult
@@ -198,6 +218,8 @@ struct NovaMLXWorker {
 
         let request = codableReq.toInferenceRequest()
         let reqTag = request.id.uuidString.prefix(8)
+        try? await NovaMLXConfiguration.shared.loadFromStore()
+        await engine.applyResourceLimits()
 
         let tokenStream: AsyncThrowingStream<Token, Error>
         let scheduler = resolveScheduler(request: request, engine: engine)

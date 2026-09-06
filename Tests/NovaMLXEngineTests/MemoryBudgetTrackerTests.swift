@@ -113,4 +113,29 @@ final class MemoryBudgetTrackerTests: XCTestCase {
         XCTAssertEqual(metrics.committedKVBytes, 256_000)
         XCTAssertEqual(metrics.activeSequenceCount, 1)
     }
+
+    func testSetGpuLimitRaisesBudget() async {
+        let tracker = MemoryBudgetTracker(gpuLimitBytes: 1_000_000)
+        await tracker.reserve(
+            modelId: "test-model",
+            sequenceId: UUID(),
+            weightsBytes: 0,
+            estimatedTokens: 3600,
+            bytesPerToken: 256
+        )
+        let rejected = await tracker.canAdmit(
+            modelId: "test-model",
+            estimatedTokens: 3600,
+            bytesPerToken: 256
+        )
+        XCTAssertFalse(rejected)
+
+        await tracker.setGpuLimit(10_000_000)
+        let admitted = await tracker.canAdmit(
+            modelId: "test-model",
+            estimatedTokens: 3600,
+            bytesPerToken: 256
+        )
+        XCTAssertTrue(admitted)
+    }
 }
