@@ -59,7 +59,7 @@ public actor TierHookCoordinator {
 
         // Determine shardKind per-model based on strategy
         let expertKind: ShardKind = .expert
-        let linearKind: ShardKind = (strategy == .layer) ? .layer : .expert
+        let linearKind: ShardKind = (strategy == .layer || strategy == .mixed) ? .layer : .expert
 
         model.visit { name, module in
             // Derive layer index from path
@@ -135,12 +135,15 @@ public actor TierHookCoordinator {
     /// Parse "model.layers.5.mlp.switch_mlp.gate_proj" → 5.
     /// Returns nil for paths without a layer index (embed_tokens, norm, etc.).
     private static func extractLayerIndex(from path: String) -> Int? {
-        // Match `layers.N` and extract digits AFTER the dot.
+        if let range = path.range(of: #"mtpLayers\.(\d+)"#, options: .regularExpression) {
+            let matchStr = String(path[range])
+            let digits = String(matchStr.dropFirst("mtpLayers.".count))
+            if let n = Int(digits) { return 10_000 + n }
+        }
         guard let range = path.range(of: #"layers\.(\d+)"#, options: .regularExpression) else {
             return nil
         }
-        let matchStr = String(path[range])  // e.g. "layers.5"
-        // Everything after "layers." is the digit run.
+        let matchStr = String(path[range])
         guard matchStr.hasPrefix("layers.") else { return nil }
         let digits = String(matchStr.dropFirst("layers.".count))
         return Int(digits)

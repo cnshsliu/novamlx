@@ -24,10 +24,28 @@ public class FluxPipeline: @unchecked Sendable {
         self.isSchnell = Self.detectSchnell(directoryURL: directoryURL)
     }
 
-    public func load() throws {
+    public func load() async throws {
         let hub = HubApi()
+        let metadataURL = directoryURL.appendingPathComponent("metadata.json")
+        let isQuantized = FileManager.default.fileExists(atPath: metadataURL.path)
 
-        if isSchnell {
+        if isQuantized {
+            let modelType = isSchnell ? "schnell" : "dev"
+            let loaded = try await FLUX.loadQuantized(
+                from: directoryURL.path,
+                modelType: modelType,
+                hub: hub
+            )
+            if isSchnell, let model = loaded as? Flux1Schnell {
+                schnellModel = model
+            } else if let model = loaded as? Flux1Dev {
+                devModel = model
+            } else {
+                throw NovaMLXError.inferenceFailed(
+                    "Quantized FLUX loaded as unexpected type \(type(of: loaded))"
+                )
+            }
+        } else if isSchnell {
             let model = try Flux1Schnell(hub: hub, modelDirectory: directoryURL)
             try model.loadWeights(from: directoryURL, dtype: .float16)
             schnellModel = model
@@ -37,7 +55,9 @@ public class FluxPipeline: @unchecked Sendable {
             devModel = model
         }
 
-        Logger(label: "NovaMLX.FluxPipeline").info("FLUX model loaded: \(directoryURL.lastPathComponent) (schnell=\(isSchnell))")
+        Logger(label: "NovaMLX.FluxPipeline").info(
+            "FLUX model loaded: \(directoryURL.lastPathComponent) (schnell=\(isSchnell), quantized=\(isQuantized))"
+        )
     }
 
     public func generate(
@@ -165,7 +185,7 @@ extension FluxPipeline: ImageGenerationPipeline {
         seed: UInt64?,
         width: Int,
         height: Int
-    ) throws -> PipelineGenerationResult {
+    ) async throws -> PipelineGenerationResult {
         let result = try generate(
             prompt: prompt,
             negativePrompt: negativePrompt,

@@ -28,6 +28,7 @@ public struct CodableInferenceRequest: Codable, Sendable {
     public let preserveThinking: Bool?
     public let draftModel: String?
     public let numDraftTokens: Int?
+    public let useNativeMtp: Bool?
 
     public init(from request: InferenceRequest) {
         self.id = request.id.uuidString
@@ -67,6 +68,7 @@ public struct CodableInferenceRequest: Codable, Sendable {
         self.preserveThinking = request.preserveThinking
         self.draftModel = request.draftModel
         self.numDraftTokens = request.numDraftTokens
+        self.useNativeMtp = request.useNativeMtp
     }
 
     public func toInferenceRequest() -> InferenceRequest {
@@ -108,7 +110,8 @@ public struct CodableInferenceRequest: Codable, Sendable {
             enableThinking: enableThinking,
             preserveThinking: preserveThinking,
             draftModel: draftModel,
-            numDraftTokens: numDraftTokens
+            numDraftTokens: numDraftTokens,
+            useNativeMtp: useNativeMtp
         )
     }
 }

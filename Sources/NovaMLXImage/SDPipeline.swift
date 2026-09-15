@@ -270,7 +270,7 @@ extension SDPipeline: ImageGenerationPipeline {
         seed: UInt64?,
         width: Int,
         height: Int
-    ) throws -> PipelineGenerationResult {
+    ) async throws -> PipelineGenerationResult {
         let result = try generate(
             prompt: prompt,
             negativePrompt: negativePrompt,

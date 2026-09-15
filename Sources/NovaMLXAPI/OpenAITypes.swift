@@ -186,6 +186,7 @@ public struct OpenAIRequest: Codable, Sendable {
     public let tag: String?
     public let draftModel: String?
     public let numDraftTokens: Int?
+    public let useMtp: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools, logprobs, tag
@@ -209,6 +210,7 @@ public struct OpenAIRequest: Codable, Sendable {
         case keepAlive = "keep_alive"
         case draftModel = "draft_model"
         case numDraftTokens = "num_draft_tokens"
+        case useMtp = "use_mtp"
     }
 
     public init(
@@ -241,7 +243,8 @@ public struct OpenAIRequest: Codable, Sendable {
         keepAlive: KeepAliveValue? = nil,
         tag: String? = nil,
         draftModel: String? = nil,
-        numDraftTokens: Int? = nil
+        numDraftTokens: Int? = nil,
+        useMtp: Bool? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -273,6 +276,7 @@ public struct OpenAIRequest: Codable, Sendable {
         self.tag = tag
         self.draftModel = draftModel
         self.numDraftTokens = numDraftTokens
+        self.useMtp = useMtp
     }
 
     /// Resolve thinking toggle from multiple client formats:
@@ -745,6 +749,9 @@ public struct AdminModelStatus: Codable, Sendable {
     public let downloadedAt: String?
     public let memoryFeasibility: MemoryFeasibility?
     public let specBoost: SpecBoostInfo?
+    public let tie: TieStatusInfo?
+    public let nativeMtpAvailable: Bool?
+    public let nativeMtpEnabled: Bool?
 
     public init(
         id: String,
@@ -754,7 +761,10 @@ public struct AdminModelStatus: Codable, Sendable {
         sizeBytes: UInt64,
         downloadedAt: Date?,
         memoryFeasibility: MemoryFeasibility? = nil,
-        specBoost: SpecBoostInfo? = nil
+        specBoost: SpecBoostInfo? = nil,
+        tie: TieStatusInfo? = nil,
+        nativeMtpAvailable: Bool? = nil,
+        nativeMtpEnabled: Bool? = nil
     ) {
         self.id = id
         self.family = family
@@ -763,6 +773,9 @@ public struct AdminModelStatus: Codable, Sendable {
         self.sizeBytes = sizeBytes
         self.memoryFeasibility = memoryFeasibility
         self.specBoost = specBoost
+        self.tie = tie
+        self.nativeMtpAvailable = nativeMtpAvailable
+        self.nativeMtpEnabled = nativeMtpEnabled
         if let date = downloadedAt {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -901,6 +914,7 @@ public struct ModelSettingsUpdateRequest: Codable, Sendable {
     public var kvBits: Int?
     public var kvGroupSize: Int?
     public var kvMemoryBytesPerTokenOverride: Int?
+    public var nativeMtpEnabled: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case maxContextWindow = "max_context_window"
@@ -919,6 +933,7 @@ public struct ModelSettingsUpdateRequest: Codable, Sendable {
         case kvBits = "kv_bits"
         case kvGroupSize = "kv_group_size"
         case kvMemoryBytesPerTokenOverride = "kv_memory_bytes_per_token_override"
+        case nativeMtpEnabled = "native_mtp"
     }
 }
 

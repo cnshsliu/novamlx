@@ -1818,20 +1818,21 @@ struct ClusterPageView: View {
     // MARK: - Model Activation Actions
 
     private func scanAvailableModelsForActivation() {
-        // Use the official path resolution (respects ~/.config/novamlx/models-path)
-        let modelsRoot = NovaMLXPaths.modelsDir
+        // Scan every configured models root (internal + extra disks).
         let minLayers = (ClusterManager.shared.config?.minLayersPerShard ?? 8) * max(2, 1 + workers.count)
         recommendedMinLayers = minLayers
 
         var infos: [ActivationModelInfo] = []
+        var seenIds = Set<String>()
 
-        // 1. Recursively scan for any directory that contains config.json (handles mlx-community/, Qwen/, etc.)
+        for modelsRoot in NovaMLXPaths.modelsDirs {
         let foundConfigs = findAllConfigJsons(under: modelsRoot)
 
         for configURL in foundConfigs {
             // modelId = relative path from modelsRoot, e.g. "mlx-community/Qwen3.6-27B-4bit"
             let relativePath = configURL.deletingLastPathComponent().path.replacingOccurrences(of: modelsRoot.path + "/", with: "")
             let modelId = relativePath
+            guard seenIds.insert(modelId).inserted else { continue }
 
             guard !modelId.isEmpty else { continue }
 
@@ -1857,6 +1858,7 @@ struct ClusterPageView: View {
                 isRecommended: isRecommended,
                 displayLabel: label
             ))
+        }
         }
 
         // 2. Also surface currently loaded models (even if not rescanned)

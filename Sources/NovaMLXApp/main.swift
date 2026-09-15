@@ -140,7 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Auto-migrate from old Application Support path if needed
         Self.migrateFromApplicationSupport(to: baseDir)
 
-        self.modelManager = ModelManager(modelsDirectory: modelsDir)
+        self.modelManager = ModelManager(
+            modelsDirectory: modelsDir,
+            extraModelDirectories: Array(NovaMLXPaths.modelsDirs.dropFirst())
+        )
         self.settingsManager = ModelSettingsManager(baseDirectory: baseDir)
 
         // Enable worker subprocess for crash isolation
@@ -389,7 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             )
                         },
                         modelPathProvider: { modelId in
-                            let path = NovaMLXPaths.modelsDir.appendingPathComponent(modelId).path
+                            let path = NovaMLXPaths.directory(forModelId: modelId).path
                             var isDir: ObjCBool = false
                             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
                                 return nil

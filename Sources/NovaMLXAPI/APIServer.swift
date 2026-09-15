@@ -637,6 +637,8 @@ extension NovaMLXError {
         case .modelNotLoaded: .notFound
         case .modelLoadInProgress: .serviceUnavailable
         case .mtpCompanionNotLoadable: .badRequest
+        case .tieConversionFailed: .internalServerError
+        case .tieLayoutIncomplete: .conflict
         }
     }
 
@@ -655,6 +657,8 @@ extension NovaMLXError {
         case .modelNotLoaded: "not_found_error"
         case .modelLoadInProgress: "server_error"
         case .mtpCompanionNotLoadable: "invalid_request_error"
+        case .tieConversionFailed: "server_error"
+        case .tieLayoutIncomplete: "invalid_request_error"
         }
     }
 
@@ -673,6 +677,8 @@ extension NovaMLXError {
         case .modelNotLoaded: "model_not_loaded"
         case .modelLoadInProgress: "model_load_in_progress"
         case .mtpCompanionNotLoadable: "mtp_companion_not_loadable"
+        case .tieConversionFailed: "tie_conversion_failed"
+        case .tieLayoutIncomplete: "tie_layout_incomplete"
         }
     }
 }
@@ -1437,6 +1443,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
 
                 let model = req.model
+                if ImageModelSupport.isUnsupported(model) {
+                    throw NovaMLXError.unsupportedModel(ImageModelSupport.refuseMessage(model))
+                }
                 let n = req.resolvedN
                 let (width, height) = req.resolvedSize
                 let format = req.resolvedResponseFormat
@@ -2130,12 +2139,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             } else {
                                 isHybrid = false
                             }
+                            let nativeOn = isLoaded && inference.hasNativeMtp(record.id)
+                                && inference.settingsManager.getSettings(record.id).nativeMtpEnabled != false
                             let status = DraftModelRegistry.shared.boostStatus(
                                 family: record.family,
                                 isHybrid: isHybrid,
                                 modelType: record.modelType,
                                 modelId: record.id,
-                                nativeMtp: isLoaded && inference.hasNativeMtp(record.id),
+                                nativeMtp: nativeOn,
                                 draftModelLoaded: { id in inference.isModelLoaded(id) },
                                 draftModelOnDisk: { id in models.isDownloaded(id) }
                             )
@@ -2159,6 +2170,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             }
                         }
 
+                        var tie = ExpertShardConverter.inspect(at: record.localURL)
+                        if let live = await TieConversionBroker.shared.snapshot(modelId: record.id) {
+                            tie = live
+                        }
+                        let mtpSettings = inference.settingsManager.getSettings(record.id)
                         statuses.append(AdminModelStatus(
                             id: record.id,
                             family: record.family.rawValue,
@@ -2167,7 +2183,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             sizeBytes: record.sizeBytes,
                             downloadedAt: record.downloadedAt,
                             memoryFeasibility: feasibility,
-                            specBoost: specBoost
+                            specBoost: specBoost,
+                            tie: tie.status == .none ? nil : tie,
+                            nativeMtpAvailable: isLoaded && inference.hasNativeMtp(record.id),
+                            nativeMtpEnabled: mtpSettings.nativeMtpEnabled
                         ))
                     }
                     return try Self.jsonResponse(statuses)
@@ -2233,6 +2252,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                     guard let record = models.getRecord(req.modelId) else {
                         throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+
+                    if record.modelType == .image,
+                       ImageModelSupport.isUnsupported(req.modelId) {
+                        throw NovaMLXError.unsupportedModel(
+                            ImageModelSupport.refuseMessage(req.modelId)
+                        )
                     }
 
                     let config = ModelConfig(
@@ -2392,6 +2418,38 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         draftLoaded: true
                     ))
                 }
+                Post("/tie/convert") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+                    guard let record = models.getRecord(req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+                    if inference.isModelLoaded(req.modelId) {
+                        throw NovaMLXError.apiError(
+                            "Unload '\(req.modelId)' before converting to TIE."
+                        )
+                    }
+                    try await TieConversionBroker.shared.convert(
+                        modelId: req.modelId, at: record.localURL
+                    )
+                    let tie = ExpertShardConverter.inspect(at: record.localURL)
+                    return try Self.jsonResponse(tie)
+                }
+                Post("/tie/delete") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
+                    guard let record = models.getRecord(req.modelId) else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+                    if inference.isModelLoaded(req.modelId) {
+                        throw NovaMLXError.apiError(
+                            "Unload '\(req.modelId)' before removing the TIE layout."
+                        )
+                    }
+                    try ExpertShardConverter.removeLayout(at: record.localURL)
+                    let tie = ExpertShardConverter.inspect(at: record.localURL)
+                    return try Self.jsonResponse(tie)
+                }
                 Post("/discover") { request, context in
                     let discovered = models.discoverModels()
                     let items = discovered.map { model -> AdminDiscoveredModel in
@@ -2434,6 +2492,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         if let v = update.kvBits { settings.kvBits = v }
                         if let v = update.kvGroupSize { settings.kvGroupSize = v }
                         if let v = update.kvMemoryBytesPerTokenOverride { settings.kvMemoryBytesPerTokenOverride = v }
+                        if let v = update.nativeMtpEnabled { settings.nativeMtpEnabled = v }
 
                         inference.settingsManager.setSettings(modelId, settings)
 
@@ -3049,11 +3108,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let exact = catalog.first {
                                 $0.id == repoId && !ModelCatalogPolicy.isIdPattern($0.id)
                             }
+                            let dest = NovaMLXPaths.downloadRoot(estimatedBytes: exact?.sizeBytes ?? 0)
                             let task = try await hf.startDownload(
                                 repoId: repoId,
                                 hfToken: hfToken,
                                 mirrorEndpoint: endpoint,
-                                revision: exact?.revision
+                                revision: exact?.revision,
+                                destinationDirectory: dest
                             )
                             return try Self.jsonResponse(["success": "true", "task_id": task.id] as [String: String])
                         } catch {

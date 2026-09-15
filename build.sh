@@ -194,6 +194,22 @@ binary_uuid() {
 	/usr/bin/dwarfdump --uuid "$1" 2>/dev/null | awk 'NR==1 {print $2}'
 }
 
+# Copy/sign via a new inode, then `mv` over the dest. `cp`/`codesign --force`
+# on a live path invalidates the mapped TEXT of a running NovaMLXWorker
+# (SIGKILL Code Signature Invalid). The old inode stays valid until exit.
+install_new_inode() {
+	local src="$1" dst="$2"
+	local dir tmp
+	dir=$(dirname "$dst")
+	tmp=$(mktemp "$dir/.$(basename "$dst").XXXXXX")
+	cp -p "$src" "$tmp"
+	chmod u+w "$tmp" 2>/dev/null || true
+	if ! mv -f "$tmp" "$dst"; then
+		rm -f "$tmp"
+		return 1
+	fi
+}
+
 UPDATED=()
 SKIPPED=()
 for bin in "${SYNC_BINARIES[@]}"; do
@@ -208,7 +224,7 @@ for bin in "${SYNC_BINARIES[@]}"; do
 	if [ -n "$src_uuid" ] && [ "$src_uuid" = "$dst_uuid" ]; then
 		continue
 	fi
-	cp "$src" "$dst"
+	install_new_inode "$src" "$dst"
 	UPDATED+=("$bin")
 done
 
@@ -217,7 +233,7 @@ METALLIB_SRC="$BUILD_BIN_DIR/mlx.metallib"
 METALLIB_DST="$APP_MACOS/mlx.metallib"
 if [ -f "$METALLIB_SRC" ]; then
 	if [ ! -f "$METALLIB_DST" ] || [ "$METALLIB_SRC" -nt "$METALLIB_DST" ]; then
-		cp "$METALLIB_SRC" "$METALLIB_DST"
+		install_new_inode "$METALLIB_SRC" "$METALLIB_DST"
 		UPDATED+=("mlx.metallib")
 	fi
 fi
@@ -255,6 +271,37 @@ designated => anchor apple generic and identifier "$ident" and (certificate leaf
 REQEOF
 }
 
+codesign_path() {
+	local path="$1"
+	local ident="$2"
+	if [ -n "$TEAM_ID" ]; then
+		local leaf_rqset
+		leaf_rqset=$(mktemp /tmp/novamlx_leaf_req.XXXXXX)
+		write_designated_req "$ident" "$leaf_rqset"
+		if [ -f "$ENTITLEMENTS" ]; then
+			codesign --force --options runtime \
+				-i "$ident" \
+				--entitlements "$ENTITLEMENTS" \
+				--team-identifier "$TEAM_ID" \
+				-r "$leaf_rqset" \
+				--sign "$DEVELOPER_ID" \
+				"$path"
+		else
+			codesign --force --options runtime \
+				-i "$ident" \
+				--team-identifier "$TEAM_ID" \
+				-r "$leaf_rqset" \
+				--sign "$DEVELOPER_ID" \
+				"$path"
+		fi
+		rm -f "$leaf_rqset"
+	elif [ -f "$ENTITLEMENTS" ]; then
+		codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$DEVELOPER_ID" "$path"
+	else
+		codesign --force --options runtime --sign "$DEVELOPER_ID" "$path"
+	fi
+}
+
 sign_leaf() {
 	local bin_path="$1"
 	local bin_name
@@ -263,32 +310,21 @@ sign_leaf() {
 	if [[ "$bin_name" == *.metallib ]]; then
 		bin_id="${bin_name%.metallib}"
 	fi
-	if [ -n "$TEAM_ID" ]; then
-		local leaf_rqset
-		leaf_rqset=$(mktemp /tmp/novamlx_leaf_req.XXXXXX)
-		write_designated_req "$bin_id" "$leaf_rqset"
-		if [ -f "$ENTITLEMENTS" ]; then
-			codesign --force --options runtime \
-				-i "$bin_id" \
-				--entitlements "$ENTITLEMENTS" \
-				--team-identifier "$TEAM_ID" \
-				-r "$leaf_rqset" \
-				--sign "$DEVELOPER_ID" \
-				"$bin_path"
-		else
-			codesign --force --options runtime \
-				-i "$bin_id" \
-				--team-identifier "$TEAM_ID" \
-				-r "$leaf_rqset" \
-				--sign "$DEVELOPER_ID" \
-				"$bin_path"
-		fi
-		rm -f "$leaf_rqset"
-	elif [ -f "$ENTITLEMENTS" ]; then
-		codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$DEVELOPER_ID" "$bin_path"
-	else
-		codesign --force --options runtime --sign "$DEVELOPER_ID" "$bin_path"
+	# Directories (.bundle) are not mapped as worker TEXT; sign in place.
+	if [ ! -f "$bin_path" ]; then
+		codesign_path "$bin_path" "$bin_id"
+		return
 	fi
+	local dir tmp
+	dir=$(dirname "$bin_path")
+	tmp=$(mktemp "$dir/.$(basename "$bin_path").XXXXXX")
+	cp -p "$bin_path" "$tmp"
+	chmod u+w "$tmp" 2>/dev/null || true
+	if ! codesign_path "$tmp" "$bin_id"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	mv -f "$tmp" "$bin_path"
 }
 
 sign_dist_app() {
@@ -311,6 +347,7 @@ sign_dist_app() {
 	for bin in "$APP_CONTENTS/MacOS/"*; do
 		[ -f "$bin" ] || continue
 		name=$(basename "$bin")
+		[[ "$name" == .* ]] && continue
 		if [[ "$name" == *.metallib ]]; then
 			sign_leaf "$bin"
 			continue
@@ -370,6 +407,9 @@ if [ ${#UPDATED[@]} -gt 0 ]; then
 		plutil -insert NSMicrophoneUsageDescription -string "NovaMLX needs microphone access to record audio for voice cloning and speech recognition." "$INFOPLIST" 2>/dev/null || true
 	fi
 elif ! dist_signature_is_stable; then
+	NEEDS_SIGN=1
+fi
+if [ "${NOVAMLX_FORCE_SIGN:-0}" = "1" ]; then
 	NEEDS_SIGN=1
 fi
 

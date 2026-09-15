@@ -18,6 +18,9 @@ struct ModelsPageView: View {
     @State private var modelToDelete: String?
     @State private var showDeleteConfirmation = false
     @State private var loadingModelId: String?
+    @State private var convertingModelId: String?
+    @State private var tieToDelete: String?
+    @State private var showTieDeleteConfirm = false
     @State private var typeFilter: ModelTypeFilter = .all
 
     enum ModelTypeFilter: String, CaseIterable {
@@ -84,6 +87,34 @@ struct ModelsPageView: View {
         }
         .alert(alertMessage, isPresented: $showAlert) {
             Button("OK", role: .cancel) {}
+        }
+        .confirmationDialog(
+            l10n.tr("models.tieDeleteConfirm"),
+            isPresented: $showTieDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(l10n.tr("models.tieDelete"), role: .destructive) {
+                if let id = tieToDelete {
+                    Task {
+                        do {
+                            if let record = modelManager.getRecord(id),
+                               inferenceService.listLoadedModels().contains(id)
+                            {
+                                await inferenceService.unloadModel(
+                                    ModelIdentifier(id: id, family: record.family)
+                                )
+                            }
+                            try await appState.deleteTIE(modelId: id)
+                            refreshTrigger.toggle()
+                        } catch {
+                            alertMessage = error.localizedDescription
+                            showAlert = true
+                        }
+                    }
+                }
+                tieToDelete = nil
+            }
+            Button(l10n.tr("models.cancel"), role: .cancel) { tieToDelete = nil }
         }
         .sheet(item: $selectedModelCard) { card in
             modelCardSheet(card)
@@ -160,8 +191,11 @@ struct ModelsPageView: View {
                         subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
                         isLoaded: true,
                         actions: {
+                            nativeMtpToggle(for: modelId)
                             specBoostBadge(for: modelId)
+                            tieBadge(for: modelId)
                             addToCatalogButton(modelId: modelId)
+                            tieActions(for: modelId, isLoaded: true)
                             Button(l10n.tr("models.unload")) {
                                 Task {
                                     if let record = modelManager.getRecord(modelId) {
@@ -203,6 +237,26 @@ struct ModelsPageView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(NovaTheme.Colors.accent.opacity(0.2), lineWidth: 0.5)
         )
+    }
+
+    @ViewBuilder
+    private func nativeMtpToggle(for modelId: String) -> some View {
+        if inferenceService.hasNativeMtp(modelId) {
+            let enabled = inferenceService.settingsManager.getSettings(modelId).nativeMtpEnabled != false
+            Toggle(isOn: Binding(
+                get: { inferenceService.settingsManager.getSettings(modelId).nativeMtpEnabled != false },
+                set: { on in
+                    inferenceService.settingsManager.updateSettings(modelId) { $0.nativeMtpEnabled = on }
+                    refreshTrigger.toggle()
+                }
+            )) {
+                Text(enabled ? l10n.tr("models.mtpOn") : l10n.tr("models.mtpOff"))
+                    .font(.caption2.weight(.semibold))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .help(l10n.tr("models.mtpHelp"))
+        }
     }
 
     @ViewBuilder
@@ -256,6 +310,94 @@ struct ModelsPageView: View {
         }
     }
 
+    @ViewBuilder
+    private func tieBadge(for modelId: String) -> some View {
+        switch appState.tieStatus[modelId]?.status {
+        case .ready:
+            Text(l10n.tr("models.tie"))
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.orange.opacity(0.18))
+                .foregroundColor(.orange)
+                .cornerRadius(4)
+                .help(l10n.tr("models.tieReady"))
+        case .incomplete:
+            Text(l10n.tr("models.tieIncomplete"))
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.red.opacity(0.15))
+                .foregroundColor(.red)
+                .cornerRadius(4)
+                .help(appState.tieStatus[modelId]?.message ?? l10n.tr("models.tieIncompleteHint"))
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func tieConvertingLabel(for modelId: String) -> some View {
+        let tie = appState.tieStatus[modelId]
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(l10n.tr("models.tieConverting"))
+                    .font(.caption)
+                    .foregroundColor(NovaTheme.Colors.accent)
+                if let msg = tie?.message {
+                    Text(msg)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                if let frac = tie?.fraction {
+                    ProgressView(value: frac)
+                        .frame(width: 140)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tieActions(for modelId: String, isLoaded: Bool) -> some View {
+        let status = appState.tieStatus[modelId]?.status
+        if !isLoaded, status == .convertible || status == .incomplete {
+            Button(l10n.tr("models.tieConvert")) {
+                convertingModelId = modelId
+                Task {
+                    do {
+                        try await appState.convertTIE(modelId: modelId)
+                        refreshTrigger.toggle()
+                    } catch {
+                        alertMessage = error.localizedDescription
+                        showAlert = true
+                    }
+                    convertingModelId = nil
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help(l10n.tr("models.tieConvertHint"))
+        }
+        if (status == .ready || status == .incomplete) && !isLoaded {
+            Button(l10n.tr("models.tieDelete"), role: .destructive) {
+                tieToDelete = modelId
+                showTieDeleteConfirm = true
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        } else if (status == .ready || status == .incomplete) && isLoaded {
+            Button(l10n.tr("models.tieDelete"), role: .destructive) {
+                tieToDelete = modelId
+                showTieDeleteConfirm = true
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Unload, then remove TIE layout")
+        }
+    }
+
     private var downloadedSection: some View {
         let allDownloaded = modelManager.downloadedModels()
         let loaded = Set(inferenceService.listLoadedModels())
@@ -287,7 +429,9 @@ struct ModelsPageView: View {
                         subtitle: "\(record.family.rawValue)  \(record.sizeBytes > 0 ? record.sizeBytes.bytesFormatted : "")",
                         isLoaded: false,
                         actions: {
-                            if loadingModelId == record.id {
+                            if convertingModelId == record.id || appState.tieStatus[record.id]?.status == .converting {
+                                tieConvertingLabel(for: record.id)
+                            } else if loadingModelId == record.id {
                                 HStack(spacing: 8) {
                                     ProgressView()
                                         .controlSize(.small)
@@ -297,6 +441,7 @@ struct ModelsPageView: View {
                                 }
                             } else {
                                 addToCatalogButton(modelId: record.id)
+                                tieActions(for: record.id, isLoaded: false)
                                 Button(l10n.tr("models.load")) {
                                     loadingModelId = record.id
                                     NovaMLXLog.info("[ModelsPage] User clicked Load for \(record.id), type=\(record.modelType), family=\(record.family), url=\(record.localURL.path)")

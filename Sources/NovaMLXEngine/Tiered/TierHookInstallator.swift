@@ -190,22 +190,38 @@ public enum TierHookInstallator {
             var qBiasesList: [MLXArray] = []
             var hasScales = false
             for e in expertIDs {
-                guard let tensors = loaded[e],
-                      let w = tensors[ctx.path + ".weight"] else { continue }
+                guard let tensors = loaded[e] else { continue }
+                func lookup(_ suffix: String) -> MLXArray? {
+                    if let v = tensors[ctx.path + suffix] { return v }
+                    if ctx.path.hasPrefix("layers."),
+                       let v = tensors["model." + ctx.path + suffix] { return v }
+                    if ctx.path.hasPrefix("model.layers."),
+                       let stripped = ctx.path.strippedPrefix("model."),
+                       let v = tensors[stripped + suffix] { return v }
+                    if let last = ctx.path.split(separator: ".").last {
+                        let tail = ".\(last)\(suffix)"
+                        return tensors.first(where: { $0.key.hasSuffix(tail) })?.value
+                    }
+                    return nil
+                }
+                guard let w = lookup(".weight") else { continue }
                 weights.append(w)
-                if let b = tensors[ctx.path + ".bias"] {
+                if let b = lookup(".bias") {
                     biasesList.append(b)
                     hasBias = true
                 }
-                if let s = tensors[ctx.path + ".scales"] {
+                if let s = lookup(".scales") {
                     scalesList.append(s)
                     hasScales = true
                 }
-                if let qb = tensors[ctx.path + ".biases"] {
+                if let qb = lookup(".biases") {
                     qBiasesList.append(qb)
                 }
             }
-            guard !weights.isEmpty else { return }
+            guard !weights.isEmpty else {
+                NovaMLXLog.warning("[TIE-PE] no expert weights for path=\(ctx.path) layer=\(ctx.layerIdx) experts=\(expertIDs)")
+                return
+            }
 
             let stackedWeight = MLX.stacked(weights, axis: 0)
             MLX.eval(stackedWeight)

@@ -405,4 +405,26 @@ struct ModelManagerTests {
         #expect(record?.remoteURL == "https://example.com/test")
         #expect(record?.family == .llama)
     }
+
+    @Test("discoverModels scans extra model directories")
+    func discoverModelsExtraRoot() throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let extra = tempDir.appendingPathComponent("external", isDirectory: true)
+        let modelDir = extra.appendingPathComponent("mlx-community/DeepSeek-V4.1-Flash-MLX-2bit")
+        try createFakeModelConfig(
+            at: modelDir,
+            architectures: ["DeepseekV41ForCausalLM"],
+            modelType: "deepseek_v41"
+        )
+        try Data("fake weights".utf8).write(to: modelDir.appendingPathComponent("model.safetensors"))
+
+        let manager = ModelManager(modelsDirectory: tempDir, extraModelDirectories: [extra])
+        let discovered = manager.discoverModels()
+        #expect(discovered.contains(where: { $0.modelId == "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit" }))
+        let record = manager.getRecord("mlx-community/DeepSeek-V4.1-Flash-MLX-2bit")
+        #expect(record?.family == .deepseek)
+        #expect(record?.localURL.resolvingSymlinksInPath().path == modelDir.resolvingSymlinksInPath().path)
+        #expect(record?.downloadedAt != nil)
+    }
 }

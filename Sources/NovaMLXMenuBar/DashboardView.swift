@@ -167,6 +167,11 @@ public struct DashboardView: View {
                         Text(modelId)
                             .font(.system(size: 12))
                             .lineLimit(1)
+                        if appState.tieStatus[modelId]?.status == .ready {
+                            Text(l10n.tr("models.tie"))
+                                .font(.caption2.weight(.semibold))
+                                .foregroundColor(.orange)
+                        }
                         CopyIDButton(id: modelId)
                         Spacer()
                         Button {
@@ -215,6 +220,11 @@ public struct DashboardView: View {
                                 .font(.system(size: 12))
                                 .lineLimit(1)
                             HStack(spacing: 8) {
+                                if appState.tieStatus[record.id]?.status == .ready {
+                                    Text(l10n.tr("models.tie"))
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundColor(.orange)
+                                }
                                 Text(record.family.rawValue)
                                     .font(.caption2)
                                     .foregroundColor(.secondary)

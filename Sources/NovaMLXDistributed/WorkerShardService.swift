@@ -250,7 +250,7 @@ public final class WorkerShardService: @unchecked Sendable {
                             if let modelId = String(data: payloadData, encoding: .utf8), !modelId.isEmpty {
                                 // Trigger the same ensure logic we have for bindWeights
                                 Task {
-                                    let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+                                    let modelDir = NovaMLXPaths.directory(forModelId:modelId)
                                     if !FileManager.default.fileExists(atPath: modelDir.path), let host = self.lastCoordinatorHost {
                                         _ = try? await WeightDistributor.shared.ensureModelAvailable(
                                             modelId: modelId,
@@ -313,7 +313,7 @@ public final class WorkerShardService: @unchecked Sendable {
         }
 
         // Load model directly into main engine using Worker's local model path
-        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let modelDir = NovaMLXPaths.directory(forModelId:modelId)
 
         // NEW: Auto-sync from coordinator if the model is not present on this worker
         if !FileManager.default.fileExists(atPath: modelDir.path) {

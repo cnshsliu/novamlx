@@ -23,5 +23,16 @@ enum CustomModelRegistration {
         await LLMTypeRegistry.shared.registerModelType(
             "deepseek_v4",
             creator: createCustom(DeepseekV4Configuration.self, DeepseekV4Model.init))
+        await LLMTypeRegistry.shared.registerModelType(
+            "deepseek_v41",
+            creator: { data in
+                let flat = try DeepseekV41OfficialLoader.flattenConfig(data)
+                let configuration = try JSONDecoder.json5().decode(
+                    DeepseekV4Configuration.self, from: flat)
+                return DeepseekV4Model(configuration)
+            })
+        MLXLMCommon.customWeightLoader = { dir, module in
+            try DeepseekV41OfficialLoader.loadIfOfficial(dir: dir, model: module)
+        }
     }
 }

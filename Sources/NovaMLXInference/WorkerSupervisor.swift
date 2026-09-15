@@ -15,6 +15,10 @@ public final class WorkerSupervisor: @unchecked Sendable {
     private var process: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
+    private var stderrFile: FileHandle?
+    private var stderrRemainder = Data()
+    private var lastStderrLines: [String] = []
     private let lock = NSLock()
 
     // Pending generate requests: requestId → continuation
@@ -64,12 +68,13 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
         let stdin = Pipe()
         let stdout = Pipe()
+        let stderr = Pipe()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: workerBinaryPath)
         proc.standardInput = stdin
         proc.standardOutput = stdout
-        proc.standardError = FileHandle.nullDevice
+        proc.standardError = stderr
 
         // Terminate worker when parent dies
         proc.terminationHandler = { [weak self] _ in
@@ -83,9 +88,11 @@ public final class WorkerSupervisor: @unchecked Sendable {
         self.process = proc
         self.stdinPipe = stdin
         self.stdoutPipe = stdout
+        self.stderrPipe = stderr
         self.isRunning = true
 
         startReader(stdout: stdout)
+        startStderrReader(stderr, pid: proc.processIdentifier)
 
         NovaMLXLog.info("[WorkerSupervisor] Worker started (pid=\(proc.processIdentifier))")
     }
@@ -118,28 +125,27 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     public func stop() {
         lock.lock()
-        defer { lock.unlock() }
-
         if let pipe = stdoutPipe {
             pipe.fileHandleForReading.readabilityHandler = nil
         }
-        process?.terminate()
+        if let pipe = stderrPipe {
+            pipe.fileHandleForReading.readabilityHandler = nil
+        }
+        let proc = process
         process = nil
         stdinPipe = nil
         stdoutPipe = nil
+        stderrPipe = nil
         isRunning = false
         readBuffer = Data()
-
-        // Fail all pending requests
-        for (_, cont) in pendingRequests {
-            cont.resume(throwing: NovaMLXError.inferenceFailed("Worker stopped"))
-        }
+        let pending = pendingRequests
         pendingRequests.removeAll()
+        let streams = streamContinuations
+        clearStreamStateLocked()
+        lock.unlock()
 
-        for (_, cont) in streamContinuations {
-            cont.finish(throwing: NovaMLXError.inferenceFailed("Worker stopped"))
-        }
-        streamContinuations.removeAll()
+        proc?.terminate()
+        failWaiters(pending: pending, streams: streams, error: NovaMLXError.inferenceFailed("Worker stopped"))
     }
 
     // MARK: - Send Messages
@@ -296,6 +302,64 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     private var readBuffer = Data()
 
+    private func startStderrReader(_ pipe: Pipe, pid: Int32) {
+        let url = NovaMLXPaths.workerStderrFile
+        let fm = FileManager.default
+        try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue,
+            size > 16 * 1024 * 1024
+        {
+            try? fm.removeItem(at: url)
+        }
+        if !fm.fileExists(atPath: url.path) {
+            fm.createFile(atPath: url.path, contents: nil)
+        }
+        let file = try? FileHandle(forWritingTo: url)
+        file?.seekToEndOfFile()
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        if let banner = "\n===== worker pid=\(pid) \(stamp) =====\n".data(using: .utf8) {
+            file?.write(banner)
+        }
+        lock.lock()
+        stderrFile = file
+        stderrRemainder = Data()
+        lastStderrLines.removeAll()
+        lock.unlock()
+
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard let self else { return }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self.ingestStderr(data)
+        }
+    }
+
+    private func ingestStderr(_ data: Data) {
+        lock.lock()
+        stderrFile?.write(data)
+        stderrRemainder.append(data)
+        var lines: [String] = []
+        while let nl = stderrRemainder.firstIndex(of: 0x0A) {
+            let lineData = stderrRemainder[..<nl]
+            stderrRemainder = Data(stderrRemainder[(nl + 1)...])
+            let line = String(data: Data(lineData), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !line.isEmpty else { continue }
+            lastStderrLines.append(line)
+            if lastStderrLines.count > 80 {
+                lastStderrLines.removeFirst(lastStderrLines.count - 80)
+            }
+            lines.append(line)
+        }
+        lock.unlock()
+        for line in lines {
+            NovaMLXLog.error("[Worker stderr] \(line)")
+        }
+    }
+
     private func startReader(stdout: Pipe) {
         let handle = stdout.fileHandleForReading
         NovaMLXLog.info("[WorkerSupervisor] Reader started (readabilityHandler)")
@@ -348,10 +412,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 let key = msg.modelId ?? ""
                 lock.lock()
                 let callback = loadProgressCallbacks.removeValue(forKey: key)
-                if let cont = pendingRequests.removeValue(forKey: key) {
-                    cont.resume(returning: msg)
-                }
+                let cont = pendingRequests.removeValue(forKey: key)
                 lock.unlock()
+                cont?.resume(returning: msg)
                 if let callback = callback, msg.type == WorkerMessageType.loaded {
                     callback(.ready)
                 }
@@ -369,12 +432,13 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 // Worker rejected load/unload — resume the waiting continuation
                 let key = msg.modelId ?? ""
                 lock.lock()
-                if let cont = pendingRequests.removeValue(forKey: key) {
+                let cont = pendingRequests.removeValue(forKey: key)
+                lock.unlock()
+                if let cont {
                     cont.resume(returning: msg)
                 } else {
                     NovaMLXLog.warning("[WorkerSupervisor] Unhandled worker error (no pending request for '\(key)'): \(msg.errorMessage ?? "unknown")")
                 }
-                lock.unlock()
             }
             return
         }
@@ -382,10 +446,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
         switch msg.type {
         case WorkerMessageType.result, WorkerMessageType.error:
             lock.lock()
-            if let cont = pendingRequests.removeValue(forKey: requestId) {
-                cont.resume(returning: msg)
-            }
+            let cont = pendingRequests.removeValue(forKey: requestId)
             lock.unlock()
+            cont?.resume(returning: msg)
 
         case WorkerMessageType.token:
             let tokenToYield: Token?
@@ -449,6 +512,29 @@ public final class WorkerSupervisor: @unchecked Sendable {
         }
     }
 
+    /// `onTermination` and `activeRequestCount` take this lock. Never resume
+    /// or finish a continuation while holding it.
+    private func clearStreamStateLocked() {
+        streamContinuations.removeAll()
+        streamFinishReasons.removeAll()
+        streamCompletionTokens.removeAll()
+        streamDispatchStarts.removeAll()
+        streamFirstTokenLogged.removeAll()
+    }
+
+    private func failWaiters(
+        pending: [String: CheckedContinuation<WorkerMessage, Error>],
+        streams: [String: AsyncThrowingStream<Token, Error>.Continuation],
+        error: Error
+    ) {
+        for (_, cont) in pending {
+            cont.resume(throwing: error)
+        }
+        for (_, cont) in streams {
+            cont.finish(throwing: error)
+        }
+    }
+
     private func handleWorkerCrash() {
         lock.lock()
         let wasRunning = isRunning
@@ -456,26 +542,43 @@ public final class WorkerSupervisor: @unchecked Sendable {
         isRunning = false
         lastCrashTime = Date()
         pendingLoadModelId = nil
-
-        // Fail all pending requests
-        let crashMsg = crashedModelId.map { "Worker crashed while loading \($0)" } ?? "Worker crashed"
-        for (_, cont) in pendingRequests {
-            cont.resume(throwing: NovaMLXError.inferenceFailed(crashMsg))
-        }
+        let pending = pendingRequests
         pendingRequests.removeAll()
-
-        // Fail all active streams
-        for (_, cont) in streamContinuations {
-            cont.finish(throwing: NovaMLXError.inferenceFailed(crashMsg))
+        let streams = streamContinuations
+        clearStreamStateLocked()
+        if let pipe = stderrPipe {
+            pipe.fileHandleForReading.readabilityHandler = nil
         }
-        streamContinuations.removeAll()
-        streamFinishReasons.removeAll()
-        streamCompletionTokens.removeAll()
-
+        stderrPipe = nil
+        let proc = process
+        process = nil
+        let stderrTail = Array(lastStderrLines.suffix(20))
         lock.unlock()
 
+        let crashMsg = crashedModelId.map { "Worker crashed while loading \($0)" } ?? "Worker crashed"
+        failWaiters(
+            pending: pending, streams: streams,
+            error: NovaMLXError.inferenceFailed(crashMsg))
+
         if wasRunning {
-            NovaMLXLog.error("[WorkerSupervisor] Worker crashed!\(crashedModelId.map { " While loading: \($0)" } ?? "")")
+            var detail = crashedModelId.map { " While loading: \($0)" } ?? ""
+            if let proc {
+                let how: String
+                switch proc.terminationReason {
+                case .exit: how = "exit"
+                case .uncaughtSignal: how = "signal"
+                @unknown default: how = "term"
+                }
+                if proc.isRunning {
+                    detail += " pid=\(proc.processIdentifier) still-running"
+                } else {
+                    detail += " pid=\(proc.processIdentifier) \(how)=\(proc.terminationStatus)"
+                }
+            }
+            if !stderrTail.isEmpty {
+                detail += " stderr=\(stderrTail.joined(separator: " | "))"
+            }
+            NovaMLXLog.error("[WorkerSupervisor] Worker crashed!\(detail)")
             onCrash?()
         }
     }

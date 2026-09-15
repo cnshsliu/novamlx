@@ -73,10 +73,29 @@ public final class DraftModelRegistry: Sendable {
         return candidates.first { $0.family == family }
     }
 
+    /// DeepSeek DSpark drafter (V4.1 Flash). Preferred over a second LM draft.
+    public func dsparkCandidate(forMainId mainId: String) -> DraftModelCandidate? {
+        for id in dsparkDraftCandidates(forMainId: mainId) {
+            let dir = NovaMLXPaths.directory(forModelId: id)
+            let cfg = dir.appendingPathComponent("config.json")
+            guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
+            guard isDSparkDraftConfig(at: dir) || isMtpDraftConfig(at: dir) else { continue }
+            return DraftModelCandidate(
+                draftModelId: id,
+                displayName: id.split(separator: "/").last.map(String.init) ?? id,
+                expectedVocabSize: 129280,
+                family: .deepseek,
+                downloadRepo: id,
+                estimatedSizeMB: 4500
+            )
+        }
+        return nil
+    }
+
     /// DFlash2 block-diffusion drafter for this backbone (preferred over MTP).
     public func dflashCandidate(forMainId mainId: String) -> DraftModelCandidate? {
         for id in dflashDraftCandidates(forMainId: mainId) {
-            let dir = NovaMLXPaths.modelsDir.appendingPathComponent(id)
+            let dir = NovaMLXPaths.directory(forModelId:id)
             let cfg = dir.appendingPathComponent("config.json")
             guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
             guard isDFlashDraftConfig(at: dir) else { continue }
@@ -94,10 +113,10 @@ public final class DraftModelRegistry: Sendable {
 
     /// Native MTP head on disk for this backbone (same vocab, `qwen3_5_mtp` or `mtp.*` weights).
     public func mtpCandidate(forMainId mainId: String) -> DraftModelCandidate? {
-        let mainDir = NovaMLXPaths.modelsDir.appendingPathComponent(mainId)
+        let mainDir = NovaMLXPaths.directory(forModelId:mainId)
         let vocab = Self.readVocabSize(from: mainDir)
         for id in mtpDraftCandidates(forMainId: mainId) {
-            let dir = NovaMLXPaths.modelsDir.appendingPathComponent(id)
+            let dir = NovaMLXPaths.directory(forModelId:id)
             let cfg = dir.appendingPathComponent("config.json")
             guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
             guard isMtpDraftConfig(at: dir) || checkpointHasMtpWeights(at: dir) else { continue }
@@ -128,6 +147,12 @@ public final class DraftModelRegistry: Sendable {
     ) -> SpecBoostStatus {
         if nativeMtp {
             return .active(draftModelId: modelId ?? "native-mtp")
+        }
+        if let modelId, let dspark = dsparkCandidate(forMainId: modelId) {
+            if draftModelLoaded(dspark.draftModelId) {
+                return .active(draftModelId: dspark.draftModelId)
+            }
+            return .eligible(candidate: dspark)
         }
         if let modelId, let dflash = dflashCandidate(forMainId: modelId) {
             if draftModelLoaded(dflash.draftModelId) {

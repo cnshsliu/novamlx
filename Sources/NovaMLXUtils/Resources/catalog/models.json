@@ -2,6 +2,61 @@
   "schemaVersion": 1,
   "models": [
     {
+      "id": "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit",
+      "url": "https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-MLX-2bit",
+      "name": "DeepSeek-V4.1-Flash",
+      "description": "DeepSeek V4.1 Flash (deepseek_v41): 552B MoE CED, 1M context, native multimodal. mlx-community affine 2-bit (~239 GB). Decode stack: NovaMLX-TIE SSD streaming, in-graph DSpark/MTP (3 stages, 5-token blocks — Qwen DFlash is a different recipe), n-gram spec on the fused path, prefix KV cache. Pair mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter for the split drafter. Official deepseek-ai/DeepSeek-V4.1-Flash is transformers FP4/FP8 (~510 GB), not MLX.",
+      "category": "vlm",
+      "family": "deepseek",
+      "format": "mlx",
+      "status": "verified",
+      "quant": "2bit",
+      "size": "~239 GB (2-bit)",
+      "sizeBytes": 238834784075,
+      "minRamGB": 128,
+      "addedAt": "2026-09-11T20:00:00Z",
+      "testedOn": "1.2.0",
+      "tags": [
+        "MLX",
+        "2-bit",
+        "DeepSeek",
+        "V4.1",
+        "MoE",
+        "TIE",
+        "DSpark",
+        "MTP",
+        "Vision"
+      ],
+      "capabilities": [
+        "tools",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "id": "mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter",
+      "url": "https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter",
+      "name": "DeepSeek-V4.1-Flash DSpark drafter",
+      "description": "Split DSpark speculative drafter for DeepSeek V4.1 Flash (deepseek_v41_dspark, 3 stages × 128 experts, 5-token block, ~4.5 GB). Download only — cannot load as chat. The 2-bit backbone already contains in-graph mtp.* DSpark heads; this companion is the standalone path. Qwen DFlash2 does not attach to DeepSeek.",
+      "category": "llm",
+      "family": "deepseek",
+      "format": "mlx",
+      "status": "verified",
+      "quant": "2bit",
+      "size": "~4.5 GB (2-bit)",
+      "sizeBytes": 4466990307,
+      "minRamGB": 16,
+      "addedAt": "2026-09-11T21:00:00Z",
+      "testedOn": "1.2.0",
+      "tags": [
+        "MLX",
+        "DSpark",
+        "Speculative",
+        "Companion",
+        "DeepSeek"
+      ]
+    },
+    {
       "id": "Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX",
       "url": "https://huggingface.co/Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX",
       "name": "Qwythos-27B-v1",
@@ -210,7 +265,12 @@
       "size": "~1.5 GB",
       "sizeBytes": 1500000000,
       "testedOn": "1.2.0",
-      "tags": ["MLX", "DFlash", "Speculative", "Companion"]
+      "tags": [
+        "MLX",
+        "DFlash",
+        "Speculative",
+        "Companion"
+      ]
     },
     {
       "id": "mlx-community/Qwen3.6-27B-OptiQ-4bit",
@@ -687,18 +747,19 @@
       "id": "mzbac/flux1.schnell.4bit.mlx",
       "url": "https://huggingface.co/mzbac/flux1.schnell.4bit.mlx",
       "name": "FLUX.1-schnell-4bit",
-      "description": "Fast 4-step image generation, quantized for Mac",
+      "description": "Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.",
       "size": "~6 GB",
       "tags": [
         "MLX",
         "4-bit",
-        "FLUX"
+        "FLUX",
+        "unsupported"
       ],
       "category": "image",
       "sizeBytes": 6000000000,
       "family": "flux",
       "format": "mlx",
-      "status": "preview"
+      "status": "unsupported"
     },
     {
       "id": "mzbac/flux1.dev.4bit.mlx",
@@ -716,7 +777,59 @@
       "family": "flux",
       "format": "mlx",
       "status": "preview"
+    },
+    {
+      "id": "black-forest-labs/FLUX.2-klein-4B",
+      "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B",
+      "name": "FLUX.2-klein-4B",
+      "description": "4-step distilled FLUX.2 Klein (Apache-2.0). Native Swift/MLX, ~8–16 GB",
+      "size": "~16 GB",
+      "tags": [
+        "MLX",
+        "bf16",
+        "FLUX.2",
+        "Klein"
+      ],
+      "category": "image",
+      "sizeBytes": 16000000000,
+      "family": "flux2",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "mzbac/Z-Image-Turbo-8bit",
+      "url": "https://huggingface.co/mzbac/Z-Image-Turbo-8bit",
+      "name": "Z-Image-Turbo-8bit",
+      "description": "Tongyi Z-Image-Turbo distilled 9-step T2I, 8-bit MLX (~7.5 GB)",
+      "size": "~7.5 GB",
+      "tags": [
+        "MLX",
+        "8-bit",
+        "Z-Image"
+      ],
+      "category": "image",
+      "sizeBytes": 7500000000,
+      "family": "zImage",
+      "format": "mlx",
+      "status": "preview"
+    },
+    {
+      "id": "Qwen/Qwen-Image",
+      "url": "https://huggingface.co/Qwen/Qwen-Image",
+      "name": "Qwen-Image",
+      "description": "Qwen-Image 20B T2I with strong text rendering. Full bf16 weights, high RAM",
+      "size": "~40 GB",
+      "tags": [
+        "MLX",
+        "bf16",
+        "Qwen-Image"
+      ],
+      "category": "image",
+      "sizeBytes": 40000000000,
+      "family": "qwenImage",
+      "format": "mlx",
+      "status": "preview"
     }
   ],
-  "updatedAt": "2026-09-05T12:00:00Z"
+  "updatedAt": "2026-09-11T21:00:00Z"
 }

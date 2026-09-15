@@ -129,6 +129,9 @@ struct NovaMLXWorker {
         do {
             let url = URL(fileURLWithPath: path)
             NovaMLXLog.info("[Worker] Loading \(modelId), MLX active=\(MLX.Memory.activeMemory / 1_048_576)MB, peak=\(MLX.Memory.peakMemory / 1_048_576)MB")
+            if let reason = ExpertShardConverter.validationError(at: url) {
+                throw NovaMLXError.tieLayoutIncomplete(modelId, reason)
+            }
             // NovaMLX-TIE: bind BEFORE loadModel so shards move into tie-shards/
             // before MLX's eager loadWeights scans the directory. If we bind
             // after, loadWeights sees the per-shard files and loads everything

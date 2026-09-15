@@ -110,6 +110,57 @@ struct CoreTypesTests {
         #expect(ModelFamily.allCases.count >= 8)
     }
 
+    @Test("models-path file parses comments, blanks, and multiple roots")
+    func modelsPathMultiLine() {
+        let content = """
+        # comment
+        /Users/lucas/Models
+
+        /Volumes/Samsung768/Models
+        """
+        #expect(NovaMLXPaths.parseModelsPathContents(content) == [
+            "/Users/lucas/Models",
+            "/Volumes/Samsung768/Models",
+        ])
+    }
+
+    @Test("directory(forModelId:) finds a model on an extra root")
+    func directoryResolvesExtraRoot() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("novamlx-paths-\(UUID().uuidString)")
+        let primary = base.appendingPathComponent("internal", isDirectory: true)
+        let extra = base.appendingPathComponent("external", isDirectory: true)
+        let modelId = "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit"
+        let onExtra = extra.appendingPathComponent(modelId, isDirectory: true)
+        try fm.createDirectory(at: onExtra, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let found = NovaMLXPaths.directory(forModelId: modelId, roots: [primary, extra])
+        #expect(found.path == onExtra.path)
+
+        let missing = NovaMLXPaths.directory(forModelId: "org/not-there", roots: [primary, extra])
+        #expect(missing.path.hasSuffix("org/not-there"))
+    }
+
+    @Test("downloadRoot sends large checkpoints to the extra disk")
+    func downloadRootPrefersExtraForLargeModels() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("novamlx-dlroot-\(UUID().uuidString)")
+        let primary = base.appendingPathComponent("internal", isDirectory: true)
+        let extra = base.appendingPathComponent("external", isDirectory: true)
+        try fm.createDirectory(at: extra, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let small = NovaMLXPaths.downloadRoot(estimatedBytes: 1_000_000_000, roots: [primary, extra])
+        #expect(small.path == NovaMLXPaths.modelsDir.path)
+
+        let large = NovaMLXPaths.downloadRoot(
+            estimatedBytes: NovaMLXPaths.largeModelDownloadThresholdBytes,
+            roots: [primary, extra]
+        )
+        #expect(large.path == extra.path)
+    }
+
     @Test("Token creation")
     func tokenCreation() {
         let token = Token(id: 42, text: "hello", logprob: -0.5)
@@ -181,6 +232,26 @@ struct CoreTypesTests {
         let overridden = settings.applySamplingOverrides(to: request)
         #expect(overridden.temperature == 0.8)
         #expect(overridden.topP == 0.95)
+    }
+
+    @Test("ModelSettings native MTP off applies unless request overrides")
+    func modelSettingsNativeMtpToggle() {
+        var settings = ModelSettings()
+        settings.nativeMtpEnabled = false
+        let request = InferenceRequest(
+            model: "test",
+            messages: [ChatMessage(role: .user, content: "hello")]
+        )
+        let off = settings.applySamplingOverrides(to: request)
+        #expect(off.useNativeMtp == false)
+
+        let forced = InferenceRequest(
+            model: "test",
+            messages: [ChatMessage(role: .user, content: "hello")],
+            useNativeMtp: true
+        )
+        let on = settings.applySamplingOverrides(to: forced)
+        #expect(on.useNativeMtp == true)
     }
 
     @Test("ThinkingParser basic think block")

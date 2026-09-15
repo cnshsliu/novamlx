@@ -114,7 +114,13 @@ struct CatalogAdminPageView: View {
                         if ModelCatalogPolicy.isIdPattern(entry.id) {
                             badge("family", color: NovaTheme.Colors.accent)
                         }
-                        badge(entry.status.rawValue, color: entry.status == .verified ? NovaTheme.Colors.statusOK : .orange)
+                        badge(entry.status.rawValue, color: {
+                            switch entry.status {
+                            case .verified: return NovaTheme.Colors.statusOK
+                            case .preview: return .orange
+                            case .unsupported: return .secondary
+                            }
+                        }())
                     }
                     Text("\(entry.id) · \(entry.category.rawValue) · \(entry.size ?? "")")
                         .font(.system(size: 11))

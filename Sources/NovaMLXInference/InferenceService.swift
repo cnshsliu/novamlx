@@ -90,7 +90,7 @@ public final class InferenceService: @unchecked Sendable {
                     )
                 },
                 modelPathProvider: { modelId in
-                    let path = NovaMLXPaths.modelsDir.appendingPathComponent(modelId).path
+                    let path = NovaMLXPaths.directory(forModelId:modelId).path
                     var isDir: ObjCBool = false
                     guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
                         return nil
@@ -241,7 +241,7 @@ public final class InferenceService: @unchecked Sendable {
 
     public func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
         let resolvedId = settingsManager.resolveModelId(request.model)
-        let mtpDir = NovaMLXPaths.modelsDir.appendingPathComponent(resolvedId)
+        let mtpDir = NovaMLXPaths.directory(forModelId:resolvedId)
         if isMtpDraftConfig(at: mtpDir) {
             return AsyncThrowingStream { continuation in
                 continuation.finish(
@@ -417,6 +417,12 @@ public final class InferenceService: @unchecked Sendable {
         guard isModelLoaded(request.model) else { return request }
 
         let mainId = settingsManager.resolveModelId(request.model)
+        if let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: mainId),
+           isModelLoaded(dspark.draftModelId)
+        {
+            NovaMLXLog.info("[SpecBoost] Auto-injecting DSpark draft '\(dspark.draftModelId)' for '\(request.model)'")
+            return withDraft(request, draftId: dspark.draftModelId)
+        }
         if let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId),
            isModelLoaded(dflash.draftModelId)
         {
@@ -463,8 +469,8 @@ public final class InferenceService: @unchecked Sendable {
         guard isModelLoaded(candidate.draftModelId) else { return request }
 
         // Validate vocab_size match from config.json on disk
-        let mainDir = NovaMLXPaths.modelsDir.appendingPathComponent(mainId)
-        let draftDir = NovaMLXPaths.modelsDir.appendingPathComponent(candidate.draftModelId)
+        let mainDir = NovaMLXPaths.directory(forModelId:mainId)
+        let draftDir = NovaMLXPaths.directory(forModelId:candidate.draftModelId)
         guard let mainVocab = DraftModelRegistry.readVocabSize(from: mainDir),
               let draftVocab = DraftModelRegistry.readVocabSize(from: draftDir),
               mainVocab == draftVocab else {
@@ -533,37 +539,107 @@ public final class InferenceService: @unchecked Sendable {
             return
         }
 
+        // Image models stay on the host ImageGenerationService (not the worker MLXEngine).
+        let isImageFamily: Bool = {
+            switch config.identifier.family {
+            case .flux, .flux2, .zImage, .qwenImage, .stableDiffusion: return true
+            default: return false
+            }
+        }()
+        if config.modelType == .image || isImageFamily {
+            if ImageModelSupport.isUnsupported(modelId) {
+                throw NovaMLXError.unsupportedModel(ImageModelSupport.refuseMessage(modelId))
+            }
+            NovaMLXLog.info(
+                "[InferenceService] Loading image model: \(modelId), family=\(config.identifier.family), url=\(url.path)"
+            )
+            try await loadDedup.ensureSingle(modelId: modelId) {
+                _ = try await self.imageGenerationService.loadModel(
+                    from: url, config: config, progress: progress
+                )
+                self.saveLoadedModelsList()
+            }
+            return
+        }
+
         try await loadDedup.ensureSingle(modelId: modelId) { [self] in
             if !asMtpCompanion, config.modelType == .llm || config.modelType == .vlm {
                 await self.evictOthersForExclusive(keeping: modelId)
             }
-            if self.workerMode, let worker = self.worker {
-                let flags = try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
-                self.workerLoadedModels.insert(modelId)
-                self.workerModelTypes[modelId] = config.modelType
-                if flags.hybrid {
-                    self.workerHybridModels.insert(modelId)
+            try await self.ensureTieLayoutIfNeeded(
+                modelId: modelId, url: url, progress: progress
+            )
+            do {
+                if self.workerMode, let worker = self.worker {
+                    let flags = try await worker.sendLoad(modelId: modelId, path: url.path, config: config, progress: progress)
+                    self.workerLoadedModels.insert(modelId)
+                    self.workerModelTypes[modelId] = config.modelType
+                    if flags.hybrid {
+                        self.workerHybridModels.insert(modelId)
+                    }
+                    if flags.nativeMtp {
+                        self.workerNativeMtpModels.insert(modelId)
+                    }
+                } else {
+                    _ = try await self.engine.loadModel(from: url, config: config, progress: progress)
+                    let settings = self.settingsManager.getSettings(modelId)
+                    if settings.isPinned {
+                        self.engine.pool.pin(modelId)
+                    }
                 }
-                if flags.nativeMtp {
-                    self.workerNativeMtpModels.insert(modelId)
+            } catch {
+                if ExpertShardConverter.inspect(at: url).status == .ready
+                    || ExpertShardConverter.inspect(at: url).status == .incomplete
+                {
+                    throw NovaMLXError.modelLoadFailed(
+                        modelId,
+                        underlying: NovaMLXError.apiError(
+                            "\(error.localizedDescription) If TIE conversion looks wrong, unload (if needed), remove the TIE layout, and convert again."
+                        )
+                    )
                 }
-            } else {
-                _ = try await self.engine.loadModel(from: url, config: config, progress: progress)
-                let settings = self.settingsManager.getSettings(modelId)
-                if settings.isPinned {
-                    self.engine.pool.pin(modelId)
-                }
+                throw error
             }
             self.saveLoadedModelsList()
         }
 
+        await loadCompanionDSparkIfPresent(mainId: modelId)
         await loadCompanionDFlashIfPresent(mainId: modelId)
         await loadCompanionMtpIfPresent(mainId: modelId)
         await applyResourceLimits()
     }
 
+    private func ensureTieLayoutIfNeeded(
+        modelId: String,
+        url: URL,
+        progress: (@Sendable (LoadPhase) -> Void)?
+    ) async throws {
+        let status = ExpertShardConverter.inspect(
+            at: url,
+            converting: await TieConversionBroker.shared.snapshot(modelId: modelId)
+        )
+        if status.status == .incomplete {
+            throw NovaMLXError.tieLayoutIncomplete(modelId, status.message ?? "incomplete layout")
+        }
+        if status.status == .converting {
+            progress?(.convertingTIE)
+            try await TieConversionBroker.shared.convert(modelId: modelId, at: url)
+            return
+        }
+        guard status.status == .convertible else { return }
+        let estimated = MLXEngine.estimateModelWeightSize(at: url) ?? 0
+        let gpu = MLXEngine.recommendedGpuBytes()
+        if ExpertShardConverter.shouldAutoConvertOnLoad(
+            at: url, estimatedBytes: estimated, gpuBudgetBytes: gpu
+        ) {
+            progress?(.convertingTIE)
+            NovaMLXLog.info("[TIE] Auto-converting '\(modelId)' before load (model larger than GPU budget)")
+            try await TieConversionBroker.shared.convert(modelId: modelId, at: url)
+        }
+    }
+
     private static func rejectMtpAsChat(_ modelId: String) throws {
-        let dir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let dir = NovaMLXPaths.directory(forModelId:modelId)
         if isMtpDraftConfig(at: dir) {
             throw NovaMLXError.unsupportedModel(
                 "MTP draft head cannot be used as a chat model: \(modelId)"
@@ -571,10 +647,34 @@ public final class InferenceService: @unchecked Sendable {
         }
     }
 
+    private func loadCompanionDSparkIfPresent(mainId: String) async {
+        guard let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: mainId) else { return }
+        guard !isModelLoaded(dspark.draftModelId) else { return }
+        let dir = NovaMLXPaths.directory(forModelId: dspark.draftModelId)
+        guard FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("config.json").path)
+        else {
+            NovaMLXLog.info(
+                "[SpecBoost] DSpark companion '\(dspark.draftModelId)' not on disk — in-graph DSpark/MTP still runs from the V4.1 checkpoint; download the drafter for the split path"
+            )
+            return
+        }
+        NovaMLXLog.info("[SpecBoost] Loading DSpark companion '\(dspark.draftModelId)' for '\(mainId)'")
+        let config = ModelConfig(
+            identifier: ModelIdentifier(id: dspark.draftModelId, family: .deepseek),
+            modelType: .llm
+        )
+        do {
+            try await loadModel(at: dir, config: config, asMtpCompanion: true)
+        } catch {
+            NovaMLXLog.warning("[SpecBoost] DSpark companion load failed: \(error.localizedDescription)")
+        }
+    }
+
     private func loadCompanionDFlashIfPresent(mainId: String) async {
         guard let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId) else { return }
         guard !isModelLoaded(dflash.draftModelId) else { return }
-        let dir = NovaMLXPaths.modelsDir.appendingPathComponent(dflash.draftModelId)
+        let dir = NovaMLXPaths.directory(forModelId:dflash.draftModelId)
         guard FileManager.default.fileExists(
             atPath: dir.appendingPathComponent("config.json").path)
         else {
@@ -612,19 +712,22 @@ public final class InferenceService: @unchecked Sendable {
 
     /// Companions kept with a chat backbone. DFlash2 replaces MTP when present.
     public static func companionKeepIds(
-        backboneId: String, dflashId: String?, mtpId: String?
+        backboneId: String, dflashId: String?, mtpId: String?, dsparkId: String? = nil
     ) -> Set<String> {
         var keep: Set<String> = [backboneId]
+        if let dsparkId {
+            keep.insert(dsparkId)
+        }
         if let dflashId {
             keep.insert(dflashId)
-        } else if let mtpId {
+        } else if dsparkId == nil, let mtpId {
             keep.insert(mtpId)
         }
         return keep
     }
 
     private func loadCompanionMtpIfPresent(mainId: String) async {
-        let mainDir = NovaMLXPaths.modelsDir.appendingPathComponent(mainId)
+        let mainDir = NovaMLXPaths.directory(forModelId:mainId)
         guard !isMtpDraftConfig(at: mainDir) else { return }
         let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId)
         let dflashLoaded = dflash.map { isModelLoaded($0.draftModelId) } ?? false
@@ -638,7 +741,7 @@ public final class InferenceService: @unchecked Sendable {
         }
         guard let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId) else { return }
         guard !isModelLoaded(mtp.draftModelId) else { return }
-        let mtpDir = NovaMLXPaths.modelsDir.appendingPathComponent(mtp.draftModelId)
+        let mtpDir = NovaMLXPaths.directory(forModelId:mtp.draftModelId)
         guard FileManager.default.fileExists(
             atPath: mtpDir.appendingPathComponent("config.json").path)
         else { return }
@@ -659,7 +762,8 @@ public final class InferenceService: @unchecked Sendable {
         companionKeepIds(
             backboneId: modelId,
             dflashId: DraftModelRegistry.shared.dflashCandidate(forMainId: modelId)?.draftModelId,
-            mtpId: DraftModelRegistry.shared.mtpCandidate(forMainId: modelId)?.draftModelId
+            mtpId: DraftModelRegistry.shared.mtpCandidate(forMainId: modelId)?.draftModelId,
+            dsparkId: DraftModelRegistry.shared.dsparkCandidate(forMainId: modelId)?.draftModelId
         )
     }
 
@@ -677,9 +781,10 @@ public final class InferenceService: @unchecked Sendable {
 
     public func chatLoadedCount() -> Int {
         listLoadedModels().filter { id in
-            !isMtpDraftConfig(at: NovaMLXPaths.modelsDir.appendingPathComponent(id))
-                && !isDFlashDraftConfig(at: NovaMLXPaths.modelsDir.appendingPathComponent(id))
-                && !ResourceLimits.isMtpModelId(id)
+            !isMtpDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
+                && !isDFlashDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
+                && !isDSparkDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
+                && !ResourceLimits.isCompanionDraftModelId(id)
         }.count
     }
 

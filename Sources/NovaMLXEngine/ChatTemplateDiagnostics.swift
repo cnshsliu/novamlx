@@ -53,7 +53,10 @@ public enum ChatTemplateDiagnostics {
     /// directory under which model dirs live (typically NovaMLXPaths.modelsDir).
     public static func diagnose(modelId: String, modelsDir: URL, family: ModelFamily) -> Report {
         let fm = FileManager.default
-        let modelDir = modelsDir.appendingPathComponent(modelId)
+        var modelDir = modelsDir.appendingPathComponent(modelId)
+        if !fm.fileExists(atPath: modelDir.path) {
+            modelDir = NovaMLXPaths.directory(forModelId: modelId)
+        }
         let dirExists = fm.fileExists(atPath: modelDir.path)
 
         // Architecture & model_type from config.json

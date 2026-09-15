@@ -1,0 +1,41 @@
+{%- set bos = bos_token if bos_token is defined and bos_token else '<｜begin▁of▁sentence｜>' -%}
+{%- set eos = eos_token if eos_token is defined and eos_token else '<｜end▁of▁sentence｜>' -%}
+{%- set thinking = false if enable_thinking is not defined else enable_thinking -%}
+{{- bos -}}
+{%- if thinking -%}
+  {{- '<｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n' -}}
+{%- endif -%}
+{%- set ns = namespace(system='') -%}
+{%- for message in messages -%}
+  {%- if message['role'] == 'system' -%}
+    {%- if ns.system -%}
+      {%- set ns.system = ns.system + '\n\n' + message['content'] -%}
+    {%- else -%}
+      {%- set ns.system = message['content'] -%}
+    {%- endif -%}
+  {%- endif -%}
+{%- endfor -%}
+{%- if ns.system -%}
+  {{- ns.system -}}
+{%- endif -%}
+{%- for message in messages -%}
+  {%- if message['role'] == 'user' -%}
+    {{- '<｜User｜>' + message['content'] -}}
+  {%- elif message['role'] == 'assistant' -%}
+    {{- '<｜Assistant｜>' -}}
+    {%- if thinking -%}
+      {{- '<think>' -}}
+    {%- else -%}
+      {{- '</think>' -}}
+    {%- endif -%}
+    {{- (message['content'] | default('')) + eos -}}
+  {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+  {{- '<｜Assistant｜>' -}}
+  {%- if thinking -%}
+    {{- '<think>' -}}
+  {%- else -%}
+    {{- '</think>' -}}
+  {%- endif -%}
+{%- endif -%}

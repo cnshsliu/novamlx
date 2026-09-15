@@ -82,6 +82,7 @@ struct ResourceLimitsTests {
     func companionDraftIds() {
         #expect(ResourceLimits.isCompanionDraftModelId("incoai/Qwen3.8-27B-DFlash2"))
         #expect(ResourceLimits.isCompanionDraftModelId("mlx-community/Qwen3.8-27B-MTP-8bit"))
+        #expect(ResourceLimits.isCompanionDraftModelId("mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter"))
         #expect(!ResourceLimits.isCompanionDraftModelId("mlx-community/Qwen3.8-27B-8bit"))
     }
 

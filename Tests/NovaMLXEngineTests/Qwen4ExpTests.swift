@@ -94,6 +94,21 @@ struct Qwen4ExpTests {
         """.data(using: .utf8)!
     }
 
+    @Test("Per-layer ngram shard_ group size matches shards. Module path")
+    func ngramQuantizationPathAlias() {
+        let pl = BaseConfiguration.PerLayerQuantization(
+            quantization: BaseConfiguration.Quantization(groupSize: 64, bits: 4),
+            perLayerQuantization: [
+                "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0":
+                    .quantize(BaseConfiguration.Quantization(groupSize: 32, bits: 4))
+            ]
+        )
+        let path =
+            "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0"
+        #expect(pl.quantization(layer: path)?.groupSize == 32)
+        #expect(pl.quantization(layer: "model.layers.0.mlp.gate")?.groupSize == 64)
+    }
+
     @Test("LLMTypeRegistry has qwen4_exp and qwen4_exp_text")
     func registryContainsTypes() async throws {
         do {
@@ -153,10 +168,12 @@ struct Qwen4ExpTests {
                 MLXArray.ones([4, 8]),
             "vision_tower.patch_embed.proj.weight": MLXArray.ones([1]),
             "mtp.layers.0.self_attn.q_proj.weight": MLXArray.ones([1]),
+            "language_model.mtp.fc_embedding.weight": MLXArray.ones([8, 8]),
         ]
         let out = Qwen4ExpModel.remapWeights(weights, layerCount: 2)
         #expect(out["vision_tower.patch_embed.proj.weight"] == nil)
-        #expect(out.keys.contains { $0.contains("mtp.") } == false)
+        #expect(out["mtp.layers.0.self_attn.q_proj.weight"] != nil)
+        #expect(out["language_model.mtp.fc_embedding.weight"] != nil)
         let convKey = "language_model.model.layers.0.linear_attn.conv1d.weight"
         #expect(out[convKey] != nil)
         #expect(out[convKey]?.dim(-1) == 1)
@@ -190,5 +207,46 @@ struct Qwen4ExpTests {
         #expect(found?.family == .qwen)
         #expect(found?.modelType == .vlm)
         #expect(found?.configModelType == "qwen4_exp")
+    }
+
+    @Test("native MTP attaches only when mtp tensors are present")
+    func nativeMtpAttachAndShapes() throws {
+        let config = try JSONDecoder().decode(Qwen4ExpTextConfiguration.self, from: tinyTextJSON)
+        let model = Qwen4ExpTextModel(config)
+        #expect(model.mtpBlockSize == 0)
+        #expect(model.nativeMtpAvailable == false)
+
+        let hcHidden = config.hiddenSize * config.hcCount
+        var weights: [String: MLXArray] = [
+            "language_model.mtp.fc_embedding.weight": MLXArray.ones([config.hiddenSize, config.hiddenSize]),
+            "language_model.mtp.fc_hidden.weight": MLXArray.ones([config.hiddenSize, config.hiddenSize]),
+            "language_model.mtp.pre_fc_norm_embedding.weight": MLXArray.zeros([config.hiddenSize]),
+            "language_model.mtp.pre_fc_norm_hidden.weight": MLXArray.zeros([hcHidden]),
+        ]
+        let gateUp = MLXArray.ones([config.numExperts, config.moeIntermediateSize * 2, config.hiddenSize])
+        let down = MLXArray.ones([config.numExperts, config.hiddenSize, config.moeIntermediateSize])
+        weights["language_model.mtp.layers.0.mlp.experts.gate_up_proj.weight"] = gateUp
+        weights["language_model.mtp.layers.0.mlp.experts.down_proj.weight"] = down
+
+        let remapped = Qwen4ExpModel.remapWeights(weights, layerCount: config.hiddenLayers)
+        #expect(remapped["language_model.mtp.layers.0.mlp.switch_mlp.gate_proj.weight"] != nil)
+        #expect(remapped["language_model.mtp.layers.0.mlp.experts.gate_up_proj.weight"] == nil)
+
+        model.attachNativeMtp(from: remapped)
+        #expect(model.nativeMtpAvailable)
+        #expect(model.mtpBlockSize == 2)
+
+        let tokens = MLXArray(Array(Int32(1) ..< Int32(3))).reshaped([1, 2])
+        let embed = model.mtpEmbed(tokens)
+        #expect(embed.shape == [1, 2, config.hiddenSize])
+        let hidden = MLXArray.ones([1, 2, hcHidden])
+        let draftCache = model.mtpNewCache(parameters: nil)
+        #expect(draftCache.count == 1)
+        let out = model.mtpForward(tokenEmbed: embed, hidden: hidden, cache: draftCache)
+        eval(out)
+        #expect(out.shape == [1, 2, hcHidden])
+        let logits = model.mtpLmHead(out)
+        eval(logits)
+        #expect(logits.shape == [1, 2, config.vocabularySize])
     }
 }

@@ -103,12 +103,24 @@ public final class ModelDiscovery: Sendable {
         "UNet2DConditionModel",
         "FluxPipeline",
         "FluxTransformer2DModel",
+        "Flux2Pipeline",
+        "Flux2Transformer2DModel",
+        "ZImagePipeline",
+        "ZImageTransformer2DModel",
+        "QwenImagePipeline",
+        "QwenImageTransformer2DModel",
     ]
 
     private static let imageModelTypes: Set<String> = [
         "stable-diffusion-xl",
         "stable-diffusion",
         "flux",
+        "flux2",
+        "flux_2",
+        "z_image",
+        "zimage",
+        "qwen_image",
+        "qwenimage",
     ]
 
     private static let familyByModelType: [String: ModelFamily] = [
@@ -121,7 +133,7 @@ public final class ModelDiscovery: Sendable {
         "gemma": .gemma, "gemma2": .gemma, "gemma3": .gemma, "gemma4": .gemma, "gemma3_text": .gemma, "gemma3n": .gemma, "gemma4_text": .gemma,
         "starcoder2": .starcoder,
         "bailing_moe": .bailing, "bailing_hybrid": .bailing,
-        "deepseek_v3": .deepseek, "deepseek_v4": .deepseek,
+        "deepseek_v3": .deepseek, "deepseek_v4": .deepseek, "deepseek_v41": .deepseek,
         "hy_v4": .hunyuan,
         "gpt_oss": .gptOss,
         "whisper": .whisper,
@@ -131,6 +143,9 @@ public final class ModelDiscovery: Sendable {
         "stable-diffusion": .stableDiffusion, "stable_diffusion": .stableDiffusion,
         "stable-diffusion-xl": .stableDiffusion, "stable_diffusion_xl": .stableDiffusion,
         "flux": .flux,
+        "flux2": .flux2, "flux_2": .flux2,
+        "z_image": .zImage, "zimage": .zImage,
+        "qwen_image": .qwenImage, "qwenimage": .qwenImage,
     ]
 
     private static let familyByArchitecture: [String: ModelFamily] = [
@@ -147,6 +162,7 @@ public final class ModelDiscovery: Sendable {
         "Gemma4ForConditionalGeneration": .gemma,
         "GptOssForCausalLM": .gptOss,
         "DeepseekV4ForCausalLM": .deepseek,
+        "DeepseekV41ForCausalLM": .deepseek,
         "HYV4ForCausalLM": .hunyuan,
         "Qwen4ExpForConditionalGeneration": .qwen,
         "Qwen3ASRForConditionalGeneration": .qwen3Asr,
@@ -154,6 +170,12 @@ public final class ModelDiscovery: Sendable {
         "DotsTTSForConditionalGeneration": .dotsTts,
         "FluxTransformer2DModel": .flux,
         "FluxPipeline": .flux,
+        "Flux2Transformer2DModel": .flux2,
+        "Flux2Pipeline": .flux2,
+        "ZImageTransformer2DModel": .zImage,
+        "ZImagePipeline": .zImage,
+        "QwenImageTransformer2DModel": .qwenImage,
+        "QwenImagePipeline": .qwenImage,
     ]
 
     public init() {}
@@ -354,9 +376,23 @@ public final class ModelDiscovery: Sendable {
             return false
         }
 
-        let safetensors = contents.filter { $0.pathExtension == "safetensors" }
-        let ggufFiles = contents.filter { $0.pathExtension == "gguf" }
-        let weightFiles = safetensors + ggufFiles
+        var weightFiles = contents.filter {
+            $0.pathExtension == "safetensors" || $0.pathExtension == "gguf"
+        }
+
+        // Diffusers / FLUX / Qwen-Image / Z-Image keep shards in subfolders.
+        if weightFiles.isEmpty {
+            let subdirs = ["transformer", "vae", "unet", "text_encoder", "text_encoder_2"]
+            for name in subdirs {
+                let child = resolved.appendingPathComponent(name)
+                guard let nested = try? fm.contentsOfDirectory(
+                    at: child, includingPropertiesForKeys: nil
+                ) else { continue }
+                weightFiles.append(contentsOf: nested.filter {
+                    $0.pathExtension == "safetensors" || $0.pathExtension == "gguf"
+                })
+            }
+        }
 
         // Must have at least one weight file (safetensors or gguf)
         guard !weightFiles.isEmpty else { return false }
@@ -451,6 +487,11 @@ public final class ModelDiscovery: Sendable {
         }
 
         let dirName = path.lastPathComponent.lowercased()
+        if dirName.contains("flux.2") || dirName.contains("flux2")
+            || dirName.contains("flux-2") || dirName.contains("z-image")
+            || dirName.contains("zimage") || dirName.contains("qwen-image") {
+            return .image
+        }
         // Qwen3-Embedding / EmbeddingGemma checkpoints often keep a CausalLM
         // architecture string. The directory name is the reliable signal.
         if dirName.contains("embedding") || dirName.contains("-embed-")
@@ -463,6 +504,7 @@ public final class ModelDiscovery: Sendable {
 
     private func detectFamily(config: HFConfig, modelId: String) -> ModelFamily {
         // Resolution order (most-specific first, with data-driven extensions overlaying built-ins):
+        //   0. Image-family ids (Qwen-Image / FLUX.2 / Z-Image) before LLM "qwen"/"flux"
         //   1. ChatTemplateRegistry user/bundled extensions by model_type
         //   2. Built-in Swift familyByModelType map
         //   3. ChatTemplateRegistry by architecture
@@ -472,6 +514,19 @@ public final class ModelDiscovery: Sendable {
         //
         // Adding support for a new family without recompiling: drop entries
         // into ~/.nova/templates/registry.json under `familyDetection`.
+
+        let idLower = modelId.lowercased()
+        if idLower.contains("flux.2") || idLower.contains("flux2")
+            || idLower.contains("flux-2") {
+            return .flux2
+        }
+        if idLower.contains("z-image") || idLower.contains("z_image")
+            || idLower.contains("zimage") {
+            return .zImage
+        }
+        if idLower.contains("qwen-image") || idLower.contains("qwen_image") {
+            return .qwenImage
+        }
 
         if let rawType = config.modelType {
             let normalized = rawType.lowercased().replacingOccurrences(of: "-", with: "_")
@@ -496,8 +551,8 @@ public final class ModelDiscovery: Sendable {
             }
         }
 
-        // 5. Substring match — non-conservative, but better than .other for popular families.
-        let idLower = modelId.lowercased()
+        // 5. Substring match — image ids already handled above.
+        if idLower.contains("flux") { return .flux }
         if idLower.contains("llama") { return .llama }
         if idLower.contains("mistral") || idLower.contains("mixtral") { return .mistral }
         if idLower.contains("phi") { return .phi }

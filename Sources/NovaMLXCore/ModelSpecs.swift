@@ -18,6 +18,7 @@ public enum ModelSpecs {
     public static let families: [ModelFamilySpec] = [
         // Specific patterns first, general patterns after
         ModelFamilySpec(family: "deepseek-v4-pro", contextWindow: 1_000_000, displayName: "DeepSeek V4 Pro"),
+        ModelFamilySpec(family: "deepseek-v4.1", contextWindow: 1_000_000, displayName: "DeepSeek V4.1 Flash"),
         ModelFamilySpec(family: "deepseek-v4", contextWindow: 1_000_000, displayName: "DeepSeek V4"),
         ModelFamilySpec(family: "deepseek-r1", contextWindow: 128_000, displayName: "DeepSeek R1"),
         ModelFamilySpec(family: "deepseek-chat", contextWindow: 128_000, displayName: "DeepSeek Chat"),

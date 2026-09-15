@@ -9,7 +9,7 @@ public protocol ImageGenerationPipeline: Sendable {
         seed: UInt64?,
         width: Int,
         height: Int
-    ) throws -> PipelineGenerationResult
+    ) async throws -> PipelineGenerationResult
 }
 
 public struct PipelineGenerationResult: Sendable {

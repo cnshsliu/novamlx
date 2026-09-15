@@ -61,4 +61,16 @@ struct InferenceServiceTests {
         )
         #expect(keep == ["org/foo", "org/foo-MTP-4bit"])
     }
+
+    @Test("Exclusive keep includes DSpark with the V4.1 backbone")
+    func exclusiveKeepDSpark() {
+        let keep = InferenceService.companionKeepIds(
+            backboneId: "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit",
+            dflashId: nil,
+            mtpId: nil,
+            dsparkId: "mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter"
+        )
+        #expect(keep.contains("mlx-community/DeepSeek-V4.1-Flash-MLX-2bit"))
+        #expect(keep.contains("mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter"))
+    }
 }

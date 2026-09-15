@@ -4,7 +4,7 @@ import Logging
 
 public enum NovaMLX {}
 
-public let version = "1.3.0"
+public let version = "1.4.0"
 
 public var buildTimestamp: String {
     guard let execURL = Bundle.main.executableURL,
@@ -30,6 +30,8 @@ public enum NovaMLXError: Error, LocalizedError {
     case modelNotLoaded(String)
     case modelLoadInProgress(modelId: String, etaSeconds: Int?)
     case mtpCompanionNotLoadable(String)
+    case tieConversionFailed(String, String)
+    case tieLayoutIncomplete(String, String)
 
     public var errorDescription: String? {
         switch self {
@@ -51,6 +53,10 @@ public enum NovaMLXError: Error, LocalizedError {
             "Model '\(id)' is loading. Retry in approximately \(eta ?? 60) seconds."
         case .mtpCompanionNotLoadable(let id):
             "MTP companion '\(id)' cannot be loaded directly. Load the matching backbone instead; the MTP head attaches automatically."
+        case .tieConversionFailed(let id, let reason):
+            "TIE conversion failed for '\(id)': \(reason)"
+        case .tieLayoutIncomplete(let id, let reason):
+            "TIE layout for '\(id)' is incomplete (\(reason)). Remove the TIE layout and convert again."
         }
     }
 
@@ -94,6 +100,9 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case dotsTts
     case stableDiffusion
     case flux
+    case flux2
+    case zImage
+    case qwenImage
     case other
 
     public init(from decoder: Decoder) throws {
@@ -268,6 +277,8 @@ public struct InferenceRequest: @unchecked Sendable {
     public let draftModel: String?
     /// Number of tokens the draft model proposes per speculation round (default: 4).
     public let numDraftTokens: Int?
+    /// Native in-graph MTP. `nil` follows model settings (default on). `false` forces serial decode.
+    public let useNativeMtp: Bool?
     /// When true, compute log probabilities for sampled tokens and top-K alternatives.
     public let includeLogprobs: Bool
     /// Number of top logprobs to return per token (only used when includeLogprobs is true).
@@ -305,7 +316,8 @@ public struct InferenceRequest: @unchecked Sendable {
         numDraftTokens: Int? = nil,
         includeLogprobs: Bool = false,
         topLogprobsCount: Int? = nil,
-        httpRequestId: String? = nil
+        httpRequestId: String? = nil,
+        useNativeMtp: Bool? = nil
     ) {
         self.id = id
         self.model = model
@@ -335,6 +347,7 @@ public struct InferenceRequest: @unchecked Sendable {
         self.includeLogprobs = includeLogprobs
         self.topLogprobsCount = topLogprobsCount
         self.httpRequestId = httpRequestId
+        self.useNativeMtp = useNativeMtp
     }
 }
 
@@ -673,10 +686,42 @@ public enum LoadPhase: String, Codable, Sendable {
     case queued
     case feasibilityChecking
     case evicting
+    case convertingTIE
     case loadingWeights
     case warmingUp
     case ready
     case failed
+}
+
+/// On-disk TIE (SSD streaming) layout for a downloaded model.
+public enum TieLayoutState: String, Codable, Sendable {
+    case none
+    case convertible
+    case converting
+    case ready
+    case incomplete
+}
+
+public struct TieStatusInfo: Codable, Sendable {
+    public let status: TieLayoutState
+    public let message: String?
+    public let fraction: Double?
+    public let done: Int?
+    public let total: Int?
+
+    public init(
+        status: TieLayoutState,
+        message: String? = nil,
+        fraction: Double? = nil,
+        done: Int? = nil,
+        total: Int? = nil
+    ) {
+        self.status = status
+        self.message = message
+        self.fraction = fraction
+        self.done = done
+        self.total = total
+    }
 }
 
 public protocol TokenizerProtocol: Sendable {
@@ -912,9 +957,15 @@ public enum ResourceLimits: Sendable {
         return name.contains("DFLASH")
     }
 
+    /// DeepSeek DSpark speculative drafter (V4.1 Flash companion).
+    public static func isDSparkModelId(_ id: String) -> Bool {
+        let name = (id.split(separator: "/").last.map(String.init) ?? id).uppercased()
+        return name.contains("DSPARK")
+    }
+
     /// Draft companions cannot be opened in Playground or counted as chat models.
     public static func isCompanionDraftModelId(_ id: String) -> Bool {
-        isMtpModelId(id) || isDFlashModelId(id)
+        isMtpModelId(id) || isDFlashModelId(id) || isDSparkModelId(id)
     }
 }
 

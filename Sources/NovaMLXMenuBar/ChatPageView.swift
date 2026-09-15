@@ -182,7 +182,11 @@ struct ChatPageView: View {
         if let record = modelManager.getRecord(model) {
             if record.family == .whisper || record.family == .qwen3Asr { return .asr }
             if record.family == .dotsTts || record.family == .qwen3Tts { return .tts }
-            if record.family == .flux || record.family == .stableDiffusion { return .image }
+            if record.family == .flux || record.family == .flux2
+                || record.family == .zImage || record.family == .qwenImage
+                || record.family == .stableDiffusion {
+                return .image
+            }
             if record.modelType == .vlm { return .vlm }
             return .llm
         }
@@ -201,7 +205,9 @@ struct ChatPageView: View {
         }
         if lower.contains("flux") || lower.contains("stable-diffusion")
             || lower.contains("sdxl") || lower.contains("dall-e")
-            || lower.contains("imagen") || lower.contains("midjourney") {
+            || lower.contains("imagen") || lower.contains("midjourney")
+            || lower.contains("z-image") || lower.contains("zimage")
+            || lower.contains("qwen-image") || lower.contains("klein") {
             return .image
         }
         if lower.contains("vl") || lower.contains("vision")

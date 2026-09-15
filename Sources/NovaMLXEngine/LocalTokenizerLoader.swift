@@ -78,7 +78,7 @@ final class LocalTokenizerLoader: MLXLMCommon.TokenizerLoader, @unchecked Sendab
                 "orcarouter/Qwen3.8-27B-Uncensored-MLX",
             ]
             for id in fallbacks {
-                let fb = NovaMLXPaths.modelsDir.appendingPathComponent(id)
+                let fb = NovaMLXPaths.directory(forModelId:id)
                 if FileManager.default.fileExists(
                     atPath: fb.appendingPathComponent("tokenizer.json").path)
                 {

@@ -77,6 +77,8 @@ public struct DownloadStatus: Codable, Sendable {
 
 public final class ModelManager: @unchecked Sendable {
     public let modelsDirectory: URL
+    /// Additional roots scanned for load (external disks). Empty in unit tests.
+    public let extraModelDirectories: [URL]
     public let catalogStore: ModelCatalogStore
     private let registryFile: URL
     private let hubApi: HubApi
@@ -85,8 +87,13 @@ public final class ModelManager: @unchecked Sendable {
     private var _downloadStates: [String: DownloadStatus]
     private let lock = NovaMLXLock()
 
-    public init(modelsDirectory: URL, catalogStore: ModelCatalogStore = ModelCatalogStore()) {
+    public init(
+        modelsDirectory: URL,
+        extraModelDirectories: [URL] = [],
+        catalogStore: ModelCatalogStore = ModelCatalogStore()
+    ) {
         self.modelsDirectory = modelsDirectory
+        self.extraModelDirectories = extraModelDirectories
         self.catalogStore = catalogStore
         self.registryFile = modelsDirectory.appendingPathComponent("registry.json")
         let hubDownloadBase = modelsDirectory.appendingPathComponent("hub")
@@ -97,6 +104,20 @@ public final class ModelManager: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: hubDownloadBase, withIntermediateDirectories: true)
         loadRegistry()
+    }
+
+    /// Extra disks get models at/above the large-checkpoint threshold.
+    private func rootForNewModel(sizeBytes: UInt64) -> URL {
+        guard sizeBytes >= NovaMLXPaths.largeModelDownloadThresholdBytes else {
+            return modelsDirectory
+        }
+        for extra in extraModelDirectories {
+            guard FileManager.default.isWritableFile(atPath: extra.path) else { continue }
+            let free = (try? FileManager.default.attributesOfFileSystem(
+                forPath: extra.path)[.systemFreeSize] as? Int64) ?? 0
+            if free > Int64(sizeBytes) { return extra }
+        }
+        return modelsDirectory
     }
 
     /// Models that are downloaded and ready to use (complete weight files on disk).
@@ -139,7 +160,8 @@ public final class ModelManager: @unchecked Sendable {
         source: ModelSource = .huggingFace, remoteURL: String,
         sizeBytes: UInt64 = 0, version: String = "1.0"
     ) -> ModelRecord {
-        let localURL = modelsDirectory.appendingPathComponent(id.sanitized, isDirectory: true)
+        let destRoot = rootForNewModel(sizeBytes: sizeBytes)
+        let localURL = destRoot.appendingPathComponent(id, isDirectory: true)
         let record = ModelRecord(
             id: id, family: family, modelType: modelType, source: source,
             localURL: localURL, remoteURL: remoteURL, sizeBytes: sizeBytes, version: version
@@ -291,6 +313,7 @@ public final class ModelManager: @unchecked Sendable {
     public func registerPopularModels() {
         for model in catalogStore.models {
             if ModelCatalogPolicy.isIdPattern(model.id) { continue }
+            if model.status == .unsupported || ImageModelSupport.isUnsupported(model.id) { continue }
             if lock.withLock({ _registry[model.id] }) == nil {
                 register(
                     id: model.id,
@@ -306,8 +329,16 @@ public final class ModelManager: @unchecked Sendable {
     @discardableResult
     public func discoverModels() -> [DiscoveredModel] {
         let discovery = ModelDiscovery()
-        let hubDir = modelsDirectory.appendingPathComponent("hub/models", isDirectory: true)
-        let scanDirs = [modelsDirectory, hubDir]
+        var scanDirs: [URL] = [modelsDirectory]
+        for extra in extraModelDirectories {
+            if extra.standardizedFileURL != modelsDirectory.standardizedFileURL {
+                scanDirs.append(extra)
+            }
+        }
+        scanDirs.append(modelsDirectory.appendingPathComponent("hub/models", isDirectory: true))
+        for extra in extraModelDirectories {
+            scanDirs.append(extra.appendingPathComponent("hub/models", isDirectory: true))
+        }
         var allDiscovered: [DiscoveredModel] = []
 
         #if DEBUG

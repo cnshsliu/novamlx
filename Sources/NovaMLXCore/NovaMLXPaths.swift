@@ -4,14 +4,24 @@ import os.log
 public enum NovaMLXPaths {
     private static let log = Logger(subsystem: "com.novamlx", category: "Paths")
 
-    private static func readPathConfig(_ name: String) -> String? {
+    /// Splits a models-path file: one directory per line, `#` comments ignored.
+    /// First path is the default download root (portable / internal disk);
+    /// later paths are extra scan/load roots (external disks).
+    public static func parseModelsPathContents(_ content: String) -> [String] {
+        content.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+    }
+
+    private static func readPathConfigLines(_ name: String) -> [String] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let configFile = home.appendingPathComponent(".config/novamlx/\(name)")
-        guard let content = try? String(contentsOf: configFile, encoding: .utf8),
-              let path = content.split(separator: "\n").first.map(String.init),
-              !path.trimmingCharacters(in: .whitespaces).isEmpty
-        else { return nil }
-        return path.trimmingCharacters(in: .whitespaces)
+        guard let content = try? String(contentsOf: configFile, encoding: .utf8) else { return [] }
+        return parseModelsPathContents(content)
+    }
+
+    private static func readPathConfig(_ name: String) -> String? {
+        readPathConfigLines(name).first
     }
 
     /// Validate configured paths. Returns error messages for any path that's configured but inaccessible.
@@ -30,13 +40,21 @@ public enum NovaMLXPaths {
             }
         }
 
-        // Check modelsDir if explicitly configured
-        if let path = readPathConfig("models-path") {
+        // Primary models dir (first line) must exist. Extra lines are optional
+        // so an unplugged external disk does not block startup.
+        let modelPaths = readPathConfigLines("models-path")
+        if let path = modelPaths.first {
             let url = URL(fileURLWithPath: path, isDirectory: true)
             if !fm.fileExists(atPath: url.path) {
                 errors.append("Models directory not found: \(url.path)\n(Check ~/.config/novamlx/models-path)")
             } else if !fm.isReadableFile(atPath: url.path) {
                 errors.append("Models directory not readable: \(url.path)\n(Check permissions)")
+            }
+        }
+        for path in modelPaths.dropFirst() {
+            let url = URL(fileURLWithPath: path, isDirectory: true)
+            if !fm.fileExists(atPath: url.path) {
+                log.warning("[Paths] Extra models directory not mounted, skipping: \(url.path)")
             }
         }
 
@@ -62,18 +80,76 @@ public enum NovaMLXPaths {
         return home.appendingPathComponent(".nova")
     }()
 
+    /// Primary model root (first line of `~/.config/novamlx/models-path`).
+    /// Small / portable models download here. Load still searches `modelsDirs`.
     public static let modelsDir: URL = {
-        // 1. Config file: ~/.config/novamlx/models-path
         if let path = readPathConfig("models-path") {
             let url = URL(fileURLWithPath: path, isDirectory: true)
             log.info("[Paths] modelsDir from config: \(url.path)")
             return url
         }
-        // 2. Fallback: <baseDir>/models
         return baseDir.appendingPathComponent("models")
     }()
 
+    /// All configured model roots that currently exist. First is `modelsDir`.
+    public static var modelsDirs: [URL] {
+        let configured = readPathConfigLines("models-path").map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        }
+        var seen = Set<String>()
+        var urls: [URL] = []
+        let fm = FileManager.default
+        for url in configured + [modelsDir] {
+            let key = url.standardizedFileURL.path
+            guard seen.insert(key).inserted else { continue }
+            guard fm.fileExists(atPath: url.path) else { continue }
+            urls.append(url)
+        }
+        return urls
+    }
+
+    /// Models at or above this size download to the extra root with most free space.
+    public static let largeModelDownloadThresholdBytes: UInt64 = 64 * 1_073_741_824
+
+    /// Resolve an on-disk model folder across every configured root
+    /// (`org/name`, a flat folder, or `hub/models/org/name`). Missing models
+    /// fall back to the primary root so downloads have a destination.
+    public static func directory(forModelId id: String, roots: [URL]? = nil) -> URL {
+        let search = roots ?? modelsDirs
+        let fm = FileManager.default
+        for root in search {
+            let candidates = [
+                root.appendingPathComponent(id, isDirectory: true),
+                root.appendingPathComponent("hub/models/\(id)", isDirectory: true),
+            ]
+            for candidate in candidates {
+                if fm.fileExists(atPath: candidate.path) {
+                    return candidate
+                }
+            }
+        }
+        return modelsDir.appendingPathComponent(id, isDirectory: true)
+    }
+
+    /// Primary root for small models; extra disk for large checkpoints.
+    public static func downloadRoot(estimatedBytes: UInt64, roots: [URL]? = nil) -> URL {
+        let search = roots ?? modelsDirs
+        guard estimatedBytes >= largeModelDownloadThresholdBytes, search.count > 1 else {
+            return modelsDir
+        }
+        var best: (url: URL, free: Int64)?
+        for root in search.dropFirst() {
+            guard FileManager.default.isWritableFile(atPath: root.path) else { continue }
+            let free = (try? FileManager.default.attributesOfFileSystem(forPath: root.path)[.systemFreeSize] as? Int64) ?? 0
+            if free > Int64(estimatedBytes), best == nil || free > best!.free {
+                best = (root, free)
+            }
+        }
+        return best?.url ?? modelsDir
+    }
+
     public static var logFile: URL { baseDir.appendingPathComponent("novamlx.log") }
+    public static var workerStderrFile: URL { baseDir.appendingPathComponent("worker.stderr") }
     public static var configFile: URL { baseDir.appendingPathComponent("config.json") }
     public static var metricsFile: URL { baseDir.appendingPathComponent("metrics.json") }
     public static var sessionsDir: URL { baseDir.appendingPathComponent("sessions") }

@@ -13,7 +13,12 @@ public final class ImageGenerationContainer: @unchecked Sendable {
     public private(set) var isLoaded: Bool
     public var pipeline: (any ImageGenerationPipeline)?
 
-    public var isFlux: Bool { config.identifier.family == .flux }
+    public var isFlux: Bool {
+        switch config.identifier.family {
+        case .flux, .flux2, .zImage, .qwenImage: return true
+        default: return false
+        }
+    }
 
     public init(identifier: ModelIdentifier, config: ModelConfig) {
         self.identifier = identifier
@@ -68,16 +73,33 @@ public final class ImageGenerationService: @unchecked Sendable {
             identifier: config.identifier,
             config: config
         )
+        if ImageModelSupport.isUnsupported(config.identifier.id) {
+            throw NovaMLXError.unsupportedModel(ImageModelSupport.refuseMessage(config.identifier.id))
+        }
+
         NovaMLXLog.info("Loading image model from: \(url.path)")
 
         MLX.Memory.clearCache()
 
         let pipeline: any ImageGenerationPipeline
-        if config.identifier.family == .flux {
+        switch config.identifier.family {
+        case .flux:
             let flux = try FluxPipeline(directoryURL: url)
-            try flux.load()
+            try await flux.load()
             pipeline = flux
-        } else {
+        case .flux2:
+            let flux2 = Flux2KleinPipeline(directoryURL: url)
+            try await flux2.load()
+            pipeline = flux2
+        case .zImage:
+            let zimage = ZImageTurboPipeline(directoryURL: url)
+            try await zimage.load()
+            pipeline = zimage
+        case .qwenImage:
+            let qwen = QwenImageGenPipeline(directoryURL: url)
+            try await qwen.load()
+            pipeline = qwen
+        default:
             pipeline = try SDPipeline(directoryURL: url)
         }
         container.setLoaded(pipeline: pipeline)
@@ -119,7 +141,7 @@ public final class ImageGenerationService: @unchecked Sendable {
         steps: Int? = nil
     ) async throws -> ImageGenerationResult {
         try await _generateInternal(modelId: modelId, n: n, seed: seed) { pipeline, imageSeed in
-            try pipeline.generateImage(
+            try await pipeline.generateImage(
                 prompt: prompt,
                 negativePrompt: negativePrompt,
                 steps: steps,
@@ -209,7 +231,7 @@ public final class ImageGenerationService: @unchecked Sendable {
         n: Int,
         seed: UInt64? = nil,
         operation: String = "generation",
-        _ generateBlock: (any ImageGenerationPipeline, UInt64) throws -> PipelineGenerationResult
+        _ generateBlock: (any ImageGenerationPipeline, UInt64) async throws -> PipelineGenerationResult
     ) async throws -> ImageGenerationResult {
         guard let container = lock.withLock({ containers[modelId] }),
               container.isLoaded,
@@ -246,7 +268,7 @@ public final class ImageGenerationService: @unchecked Sendable {
 
         for i in 0..<n {
             let imageSeed = n == 1 ? usedSeed : usedSeed &+ UInt64(i)
-            let result = try generateBlock(pipeline, imageSeed)
+            let result = try await generateBlock(pipeline, imageSeed)
             if i == 0 { usedSeed = result.seed }
             guard let cgImage = result.images.first else {
                 throw NovaMLXError.inferenceFailed("Image \(operation) produced no output")

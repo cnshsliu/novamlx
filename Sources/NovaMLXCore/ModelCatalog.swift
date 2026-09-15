@@ -8,6 +8,8 @@ public enum CatalogFormat: String, Codable, Sendable, Equatable, CaseIterable {
 public enum CatalogStatus: String, Codable, Sendable, Equatable, CaseIterable {
     case verified
     case preview
+    /// Catalogued so operators can see it, but NovaMLX will not load or generate.
+    case unsupported
 }
 
 public struct CatalogEntry: Codable, Sendable, Identifiable, Equatable {
@@ -164,6 +166,8 @@ public enum ModelCatalogPolicy {
         catalog: [CatalogEntry],
         allowUnlisted: Bool
     ) -> Bool {
+        if ImageModelSupport.isUnsupported(id) { return false }
+        if let entry = entry(id: id, in: catalog), entry.status == .unsupported { return false }
         if allowUnlisted { return true }
         if isIdPattern(id) { return false }
         return catalog.contains { idMatches($0.id, candidate: id) }
@@ -192,6 +196,7 @@ public enum ModelCatalogPolicy {
         let tokens = queryTokens(needle)
 
         let filtered = catalog.enumerated().filter { _, entry in
+            if entry.status == .unsupported { return false }
             if let category, entry.category != category {
                 return false
             }

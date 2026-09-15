@@ -7,10 +7,12 @@
     "_doc": "Force a bundled .jinja template for a specific model id. Used when the upstream repo ships a stripped or wrong template.",
     "exact": {
       "mlx-community/Qwen3.6-27B-4bit": "qwen3_5_im_start",
-      "mlx-community/Qwen3.6-27B-OptiQ-4bit": "qwen3_5_im_start"
+      "mlx-community/Qwen3.6-27B-OptiQ-4bit": "qwen3_5_im_start",
+      "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit": "deepseek_v41"
     },
     "byFamilyArch": {
-      "_doc": "Key format: '<family>_<architecture>' — e.g. 'qwen_Qwen2ForCausalLM'. Empty by default; populate when a whole architecture needs an override."
+      "_doc": "Key format: '<family>_<architecture>' — e.g. 'qwen_Qwen2ForCausalLM'. Empty by default; populate when a whole architecture needs an override.",
+      "deepseek_deepseek_v41": "deepseek_v41"
     },
     "byRepoPrefix": {
       "_doc": "Key is a repo prefix. Useful for community repacks. First-match wins, longest-prefix preferred.",
@@ -221,6 +223,7 @@
     "byModelType": {
       "deepseek_v3": "deepseek",
       "deepseek_v4": "deepseek",
+      "deepseek_v41": "deepseek",
       "deepseek_r1": "deepseek",
       "qwen3_5": "qwen",
       "qwen3_6": "qwen",
@@ -230,6 +233,7 @@
     "byArchitecture": {
       "DeepseekV3ForCausalLM": "deepseek",
       "DeepseekV4ForCausalLM": "deepseek",
+      "DeepseekV41ForCausalLM": "deepseek",
       "Qwen3_5ForCausalLM": "qwen",
       "Qwen3_5ForConditionalGeneration": "qwen",
       "Qwen3_5MoeForCausalLM": "qwen",

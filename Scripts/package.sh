@@ -154,18 +154,52 @@ sign_leaf() {
         cat > "$leaf_rqset" << REQEOF
 designated => anchor apple generic and identifier "$bin_id" and (certificate leaf[field.1.2.840.113635.100.6.1.9] exists or certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "$TEAM_ID")
 REQEOF
+        # Sign a sibling inode then replace. In-place --force kills a live
+        # NovaMLXWorker mapping (SIGKILL Code Signature Invalid).
+        local sign_src="$bin_path"
+        local tmp=""
+        if [ -f "$bin_path" ]; then
+            tmp=$(mktemp "$(dirname "$bin_path")/.$(basename "$bin_path").XXXXXX")
+            cp -p "$bin_path" "$tmp"
+            chmod u+w "$tmp" 2>/dev/null || true
+            sign_src="$tmp"
+        fi
         codesign --force --options runtime \
             -i "$bin_id" \
             --entitlements "$ENTITLEMENTS" \
             --team-identifier "$TEAM_ID" \
             -r "$leaf_rqset" \
             --sign "$DEVELOPER_ID" \
-            "$bin_path"
+            "$sign_src"
         local rc=$?
         rm -f "$leaf_rqset"
+        if [ -n "$tmp" ]; then
+            if [ $rc -eq 0 ]; then
+                mv -f "$tmp" "$bin_path"
+            else
+                rm -f "$tmp"
+            fi
+        fi
         return $rc
     else
-        codesign "${SIGN_ARGS[@]}" "$bin_path"
+        local sign_src="$bin_path"
+        local tmp=""
+        if [ -f "$bin_path" ]; then
+            tmp=$(mktemp "$(dirname "$bin_path")/.$(basename "$bin_path").XXXXXX")
+            cp -p "$bin_path" "$tmp"
+            chmod u+w "$tmp" 2>/dev/null || true
+            sign_src="$tmp"
+        fi
+        codesign "${SIGN_ARGS[@]}" "$sign_src"
+        local rc=$?
+        if [ -n "$tmp" ]; then
+            if [ $rc -eq 0 ]; then
+                mv -f "$tmp" "$bin_path"
+            else
+                rm -f "$tmp"
+            fi
+        fi
+        return $rc
     fi
 }
 
@@ -176,6 +210,7 @@ REQEOF
 for bin in "$APP_CONTENTS/MacOS/"*; do
     [ -f "$bin" ] || continue
     name=$(basename "$bin")
+    [[ "$name" == .* ]] && continue
     if [[ "$name" == *.metallib ]]; then
         echo "   signing metallib: $name"
         sign_leaf "$bin" || true

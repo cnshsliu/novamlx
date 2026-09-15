@@ -104,6 +104,8 @@ struct ModelCatalogStoreTests {
         #expect(file.models.contains { $0.id == "mlx-community/Qwen3.8-27B-4bit" })
         #expect(file.models.contains { $0.id == "orcarouter/Qwen3.8-27B-Uncensored-MLX" })
         #expect(file.models.contains { $0.id == "incoai/Qwen3.8-27B-DFlash2" })
+        #expect(file.models.contains { $0.id == "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit" })
+        #expect(file.models.contains { $0.id == "mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter" })
         #expect(file.models.contains { $0.id == "mlx-community/Qwen3.8-27B-MTP-*" })
         #expect(!file.models.contains { $0.id == "mlx-community/Qwen3.8-*" })
         #expect(!file.models.contains { $0.id.contains("Qwen3.8-27B-OptiQ") })
@@ -139,7 +141,7 @@ struct ModelCatalogStoreTests {
                 id: "mlx-community/Qwen3.8-27B-MTP-4bit",
                 catalog: file.models,
                 allowUnlisted: false) == true)
-        #expect(file.models.allSatisfy { $0.status == .preview || $0.status == .verified })
+        #expect(file.models.allSatisfy { $0.status == .preview || $0.status == .verified || $0.status == .unsupported })
         #expect(file.models.first { $0.id == "pipenetwork/Qwen3.8-Flash-Next-*" }?.status == .preview)
         // When the Utils resource bundle is present, multi-path lookup must succeed.
         // Under plain `swift test` the bundle may be missing — that is OK if decode above passes.

@@ -81,6 +81,18 @@ struct SettingsPersistenceTests {
         }
     }
 
+    @Test("nativeMtpEnabled persists across manager restarts")
+    func nativeMtpEnabledPersists() {
+        IsolatedTestDB.run { tempDir in
+            let modelId = "pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit"
+            let manager = ModelSettingsManager(baseDirectory: tempDir)
+            manager.updateSettings(modelId) { $0.nativeMtpEnabled = false }
+
+            let manager2 = ModelSettingsManager(baseDirectory: tempDir)
+            #expect(manager2.getSettings(modelId).nativeMtpEnabled == false)
+        }
+    }
+
     @Test("Default settings have nil kvBits")
     func defaultSettingsNilKvBits() {
         IsolatedTestDB.run { dir in

@@ -73,6 +73,7 @@ public final class MenuBarAppState: ObservableObject {
 
     // Speed Boost state per model
     @Published public var specBoostStatus: [String: SpecBoostState] = [:]
+    @Published public var tieStatus: [String: TieStatusInfo] = [:]
 
     private var statsTimer: Timer?
     private var specBoostPollCounter = 0
@@ -512,19 +513,34 @@ public final class MenuBarAppState: ObservableObject {
             let (data, _) = try await URLSession.shared.data(for: request)
             guard let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
             var updated: [String: SpecBoostState] = [:]
+            var ties: [String: TieStatusInfo] = [:]
             for item in array {
-                guard let id = item["id"] as? String,
-                      let boost = item["specBoost"] as? [String: Any] else { continue }
-                updated[id] = SpecBoostState(
-                    status: boost["status"] as? String ?? "",
-                    reason: boost["reason"] as? String,
-                    draftModelId: boost["draftModelId"] as? String,
-                    draftDisplayName: boost["draftDisplayName"] as? String,
-                    draftDownloaded: boost["draftDownloaded"] as? Bool,
-                    draftLoaded: boost["draftLoaded"] as? Bool
-                )
+                guard let id = item["id"] as? String else { continue }
+                if let boost = item["specBoost"] as? [String: Any] {
+                    updated[id] = SpecBoostState(
+                        status: boost["status"] as? String ?? "",
+                        reason: boost["reason"] as? String,
+                        draftModelId: boost["draftModelId"] as? String,
+                        draftDisplayName: boost["draftDisplayName"] as? String,
+                        draftDownloaded: boost["draftDownloaded"] as? Bool,
+                        draftLoaded: boost["draftLoaded"] as? Bool
+                    )
+                }
+                if let tie = item["tie"] as? [String: Any],
+                   let raw = tie["status"] as? String,
+                   let state = TieLayoutState(rawValue: raw)
+                {
+                    ties[id] = TieStatusInfo(
+                        status: state,
+                        message: tie["message"] as? String,
+                        fraction: tie["fraction"] as? Double,
+                        done: tie["done"] as? Int,
+                        total: tie["total"] as? Int
+                    )
+                }
             }
             self.specBoostStatus = updated
+            self.tieStatus = ties
         } catch {
             // Silent
         }
@@ -544,6 +560,44 @@ public final class MenuBarAppState: ObservableObject {
         } catch {
             NovaMLXLog.error("[SpecBoost] Download failed: \(error)")
         }
+    }
+
+    func convertTIE(modelId: String) async throws {
+        guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/models/tie/convert") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 86_400
+        if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try JSONEncoder().encode(AdminLoadRequest(modelId: modelId))
+        let (data, resp) = try await URLSession.shared.data(for: request)
+        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }?["message"] as? String
+                ?? String(data: data, encoding: .utf8)
+                ?? "TIE conversion failed"
+            throw NovaMLXError.tieConversionFailed(modelId, msg)
+        }
+        await pollSpecBoostStatus()
+    }
+
+    func deleteTIE(modelId: String) async throws {
+        guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/models/tie/delete") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 120
+        if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        request.httpBody = try JSONEncoder().encode(AdminLoadRequest(modelId: modelId))
+        let (data, resp) = try await URLSession.shared.data(for: request)
+        if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }?["message"] as? String
+                ?? "Could not remove TIE layout"
+            throw NovaMLXError.apiError(msg)
+        }
+        await pollSpecBoostStatus()
+        NotificationCenter.default.post(name: .novaMLXModelsChanged, object: nil)
     }
 
     func boostLoad(modelId: String) async {

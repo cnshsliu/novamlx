@@ -93,6 +93,18 @@ public struct TierManifest: Codable, Sendable {
             case layer, expert, file, bytes, tensors
             case stackedSource = "stacked_source"
         }
+
+        public init(
+            layer: Int, expert: Int, file: String, bytes: Int64,
+            tensors: [String], stackedSource: Bool? = nil
+        ) {
+            self.layer = layer
+            self.expert = expert
+            self.file = file
+            self.bytes = bytes
+            self.tensors = tensors
+            self.stackedSource = stackedSource
+        }
     }
 
     public struct LayerEntry: Codable, Sendable {

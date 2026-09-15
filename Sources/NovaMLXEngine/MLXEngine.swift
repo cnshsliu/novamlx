@@ -45,7 +45,7 @@ public final class ModelContainer: @unchecked Sendable {
         self.tokenizer = tokenizer
         self.isLoaded = true
 
-        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(identifier.id)
+        let modelDir = NovaMLXPaths.directory(forModelId:identifier.id)
         let chatTemplate = Self.loadChatTemplate(modelDir: modelDir)
         let addedTokens = Self.loadAddedTokens(modelDir: modelDir)
 
@@ -115,7 +115,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     /// Extract control/special tokens from tokenizer.json added_tokens + chat_template
     public static func extractControlTokens(for modelId: String) -> [String] {
-        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let modelDir = NovaMLXPaths.directory(forModelId:modelId)
         var tokens = Set<String>()
 
         // 1. From tokenizer.json added_tokens where special=true
@@ -269,7 +269,7 @@ public final class ModelContainer: @unchecked Sendable {
     /// and tokenizer added_tokens (some models like Qwen3.6 use <|begin_of_thought|>
     /// in the tokenizer but not in the chat template).
     public static func detectThinkingModel(for modelId: String) -> Bool {
-        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let modelDir = NovaMLXPaths.directory(forModelId:modelId)
         let template = loadChatTemplate(modelDir: modelDir) ?? ""
         if template.contains("<think") || template.contains("</think")
             || template.contains("<thinking") || template.contains("</thinking") {
@@ -322,7 +322,7 @@ public final class ModelContainer: @unchecked Sendable {
     /// `mlx-community/Qwen3.6-*-4bit` quants and routing all pre-close output
     /// to `responseContent` rather than `reasoning_content`.
     public static func isImplicitThinkingModel(for modelId: String) -> Bool {
-        let modelDir = NovaMLXPaths.modelsDir.appendingPathComponent(modelId)
+        let modelDir = NovaMLXPaths.directory(forModelId:modelId)
         let template = loadChatTemplate(modelDir: modelDir) ?? ""
 
         // Step 1: explicit-marker family-specific tokens override everything.
@@ -395,7 +395,10 @@ public final class ModelContainer: @unchecked Sendable {
                 || lower.contains("thinking_mode == 'thinking'")
                 || lower.contains("thinking_mode==\"thinking\"")
             let closesByDefault = lower.contains("</think>")
-            if modeGated && closesByDefault {
+            let enableThinkingGated = lower.contains("enable_thinking is false")
+                || lower.contains("enable_thinking is defined")
+                || lower.contains("enable_thinking ==")
+            if (modeGated || enableThinkingGated) && closesByDefault {
                 NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): template gates `<think>` behind thinking mode and defaults to `</think>` → false (explicit, chat mode)")
                 return false
             }
@@ -1382,6 +1385,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             // Tier 0 eager load + estimated peak Tier 1 cache (capped 4GB).
             let tier1PeakEstimate: UInt64 = 4 * 1024 * 1024 * 1024
             return UInt64(manifest.tier0Bytes) + tier1PeakEstimate
+        }
+
+        if DeepseekV41OfficialLoader.isOfficialCheckpoint(at: url) {
+            // Expert SSD offload + Engram left on disk; matches oMLX ~25 GiB working set.
+            return 32 * 1024 * 1024 * 1024
         }
 
         let configFile = url.appendingPathComponent("config.json")
@@ -2449,6 +2457,72 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 // silently bypassed for VLM models. See VLM streaming path for the
                 // mirror fix.
                 let processorBox = ProcessorBox(processor)
+                let hasVision = prefillImage != nil || prefillVideo != nil
+                let mtpBlock = (model.value as? any MtpDrafter)?.mtpBlockSize ?? 0
+                let useNativeMtp = request.useNativeMtp != false
+                    && !hasVision && model.value is any MtpTarget && mtpBlock >= 2
+                if mtpBlock >= 2 && request.useNativeMtp == false {
+                    NovaMLXLog.info("[GENERATE:\(reqTag)] native MTP disabled by setting/request")
+                }
+                let numDraft = request.numDraftTokens ?? max(mtpBlock, 2)
+
+                if useNativeMtp {
+                    let genResult = try await mlxContainer.perform { context in
+                        guard let target = context.model as? any MtpTarget,
+                              let drafter = context.model as? any MtpDrafter
+                        else {
+                            return SendableBox(([Int](), "mtp-cast-failed", 0, 0))
+                        }
+                        let input = LMInput(text: .init(tokens: promptTokensBox.value))
+                        var iterator = try MtpTokenIterator(
+                            input: input,
+                            target: target,
+                            drafter: drafter,
+                            mainCache: cacheBox.value,
+                            parameters: parameters,
+                            numDraftTokens: numDraft,
+                            processor: processorBox.value
+                        )
+                        var generatedIds: [Int] = []
+                        while generatedIds.count < maxTokens, let tokenId = iterator.next() {
+                            if tokenId == unknownTokenId || stopIdsBox.value.contains(tokenId) {
+                                break
+                            }
+                            generatedIds.append(tokenId)
+                        }
+                        let stats =
+                            "mtp proposed=\(iterator.totalProposed) accepted=\(iterator.totalAccepted)"
+                        return SendableBox(
+                            (generatedIds, stats, iterator.totalProposed, iterator.totalAccepted))
+                    }
+                    let (generatedIds, logitStats, proposed, accepted) = genResult.value
+                    NovaMLXLog.info(
+                        "[GENERATE:\(reqTag)] native MTP numDraft=\(numDraft) \(logitStats)"
+                    )
+                    let decodedText = mlxTokenizer.decode(tokenIds: generatedIds)
+                    let cleanText = Self.scrubControlTokens(decodedText)
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    let tps = generatedIds.count > 0 ? Double(generatedIds.count) / elapsed : 0
+                    lock.withLock {
+                        totalRequests += 1
+                        totalTokensGenerated += UInt64(generatedIds.count)
+                        totalInferenceTime += elapsed
+                    }
+                    deferredClearCache()
+                    let acceptRate = proposed > 0 ? Double(accepted) / Double(proposed) : 0
+                    NovaMLXLog.info(
+                        "[Prefill:\(reqTag)] VLM-MTP — \(tokenIds.count) prompt, \(generatedIds.count) generated, accept=\(String(format: "%.0f%%", acceptRate * 100))"
+                    )
+                    return InferenceResult(
+                        id: request.id,
+                        model: request.model,
+                        text: cleanText,
+                        tokensPerSecond: tps,
+                        promptTokens: Int(promptTokenCount),
+                        completionTokens: generatedIds.count,
+                        finishReason: generatedIds.count >= maxTokens ? .length : .stop
+                    )
+                }
 
                 let genResult = try await mlxContainer.perform { context in
                     let modelObj = context.model
@@ -2556,7 +2630,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 )
             } else {
                 do {
-                    if let target = model.value as? any MtpTarget,
+                    if request.useNativeMtp != false,
+                       let target = model.value as? any MtpTarget,
                        let drafter = model.value as? any MtpDrafter,
                        drafter.mtpBlockSize >= 2
                     {
@@ -2761,11 +2836,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let sampler = parameters.sampler()
 
-                    // VLM streaming: run entire generation inside perform.
+                    // Image/video VLM streaming: run entire generation inside perform.
                     // TokenIterator runs model forward passes outside perform, producing
-                    // bad logits for VLM models (NaN/Inf or premature EOS). The non-streaming
-                    // VLM path already runs inside perform — replicate that for streaming.
-                    if isVLM {
+                    // bad logits when vision features must merge. Text-only Qwen4-Exp
+                    // (Flash-Next) is a language forward and must stream token-by-token
+                    // or a 128-token think dump is scrubbed down to 2 visible tokens
+                    // and reported as finish=length.
+                    if isVLM && hasImages {
                         let tokenIds = input.text.tokens.asArray(Int32.self).map { Int($0) }
                         let reqTag = request.id.uuidString.prefix(8).description
 
@@ -3056,7 +3133,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                     } else {
                         do {
-                            if let target = model.value as? any MtpTarget,
+                            if request.useNativeMtp != false,
+                               let target = model.value as? any MtpTarget,
                                let drafter = model.value as? any MtpDrafter,
                                drafter.mtpBlockSize >= 2
                             {
@@ -3070,8 +3148,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                     numDraftTokens: numDraft,
                                     processor: processor
                                 )
+                                let mtpTag = String(request.id.uuidString.prefix(8))
+                                mtpIterator.onSpeculationRound = { proposed, accepted in
+                                    NovaMLXLog.info("[MTP:\(mtpTag)] proposed=\(proposed) accepted=\(accepted)")
+                                }
                                 iterator = mtpIterator
-                                NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] native MTP numDraft=\(numDraft)")
+                                NovaMLXLog.info("[STREAM:\(mtpTag)] native MTP numDraft=\(numDraft)")
                             } else {
                                 iterator = try TokenIterator(
                                     input: effectiveInput, model: model.value,
@@ -3231,9 +3313,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// Chat/backbone models only — MTP/DFlash companions do not count toward auto-exclusive.
     public var chatLoadedCount: Int {
         pool.loadedModelIds.filter { id in
-            let dir = NovaMLXPaths.modelsDir.appendingPathComponent(id)
+            let dir = NovaMLXPaths.directory(forModelId:id)
             return !isMtpDraftConfig(at: dir)
                 && !isDFlashDraftConfig(at: dir)
+                && !isDSparkDraftConfig(at: dir)
                 && !ResourceLimits.isCompanionDraftModelId(id)
         }.count
     }

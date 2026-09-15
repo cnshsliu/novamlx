@@ -52,7 +52,7 @@ public final class TieredOffloadPolicy: @unchecked Sendable {
         self.weightManager = WeightTierManager()
         // Phase 6: auto-enable per-expert streaming for MoE models.
         // 256 experts × ~8 activated per token = ~32× memory reduction.
-        self.perExpertStreaming = (manifest.strategy == .expert)
+        self.perExpertStreaming = (manifest.strategy == .expert || manifest.strategy == .mixed)
         // Estimate layer + expert counts from manifest.
         let layerCount = Set(manifest.experts.map { $0.layer }).count
         let expertCount = manifest.expertCount / max(1, layerCount)

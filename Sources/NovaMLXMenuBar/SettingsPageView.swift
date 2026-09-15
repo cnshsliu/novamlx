@@ -166,7 +166,7 @@ struct SettingsPageView: View {
 
     private var configPathRow: some View {
         let configPath = NovaMLXPaths.configFile.path
-        let modelsPath = NovaMLXPaths.modelsDir.path
+        let modelRoots = NovaMLXPaths.modelsDirs
 
         return VStack(spacing: 0) {
             HStack {
@@ -184,22 +184,24 @@ struct SettingsPageView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
 
-            Divider().padding(.horizontal, 12)
-
-            HStack {
-                Text(l10n.tr("settings.modelsPath")).font(.system(size: 13)).foregroundColor(.secondary)
-                Spacer()
-                Text(modelsPath)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(NovaTheme.Colors.accent)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .onTapGesture {
-                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: modelsPath)
-                    }
+            ForEach(Array(modelRoots.enumerated()), id: \.element.path) { index, root in
+                Divider().padding(.horizontal, 12)
+                HStack {
+                    Text(index == 0 ? l10n.tr("settings.modelsPath") : l10n.tr("settings.modelsPathExtra"))
+                        .font(.system(size: 13)).foregroundColor(.secondary)
+                    Spacer()
+                    Text(root.path)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .onTapGesture {
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: root.path)
+                        }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
         }
     }
 

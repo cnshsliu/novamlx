@@ -574,7 +574,8 @@ public final class HuggingFaceService: @unchecked Sendable {
         repoId: String,
         hfToken: String? = nil,
         mirrorEndpoint: String? = nil,
-        revision: String? = nil
+        revision: String? = nil,
+        destinationDirectory: URL? = nil
     ) async throws -> HFDownloadTask {
         // Idempotent Resume: kill any in-flight tasks for the SAME repoId
         // before minting a new one. Without this, a user clicking Resume
@@ -607,7 +608,8 @@ public final class HuggingFaceService: @unchecked Sendable {
                 task: taskCopy,
                 hfToken: hfToken,
                 adapter: effectiveAdapter,
-                revision: revision
+                revision: revision,
+                destinationDirectory: destinationDirectory
             ) { [weak self] _ in
                 self?.onModelDownloaded?(repoId)
             }
@@ -683,9 +685,11 @@ public final class HuggingFaceService: @unchecked Sendable {
         hfToken: String?,
         adapter: any MirrorAdapter,
         revision: String?,
+        destinationDirectory: URL? = nil,
         onModelDownloaded: @Sendable @escaping (String) -> Void
     ) async {
-        let targetDir = modelDirectory.appendingPathComponent(
+        let destRoot = destinationDirectory ?? modelDirectory
+        let targetDir = destRoot.appendingPathComponent(
             task.repoId.replacingOccurrences(of: ":", with: "_"), isDirectory: true)
         var currentTask = task
 

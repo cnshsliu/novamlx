@@ -305,6 +305,31 @@ struct ThinkingParserExplicitMarkerTests {
             "Qwen3.6-style fixture (template <think + explicit <|begin_of_thought|> token) must be detected as NON-implicit so ThinkingParser is constructed with expectImplicitThinking=false")
     }
 
+    @Test("isImplicitThinkingModel returns FALSE for Qwen3.8-Flash-Next enable_thinking gate")
+    func implicitDetectionFlashNextEnableThinkingGate() throws {
+        let modelId = try makeFixtureModel(
+            nameSuffix: "flash-next-enable-thinking",
+            addedTokens: [
+                ["content": "<|im_start|>", "special": true],
+                ["content": "<|im_end|>", "special": true],
+            ],
+            chatTemplate: """
+            {%- if add_generation_prompt %}
+                {{- '<|im_start|>assistant\\n' }}
+                {%- if enable_thinking is defined and enable_thinking is false %}
+                    {{- '<think>\\n\\n</think>\\n\\n' }}
+                {%- else %}
+                    {{- '<think>\\n' }}
+                {%- endif %}
+            {%- endif %}
+            """
+        )
+        defer { cleanupFixture(modelId) }
+        let isImplicit = ModelContainer.isImplicitThinkingModel(for: modelId)
+        #expect(isImplicit == false,
+            "Flash-Next gates <think> on enable_thinking and emits </think> when false")
+    }
+
     @Test("isImplicitThinkingModel returns TRUE for DeepSeek-R1-style fixture (template-only, no explicit marker tokens)")
     func implicitDetectionDeepSeekR1LikeReturnsTrue() throws {
         // DeepSeek-R1-Distill style: chat template injects <think prefix

@@ -31,10 +31,10 @@ struct AutoLoadCoordinatorTests {
     @Test("LoadPhase enum has all expected cases")
     func loadPhaseCases() {
         let phases: [LoadPhase] = [
-            .queued, .feasibilityChecking, .evicting,
+            .queued, .feasibilityChecking, .evicting, .convertingTIE,
             .loadingWeights, .warmingUp, .ready, .failed
         ]
-        #expect(phases.count == 7)
+        #expect(phases.count == 8)
         #expect(LoadPhase(rawValue: "loadingWeights") == .loadingWeights)
         #expect(LoadPhase(rawValue: "nonexistent") == nil)
     }

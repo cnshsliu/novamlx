@@ -22,6 +22,8 @@ public struct ModelSettings: Codable, Sendable, Equatable {
     public var kvGroupSize: Int?
     public var thinkingBudget: Int?
     public var kvMemoryBytesPerTokenOverride: Int?
+    /// Native in-graph MTP. `nil`/true = use it when the checkpoint has MTP weights; false = serial decode.
+    public var nativeMtpEnabled: Bool?
 
     public init(
         maxContextWindow: Int? = nil,
@@ -44,7 +46,8 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         kvBits: Int? = nil,
         kvGroupSize: Int? = nil,
         thinkingBudget: Int? = nil,
-        kvMemoryBytesPerTokenOverride: Int? = nil
+        kvMemoryBytesPerTokenOverride: Int? = nil,
+        nativeMtpEnabled: Bool? = nil
     ) {
         self.maxContextWindow = maxContextWindow
         self.maxTokens = maxTokens
@@ -67,6 +70,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         self.kvGroupSize = kvGroupSize
         self.thinkingBudget = thinkingBudget
         self.kvMemoryBytesPerTokenOverride = kvMemoryBytesPerTokenOverride
+        self.nativeMtpEnabled = nativeMtpEnabled
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -87,6 +91,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         case kvGroupSize = "kv_group_size"
         case thinkingBudget = "thinking_budget"
         case kvMemoryBytesPerTokenOverride = "kv_memory_bytes_per_token_override"
+        case nativeMtpEnabled = "native_mtp"
     }
 
     public func applySamplingOverrides(to request: InferenceRequest) -> InferenceRequest {
@@ -117,7 +122,9 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             draftModel: request.draftModel,
             numDraftTokens: request.numDraftTokens,
             includeLogprobs: request.includeLogprobs,
-            topLogprobsCount: request.topLogprobsCount
+            topLogprobsCount: request.topLogprobsCount,
+            httpRequestId: request.httpRequestId,
+            useNativeMtp: request.useNativeMtp ?? nativeMtpEnabled
         )
     }
 }

@@ -31,10 +31,15 @@ public actor NovaMLXConfiguration {
         _serverConfig = ServerConfig()
     }
 
-    /// Always `~/.config/novamlx/models-path` (see `NovaMLXPaths.modelsDir`).
+    /// Primary root from `~/.config/novamlx/models-path` (first line).
+    /// Extra lines are additional scan/load roots — see `NovaMLXPaths.modelsDirs`.
     /// Not stored in SQLite — a DB copy used to diverge from the file.
     public var modelsDirectory: URL {
         get async { NovaMLXPaths.modelsDir }
+    }
+
+    public var modelsDirectories: [URL] {
+        get async { NovaMLXPaths.modelsDirs }
     }
 
     public var serverConfig: ServerConfig {
@@ -63,6 +68,9 @@ public actor NovaMLXConfiguration {
 
     public func initializeDirectories() throws {
         try FileManager.default.createDirectory(at: NovaMLXPaths.modelsDir, withIntermediateDirectories: true)
+        for dir in NovaMLXPaths.modelsDirs.dropFirst() {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
     }
 
     /// Serialize current state to the same JSON shape config.json used.
@@ -73,6 +81,7 @@ public actor NovaMLXConfiguration {
             server: _serverConfig,
             defaultModel: _defaultModel,
             modelsDirectory: NovaMLXPaths.modelsDir.path,
+            modelsDirectories: NovaMLXPaths.modelsDirs.map(\.path),
             huggingfaceEndpoint: _huggingfaceEndpoint,
             language: nil
         )
@@ -81,8 +90,8 @@ public actor NovaMLXConfiguration {
 
     /// Apply a PersistedConfig-shaped JSON blob to current state and persist
     /// to the SQLite store. Used by `/admin/api/config` PUT.
-    /// `modelsDirectory` in the payload is ignored — change
-    /// `~/.config/novamlx/models-path` and restart.
+    /// `modelsDirectory` / `modelsDirectories` in the payload are ignored —
+    /// change `~/.config/novamlx/models-path` (one path per line) and restart.
     public func applySerializedConfigJSON(_ data: Data) throws {
         let persisted = try JSONDecoder().decode(PersistedConfig.self, from: data)
         _serverConfig = persisted.server
@@ -162,6 +171,7 @@ public struct PersistedConfig: Codable, Sendable {
     public let server: ServerConfig
     public let defaultModel: String?
     public let modelsDirectory: String?
+    public let modelsDirectories: [String]?
     public let huggingfaceEndpoint: String?
     public let language: String?
 
@@ -169,12 +179,14 @@ public struct PersistedConfig: Codable, Sendable {
         server: ServerConfig,
         defaultModel: String?,
         modelsDirectory: String?,
+        modelsDirectories: [String]? = nil,
         huggingfaceEndpoint: String?,
         language: String?
     ) {
         self.server = server
         self.defaultModel = defaultModel
         self.modelsDirectory = modelsDirectory
+        self.modelsDirectories = modelsDirectories
         self.huggingfaceEndpoint = huggingfaceEndpoint
         self.language = language
     }

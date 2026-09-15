@@ -50,7 +50,8 @@ extension NovaMLXAPIServer {
             numDraftTokens: openAIReq.numDraftTokens,
             includeLogprobs: openAIReq.logprobs == true,
             topLogprobsCount: openAIReq.topLogprobs,
-            httpRequestId: HTTPHelpers.requestID(from: httpRequest)
+            httpRequestId: HTTPHelpers.requestID(from: httpRequest),
+            useNativeMtp: openAIReq.useMtp
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -216,7 +217,8 @@ extension NovaMLXAPIServer {
             numDraftTokens: openAIReq.numDraftTokens,
             includeLogprobs: openAIReq.logprobs == true,
             topLogprobsCount: openAIReq.topLogprobs,
-            httpRequestId: HTTPHelpers.requestID(from: httpRequest)
+            httpRequestId: HTTPHelpers.requestID(from: httpRequest),
+            useNativeMtp: openAIReq.useMtp
         )
 
         let modelId = openAIReq.model

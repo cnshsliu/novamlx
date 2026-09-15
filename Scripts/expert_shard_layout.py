@@ -71,8 +71,13 @@ TIER0_PATTERNS = [
 # Per-expert tensor patterns.
 # Captures (layer, expert) so we can group/slice.
 EXPERT_PATTERNS = [
-    # Classic MoE: [prefix.]model.layers.{L}[.mlp].experts.{E}.<proj>.<suffix>
-    re.compile(r"^.*model\.layers\.(?P<L>\d+)(?:\.mlp)?\.experts\.(?P<E>\d+)\.(?P<rest>.+)$"),
+    # Classic MoE: [prefix.]model.layers.{L}[.mlp|.ffn].experts.{E}.<proj>.<suffix>
+    # V4.1 Flash uses language_model.layers.{L}.ffn.experts.{E}.w1/w2/w3
+    re.compile(
+        r"^.*layers\.(?P<L>\d+)(?:\.(?:mlp|ffn))?\.experts\.(?P<E>\d+)\.(?P<rest>.+)$"
+    ),
+    # In-graph DSpark / MTP heads: mtp.{S}.ffn.experts.{E}...
+    re.compile(r"^mtp\.(?P<L>\d+)\.ffn\.experts\.(?P<E>\d+)\.(?P<rest>.+)$"),
 ]
 
 # Stacked expert patterns.
@@ -97,7 +102,11 @@ def is_tier0(name: str) -> bool:
 
 def match_expert_tensor(name: str) -> Optional[Tuple[int, int, str]]:
     """Return (layer, expert, rest) if name is a per-expert tensor in classic layout."""
-    for p in EXPERT_PATTERNS:
+    mtp = EXPERT_PATTERNS[-1].match(name)
+    if mtp:
+        # Keep MTP stages out of backbone layer ids (expert.L10000+).
+        return 10000 + int(mtp.group("L")), int(mtp.group("E")), mtp.group("rest")
+    for p in EXPERT_PATTERNS[:-1]:
         m = p.match(name)
         if m:
             return int(m.group("L")), int(m.group("E")), m.group("rest")
@@ -183,6 +192,14 @@ def classify_all(index: Dict[str, Tuple[Path, int, int]]) -> Tuple[List[str], Di
     stacked: Dict[Tuple[int, str], Dict[str, str]] = {}
 
     for name in index.keys():
+        if name.startswith(("vision.", "aligner.", "image_")):
+            continue
+        if "engram" in name:
+            continue
+        if "confidence_head" in name or "markov_head" in name or ".main_proj" in name or ".main_norm" in name:
+            continue
+        if name.endswith(".ffn.gate.bias_vl"):
+            continue
         s = match_stacked_tensor(name)
         if s is not None:
             L, proj, suffix = s
@@ -225,6 +242,48 @@ def write_tier0(model_dir: Path, dst_dir: Path, names: List[str]) -> Path:
     return out
 
 
+def swift_tensor_name(name: str) -> str:
+    """Map HuggingFace / mlx-community V4.1 keys onto the DeepseekV4 Swift tree."""
+    k = name
+    if k.startswith("language_model.head."):
+        k = "lm_head." + k[len("language_model.head.") :]
+    elif k.startswith("language_model."):
+        k = "model." + k[len("language_model.") :]
+    elif k == "norm.weight" or k.startswith("norm."):
+        k = "model." + k
+    elif k.startswith("mtp."):
+        rest = k[len("mtp.") :]
+        idx, _, tail = rest.partition(".")
+        k = f"model.mtpLayers.{idx}.{tail}"
+    k = k.replace(".hc_attn_fn", ".attn_hc.fn")
+    k = k.replace(".hc_attn_base", ".attn_hc.base")
+    k = k.replace(".hc_attn_scale", ".attn_hc.scale")
+    k = k.replace(".hc_ffn_fn", ".ffn_hc.fn")
+    k = k.replace(".hc_ffn_base", ".ffn_hc.base")
+    k = k.replace(".hc_ffn_scale", ".ffn_hc.scale")
+    k = k.replace(".ffn.gate.bias", ".ffn.gate.e_score_correction_bias")
+    for src, dst in ((".w1.", ".gate_proj."), (".w3.", ".up_proj."), (".w2.", ".down_proj.")):
+        if ".shared_experts" in k:
+            k = k.replace(f".shared_experts{src}", f".shared_experts{dst}")
+    return k
+
+
+def classic_expert_switch_name(name: str, layer: int, expert: int) -> str:
+    """Per-expert file tensors share one key so TIE can stack on axis 0."""
+    rest = name
+    # ...ffn.experts.{E}.{proj}.{suffix}
+    marker = f".experts.{expert}."
+    if marker not in rest:
+        return swift_tensor_name(name)
+    proj_suffix = rest.split(marker, 1)[1]  # e.g. w1.weight
+    proj, _, suffix = proj_suffix.partition(".")
+    proj = {"w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}.get(proj, proj)
+    if layer >= 10000:
+        L = layer - 10000
+        return f"model.mtpLayers.{L}.ffn.switch_mlp.{proj}.{suffix}"
+    return f"model.layers.{layer}.ffn.switch_mlp.{proj}.{suffix}"
+
+
 def write_dense_layer_shards(
     dst_dir: Path,
     tier0_names: List[str],
@@ -243,15 +302,19 @@ def write_dense_layer_shards(
     norm weight is `[hidden]`).
     """
     import re
-    layer_re = re.compile(r"^.*model\.layers\.(?P<L>\d+)\..+$")
+    layer_re = re.compile(r"^(?:language_model|model)\.layers\.(?P<L>\d+)\..+$")
+    mtp_re = re.compile(r"^mtp\.(?P<L>\d+)\..+$")
     norm_re = re.compile(r"(?:norm|layernorm)", re.IGNORECASE)
     # Group tier0 tensors by layer index, but keep norm-like tensors in tier0
     by_layer: Dict[int, List[str]] = {}
     keep_in_tier0: List[str] = []
     for n in tier0_names:
         m = layer_re.match(n)
+        mt = mtp_re.match(n)
         if m and not norm_re.search(n):
             by_layer.setdefault(int(m.group("L")), []).append(n)
+        elif mt and not norm_re.search(n):
+            by_layer.setdefault(10000 + int(mt.group("L")), []).append(n)
         else:
             keep_in_tier0.append(n)
 
@@ -266,13 +329,13 @@ def write_dense_layer_shards(
         bucket = {}
         for n in names:
             with safe_open(str(file_for[n]), framework="pt") as fh:
-                bucket[n] = fh.get_tensor(n)
+                bucket[swift_tensor_name(n)] = fh.get_tensor(n)
         save_file(bucket, str(out))
         entries.append({
             "layer": L,
             "file": fname,
             "bytes": out.stat().st_size,
-            "tensors": names,
+            "tensors": [swift_tensor_name(n) for n in names],
         })
         print(f"  wrote {fname} ({out.stat().st_size // 1024 // 1024}MB, {len(names)} tensors)")
     return entries
@@ -289,18 +352,24 @@ def write_classic_experts(
         fname = f"expert.L{L:02d}.E{E:03d}.safetensors"
         out = dst_dir / fname
         bucket = {}
+        swift_names = []
         for n in names:
             with safe_open(str(file_for[n]), framework="pt") as fh:
-                bucket[n] = fh.get_tensor(n)
-        save_file(bucket, str(out))
+                key = classic_expert_switch_name(n, L, E)
+                bucket[key] = fh.get_tensor(n)
+                swift_names.append(key)
+        tmp = Path("/tmp/novamlx-tie-expert.safetensors")
+        save_file(bucket, str(tmp))
+        shutil.copy2(tmp, out)
         entries.append({
             "layer": L,
             "expert": E,
             "file": fname,
             "bytes": out.stat().st_size,
-            "tensors": names,
+            "tensors": swift_names,
         })
-        print(f"  wrote {fname} ({out.stat().st_size // 1024 // 1024}MB)")
+        if E == 0 or (E + 1) % 64 == 0:
+            print(f"  wrote {fname} ({out.stat().st_size // 1024 // 1024}MB)")
     return entries
 
 
@@ -410,20 +479,19 @@ def main() -> int:
             for k in fh.keys():
                 file_for[k] = st
 
-    # Dense path: split per-layer weights out of tier0 BEFORE writing tier0 file.
-    # write_dense_layer_shards mutates tier0_names in place to remove tensors
-    # that go into per-layer files (so tier0 ends up with embed/lm_head/norm only).
+    # Split per-layer non-expert weights (attn, engram, …) out of tier0 so
+    # conversion does not hold a 200GB bucket in RAM. MoE experts still go
+    # to per-expert files; leftover embed/lm_head/norm stay in tier0.
     layer_entries: List[dict] = []
-    if not stacked and not classic:
-        print("[layers] splitting per-layer weights (dense strategy)...")
-        layer_entries = write_dense_layer_shards(dst, tier0_names, file_for)
+    print("[layers] splitting per-layer non-expert weights...")
+    layer_entries = write_dense_layer_shards(dst, tier0_names, file_for)
 
     # Write tier0.safetensors (after potential dense split above)
     print(f"[tier0] writing {len(tier0_names)} shared tensors...")
     tier0_bucket: Dict[str, torch.Tensor] = {}
     for n in tier0_names:
         with safe_open(str(file_for[n]), framework="pt") as fh:
-            tier0_bucket[n] = fh.get_tensor(n)
+            tier0_bucket[swift_tensor_name(n)] = fh.get_tensor(n)
     save_file(tier0_bucket, str(dst / "tier0.safetensors"))
     print(f"  tier0.safetensors: {(dst / 'tier0.safetensors').stat().st_size // 1024 // 1024}MB")
     del tier0_bucket
@@ -444,7 +512,9 @@ def main() -> int:
     shutil.copy2(src / "config.json", dst / "config.json")
 
     # Determine strategy for manifest
-    if stacked or classic:
+    if (stacked or classic) and layer_entries:
+        strategy = "mixed"
+    elif stacked or classic:
         strategy = "expert"
     elif layer_entries:
         strategy = "layer"
