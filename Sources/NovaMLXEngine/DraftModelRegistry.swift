@@ -142,10 +142,11 @@ public final class DraftModelRegistry: Sendable {
         modelType: ModelType,
         modelId: String? = nil,
         nativeMtp: Bool = false,
+        mtpEnabled: Bool = true,
         draftModelLoaded: (String) -> Bool,
         draftModelOnDisk: (String) -> Bool
     ) -> SpecBoostStatus {
-        if nativeMtp {
+        if nativeMtp && mtpEnabled {
             return .active(draftModelId: modelId ?? "native-mtp")
         }
         if let modelId, let dspark = dsparkCandidate(forMainId: modelId) {
@@ -161,7 +162,7 @@ public final class DraftModelRegistry: Sendable {
             return .eligible(candidate: dflash)
         }
         if let modelId, let mtp = mtpCandidate(forMainId: modelId) {
-            if draftModelLoaded(mtp.draftModelId) {
+            if mtpEnabled, draftModelLoaded(mtp.draftModelId) {
                 return .active(draftModelId: mtp.draftModelId)
             }
             return .eligible(candidate: mtp)

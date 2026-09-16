@@ -252,6 +252,9 @@ struct CoreTypesTests {
         )
         let on = settings.applySamplingOverrides(to: forced)
         #expect(on.useNativeMtp == true)
+        #expect(off.allowsMtp == false)
+        #expect(on.allowsMtp == true)
+        #expect(request.allowsMtp == true)
     }
 
     @Test("ThinkingParser basic think block")

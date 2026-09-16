@@ -2139,14 +2139,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             } else {
                                 isHybrid = false
                             }
+                            let mtpOn = inference.settingsManager.getSettings(record.id).nativeMtpEnabled != false
                             let nativeOn = isLoaded && inference.hasNativeMtp(record.id)
-                                && inference.settingsManager.getSettings(record.id).nativeMtpEnabled != false
                             let status = DraftModelRegistry.shared.boostStatus(
                                 family: record.family,
                                 isHybrid: isHybrid,
                                 modelType: record.modelType,
                                 modelId: record.id,
                                 nativeMtp: nativeOn,
+                                mtpEnabled: mtpOn,
                                 draftModelLoaded: { id in inference.isModelLoaded(id) },
                                 draftModelOnDisk: { id in models.isDownloaded(id) }
                             )
@@ -2185,7 +2186,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             memoryFeasibility: feasibility,
                             specBoost: specBoost,
                             tie: tie.status == .none ? nil : tie,
-                            nativeMtpAvailable: isLoaded && inference.hasNativeMtp(record.id),
+                            nativeMtpAvailable: inference.mtpSwitchAvailable(record.id),
                             nativeMtpEnabled: mtpSettings.nativeMtpEnabled
                         ))
                     }
@@ -2495,6 +2496,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         if let v = update.nativeMtpEnabled { settings.nativeMtpEnabled = v }
 
                         inference.settingsManager.setSettings(modelId, settings)
+                        if let v = update.nativeMtpEnabled {
+                            await inference.setMtpEnabled(modelId, enabled: v)
+                            settings = inference.settingsManager.getSettings(modelId)
+                        }
 
                         if update.isPinned == true {
                             if inference.engine.getContainer(for: modelId) != nil {

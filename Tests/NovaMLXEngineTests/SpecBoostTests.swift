@@ -22,6 +22,23 @@ struct SpecBoostTests {
         #expect(id == "mlx-community/Qwen3.8-27B-8bit")
     }
 
+    @Test("MTP switch off does not report native MTP as active")
+    func nativeMtpOffNotActive() {
+        let status = DraftModelRegistry.shared.boostStatus(
+            family: .qwen,
+            isHybrid: true,
+            modelType: .llm,
+            modelId: "mlx-community/Qwen3.8-27B-8bit",
+            nativeMtp: true,
+            mtpEnabled: false,
+            draftModelLoaded: { _ in false },
+            draftModelOnDisk: { _ in false }
+        )
+        if case .active = status {
+            Issue.record("MTP off should not report native MTP as active, got \(status)")
+        }
+    }
+
     @Test("Hybrid without MTP companion stays ineligible")
     func hybridWithoutMtpIneligible() {
         let status = DraftModelRegistry.shared.boostStatus(

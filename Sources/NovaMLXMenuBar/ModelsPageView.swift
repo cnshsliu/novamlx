@@ -241,13 +241,15 @@ struct ModelsPageView: View {
 
     @ViewBuilder
     private func nativeMtpToggle(for modelId: String) -> some View {
-        if inferenceService.hasNativeMtp(modelId) {
-            let enabled = inferenceService.settingsManager.getSettings(modelId).nativeMtpEnabled != false
+        if inferenceService.mtpSwitchAvailable(modelId) {
+            let enabled = inferenceService.isMtpEnabled(modelId)
             Toggle(isOn: Binding(
-                get: { inferenceService.settingsManager.getSettings(modelId).nativeMtpEnabled != false },
+                get: { inferenceService.isMtpEnabled(modelId) },
                 set: { on in
-                    inferenceService.settingsManager.updateSettings(modelId) { $0.nativeMtpEnabled = on }
-                    refreshTrigger.toggle()
+                    Task {
+                        await inferenceService.setMtpEnabled(modelId, enabled: on)
+                        refreshTrigger.toggle()
+                    }
                 }
             )) {
                 Text(enabled ? l10n.tr("models.mtpOn") : l10n.tr("models.mtpOff"))

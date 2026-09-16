@@ -160,7 +160,11 @@ public final class InferenceService: @unchecked Sendable {
             enableThinking: finalRequest.enableThinking,
             preserveThinking: finalRequest.preserveThinking,
             draftModel: finalRequest.draftModel,
-            numDraftTokens: finalRequest.numDraftTokens
+            numDraftTokens: finalRequest.numDraftTokens,
+            includeLogprobs: finalRequest.includeLogprobs,
+            topLogprobsCount: finalRequest.topLogprobsCount,
+            httpRequestId: finalRequest.httpRequestId,
+            useNativeMtp: finalRequest.useNativeMtp
         )
         finalRequest = autoInjectDraftModel(finalRequest)
 
@@ -268,7 +272,11 @@ public final class InferenceService: @unchecked Sendable {
             enableThinking: finalRequest.enableThinking,
             preserveThinking: finalRequest.preserveThinking,
             draftModel: finalRequest.draftModel,
-            numDraftTokens: finalRequest.numDraftTokens
+            numDraftTokens: finalRequest.numDraftTokens,
+            includeLogprobs: finalRequest.includeLogprobs,
+            topLogprobsCount: finalRequest.topLogprobsCount,
+            httpRequestId: finalRequest.httpRequestId,
+            useNativeMtp: finalRequest.useNativeMtp
         )
         finalRequest = autoInjectDraftModel(finalRequest)
 
@@ -435,12 +443,16 @@ public final class InferenceService: @unchecked Sendable {
         if let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId),
            isModelLoaded(mtp.draftModelId)
         {
-            let temp = request.temperature ?? 1
-            if temp > 0 {
-                NovaMLXLog.info("[SpecBoost] Skipping MTP auto-inject for '\(mainId)' (temp=\(temp) > 0; Qwen MTP is greedy-only)")
+            if !request.allowsMtp {
+                NovaMLXLog.info("[SpecBoost] Skipping MTP auto-inject for '\(mainId)' (MTP off)")
             } else {
-                NovaMLXLog.info("[SpecBoost] Auto-injecting MTP draft '\(mtp.draftModelId)' for '\(request.model)'")
-                return withDraft(request, draftId: mtp.draftModelId)
+                let temp = request.temperature ?? 1
+                if temp > 0 {
+                    NovaMLXLog.info("[SpecBoost] Skipping MTP auto-inject for '\(mainId)' (temp=\(temp) > 0; Qwen MTP is greedy-only)")
+                } else {
+                    NovaMLXLog.info("[SpecBoost] Auto-injecting MTP draft '\(mtp.draftModelId)' for '\(request.model)'")
+                    return withDraft(request, draftId: mtp.draftModelId)
+                }
             }
         }
 
@@ -500,7 +512,11 @@ public final class InferenceService: @unchecked Sendable {
             enableThinking: request.enableThinking,
             preserveThinking: request.preserveThinking,
             draftModel: draftId,
-            numDraftTokens: request.numDraftTokens ?? 4
+            numDraftTokens: request.numDraftTokens ?? 4,
+            includeLogprobs: request.includeLogprobs,
+            topLogprobsCount: request.topLogprobsCount,
+            httpRequestId: request.httpRequestId,
+            useNativeMtp: request.useNativeMtp
         )
     }
 
@@ -727,6 +743,10 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     private func loadCompanionMtpIfPresent(mainId: String) async {
+        if settingsManager.getSettings(mainId).nativeMtpEnabled == false {
+            NovaMLXLog.info("[SpecBoost] Skipping companion MTP load for '\(mainId)' (MTP off)")
+            return
+        }
         let mainDir = NovaMLXPaths.directory(forModelId:mainId)
         guard !isMtpDraftConfig(at: mainDir) else { return }
         let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId)
@@ -851,6 +871,43 @@ public final class InferenceService: @unchecked Sendable {
             return workerNativeMtpModels.contains(resolvedId)
         }
         return engine.getContainer(for: resolvedId)?.hasNativeMtp == true
+    }
+
+    /// Standalone MTP draft on disk for this backbone (Spec Boost companion).
+    public func hasCompanionMtp(_ modelId: String) -> Bool {
+        let resolvedId = settingsManager.resolveModelId(modelId)
+        guard let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: resolvedId) else {
+            return false
+        }
+        return isModelLoaded(mtp.draftModelId) || companionMtpOnDisk(mtp.draftModelId)
+    }
+
+    /// Show the MTP switch when native weights or a companion pack is present.
+    public func mtpSwitchAvailable(_ modelId: String) -> Bool {
+        hasNativeMtp(modelId) || hasCompanionMtp(modelId)
+    }
+
+    public func isMtpEnabled(_ modelId: String) -> Bool {
+        settingsManager.getSettings(settingsManager.resolveModelId(modelId)).nativeMtpEnabled != false
+    }
+
+    /// Persist the unified MTP switch (native head + companion auto-load/inject).
+    public func setMtpEnabled(_ modelId: String, enabled: Bool) async {
+        let resolvedId = settingsManager.resolveModelId(modelId)
+        settingsManager.updateSettings(resolvedId) { $0.nativeMtpEnabled = enabled }
+        if let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: resolvedId) {
+            if enabled {
+                await loadCompanionMtpIfPresent(mainId: resolvedId)
+            } else if isModelLoaded(mtp.draftModelId) {
+                NovaMLXLog.info("[SpecBoost] Unloading companion MTP '\(mtp.draftModelId)' (MTP off)")
+                await unloadModel(ModelIdentifier(id: mtp.draftModelId, family: mtp.family))
+            }
+        }
+    }
+
+    private func companionMtpOnDisk(_ draftModelId: String) -> Bool {
+        let dir = NovaMLXPaths.directory(forModelId: draftModelId)
+        return FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path)
     }
 
     /// Check if a model can be loaded given current memory constraints.

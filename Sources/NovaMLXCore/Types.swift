@@ -349,6 +349,9 @@ public struct InferenceRequest: @unchecked Sendable {
         self.httpRequestId = httpRequestId
         self.useNativeMtp = useNativeMtp
     }
+
+    /// Native in-graph MTP and companion MTP auto-inject. `nil` means on.
+    public var allowsMtp: Bool { useNativeMtp != false }
 }
 
 public struct ChatMessage: Codable, Sendable {
