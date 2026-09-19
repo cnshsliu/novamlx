@@ -266,16 +266,32 @@ public final class RequestLogStore: @unchecked Sendable {
         )
     }
 
+    /// Floor for the Request Log orphan prune. Inference can sit in the serial
+    /// decode queue far longer than the 300s HTTP `request_timeout`; 120s was
+    /// labeling live jobs as timeout.
+    public static let minimumStaleAge: TimeInterval = 1_800
+
+    /// Age after which an in-flight log row is assumed orphaned (crashed worker,
+    /// dropped stream). At least 4× `requestTimeout`, never under 30 minutes.
+    public static func staleAge(requestTimeout: TimeInterval) -> TimeInterval {
+        max(requestTimeout * 4, minimumStaleAge)
+    }
+
     /// Cancel any entries still in flight older than `age` (safety net so stale
     /// rows from crashed requests don't linger forever). Returns count cleared.
     @discardableResult
-    public func cancelStale(olderThan age: TimeInterval = 120) -> Int {
+    public func cancelStale(olderThan age: TimeInterval = RequestLogStore.minimumStaleAge) -> Int {
         let cutoff = Date().addingTimeInterval(-age)
         return lock.withLock {
             let stale = active.filter { $0.value.startedAt < cutoff }.map { $0.key }
             for id in stale {
                 guard var entry = active[id] else { continue }
-                finalizeLocked(&entry, status: .cancelled, error: "timeout", durationMs: age * 1000)
+                finalizeLocked(
+                    &entry,
+                    status: .cancelled,
+                    error: "stale (no completion callback after \(Int(age))s)",
+                    durationMs: age * 1000
+                )
                 active.removeValue(forKey: id)
                 if let model = entry.model, let idx = activeByModel[model]?.firstIndex(of: id) {
                     var list = activeByModel[model] ?? []

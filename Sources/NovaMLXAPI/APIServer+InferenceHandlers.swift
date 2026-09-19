@@ -453,7 +453,7 @@ extension NovaMLXAPIServer {
                 // SSE writer errors mid-stream (client disconnect, ChannelError)
                 // the upstream task can get stuck mid-yield and tracker.finish
                 // never fires — leaving the entry orphaned in `active` until
-                // cancelStale prunes it as "timeout" 120s later. Calling
+                // cancelStale prunes it. Calling
                 // finishHTTP here is idempotent: if StreamTracker already
                 // finalized, this is a no-op; if not, we close the entry.
                 RequestLogStore.shared.finish(

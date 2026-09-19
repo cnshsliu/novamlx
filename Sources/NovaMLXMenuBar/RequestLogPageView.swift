@@ -73,10 +73,9 @@ struct RequestLogPageView: View {
         }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
             refreshTick = Date()
-            // Safety net: prune any in-flight entries whose finalization hook
-            // never fired (crashed worker, broken stream, etc.) so they don't
-            // spin forever. The 120s default only catches genuinely orphaned rows.
-            store.cancelStale(olderThan: 120)
+            // Safety net for crashed workers / dropped streams — not a generate
+            // deadline. 120s was labeling queued 27B jobs as timeout.
+            store.cancelStale(olderThan: RequestLogStore.staleAge(requestTimeout: 300))
         }
     }
 

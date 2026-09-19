@@ -492,7 +492,7 @@ private struct RequestLogMiddleware: RouterMiddleware {
                         // Body write failed (client disconnect, channel error,
                         // upstream timeout). Finalize the entry before re-throwing
                         // so the log reflects the actual outcome rather than
-                        // hanging in `active` until cancelStale prunes it.
+                        // hanging in `active` until the stale prune.
                         capturedStore.finishHTTP(
                             id: capturedID,
                             status: .error,

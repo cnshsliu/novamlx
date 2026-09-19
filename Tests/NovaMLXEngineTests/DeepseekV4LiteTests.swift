@@ -86,6 +86,32 @@ struct DeepseekV4LiteTests {
         #expect(out["mtp.0.ffn.experts.0.w1.weight"] == nil)
     }
 
+    @Test("TIE dense mtpLayers keys enable native DSpark without expert tensors")
+    func sanitizeTieDenseMtpEnablesNative() throws {
+        var native = false
+        let weights: [String: MLXArray] = [
+            "model.mtpLayers.0.ffn.gate.weight": MLXArray.ones([2, 2]),
+            "model.mtpLayers.0.attn.wq_a.weight": MLXArray.ones([2, 2]),
+            "model.mtpLayers.1.ffn.gate.weight": MLXArray.ones([2, 2]),
+            "model.mtpLayers.2.ffn.gate.weight": MLXArray.ones([2, 2]),
+            "norm.weight": MLXArray.ones([2]),
+        ]
+        let cfgJSON = """
+            {"model_type":"deepseek_v41","num_nextn_predict_layers":3,"n_routed_experts":2,
+             "dspark_n_routed_experts":2,"dspark_block_size":5,"hidden_size":2,"vocab_size":4,
+             "num_hidden_layers":1}
+            """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(DeepseekV4Configuration.self, from: cfgJSON)
+        let out = DeepseekV4Sanitizer.remap(weights, config: cfg, nativeMtp: &native)
+        #expect(native)
+        #expect(out["model.mtpLayers.0.ffn.gate.weight"] != nil)
+        let model = DeepseekV4Model(cfg)
+        model.nativeMtpAvailable = native
+        #expect(model.mtpBlockSize == 5)
+        #expect(!model.model.mtpLayers.isEmpty)
+        #expect(model.model.mtpLayers.count == 3)
+    }
+
     @Test("V4.1 Flash ids resolve to the DSpark companion, not Qwen DFlash")
     func v41ResolvesDSparkNotDFlash() {
         let id = "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit"
@@ -152,8 +178,8 @@ struct DeepseekV4LiteTests {
         let found = results.first { $0.modelId == modelId }
 
         #expect(found != nil, "model should be discovered")
-        #expect(found?.family == .qwen,
-            "deepseek_v4 model_type should map to .qwen family; got \(found?.family.rawValue ?? "nil")")
+        #expect(found?.family == .deepseek,
+            "deepseek_v4 model_type should map to .deepseek family; got \(found?.family.rawValue ?? "nil")")
         #expect(found?.configModelType == "deepseek_v4",
             "configModelType should preserve the raw model_type string")
     }
@@ -180,8 +206,8 @@ struct DeepseekV4LiteTests {
         let found = results.first { $0.modelId == modelId }
 
         #expect(found != nil)
-        #expect(found?.family == .qwen,
-            "DeepseekV4ForCausalLM architecture should map to .qwen; got \(found?.family.rawValue ?? "nil")")
+        #expect(found?.family == .deepseek,
+            "DeepseekV4ForCausalLM architecture should map to .deepseek; got \(found?.family.rawValue ?? "nil")")
     }
 
     // MARK: - 3. Chat template detection
@@ -298,15 +324,10 @@ struct DeepseekV4LiteTests {
         #expect(w![0].item(Float.self) == 1)
     }
 
-    @Test("ModelFamily has no .deepseek case — currently mapped to .qwen")
-    func noDeepseekFamilyCase() {
-        // If a future commit adds .deepseek, this test fails and signals
-        // that the family routing in ModelDiscovery should be updated.
-        let raw = ModelFamily(rawValue: "deepseek")
-        #expect(raw == nil,
-            "ModelFamily should not have a .deepseek case yet; if this fails, update ModelDiscovery routing")
-        #expect(ModelFamily(rawValue: "qwen") == .qwen,
-            ".qwen case must exist for current DeepSeek-V4 routing")
+    @Test("ModelFamily includes .deepseek")
+    func deepseekFamilyCase() {
+        #expect(ModelFamily(rawValue: "deepseek") == .deepseek)
+        #expect(ModelFamily(rawValue: "qwen") == .qwen)
     }
 
     @Test("V4.1 RoPE rotates sequence axis 1, matching MLXFast on [B,H,L,D]")

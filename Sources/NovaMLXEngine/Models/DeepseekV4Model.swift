@@ -1112,8 +1112,10 @@ public class DeepseekV4ModelInner: Module {
         self.layers = (0..<args.numHiddenLayers).map { DeepseekV4Block(layerId: $0, config: args) }
         let nMtp = args.numNextnPredictLayers >= 2 ? args.numNextnPredictLayers : 0
         let mtpCfg = args.mtpLayerConfig()
+        // TIE maps `model.mtpLayers.N` → layer index 10_000+N. Keep the same
+        // ids so SSD expert fetch and heat-map keys match the manifest.
         self.mtpLayers = (0..<nMtp).map {
-            DeepseekV4Block(layerId: 100 + $0, config: mtpCfg)
+            DeepseekV4Block(layerId: 10_000 + $0, config: mtpCfg)
         }
         self._norm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
         self._hcHead.wrappedValue = DeepseekV4HyperConnection(
@@ -1227,11 +1229,19 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     public func mtpForward(tokenEmbed: MLXArray, hidden: MLXArray, cache: [KVCache]?) -> MLXArray {
         precondition(nativeMtpAvailable && !model.mtpLayers.isEmpty, "DeepSeek native DSpark/MTP weights missing")
         var h = hidden
-        if h.ndim == 2 { h = h.reshaped(1, h.dim(0), h.dim(1)) }
-        // MTP blocks use the same mHC layout as the backbone ([B, L, hc, D]).
+        // lastTokenHidden can squeeze a size-1 seq dim; restore [B, S, D] then mHC.
+        if h.ndim == 1 {
+            h = h.reshaped(1, 1, h.dim(0))
+        } else if h.ndim == 2 {
+            h = h.dim(0) == 1 ? h.reshaped(1, 1, h.dim(1)) : h.reshaped(h.dim(0), 1, h.dim(1))
+        }
         if h.ndim == 3 {
             h = MLX.repeated(MLX.expandedDimensions(h, axis: 2), count: args.hcMult, axis: 2)
         }
+        precondition(
+            h.ndim == 4,
+            "DSpark hidden must be [batch, seq, hc, hidden], got \(h.shape)"
+        )
         var pre = deepseekV41InitialPre(
             batch: h.dim(0), length: h.dim(1), hcMult: args.hcMult)
         let mask = createAttentionMask(
@@ -1290,9 +1300,11 @@ enum DeepseekV4Sanitizer {
         config: DeepseekV4Configuration,
         nativeMtp: inout Bool
     ) -> [String: MLXArray] {
+        // TIE streams SwitchLinear expert shards from SSD, so sanitize never
+        // sees mtp*.experts / switch_mlp. Dense mtpLayers.* (attn, gate,
+        // shared expert) in the in-memory dict is enough to enable DSpark.
         nativeMtp = weights.keys.contains {
-            ($0.hasPrefix("mtp.") || $0.contains("mtpLayers"))
-                && ($0.contains("experts") || $0.contains("switch_mlp"))
+            $0.hasPrefix("mtp.") || $0.contains("mtpLayers")
         }
         var w = [String: MLXArray]()
         w.reserveCapacity(weights.count)

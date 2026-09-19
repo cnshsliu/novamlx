@@ -295,6 +295,7 @@ struct NovaMLXWorker {
         let isVLM = container?.config.modelType == .vlm
         let hasLinearAttention = container?.config.hasLinearAttention == true
         let hasDraftModel = request.draftModel != nil
+        let nativeMtp = container?.hasNativeMtp == true
 
         let needsSpecialized = request.sessionId != nil ||
             request.jsonSchemaDef != nil ||
@@ -303,7 +304,8 @@ struct NovaMLXWorker {
             request.gbnfGrammar != nil ||
             isVLM ||
             hasLinearAttention ||
-            hasDraftModel
+            hasDraftModel ||
+            nativeMtp
 
         return needsSpecialized ? .batcher : .fused
     }

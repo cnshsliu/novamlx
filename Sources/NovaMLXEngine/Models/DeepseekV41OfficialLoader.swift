@@ -303,8 +303,10 @@ enum DeepseekV41OfficialLoader {
         NovaMLXLog.info("[V41] read \(weights.count) dense tensors")
         var flag = false
         weights = DeepseekV4Sanitizer.remap(weights, config: model.args, nativeMtp: &flag)
-        model.nativeMtpAvailable = false
-        NovaMLXLog.info("[V41] sanitized \(weights.count) tensors, quantizing")
+        model.nativeMtpAvailable = flag
+        NovaMLXLog.info(
+            "[V41] sanitized \(weights.count) tensors, nativeMtp=\(flag) mtpLayers=\(model.model.mtpLayers.count), quantizing"
+        )
 
         quantize(model: model) { path, module in
             if module is QuantizedSwitchLinear { return nil }

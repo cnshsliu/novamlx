@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import NovaMLXCore
 import Testing
 
 @Suite("DFlash2")
@@ -109,6 +110,17 @@ struct DFlashTests {
         let result = DFlashAccept.greedy(drafted: drafted, targetArgmax: target)
         #expect(result.accepted == 2)
         #expect(result.committed == [10, 11, 99])
+    }
+
+    @Test("GDN spec capture is only for the short DFlash verify window")
+    func specRecordOnlyShortVerify() {
+        #expect(!DFlashLimits.shouldRecordSpec(sequenceLength: 1))
+        #expect(DFlashLimits.shouldRecordSpec(sequenceLength: 8))
+        #expect(DFlashLimits.shouldRecordSpec(sequenceLength: 32))
+        #expect(!DFlashLimits.shouldRecordSpec(sequenceLength: 8193))
+        #expect(!DFlashLimits.shouldRecordSpec(sequenceLength: 11461))
+        #expect(DFlashLimits.prefillChunkTokens == 4096)
+        #expect(ResourceLimits.dflashMaxPromptTokens > 8192)
     }
 
     @Test("isDFlashDraftConfig detects architecture tag")

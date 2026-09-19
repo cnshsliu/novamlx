@@ -856,9 +856,10 @@ public enum ResourceLimits: Sendable {
         return safetyConcurrentCap
     }
 
-    /// DFlash2 verify through Qwen3.5 GatedDeltaNet after a long prefill
-    /// has been observed to kill the worker (no IPS). Vanilla decode is used above this.
-    public static let dflashMaxPromptTokens = 8192
+    /// Soft ceiling for DFlash2. Prefill is chunked and GDN spec-capture is
+    /// limited to the short verify window, so this is no longer the old 8192
+    /// crash workaround. Vanilla decode is used above this.
+    public static let dflashMaxPromptTokens = 131_072
 
     /// Prefill chunk for hybrid GDN (Qwen3.5/3.8). Each chunk re-reads the
     /// full 8-bit weight set (~28GB on Qwen3.8-27B), so a 512-token stride
