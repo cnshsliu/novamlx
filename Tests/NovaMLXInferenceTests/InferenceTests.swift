@@ -20,6 +20,36 @@ struct InferenceServiceTests {
         #expect(stats.gpuMemoryUsed == 1024)
     }
 
+    @Test("Exclusive eviction never auto-unloads TTS/ASR/image")
+    func exclusiveSkipsSideModels() {
+        let keep: Set<String> = ["orcarouter/Qwen3.8-27B-Uncensored-MLX"]
+        let side: Set<String> = [
+            "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+            "mlx-community/Qwen3-ASR-1.7B-8bit",
+        ]
+        #expect(
+            InferenceService.shouldExclusiveEvict(
+                id: "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+                keep: keep,
+                sideLoaded: side
+            ) == false
+        )
+        #expect(
+            InferenceService.shouldExclusiveEvict(
+                id: "some-other-chat-llm",
+                keep: keep,
+                sideLoaded: side
+            ) == true
+        )
+        #expect(
+            InferenceService.shouldExclusiveEvict(
+                id: "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+                keep: keep,
+                sideLoaded: side
+            ) == false
+        )
+    }
+
     @Test("Exclusive keep set always includes the backbone id")
     func exclusiveKeepIncludesBackbone() {
         let keep = InferenceService.exclusiveKeepIds(for: "org/foo")

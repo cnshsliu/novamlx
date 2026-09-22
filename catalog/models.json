@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "updatedAt": "2026-09-21T22:40:00Z",
   "models": [
     {
       "id": "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit",
@@ -136,6 +137,24 @@
       ],
       "capabilities": [],
       "testedOn": "1.2.0"
+    },
+    {
+      "id": "aac6fef/laya-multilingual-mlx",
+      "url": "https://huggingface.co/aac6fef/laya-multilingual-mlx",
+      "name": "Laya Multilingual",
+      "description": "Laya typed-decision model (mmBERT, 322M, 1024 context). One forward pass returns choice, score, or noul probabilities. Not a chat LLM. Default decision checkpoint for NovaMLX. English-only sibling: aac6fef/laya-mlx.",
+      "category": "decision",
+      "family": "laya",
+      "format": "mlx",
+      "status": "verified",
+      "quant": "fp16",
+      "size": "~700 MB",
+      "sizeBytes": 734003200,
+      "minRamGB": 4,
+      "addedAt": "2026-09-21T13:30:00Z",
+      "tags": ["MLX", "Laya", "Decision", "Multilingual"],
+      "capabilities": [],
+      "testedOn": "1.4.0"
     },
     {
       "id": "orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX",
@@ -725,6 +744,25 @@
       "family": "dotsTts",
       "format": "mlx",
       "status": "preview"
+    },
+    {
+      "id": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+      "url": "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+      "name": "Qwen3-TTS 1.7B Base",
+      "description": "Qwen3-TTS 12Hz 1.7B Base (8-bit). Voice cloning from a short reference clip + transcript. Use Base, not CustomVoice/VoiceDesign. Best Chinese clone in NovaMLX.",
+      "size": "3.1 GB",
+      "tags": [
+        "MLX",
+        "8-bit",
+        "TTS",
+        "Voice Clone",
+        "Chinese"
+      ],
+      "category": "audio",
+      "sizeBytes": 3100000000,
+      "family": "qwen3Tts",
+      "format": "mlx",
+      "status": "verified"
     },
     {
       "id": "mlx-community/Qwen3-ASR-1.7B-8bit",

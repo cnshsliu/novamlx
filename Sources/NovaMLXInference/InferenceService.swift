@@ -42,6 +42,7 @@ public final class InferenceService: @unchecked Sendable {
     public let transcriptionService: TranscriptionService
     public let ttsService: TTSService
     public let imageGenerationService: ImageGenerationService
+    public let decisionService: DecisionService
 
     // Worker subprocess mode
     public let workerMode: Bool
@@ -65,6 +66,7 @@ public final class InferenceService: @unchecked Sendable {
         self.transcriptionService = TranscriptionService()
         self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
+        self.decisionService = DecisionService()
         // Share the engine's metrics store with every backend so the status
         // panel's "Realtime Inference Speed" reflects ALL model types, not just LLM.
         self.transcriptionService.metricsStore = engine.metricsStore
@@ -428,14 +430,22 @@ public final class InferenceService: @unchecked Sendable {
         if let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: mainId),
            isModelLoaded(dspark.draftModelId)
         {
-            NovaMLXLog.info("[SpecBoost] Auto-injecting DSpark draft '\(dspark.draftModelId)' for '\(request.model)'")
-            return withDraft(request, draftId: dspark.draftModelId)
+            if !request.allowsMtp {
+                NovaMLXLog.info("[SpecBoost] Skipping DSpark auto-inject for '\(mainId)' (MTP/DFlash off)")
+            } else {
+                NovaMLXLog.info("[SpecBoost] Auto-injecting DSpark draft '\(dspark.draftModelId)' for '\(request.model)'")
+                return withDraft(request, draftId: dspark.draftModelId)
+            }
         }
         if let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId),
            isModelLoaded(dflash.draftModelId)
         {
-            NovaMLXLog.info("[SpecBoost] Auto-injecting DFlash2 draft '\(dflash.draftModelId)' for '\(request.model)'")
-            return withDraft(request, draftId: dflash.draftModelId)
+            if !request.allowsMtp {
+                NovaMLXLog.info("[SpecBoost] Skipping DFlash2 auto-inject for '\(mainId)' (MTP/DFlash off)")
+            } else {
+                NovaMLXLog.info("[SpecBoost] Auto-injecting DFlash2 draft '\(dflash.draftModelId)' for '\(request.model)'")
+                return withDraft(request, draftId: dflash.draftModelId)
+            }
         }
         // Qwen MTP heads are greedy. Auto-injecting them at temp>0 ignores the
         // requested sampler and often loops after </think>, leaving message.content
@@ -527,6 +537,17 @@ public final class InferenceService: @unchecked Sendable {
         asMtpCompanion: Bool = false
     ) async throws {
         let modelId = config.identifier.id
+        if config.modelType == .decision || config.identifier.family == .laya
+            || LayaCheckpoint.isLayaDirectory(url)
+        {
+            if decisionService.isLoaded(modelId) { return }
+            try await loadDedup.ensureSingle(modelId: modelId) {
+                if self.decisionService.isLoaded(modelId) { return }
+                try await self.decisionService.load(from: url, modelId: modelId)
+                self.saveLoadedModelsList()
+            }
+            return
+        }
         if !asMtpCompanion, isMtpDraftConfig(at: url) || isDFlashDraftConfig(at: url) {
             throw NovaMLXError.mtpCompanionNotLoadable(modelId)
         }
@@ -664,6 +685,10 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     private func loadCompanionDSparkIfPresent(mainId: String) async {
+        if settingsManager.getSettings(mainId).nativeMtpEnabled == false {
+            NovaMLXLog.info("[SpecBoost] Skipping DSpark companion load for '\(mainId)' (MTP/DFlash off)")
+            return
+        }
         guard let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: mainId) else { return }
         guard !isModelLoaded(dspark.draftModelId) else { return }
         let dir = NovaMLXPaths.directory(forModelId: dspark.draftModelId)
@@ -688,6 +713,10 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     private func loadCompanionDFlashIfPresent(mainId: String) async {
+        if settingsManager.getSettings(mainId).nativeMtpEnabled == false {
+            NovaMLXLog.info("[SpecBoost] Skipping DFlash2 companion load for '\(mainId)' (MTP/DFlash off)")
+            return
+        }
         guard let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId) else { return }
         guard !isModelLoaded(dflash.draftModelId) else { return }
         let dir = NovaMLXPaths.directory(forModelId:dflash.draftModelId)
@@ -788,11 +817,28 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     public func evictOthersForExclusive(keeping modelId: String) async {
+        let exclusiveOn = await NovaMLXConfiguration.shared.serverConfig.exclusiveAutoUnload
+        guard exclusiveOn else {
+            NovaMLXLog.info("[Exclusive] skipped — exclusiveAutoUnload is off")
+            return
+        }
         let keep = Self.exclusiveKeepIds(for: modelId)
-        for id in listLoadedModels() where !keep.contains(id) {
+        let sideLoaded = Set(
+            ttsService.listLoadedModels()
+                + transcriptionService.listLoadedModels()
+                + imageGenerationService.listLoadedModels()
+                + decisionService.listLoadedModels()
+        )
+        for id in listLoadedModels() where Self.shouldExclusiveEvict(id: id, keep: keep, sideLoaded: sideLoaded) {
             NovaMLXLog.info("[Exclusive] unloading '\(id)' to keep '\(modelId)'")
             await unloadModel(ModelIdentifier(id: id, family: .other))
         }
+    }
+
+    /// Chat exclusive-load may replace another LLM/VLM, but never auto-unload
+    /// TTS, ASR, or image models sitting beside it.
+    public static func shouldExclusiveEvict(id: String, keep: Set<String>, sideLoaded: Set<String>) -> Bool {
+        !keep.contains(id) && !sideLoaded.contains(id)
     }
 
     public func applyResourceLimits() async {
@@ -832,6 +878,12 @@ public final class InferenceService: @unchecked Sendable {
             return
         }
 
+        if decisionService.isLoaded(resolvedId) {
+            decisionService.unload(modelId: resolvedId)
+            saveLoadedModelsList()
+            return
+        }
+
         if workerMode, let worker = worker {
             try? await worker.sendUnload(modelId: identifier.id)
             workerLoadedModels.remove(identifier.id)
@@ -847,13 +899,15 @@ public final class InferenceService: @unchecked Sendable {
 
     public func isModelLoaded(_ modelId: String) -> Bool {
         let resolvedId = settingsManager.resolveModelId(modelId)
-        if workerMode {
-            return workerLoadedModels.contains(resolvedId)
-        }
-        if engine.getContainer(for: resolvedId)?.isLoaded == true { return true }
+        if workerLoadedModels.contains(resolvedId) { return true }
+        if !workerMode, engine.getContainer(for: resolvedId)?.isLoaded == true { return true }
+        // Decision, ASR, TTS and image models stay on the host. In worker mode
+        // they are not in workerLoadedModels; treating that as "not loaded"
+        // reloaded the 678 MB Laya checkpoint on every request.
         if transcriptionService.isLoaded(resolvedId) { return true }
         if ttsService.listLoadedModels().contains(resolvedId) { return true }
         if imageGenerationService.isLoaded(resolvedId) { return true }
+        if decisionService.isLoaded(resolvedId) { return true }
         return false
     }
 
@@ -884,7 +938,15 @@ public final class InferenceService: @unchecked Sendable {
 
     /// Show the MTP switch when native weights or a companion pack is present.
     public func mtpSwitchAvailable(_ modelId: String) -> Bool {
-        hasNativeMtp(modelId) || hasCompanionMtp(modelId)
+        hasNativeMtp(modelId) || hasCompanionMtp(modelId) || hasCompanionDFlash(modelId)
+    }
+
+    public func hasCompanionDFlash(_ modelId: String) -> Bool {
+        let resolvedId = settingsManager.resolveModelId(modelId)
+        guard let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: resolvedId) else {
+            return false
+        }
+        return isModelLoaded(dflash.draftModelId) || companionMtpOnDisk(dflash.draftModelId)
     }
 
     public func isMtpEnabled(_ modelId: String) -> Bool {
@@ -901,6 +963,22 @@ public final class InferenceService: @unchecked Sendable {
             } else if isModelLoaded(mtp.draftModelId) {
                 NovaMLXLog.info("[SpecBoost] Unloading companion MTP '\(mtp.draftModelId)' (MTP off)")
                 await unloadModel(ModelIdentifier(id: mtp.draftModelId, family: mtp.family))
+            }
+        }
+        if let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: resolvedId) {
+            if enabled {
+                await loadCompanionDFlashIfPresent(mainId: resolvedId)
+            } else if isModelLoaded(dflash.draftModelId) {
+                NovaMLXLog.info("[SpecBoost] Unloading DFlash2 '\(dflash.draftModelId)' (MTP/DFlash off)")
+                await unloadModel(ModelIdentifier(id: dflash.draftModelId, family: dflash.family))
+            }
+        }
+        if let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: resolvedId) {
+            if enabled {
+                await loadCompanionDSparkIfPresent(mainId: resolvedId)
+            } else if isModelLoaded(dspark.draftModelId) {
+                NovaMLXLog.info("[SpecBoost] Unloading DSpark '\(dspark.draftModelId)' (MTP/DFlash off)")
+                await unloadModel(ModelIdentifier(id: dspark.draftModelId, family: dspark.family))
             }
         }
     }
@@ -943,6 +1021,7 @@ public final class InferenceService: @unchecked Sendable {
         models.append(contentsOf: ttsService.listLoadedModels().filter { !models.contains($0) })
         // Include image models
         models.append(contentsOf: imageGenerationService.listLoadedModels().filter { !models.contains($0) })
+        models.append(contentsOf: decisionService.listLoadedModels().filter { !models.contains($0) })
         return models
     }
 
@@ -999,6 +1078,11 @@ public final class InferenceService: @unchecked Sendable {
                 continue
             }
             progress?(modelId, .started)
+            if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) {
+                NovaMLXLog.info("[InferenceService] Skipping restore of '\(modelId)' — on a removable volume")
+                progress?(modelId, .skipped)
+                continue
+            }
             if isMtpDraftConfig(at: record.localURL) {
                 NovaMLXLog.info("[InferenceService] Skipping restore of MTP companion '\(modelId)'")
                 progress?(modelId, .skipped)

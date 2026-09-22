@@ -142,7 +142,13 @@ public actor AutoLoadCoordinator {
             modelType: record.modelType
         )
 
-        if record.modelType == .embedding {
+        if record.modelType == .decision {
+            try await inference.loadModel(
+                at: record.localURL,
+                config: modelConfig,
+                progress: options.progress
+            )
+        } else if record.modelType == .embedding {
             _ = try await embeddings.loadModel(
                 from: record.localURL,
                 config: modelConfig,

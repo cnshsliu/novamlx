@@ -164,6 +164,7 @@ let package = Package(
                 .product(name: "HummingbirdRouter", package: "hummingbird"),
                 .product(name: "Logging", package: "swift-log"),
             ],
+            resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
         ),
         .target(

@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laya · local decisions</title>
+<style>
+  :root {
+    --bg: #090a08;
+    --ink: #e8ecd9;
+    --muted: #8d927c;
+    --line: #23261c;
+    --lime: #d6ff3e;
+    --food: #ff4d2e;
+    --safe: #7d8a55;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); }
+  body {
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    min-height: 100%;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 18px 28px 8px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  header strong { color: var(--lime); font-weight: 650; letter-spacing: 0.18em; }
+  main {
+    display: grid;
+    grid-template-columns: minmax(420px, 1.3fr) minmax(320px, 0.8fr);
+    gap: 28px;
+    padding: 12px 28px 28px;
+    align-items: center;
+  }
+  canvas {
+    width: min(100%, 760px);
+    height: auto;
+    background:
+      radial-gradient(circle at 50% 40%, #14160f 0%, #090a08 70%);
+    border: 1px solid var(--line);
+    justify-self: center;
+  }
+  aside { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  .kicker { font-size: 11px; letter-spacing: 0.16em; color: var(--muted); text-transform: uppercase; }
+  .move {
+    font-family: "SF Pro Display", "Helvetica Neue", sans-serif;
+    font-size: 64px;
+    line-height: 0.9;
+    letter-spacing: -0.04em;
+    font-weight: 620;
+  }
+  .move.safe { color: var(--food); }
+  .bars { display: flex; flex-direction: column; gap: 10px; }
+  .bar { display: grid; grid-template-columns: 64px 1fr 52px; gap: 10px; align-items: center; font-size: 12px; }
+  .track { height: 10px; background: #161810; position: relative; }
+  .fill { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--lime); }
+  .bar.on .fill { background: #fff; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .stat { border-top: 1px solid var(--line); padding-top: 8px; }
+  .stat b { display: block; font-size: 22px; font-weight: 560; color: var(--ink); }
+  .stat span { color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .state {
+    color: var(--safe);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    max-height: 180px;
+    overflow: auto;
+  }
+  .err { color: var(--food); font-size: 13px; }
+  button {
+    align-self: start;
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--line);
+    padding: 8px 12px;
+    font: inherit;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--lime); color: var(--lime); }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    .move { font-size: 48px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div><strong>Laya</strong> · NovaMLX · 0 output tokens</div>
+  <div id="status">connecting</div>
+</header>
+<main>
+  <canvas id="board" width="720" height="720"></canvas>
+  <aside>
+    <div>
+      <div class="kicker">executed move</div>
+      <div class="move" id="move">—</div>
+    </div>
+    <div class="bars" id="bars"></div>
+    <div class="stats">
+      <div class="stat"><b id="ms">—</b><span>last ms</span></div>
+      <div class="stat"><b id="rate">—</b><span>decisions/s</span></div>
+      <div class="stat"><b id="safety">0</b><span>safety</span></div>
+    </div>
+    <div class="stat"><b id="score">0</b><span>length</span></div>
+    <div class="state" id="state"></div>
+    <div class="err" id="err"></div>
+    <button id="pause" type="button">pause</button>
+  </aside>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+const model = params.get("model") || "aac6fef/laya-multilingual-mlx";
+const key = params.get("key") || "";
+const N = 16;
+const DIRS = ["UP", "DOWN", "LEFT", "RIGHT"];
+const DELTA = { UP: [0, -1], DOWN: [0, 1], LEFT: [-1, 0], RIGHT: [1, 0] };
+const OPP = { UP: "DOWN", DOWN: "UP", LEFT: "RIGHT", RIGHT: "LEFT" };
+
+const canvas = document.getElementById("board");
+const ctx = canvas.getContext("2d");
+const moveEl = document.getElementById("move");
+const barsEl = document.getElementById("bars");
+const statusEl = document.getElementById("status");
+
+let snake, food, heading, alive, paused, busy, safety, steps, latencies;
+reset();
+
+function reset() {
+  snake = [];
+  for (let i = 0; i < 4; i++) snake.push({ x: 6 - i, y: 8 });
+  heading = "RIGHT";
+  alive = true;
+  paused = false;
+  busy = false;
+  safety = 0;
+  steps = 0;
+  latencies = [];
+  placeFood();
+  paint();
+  drawBars({ UP: 0, DOWN: 0, LEFT: 0, RIGHT: 0 }, null);
+}
+
+function placeFood() {
+  const open = [];
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    if (!snake.some(p => p.x === x && p.y === y)) open.push({ x, y });
+  }
+  food = open[Math.floor(Math.random() * open.length)] || { x: 0, y: 0 };
+}
+
+function cell(dir) {
+  const [dx, dy] = DELTA[dir];
+  const head = snake[0];
+  return { x: head.x + dx, y: head.y + dy };
+}
+
+function fatal(dir) {
+  if (snake.length > 1 && dir === OPP[heading]) return "reverses into itself";
+  const n = cell(dir);
+  if (n.x < 0 || n.y < 0 || n.x >= N || n.y >= N) return "hits the wall";
+  const body = snake.slice(0, -1);
+  if (body.some(p => p.x === n.x && p.y === n.y)) return "hits its body";
+  return null;
+}
+
+function progress(dir) {
+  const head = snake[0];
+  const n = cell(dir);
+  const before = Math.abs(head.x - food.x) + Math.abs(head.y - food.y);
+  const after = Math.abs(n.x - food.x) + Math.abs(n.y - food.y);
+  return before - after;
+}
+
+function describe() {
+  const lines = DIRS.map(dir => {
+    const hit = fatal(dir);
+    if (hit) return `${dir}: ${hit}`;
+    const gain = progress(dir);
+    const rel = gain > 0 ? `${gain} closer to the food` : gain < 0 ? `${-gain} farther from the food` : "same distance to the food";
+    return `${dir}: open, ${rel}`;
+  });
+  const safe = DIRS.filter(d => !fatal(d));
+  let best = safe[0];
+  for (const d of safe) if (progress(d) > progress(best)) best = d;
+  const head = snake[0];
+  return [
+    `Snake on a ${N} by ${N} board. Head at ${head.x},${head.y}. Current heading ${heading}. Food at ${food.x},${food.y}.`,
+    ...lines,
+    best ? `Among open directions, ${best} makes the most progress.` : "Every direction is fatal."
+  ].join("\n");
+}
+
+function paint() {
+  const s = canvas.width / N;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#1c1f16";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= N; i++) {
+    ctx.beginPath(); ctx.moveTo(i * s, 0); ctx.lineTo(i * s, canvas.width); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * s); ctx.lineTo(canvas.width, i * s); ctx.stroke();
+  }
+  ctx.fillStyle = "#ff4d2e";
+  ctx.fillRect(food.x * s + 6, food.y * s + 6, s - 12, s - 12);
+  snake.forEach((p, i) => {
+    ctx.fillStyle = i === 0 ? "#ffffff" : "#d6ff3e";
+    const inset = i === 0 ? 3 : 5;
+    ctx.fillRect(p.x * s + inset, p.y * s + inset, s - inset * 2, s - inset * 2);
+  });
+}
+
+function drawBars(probs, chosen) {
+  barsEl.innerHTML = "";
+  for (const dir of DIRS) {
+    const p = Number(probs[dir] || 0);
+    const row = document.createElement("div");
+    row.className = "bar" + (dir === chosen ? " on" : "");
+    row.innerHTML = `<span>${dir}</span><div class="track"><div class="fill" style="width:${Math.round(p * 100)}%"></div></div><span>${(p * 100).toFixed(0)}%</span>`;
+    barsEl.appendChild(row);
+  }
+}
+
+async function decide() {
+  const state = describe();
+  document.getElementById("state").textContent = state;
+  const headers = { "Content-Type": "application/json" };
+  if (key) headers.Authorization = "Bearer " + key;
+  const started = performance.now();
+  const res = await fetch("/v1/decisions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      state,
+      questions: {
+        move: {
+          type: "choice",
+          instructions: "Which direction should the snake move next?",
+          criteria: DIRS
+        }
+      }
+    })
+  });
+  const ms = performance.now() - started;
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || data.detail || res.statusText);
+  const answer = data.answers?.move || {};
+  const probs = answer.probabilities || {};
+  let proposed = String(answer.choice || "RIGHT").toUpperCase();
+  if (!DIRS.includes(proposed)) {
+    proposed = DIRS.slice().sort((a, b) => (probs[b] || 0) - (probs[a] || 0))[0];
+  }
+  return { proposed, probs, ms };
+}
+
+function step(dir) {
+  const n = cell(dir);
+  const eat = n.x === food.x && n.y === food.y;
+  snake.unshift(n);
+  if (!eat) snake.pop();
+  else placeFood();
+  heading = dir;
+  steps++;
+  document.getElementById("score").textContent = String(snake.length);
+}
+
+async function tick() {
+  if (paused || !alive || busy) return;
+  busy = true;
+  document.getElementById("err").textContent = "";
+  try {
+    const decision = await decide();
+    latencies.push(decision.ms);
+    if (latencies.length > 20) latencies.shift();
+    let executed = decision.proposed;
+    let overridden = false;
+    if (fatal(executed)) {
+      const safe = DIRS.filter(d => !fatal(d)).sort((a, b) => progress(b) - progress(a));
+      if (!safe.length) {
+        alive = false;
+        statusEl.textContent = "game over";
+        moveEl.textContent = executed;
+        moveEl.classList.add("safe");
+        drawBars(decision.probs, executed);
+        paint();
+        return;
+      }
+      executed = safe[0];
+      overridden = true;
+      safety++;
+    }
+    step(executed);
+    moveEl.textContent = overridden ? decision.proposed + " → " + executed : executed;
+    moveEl.classList.toggle("safe", overridden);
+    drawBars(decision.probs, decision.proposed);
+    document.getElementById("ms").textContent = decision.ms.toFixed(0);
+    const avg = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+    document.getElementById("rate").textContent = avg > 0 ? (1000 / avg).toFixed(1) : "—";
+    document.getElementById("safety").textContent = String(safety);
+    statusEl.textContent = overridden ? "safety" : "live";
+    paint();
+  } catch (err) {
+    const message = String(err.message || err);
+    document.getElementById("err").textContent = message === "Failed to fetch"
+      ? "NovaMLX closed the connection. Reload this page after the app is running again."
+      : message;
+    if (message.includes("Rate limit")) {
+      statusEl.textContent = "rate limit";
+    } else {
+      statusEl.textContent = "error";
+      paused = true;
+      document.getElementById("pause").textContent = "resume";
+    }
+  } finally {
+    busy = false;
+  }
+}
+
+document.getElementById("pause").onclick = () => {
+  if (!alive) { reset(); document.getElementById("pause").textContent = "pause"; return; }
+  paused = !paused;
+  document.getElementById("pause").textContent = paused ? "resume" : "pause";
+  statusEl.textContent = paused ? "paused" : "live";
+};
+
+setInterval(tick, 90);
+statusEl.textContent = "live · " + model.split("/").pop();
+</script>
+</body>
+</html>
