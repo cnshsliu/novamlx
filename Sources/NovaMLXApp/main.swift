@@ -53,6 +53,12 @@ struct NovaMLXApp: App {
             Button { appDelegate.openMainWindow(to: .chat) } label: {
                 Label(l10n.tr("app.chat"), systemImage: "cpu")
             }
+            Button { appDelegate.openMainWindow(to: .voiceClone) } label: {
+                Label(l10n.tr("app.voiceClone"), systemImage: "waveform.badge.mic")
+            }
+            Button { appDelegate.openMainWindow(to: .videoSlice) } label: {
+                Label(l10n.tr("app.videoSlice"), systemImage: "film")
+            }
             if appDelegate.appState.clusterEnabled {
                 Button { appDelegate.openMainWindow(to: .cluster) } label: {
                     Label(l10n.tr("app.cluster"), systemImage: "xserve")
@@ -137,7 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NovaMLXLog.error("Failed to initialize SQLite: \(error)")
         }
 
-        // Auto-migrate from old Application Support path if needed
+        // Auto-migrate from old Application Support path if needed.
+        // Must not stat ~/Library/Application Support on every launch — that
+        // is the macOS "access data from other apps" TCC, which is
+        // process-lifetime and re-prompts every run.
         Self.migrateFromApplicationSupport(to: baseDir)
 
         self.modelManager = ModelManager(
@@ -161,25 +170,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One-time migration from ~/Library/Application Support/NovaMLX to ~/.nova
     private static func migrateFromApplicationSupport(to newBase: URL) {
         let fm = FileManager.default
-        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        let oldBase = appSupport.appendingPathComponent("NovaMLX", isDirectory: true)
+        let sentinel = newBase.appendingPathComponent(".appsupport-migrated")
+        if fm.fileExists(atPath: sentinel.path) { return }
 
-        guard fm.fileExists(atPath: oldBase.path) else { return }
-        guard !fm.fileExists(atPath: newBase.path) else {
-            // New dir exists — just fix registry paths if they still point to old location
-            fixRegistryPaths(at: newBase, oldPrefix: oldBase.path)
+        // Already living in ~/.nova — never touch Application Support again.
+        if let items = try? fm.contentsOfDirectory(atPath: newBase.path), !items.isEmpty {
+            try? Data().write(to: sentinel, options: .atomic)
             return
         }
 
-        NovaMLXLog.info("Migrating from \(oldBase.path) to \(newBase.path)...")
-        do {
-            try fm.createDirectory(at: newBase.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try fm.moveItem(at: oldBase, to: newBase)
-            fixRegistryPaths(at: newBase, oldPrefix: oldBase.path)
-            NovaMLXLog.info("Migration complete")
-        } catch {
-            NovaMLXLog.error("Migration failed: \(error)")
+        let oldBase = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/NovaMLX", isDirectory: true)
+        if fm.fileExists(atPath: oldBase.path) {
+            if !fm.fileExists(atPath: newBase.path) {
+                NovaMLXLog.info("Migrating from \(oldBase.path) to \(newBase.path)...")
+                do {
+                    try fm.createDirectory(at: newBase.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.moveItem(at: oldBase, to: newBase)
+                    fixRegistryPaths(at: newBase, oldPrefix: oldBase.path)
+                    NovaMLXLog.info("Migration complete")
+                } catch {
+                    NovaMLXLog.error("Migration failed: \(error)")
+                }
+            } else {
+                fixRegistryPaths(at: newBase, oldPrefix: oldBase.path)
+                cleanupLegacyAppSupportDir(oldBase: oldBase)
+            }
         }
+        try? Data().write(to: sentinel, options: .atomic)
     }
 
     /// Fix localURL paths in registry.json that still point to old location
@@ -266,7 +284,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Cleanup orphaned prefix cache dirs and old Application Support directory
             let downloadedIds = Set(modelManager.downloadedModels().map { $0.id })
             engine.cleanupOrphanedCacheDirs(downloadedModelIds: downloadedIds)
-            Self.cleanupLegacyAppSupportDir()
 
             if workerMode {
                 do {
@@ -290,6 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
             appState.allowUnlistedDownloads = serverConfig.allowUnlistedDownloads
+            appState.exclusiveAutoUnload = serverConfig.exclusiveAutoUnload
             appState.loadResourceLimits(from: serverConfig)
             await inferenceService.applyResourceLimits()
             appState.apiKey = Self.firstRawAPIKey()
@@ -457,6 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.serverPort = serverConfig.port
             appState.adminPort = serverConfig.adminPort
             appState.allowUnlistedDownloads = serverConfig.allowUnlistedDownloads
+            appState.exclusiveAutoUnload = serverConfig.exclusiveAutoUnload
             appState.loadResourceLimits(from: serverConfig)
             await inferenceService.applyResourceLimits()
             appState.apiKey = Self.firstRawAPIKey()
@@ -515,9 +534,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Remove the old ~/Library/Application Support/NovaMLX/ directory if it exists
-    private static func cleanupLegacyAppSupportDir() {
+    private static func cleanupLegacyAppSupportDir(oldBase legacyDir: URL) {
         let fm = FileManager.default
-        let legacyDir = NovaMLXPaths.legacyAppSupportDir
         guard fm.fileExists(atPath: legacyDir.path) else { return }
 
         // Move any prefix_cache content to new location first

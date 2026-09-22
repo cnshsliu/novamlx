@@ -134,6 +134,9 @@ public final class NovaDB: @unchecked Sendable {
         configMigrator.registerMigration("v9_drop_models_dir") { db in
             try ConfigDBSchema.v9DropModelsDir(in: db)
         }
+        configMigrator.registerMigration("v10_exclusive_auto_unload") { db in
+            try ConfigDBSchema.v10ExclusiveAutoUnload(in: db)
+        }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")
 

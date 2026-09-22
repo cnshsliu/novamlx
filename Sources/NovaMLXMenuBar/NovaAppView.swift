@@ -12,6 +12,8 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case tokenhub = "Tokenhub"
     case loadBalancers = "Load Balancers"     // NEW — placeholder until Task 10
     case chat = "Playground"
+    case voiceClone = "Voice Clone"
+    case videoSlice = "Video Slice"
     case cluster = "Cluster"
     case requests = "Requests"
     case apiKeys = "API Keys"
@@ -28,6 +30,8 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .tokenhub: return "server.rack"
         case .loadBalancers: return "scalemass"
         case .chat: return "cpu"
+        case .voiceClone: return "waveform.badge.mic"
+        case .videoSlice: return "film"
         case .cluster: return "xserve"
         case .requests: return "list.bullet.rectangle"
         case .apiKeys: return "key.fill"
@@ -276,6 +280,14 @@ public struct NovaAppView: View {
                 .environmentObject(l10n)
                 .opacity(selectedPage == .chat ? 1 : 0)
                 .allowsHitTesting(selectedPage == .chat)
+            VoiceClonePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .voiceClone ? 1 : 0)
+                .allowsHitTesting(selectedPage == .voiceClone)
+            VideoSlicePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+                .environmentObject(l10n)
+                .opacity(selectedPage == .videoSlice ? 1 : 0)
+                .allowsHitTesting(selectedPage == .videoSlice)
             RequestLogPageView(appState: appState)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .requests ? 1 : 0)
@@ -306,6 +318,8 @@ public struct NovaAppView: View {
         case .tokenhub: return l10n.tr("app.tokenhub")
         case .loadBalancers: return l10n.tr("app.load_balancers")
         case .chat: return l10n.tr("app.chat")
+        case .voiceClone: return l10n.tr("app.voiceClone")
+        case .videoSlice: return l10n.tr("app.videoSlice")
         case .requests: return l10n.tr("app.requests")
         case .apiKeys: return "API Keys"
         case .catalogAdmin: return l10n.tr("app.catalogAdmin")

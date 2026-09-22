@@ -1384,6 +1384,7 @@ struct ChatPageView: View {
         case .embedding: return "EMB"
         case .audio: return "ASR"
         case .image: return "IMG"
+        case .decision: return "DEC"
         }
     }
 
@@ -1396,6 +1397,7 @@ struct ChatPageView: View {
         case .embedding: return "scope"
         case .audio: return "waveform"
         case .image: return "photo"
+        case .decision: return "arrow.triangle.branch"
         }
     }
 
@@ -1406,6 +1408,7 @@ struct ChatPageView: View {
         case .embedding: return .green.opacity(0.8)
         case .audio: return .orange.opacity(0.8)
         case .image: return .pink.opacity(0.8)
+        case .decision: return .mint.opacity(0.8)
         }
     }
 

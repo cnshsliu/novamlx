@@ -110,6 +110,15 @@ struct CoreTypesTests {
         #expect(ModelFamily.allCases.count >= 8)
     }
 
+    @Test("removable-volume TCC heuristic")
+    func removableVolumeTCC() {
+        #expect(NovaMLXPaths.triggersRemovableVolumeTCC(URL(fileURLWithPath: "/Users/lucas/Models")) == false)
+        #expect(NovaMLXPaths.triggersRemovableVolumeTCC(URL(fileURLWithPath: "/Users/lucas/.nova")) == false)
+        #expect(NovaMLXPaths.triggersRemovableVolumeTCC(URL(fileURLWithPath: "/Volumes/Samsung768/Models")) == true)
+        #expect(NovaMLXPaths.triggersRemovableVolumeTCC(URL(fileURLWithPath: "/Volumes/Macintosh HD/Models")) == false)
+        #expect(NovaMLXPaths.isBootVolumeName("Macintosh HD") == true)
+    }
+
     @Test("models-path file parses comments, blanks, and multiple roots")
     func modelsPathMultiLine() {
         let content = """

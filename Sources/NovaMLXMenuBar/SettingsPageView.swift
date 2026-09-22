@@ -92,6 +92,7 @@ struct SettingsPageView: View {
 
                 configPathRow
                 resourceLimitSliders
+                exclusiveAutoUnloadToggle
             }
 
             // Bottom action bar
@@ -243,6 +244,26 @@ struct SettingsPageView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var exclusiveAutoUnloadToggle: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $appState.exclusiveAutoUnload) {
+                Text(l10n.tr("settings.exclusiveAutoUnload"))
+                    .font(.system(size: 13))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .onChange(of: appState.exclusiveAutoUnload) { _, enabled in
+                Task { await appState.setExclusiveAutoUnload(enabled) }
+            }
+            Text(l10n.tr("settings.exclusiveAutoUnloadCaption"))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
     }
 
     private func resourceSliderRow(
@@ -578,6 +599,7 @@ struct SettingsPageView: View {
                     maxGpuMemory: appState.gpuLimitIsAuto ? "auto" : ResourceLimits.formatGB(min(appState.gpuLimitGB, appState.ramLimitGB)),
                     prefixCacheEnabled: current.prefixCacheEnabled,
                     allowUnlistedDownloads: appState.allowUnlistedDownloads,
+                    exclusiveAutoUnload: appState.exclusiveAutoUnload,
                     autoLoad: current.autoLoad,
                     cluster: clusterSettings
                 )
@@ -766,6 +788,7 @@ struct SettingsPageView: View {
                 maxGpuMemory: currentServer.maxGpuMemory,
                 prefixCacheEnabled: currentServer.prefixCacheEnabled,
                 allowUnlistedDownloads: appState.allowUnlistedDownloads,
+                exclusiveAutoUnload: appState.exclusiveAutoUnload,
                 autoLoad: currentServer.autoLoad,
                 cluster: clusterSettings
             )

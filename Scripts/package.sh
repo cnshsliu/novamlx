@@ -61,6 +61,10 @@ cat >"$APP_CONTENTS/Info.plist" <<'PLIST'
     <string>VERSION_PLACEHOLDER</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>NovaMLX needs microphone access to record audio for speech recognition and voice cloning.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>NovaMLX reads model weights from external disks listed in ~/.config/novamlx/models-path.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticTermination</key>

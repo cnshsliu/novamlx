@@ -31,6 +31,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     public var maxGpuMemory: String = "auto"
     public var prefixCacheEnabled: Bool = true
     public var allowUnlistedDownloads: Bool = false
+    public var exclusiveAutoUnload: Bool = true
     public var performanceMode: String = "balanced"
 
     /// Explicit public memberwise initializer so cross-module callers
@@ -60,6 +61,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         maxGpuMemory: String = "auto",
         prefixCacheEnabled: Bool = true,
         allowUnlistedDownloads: Bool = false,
+        exclusiveAutoUnload: Bool = true,
         performanceMode: String = "balanced"
     ) {
         self.id = id
@@ -85,6 +87,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         self.maxGpuMemory = maxGpuMemory
         self.prefixCacheEnabled = prefixCacheEnabled
         self.allowUnlistedDownloads = allowUnlistedDownloads
+        self.exclusiveAutoUnload = exclusiveAutoUnload
         self.performanceMode = performanceMode
     }
 
@@ -110,6 +113,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         case maxGpuMemory = "max_gpu_memory"
         case prefixCacheEnabled = "prefix_cache_enabled"
         case allowUnlistedDownloads = "allow_unlisted_downloads"
+        case exclusiveAutoUnload = "exclusive_auto_unload"
         case performanceMode = "performance_mode"
     }
 }

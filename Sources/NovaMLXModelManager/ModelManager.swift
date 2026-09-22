@@ -112,6 +112,7 @@ public final class ModelManager: @unchecked Sendable {
             return modelsDirectory
         }
         for extra in extraModelDirectories {
+            if NovaMLXPaths.triggersRemovableVolumeTCC(extra) { return extra }
             guard FileManager.default.isWritableFile(atPath: extra.path) else { continue }
             let free = (try? FileManager.default.attributesOfFileSystem(
                 forPath: extra.path)[.systemFreeSize] as? Int64) ?? 0
@@ -133,16 +134,19 @@ public final class ModelManager: @unchecked Sendable {
 
     public func downloadedModels() -> [ModelRecord] {
         lock.withLock {
-            _registry.values.filter {
-                $0.downloadedAt != nil && (try? $0.localURL.checkResourceIsReachable()) == true
+            _registry.values.filter { record in
+                guard record.downloadedAt != nil else { return false }
+                if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) { return true }
+                return (try? record.localURL.checkResourceIsReachable()) == true
             }
         }
     }
 
     public func isDownloaded(_ modelId: String) -> Bool {
         lock.withLock {
-            guard let record = _registry[modelId] else { return false }
-            return record.downloadedAt != nil && (try? record.localURL.checkResourceIsReachable()) == true
+            guard let record = _registry[modelId], record.downloadedAt != nil else { return false }
+            if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) { return true }
+            return (try? record.localURL.checkResourceIsReachable()) == true
         }
     }
 
@@ -350,6 +354,10 @@ public final class ModelManager: @unchecked Sendable {
         #endif
 
         for dir in scanDirs {
+            if NovaMLXPaths.triggersRemovableVolumeTCC(dir) {
+                NovaMLXLog.info("[Discovery] Skipping removable volume (no TCC probe): \(dir.path)")
+                continue
+            }
             guard dir.directoryExists else {
                 #if DEBUG
                 NovaMLXLog.info("[Discovery] Skipping non-existent dir: \(dir.path)")

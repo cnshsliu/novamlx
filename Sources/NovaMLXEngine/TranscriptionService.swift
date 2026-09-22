@@ -107,7 +107,13 @@ public final class TranscriptionService: @unchecked Sendable {
         }
     }
 
-    public func transcribe(modelId: String, audioData: Data, language: String? = nil, responseFormat: String = "json") async throws -> TranscriptionResult {
+    public func transcribe(
+        modelId: String,
+        audioData: Data,
+        language: String? = nil,
+        responseFormat: String = "json",
+        context: String? = nil
+    ) async throws -> TranscriptionResult {
         guard let container = lock.withLock({ containers[modelId] }),
               container.isLoaded,
               let model = container.model else {
@@ -166,6 +172,7 @@ public final class TranscriptionService: @unchecked Sendable {
                 audio: audioArray,
                 maxTokens: 8192,
                 temperature: 0.0,
+                context: context ?? "",
                 language: language
             )
         case .whisper(let whisperModel):

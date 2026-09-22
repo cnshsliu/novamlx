@@ -148,6 +148,24 @@ struct ConfigStoreTests {
         #expect(record.allowUnlistedDownloads == false)
     }
 
+    @Test("v10 migration defaults exclusiveAutoUnload to true")
+    func v10ExclusiveAutoUnloadDefault() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+        let record = try NovaDB.shared.configStore.get()
+        #expect(record.exclusiveAutoUnload == true)
+    }
+
+    @Test("ConfigStore persists exclusiveAutoUnload")
+    func persistExclusiveAutoUnload() async throws {
+        let tmp = try makeTmpDir()
+        try NovaDB.shared.setup(baseDir: tmp)
+        try NovaDB.shared.configStore.update { rec in
+            rec.exclusiveAutoUnload = false
+        }
+        #expect(try NovaDB.shared.configStore.get().exclusiveAutoUnload == false)
+    }
+
     @Test("ConfigStore persists allowUnlistedDownloads")
     func persistAllowUnlisted() async throws {
         let tmp = try makeTmpDir()

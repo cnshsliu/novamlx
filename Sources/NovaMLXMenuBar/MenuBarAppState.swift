@@ -66,6 +66,8 @@ public final class MenuBarAppState: ObservableObject {
     /// When true, Downloads can search/download any Hugging Face repo.
     /// Live-synced with `ServerConfig.allowUnlistedDownloads`.
     @Published public var allowUnlistedDownloads: Bool = false
+    /// When true, loading a chat LLM unloads other chat models. TTS/ASR/image stay either way.
+    @Published public var exclusiveAutoUnload: Bool = true
     @Published public var gpuLimitGB: Double = ResourceLimits.sliderMaxGB()
     @Published public var ramLimitGB: Double = ResourceLimits.sliderMaxGB()
     @Published public var gpuLimitIsAuto: Bool = true
@@ -223,6 +225,33 @@ public final class MenuBarAppState: ObservableObject {
             maxGpuMemory: current.maxGpuMemory,
             prefixCacheEnabled: current.prefixCacheEnabled,
             allowUnlistedDownloads: enabled,
+            exclusiveAutoUnload: current.exclusiveAutoUnload,
+            autoLoad: current.autoLoad,
+            cluster: current.cluster
+        )
+        await NovaMLXConfiguration.shared.setServerConfig(updated)
+        await NovaMLXConfiguration.shared.syncToStore()
+    }
+
+    public func setExclusiveAutoUnload(_ enabled: Bool) async {
+        exclusiveAutoUnload = enabled
+        let current = await NovaMLXConfiguration.shared.serverConfig
+        let updated = ServerConfig(
+            host: current.host,
+            port: current.port,
+            adminPort: current.adminPort,
+            maxConcurrentRequests: current.maxConcurrentRequests,
+            requestTimeout: current.requestTimeout,
+            contextScalingTarget: current.contextScalingTarget,
+            tlsCertPath: current.tlsCertPath,
+            tlsKeyPath: current.tlsKeyPath,
+            tlsKeyPassword: current.tlsKeyPassword,
+            maxRequestSizeMB: current.maxRequestSizeMB,
+            maxProcessMemory: current.maxProcessMemory,
+            maxGpuMemory: current.maxGpuMemory,
+            prefixCacheEnabled: current.prefixCacheEnabled,
+            allowUnlistedDownloads: current.allowUnlistedDownloads,
+            exclusiveAutoUnload: enabled,
             autoLoad: current.autoLoad,
             cluster: current.cluster
         )
@@ -266,6 +295,7 @@ public final class MenuBarAppState: ObservableObject {
             maxGpuMemory: gpuRaw,
             prefixCacheEnabled: current.prefixCacheEnabled,
             allowUnlistedDownloads: current.allowUnlistedDownloads,
+            exclusiveAutoUnload: current.exclusiveAutoUnload,
             autoLoad: current.autoLoad,
             cluster: current.cluster
         )
@@ -305,7 +335,7 @@ public final class MenuBarAppState: ObservableObject {
         loadResourceLimits(from: cfg)
     }
 
-    public func startDownload(repoId: String) {
+    public func startDownload(repoId: String, endpoint: String? = nil) {
         // Allow click-through even when a download is "active" — the server's
         // cancelTasksForRepo guarantees single-flight per repo by killing any
         // in-flight task before starting the new one. Why allow this: a
@@ -316,8 +346,16 @@ public final class MenuBarAppState: ObservableObject {
         downloadTasks[repoId] = DownloadTaskInfo(repoId: repoId)
 
         Task {
-            // Read current mirror before entering the inner Task
-            let currentEndpoint = await self.huggingfaceEndpoint
+            // The Downloads picker passes the host it is showing. Do not wait
+            // for the async settings write — that race kept ModelScope after
+            // the user had already switched back to Hugging Face.
+            let currentEndpoint: String
+            if let endpoint, !endpoint.isEmpty {
+                currentEndpoint = endpoint
+                await self.setHuggingfaceEndpoint(endpoint)
+            } else {
+                currentEndpoint = await self.huggingfaceEndpoint ?? "https://huggingface.co"
+            }
 
             guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/download") else {
                 downloadTasks[repoId]?.status = .failed
@@ -333,7 +371,7 @@ public final class MenuBarAppState: ObservableObject {
                 // Send current mirror so the server uses the latest setting without restart
                 let body: [String: Any] = [
                     "repo_id": repoId,
-                    "endpoint": currentEndpoint as Any
+                    "endpoint": currentEndpoint
                 ]
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
                 let (data, response) = try await URLSession.shared.data(for: request)

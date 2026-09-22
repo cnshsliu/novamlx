@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import NovaMLXCore
 import NovaMLXInference
@@ -30,6 +31,7 @@ struct ModelsPageView: View {
         case embedding
         case audio
         case image
+        case decision
 
         var label: String {
             switch self {
@@ -39,6 +41,7 @@ struct ModelsPageView: View {
             case .embedding: return "Embed"
             case .audio: return "Audio"
             case .image: return "Image"
+            case .decision: return "Decide"
             }
         }
 
@@ -50,6 +53,7 @@ struct ModelsPageView: View {
             case .embedding: return "vector"
             case .audio: return "waveform"
             case .image: return "photo"
+            case .decision: return "arrow.triangle.branch"
             }
         }
 
@@ -61,6 +65,7 @@ struct ModelsPageView: View {
             case .embedding: return modelType == .embedding
             case .audio: return modelType == .audio
             case .image: return modelType == .image
+            case .decision: return modelType == .decision
             }
         }
 
@@ -72,6 +77,7 @@ struct ModelsPageView: View {
             case .embedding: return .embedding
             case .audio: return .audio
             case .image: return .image
+            case .decision: return .decision
             }
         }
     }
@@ -191,7 +197,8 @@ struct ModelsPageView: View {
                         subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
                         isLoaded: true,
                         actions: {
-                            nativeMtpToggle(for: modelId)
+                            playButton(modelId: modelId)
+                            specCompanionToggle(for: modelId)
                             specBoostBadge(for: modelId)
                             tieBadge(for: modelId)
                             addToCatalogButton(modelId: modelId)
@@ -240,9 +247,16 @@ struct ModelsPageView: View {
     }
 
     @ViewBuilder
-    private func nativeMtpToggle(for modelId: String) -> some View {
+    private func specCompanionToggle(for modelId: String) -> some View {
         if inferenceService.mtpSwitchAvailable(modelId) {
             let enabled = inferenceService.isMtpEnabled(modelId)
+            let isDFlash = inferenceService.hasCompanionDFlash(modelId)
+            let title: String = {
+                if isDFlash {
+                    return enabled ? l10n.tr("models.dflashOn") : l10n.tr("models.dflashOff")
+                }
+                return enabled ? l10n.tr("models.mtpOn") : l10n.tr("models.mtpOff")
+            }()
             Toggle(isOn: Binding(
                 get: { inferenceService.isMtpEnabled(modelId) },
                 set: { on in
@@ -252,62 +266,31 @@ struct ModelsPageView: View {
                     }
                 }
             )) {
-                Text(enabled ? l10n.tr("models.mtpOn") : l10n.tr("models.mtpOff"))
+                Text(title)
                     .font(.caption2.weight(.semibold))
             }
             .toggleStyle(.switch)
             .controlSize(.mini)
-            .help(l10n.tr("models.mtpHelp"))
+            .help(isDFlash ? l10n.tr("models.dflashHelp") : l10n.tr("models.mtpHelp"))
         }
     }
 
     @ViewBuilder
     private func specBoostBadge(for modelId: String) -> some View {
         if let boost = appState.specBoostStatus[modelId], boost.draftModelId != modelId {
-            switch boost.status {
-            case "active":
-                HStack(spacing: 4) {
-                    Image(systemName: "bolt.fill")
-                        .font(.caption2)
-                        .foregroundColor(.green)
-                    Text(boost.draftDisplayName ?? "Boost")
-                        .font(.caption2)
-                        .foregroundColor(.green)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(Color.green.opacity(0.15))
-                .cornerRadius(4)
-            case "eligible":
-                if boost.draftDownloaded == true {
-                    Button {
-                        Task { await appState.boostLoad(modelId: modelId) }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "bolt.horizontal")
-                                .font(.caption2)
-                            Text(boost.draftDisplayName ?? "Boost")
-                                .font(.caption2)
-                        }
+            if boost.status == "eligible", boost.draftDownloaded != true {
+                Button {
+                    Task { await appState.boostDownload(modelId: modelId) }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.caption2)
+                        Text(boost.draftDisplayName ?? "Boost")
+                            .font(.caption2)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                } else {
-                    Button {
-                        Task { await appState.boostDownload(modelId: modelId) }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.down.circle")
-                                .font(.caption2)
-                            Text(boost.draftDisplayName ?? "Boost")
-                                .font(.caption2)
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
-            default:
-                EmptyView()
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
     }
@@ -442,6 +425,8 @@ struct ModelsPageView: View {
                                         .lineLimit(1)
                                 }
                             } else {
+                                specCompanionToggle(for: record.id)
+                                specBoostBadge(for: record.id)
                                 addToCatalogButton(modelId: record.id)
                                 tieActions(for: record.id, isLoaded: false)
                                 Button(l10n.tr("models.load")) {
@@ -504,6 +489,41 @@ struct ModelsPageView: View {
         }
     }
 
+    @ViewBuilder
+    private func playButton(modelId: String) -> some View {
+        if !ResourceLimits.isCompanionDraftModelId(modelId) {
+            Button {
+                if isDecisionModel(modelId) {
+                    openDecisionDemo(modelId)
+                } else {
+                    appState.pickInPlayground(modelId)
+                }
+            } label: {
+                Label("Play", systemImage: "play.fill")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .help(isDecisionModel(modelId) ? "Open decision demo" : "Open in Playground")
+        }
+    }
+
+    private func isDecisionModel(_ modelId: String) -> Bool {
+        if modelManager.getRecord(modelId)?.modelType == .decision { return true }
+        return modelId.lowercased().contains("laya")
+    }
+
+    private func openDecisionDemo(_ modelId: String) {
+        var components = URLComponents(string: "http://127.0.0.1:\(appState.serverPort)/demo/laya")
+        var items = [URLQueryItem(name: "model", value: modelId)]
+        if let key = appState.apiKey, !key.isEmpty {
+            items.append(URLQueryItem(name: "key", value: key))
+        }
+        components?.queryItems = items
+        guard let url = components?.url else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     private func modelRow(_ modelId: String, subtitle: String, isLoaded: Bool, @ViewBuilder actions: () -> some View) -> some View {
         HStack(spacing: 12) {
             Circle()
@@ -518,17 +538,6 @@ struct ModelsPageView: View {
                         .help(l10n.tr("models.clickDetails"))
                         .onTapGesture { fetchModelCard(repoId: modelId) }
                     CopyIDButton(id: modelId)
-                    if isLoaded, !ResourceLimits.isCompanionDraftModelId(modelId) {
-                        Button {
-                            appState.pickInPlayground(modelId)
-                        } label: {
-                            Image(systemName: "play.circle")
-                                .font(.system(size: 11))
-                                .foregroundColor(NovaTheme.Colors.accent)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Open in Playground")
-                    }
                 }
                 Text(subtitle).font(.caption2).foregroundColor(.secondary)
             }

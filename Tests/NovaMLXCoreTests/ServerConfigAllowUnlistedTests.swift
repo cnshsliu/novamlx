@@ -7,6 +7,7 @@ struct ServerConfigAllowUnlistedTests {
     @Test("Defaults to false")
     func defaultOff() {
         #expect(ServerConfig().allowUnlistedDownloads == false)
+        #expect(ServerConfig().exclusiveAutoUnload == true)
     }
 
     @Test("Legacy JSON without the key decodes as false")

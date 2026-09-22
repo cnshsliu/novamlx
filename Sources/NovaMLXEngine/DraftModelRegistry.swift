@@ -156,7 +156,7 @@ public final class DraftModelRegistry: Sendable {
             return .eligible(candidate: dspark)
         }
         if let modelId, let dflash = dflashCandidate(forMainId: modelId) {
-            if draftModelLoaded(dflash.draftModelId) {
+            if mtpEnabled, draftModelLoaded(dflash.draftModelId) {
                 return .active(draftModelId: dflash.draftModelId)
             }
             return .eligible(candidate: dflash)

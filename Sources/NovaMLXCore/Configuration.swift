@@ -69,6 +69,7 @@ public actor NovaMLXConfiguration {
     public func initializeDirectories() throws {
         try FileManager.default.createDirectory(at: NovaMLXPaths.modelsDir, withIntermediateDirectories: true)
         for dir in NovaMLXPaths.modelsDirs.dropFirst() {
+            if NovaMLXPaths.triggersRemovableVolumeTCC(dir) { continue }
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }
@@ -125,7 +126,8 @@ public actor NovaMLXConfiguration {
             maxProcessMemory: server.maxProcessMemory,
             maxGpuMemory: server.maxGpuMemory,
             prefixCacheEnabled: server.prefixCacheEnabled,
-            allowUnlistedDownloads: server.allowUnlistedDownloads
+            allowUnlistedDownloads: server.allowUnlistedDownloads,
+            exclusiveAutoUnload: server.exclusiveAutoUnload
         )
         do {
             try NovaDB.shared.configStore.update { existing in
@@ -159,6 +161,7 @@ public actor NovaMLXConfiguration {
             maxGpuMemory: record.maxGpuMemory,
             prefixCacheEnabled: record.prefixCacheEnabled,
             allowUnlistedDownloads: record.allowUnlistedDownloads,
+            exclusiveAutoUnload: record.exclusiveAutoUnload,
             autoLoad: autoLoad,
             cluster: cluster
         )

@@ -202,6 +202,12 @@ enum ConfigDBSchema {
         }
     }
 
+    static func v10ExclusiveAutoUnload(in db: Database) throws {
+        try db.alter(table: "config") { t in
+            t.add(column: "exclusive_auto_unload", .boolean).notNull().defaults(to: true)
+        }
+    }
+
     /// Model root lives in `~/.config/novamlx/models-path`, not SQLite.
     static func v9DropModelsDir(in db: Database) throws {
         let columns = try db.columns(in: "config").map(\.name)

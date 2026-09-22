@@ -42,23 +42,46 @@ public enum NovaMLXPaths {
 
         // Primary models dir (first line) must exist. Extra lines are optional
         // so an unplugged external disk does not block startup.
+        // Never stat `/Volumes/...` here — that pops the "access a removable
+        // volume" TCC sheet on every launch.
         let modelPaths = readPathConfigLines("models-path")
         if let path = modelPaths.first {
             let url = URL(fileURLWithPath: path, isDirectory: true)
-            if !fm.fileExists(atPath: url.path) {
-                errors.append("Models directory not found: \(url.path)\n(Check ~/.config/novamlx/models-path)")
-            } else if !fm.isReadableFile(atPath: url.path) {
-                errors.append("Models directory not readable: \(url.path)\n(Check permissions)")
-            }
-        }
-        for path in modelPaths.dropFirst() {
-            let url = URL(fileURLWithPath: path, isDirectory: true)
-            if !fm.fileExists(atPath: url.path) {
-                log.warning("[Paths] Extra models directory not mounted, skipping: \(url.path)")
+            if !triggersRemovableVolumeTCC(url) {
+                if !fm.fileExists(atPath: url.path) {
+                    errors.append("Models directory not found: \(url.path)\n(Check ~/.config/novamlx/models-path)")
+                } else if !fm.isReadableFile(atPath: url.path) {
+                    errors.append("Models directory not readable: \(url.path)\n(Check permissions)")
+                }
             }
         }
 
         return errors
+    }
+
+    /// True for paths on an external disk (`/Volumes/<name>/...` other than the
+    /// boot volume). `FileManager.fileExists` / `checkResourceIsReachable` on
+    /// these URLs is what shows the macOS removable-volume TCC alert.
+    public static func triggersRemovableVolumeTCC(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let prefix = "/Volumes/"
+        guard path.hasPrefix(prefix) else { return false }
+        let rest = path.dropFirst(prefix.count)
+        guard let slash = rest.firstIndex(of: "/") else {
+            return !isBootVolumeName(String(rest))
+        }
+        let volume = String(rest[..<slash])
+        return !volume.isEmpty && !isBootVolumeName(volume)
+    }
+
+    public static func isBootVolumeName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        if let boot = bootVolumeName(), boot == name { return true }
+        return name == "Macintosh HD"
+    }
+
+    public static func bootVolumeName() -> String? {
+        (try? URL(fileURLWithPath: "/").resourceValues(forKeys: [.volumeNameKey]))?.volumeName
     }
 
     /// Resolution order: config file > NOVA_DIR env > default ~/.nova
@@ -102,6 +125,10 @@ public enum NovaMLXPaths {
         for url in configured + [modelsDir] {
             let key = url.standardizedFileURL.path
             guard seen.insert(key).inserted else { continue }
+            if triggersRemovableVolumeTCC(url) {
+                urls.append(url)
+                continue
+            }
             guard fm.fileExists(atPath: url.path) else { continue }
             urls.append(url)
         }
@@ -123,6 +150,7 @@ public enum NovaMLXPaths {
                 root.appendingPathComponent("hub/models/\(id)", isDirectory: true),
             ]
             for candidate in candidates {
+                if triggersRemovableVolumeTCC(candidate) { continue }
                 if fm.fileExists(atPath: candidate.path) {
                     return candidate
                 }
@@ -139,6 +167,10 @@ public enum NovaMLXPaths {
         }
         var best: (url: URL, free: Int64)?
         for root in search.dropFirst() {
+            if triggersRemovableVolumeTCC(root) {
+                if best == nil { best = (root, Int64.max / 4) }
+                continue
+            }
             guard FileManager.default.isWritableFile(atPath: root.path) else { continue }
             let free = (try? FileManager.default.attributesOfFileSystem(forPath: root.path)[.systemFreeSize] as? Int64) ?? 0
             if free > Int64(estimatedBytes), best == nil || free > best!.free {

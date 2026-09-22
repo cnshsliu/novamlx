@@ -103,6 +103,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case flux2
     case zImage
     case qwenImage
+    case laya
     case other
 
     public init(from decoder: Decoder) throws {
@@ -117,6 +118,7 @@ public enum ModelType: String, Codable, Sendable, CaseIterable {
     case embedding
     case audio
     case image
+    case decision
 }
 
 /// Advertised capabilities for a model, surfaced via /v1/models under nova.capabilities.
@@ -1025,6 +1027,8 @@ public struct ServerConfig: Codable, Sendable {
     public let prefixCacheEnabled: Bool
     /// When `false` (default), only catalog-listed models may be downloaded.
     public let allowUnlistedDownloads: Bool
+    /// When true, loading a chat LLM/VLM unloads other chat models (TTS/ASR/image stay).
+    public let exclusiveAutoUnload: Bool
     public let autoLoad: AutoLoadConfig
     public let cluster: ClusterSettings?
 
@@ -1060,6 +1064,7 @@ public struct ServerConfig: Codable, Sendable {
         case maxGpuMemory
         case prefixCacheEnabled
         case allowUnlistedDownloads
+        case exclusiveAutoUnload
         case autoLoad
         case cluster
     }
@@ -1079,6 +1084,7 @@ public struct ServerConfig: Codable, Sendable {
         maxGpuMemory: String = "auto",
         prefixCacheEnabled: Bool = true,
         allowUnlistedDownloads: Bool = false,
+        exclusiveAutoUnload: Bool = true,
         autoLoad: AutoLoadConfig = .init(),
         cluster: ClusterSettings? = nil
     ) {
@@ -1096,6 +1102,7 @@ public struct ServerConfig: Codable, Sendable {
         self.maxGpuMemory = maxGpuMemory
         self.prefixCacheEnabled = prefixCacheEnabled
         self.allowUnlistedDownloads = allowUnlistedDownloads
+        self.exclusiveAutoUnload = exclusiveAutoUnload
         self.autoLoad = autoLoad
         self.cluster = cluster
     }
@@ -1118,6 +1125,7 @@ public struct ServerConfig: Codable, Sendable {
         maxGpuMemory = try container.decodeIfPresent(String.self, forKey: .maxGpuMemory) ?? "auto"
         prefixCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .prefixCacheEnabled) ?? true
         allowUnlistedDownloads = try container.decodeIfPresent(Bool.self, forKey: .allowUnlistedDownloads) ?? false
+        exclusiveAutoUnload = try container.decodeIfPresent(Bool.self, forKey: .exclusiveAutoUnload) ?? true
         autoLoad = try container.decodeIfPresent(AutoLoadConfig.self, forKey: .autoLoad) ?? .init()
         cluster = try container.decodeIfPresent(ClusterSettings.self, forKey: .cluster)
     }

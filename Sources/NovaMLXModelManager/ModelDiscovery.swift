@@ -87,7 +87,7 @@ public final class ModelDiscovery: Sendable {
     private static let audioArchitectures: Set<String> = [
         "WhisperForConditionalGeneration",
         "Qwen3ASRForConditionalGeneration",
-        // Qwen3-TTS uses Qwen3ForCausalLM base - detected via model_type or config
+        "Qwen3TTSForConditionalGeneration",
     ]
 
     private static let audioModelTypes: Set<String> = [
@@ -192,7 +192,11 @@ public final class ModelDiscovery: Sendable {
             guard subdir.directoryExists, !subdir.lastPathComponent.hasPrefix(".") else { continue }
             let configPath = subdir.appendingPathComponent("config.json")
 
-            if configPath.fileExists || hasGGUFWeights(in: subdir) {
+            if Self.isLayaDirectory(subdir) {
+                if let model = registerLaya(at: subdir, id: subdir.lastPathComponent) {
+                    models.append(model)
+                }
+            } else if configPath.fileExists || hasGGUFWeights(in: subdir) {
                 let adapterConfigPath = subdir.appendingPathComponent("adapter_config.json")
                 let adapterWeightsPath = subdir.appendingPathComponent("adapters.safetensors")
                 if adapterConfigPath.fileExists && adapterWeightsPath.fileExists {
@@ -211,6 +215,14 @@ public final class ModelDiscovery: Sendable {
                     let childConfig = child.appendingPathComponent("config.json")
                     let unetConfig = child.appendingPathComponent("unet/config.json")
                     let fluxTransformerConfig = child.appendingPathComponent("transformer/config.json")
+                    if Self.isLayaDirectory(child) {
+                        let orgPrefix = subdir.lastPathComponent
+                        let modelId = "\(orgPrefix)/\(child.lastPathComponent)"
+                        if let model = registerLaya(at: child, id: modelId) {
+                            models.append(model)
+                        }
+                        continue
+                    }
                     guard childConfig.fileExists || unetConfig.fileExists || fluxTransformerConfig.fileExists
                         || hasGGUFWeights(in: child) else { continue }
                     let adapterConfigPath = child.appendingPathComponent("adapter_config.json")
@@ -410,7 +422,31 @@ public final class ModelDiscovery: Sendable {
         return true
     }
 
+    private static func isLayaDirectory(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: url.appendingPathComponent("rl_agent_config.json").path)
+            && fm.fileExists(atPath: url.appendingPathComponent("model.safetensors").path)
+    }
+
+    private func registerLaya(at path: URL, id: String) -> DiscoveredModel? {
+        let size = estimateSize(at: path)
+        let complete = Self.checkCompleteness(at: path, isAdapter: false)
+        NovaMLXLog.info("[Discovery] Discovered Laya \(id): size=\(size.bytesFormatted) complete=\(complete)")
+        return DiscoveredModel(
+            modelId: id,
+            modelPath: path,
+            modelType: .decision,
+            family: .laya,
+            estimatedSizeBytes: size,
+            architectures: ["LayaDecisionModel"],
+            configModelType: "laya",
+            isAdapter: false,
+            isComplete: complete
+        )
+    }
+
     private func detectModelType(config: HFConfig, path: URL) -> ModelType {
+        if Self.isLayaDirectory(path) { return .decision }
         let architectures = config.architectures ?? []
         let rawType = (config.modelType ?? "").lowercased().replacingOccurrences(of: "-", with: "_")
 
@@ -487,6 +523,9 @@ public final class ModelDiscovery: Sendable {
         }
 
         let dirName = path.lastPathComponent.lowercased()
+        if dirName.contains("qwen3-tts") || dirName.contains("qwen3_tts") {
+            return .audio
+        }
         if dirName.contains("flux.2") || dirName.contains("flux2")
             || dirName.contains("flux-2") || dirName.contains("z-image")
             || dirName.contains("zimage") || dirName.contains("qwen-image") {
@@ -552,6 +591,7 @@ public final class ModelDiscovery: Sendable {
         }
 
         // 5. Substring match — image ids already handled above.
+        if idLower.contains("qwen3-tts") || idLower.contains("qwen3_tts") { return .qwen3Tts }
         if idLower.contains("flux") { return .flux }
         if idLower.contains("llama") { return .llama }
         if idLower.contains("mistral") || idLower.contains("mixtral") { return .mistral }

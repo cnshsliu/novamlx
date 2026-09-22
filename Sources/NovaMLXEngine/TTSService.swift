@@ -25,6 +25,7 @@ public struct MacOSVoice: Identifiable, Hashable, Sendable {
 public final class TTSService: @unchecked Sendable {
     private let lock = NovaMLXLock()
     private var pipeline: DotsTTSPipeline?
+    private var qwen3ModelDir: URL?
 
     /// Shared metrics store. Set by InferenceService after construction so the
     /// status panel can show live TTS activity. Weak to avoid a retain cycle.
@@ -43,19 +44,31 @@ public final class TTSService: @unchecked Sendable {
     public func loadModel(from dir: URL) async throws {
         ttsLog.info("[TTS] ====== START loadModel from \(dir.path) ======")
 
-        let hadPrevious = lock.withLock { pipeline != nil }
+        let hadPrevious = lock.withLock { pipeline != nil || qwen3ModelDir != nil }
         if hadPrevious {
             ttsLog.info("[TTS] Replacing existing TTS model, clearing GPU cache...")
-            lock.withLock { pipeline = nil; loadedModelId = nil }
+            lock.withLock { pipeline = nil; qwen3ModelDir = nil; loadedModelId = nil }
             MLX.GPU.clearCache()
         }
 
         let dirContents = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
         ttsLog.info("[TTS] Directory contents: \(dirContents ?? [])")
 
-        let configPath = dir.appendingPathComponent("config.json").path
-        let configExists = FileManager.default.fileExists(atPath: configPath)
-        ttsLog.info("[TTS] config.json exists: \(configExists) at \(configPath)")
+        let modelId = dir.pathComponents.last.flatMap { p in
+            dir.pathComponents.count >= 2 ? "\(dir.pathComponents.dropLast().last!)/\(p)" : p
+        } ?? dir.lastPathComponent
+
+        if Qwen3TTSCloneService.isQwen3TTSDirectory(dir) {
+            ttsLog.info("[TTS] Loading Qwen3-TTS Base clone backend: \(dir.path)")
+            try await Qwen3TTSCloneService.ensureModel(at: dir)
+            lock.withLock {
+                self.pipeline = nil
+                self.qwen3ModelDir = dir
+                self.loadedModelId = modelId
+            }
+            ttsLog.info("[TTS] ====== loadModel COMPLETE (Qwen3-TTS) for \(modelId) ======")
+            return
+        }
 
         ttsLog.info("[TTS] Loading DotsTTS pipeline...")
         let loadedPipeline: DotsTTSPipeline
@@ -71,12 +84,9 @@ public final class TTSService: @unchecked Sendable {
             throw error
         }
 
-        let modelId = dir.pathComponents.last.flatMap { p in
-            dir.pathComponents.count >= 2 ? "\(dir.pathComponents.dropLast().last!)/\(p)" : p
-        } ?? dir.lastPathComponent
-
         lock.withLock {
             self.pipeline = loadedPipeline
+            self.qwen3ModelDir = nil
             self.loadedModelId = modelId
         }
 
@@ -84,12 +94,13 @@ public final class TTSService: @unchecked Sendable {
     }
 
     public func isModelLoaded() -> Bool {
-        lock.withLock { pipeline != nil }
+        lock.withLock { pipeline != nil || qwen3ModelDir != nil }
     }
 
     public func unloadModel() {
         lock.withLock {
             pipeline = nil
+            qwen3ModelDir = nil
             loadedModelId = nil
         }
         MLX.GPU.clearCache()
@@ -145,44 +156,52 @@ public final class TTSService: @unchecked Sendable {
         if let engine {
             resolvedEngine = engine
         } else {
-            resolvedEngine = lock.withLock { pipeline != nil } ? .neural : .system
+            resolvedEngine = lock.withLock { pipeline != nil || qwen3ModelDir != nil } ? .neural : .system
         }
 
         switch resolvedEngine {
         case .neural:
+            let profile = voiceProfile ?? findDefaultVoiceProfile()
+            guard let profile else {
+                throw NovaMLXError.apiError("No voice profile available. Clone a voice first.")
+            }
+            ttsPrint("Using voice profile: \(profile.name)")
+
+            metricsStore?.reportActivity(
+                model: "TTS", kind: .tts, speed: 0, unit: "×RT")
+            defer { metricsStore?.clearActivity(forModel: "TTS") }
+
+            if let qwenDir = lock.withLock({ qwen3ModelDir }) {
+                ttsPrint("Using Qwen3-TTS Base for clone synthesis (\(qwenDir.lastPathComponent))")
+                guard let wavURL = VoiceProfileManager.shared.refAudioURL(for: profile) else {
+                    throw NovaMLXError.apiError("Failed to load voice profile audio")
+                }
+                let wavData = try await Qwen3TTSCloneService.synthesize(
+                    text: text,
+                    refAudio: wavURL,
+                    refText: profile.refTranscript,
+                    modelDir: qwenDir
+                )
+                ttsPrint("Generated WAV: \(wavData.count) bytes")
+                return wavData
+            }
+
             let pipe = lock.withLock { pipeline }
             guard let pipe else {
                 throw NovaMLXError.apiError("No neural TTS model loaded. Load a model or switch to System TTS.")
             }
 
-            ttsLog.info("[TTS] Using DotsTTS for synthesis")
-
-            // Load reference audio: from voice profile, or fall back to first available
-            let refAudio: MLXArray
-            let refTranscript: String
-
-            if let profile = voiceProfile ?? findDefaultVoiceProfile() {
-                guard let audio = VoiceProfileManager.shared.loadRefAudio(for: profile) else {
-                    ttsLog.error("[TTS] Failed to load reference audio for profile \(profile.name)")
-                    throw NovaMLXError.apiError("Failed to load voice profile audio")
-                }
-                refAudio = audio
-                refTranscript = profile.refTranscript
-                ttsPrint("Using voice profile: \(profile.name)")
-            } else {
-                throw NovaMLXError.apiError("No voice profile available. Clone a voice first.")
+            ttsPrint("Using DotsTTS for synthesis")
+            guard let refAudio = VoiceProfileManager.shared.loadRefAudio(for: profile) else {
+                ttsLog.error("[TTS] Failed to load reference audio for profile \(profile.name)")
+                throw NovaMLXError.apiError("Failed to load voice profile audio")
             }
-
-            // Report live activity so the status panel shows TTS is running.
-            metricsStore?.reportActivity(
-                model: "TTS", kind: .tts, speed: 0, unit: "×RT")
-            defer { metricsStore?.clearActivity(forModel: "TTS") }
 
             var params = DotsTTSPipeline.Params()
             let audio = pipe.generate(
                 targetText: text,
                 refAudio48k: refAudio,
-                refTranscript: refTranscript,
+                refTranscript: profile.refTranscript,
                 params: params
             )
 
