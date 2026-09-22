@@ -103,6 +103,16 @@ struct DFlashTests {
         #expect(picks.asArray(Int.self) == [12, 20, 31])
     }
 
+    @Test("Greedy selector walk of one step returns that slot's winner")
+    func walkGreedyOneStep() {
+        let sel = DFlashCandidateSelector(hiddenSize: 8, vocabSize: 32, rank: 4, topK: 2)
+        let cand = MLXArray([Int32(5), 7], [1, 2])
+        let scores = MLXArray([Float(1), 4, 0, 0], [1, 2, 2])
+        let picks = sel.walkGreedy(scores: scores, candidateIds: cand)
+        eval(picks)
+        #expect(picks.asArray(Int.self) == [7])
+    }
+
     @Test("Greedy accept prefix stops at first mismatch and keeps the bonus token")
     func greedyAcceptPrefix() {
         let drafted = [10, 11, 12, 13]
