@@ -137,4 +137,39 @@ struct DFlashTests {
         #expect(isDFlashDraftConfig(at: dir))
         #expect(!isMtpDraftConfig(at: dir))
     }
+
+    @Test("Block check keeps a matching accepted prefix")
+    func blockCheckKeepsAcceptedPrefix() {
+        let decision = DFlashBlockCheck.decide(
+            draftCount: 4, logitLength: 5, fusedLength: 5, accepted: 2)
+        #expect(decision.acceptNormally)
+        #expect(decision.specWidth == 5)
+        #expect(decision.nRejected == 2)
+    }
+
+    @Test("Block check drops the block when a length disagrees")
+    func blockCheckRejectsMismatchedLength() {
+        let badLogits = DFlashBlockCheck.decide(
+            draftCount: 4, logitLength: 4, fusedLength: 5, accepted: 2)
+        #expect(!badLogits.acceptNormally)
+        #expect(badLogits.specWidth == 5)
+        #expect(badLogits.nRejected == 4)
+
+        let badFused = DFlashBlockCheck.decide(
+            draftCount: 4, logitLength: 5, fusedLength: 4, accepted: 2)
+        #expect(!badFused.acceptNormally)
+        #expect(badFused.specWidth == 5)
+        #expect(badFused.nRejected == 4)
+    }
+
+    @Test("Block check drops the block when accepted is outside the draft")
+    func blockCheckRejectsAcceptedOutOfRange() {
+        for accepted in [-1, 5] {
+            let decision = DFlashBlockCheck.decide(
+                draftCount: 4, logitLength: 5, fusedLength: 5, accepted: accepted)
+            #expect(!decision.acceptNormally)
+            #expect(decision.specWidth == 5)
+            #expect(decision.nRejected == 4)
+        }
+    }
 }
