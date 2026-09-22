@@ -196,9 +196,8 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
     typealias Context = AppContext
 
     let config: NovaMLXConfiguration
-    let globalRateLimiter: RateLimiter
 
-    private static let publicPaths: Set<String> = ["/health", "/v1/models", "/v1/stats"]
+    private static let publicPaths: Set<String> = ["/health", "/v1/models", "/v1/stats", "/demo/laya"]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
     func handle(
@@ -260,22 +259,20 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
                 }
             }
 
-            // Check rate limit (per-key or global)
-            let rateLimiter = key.rateLimitPerSecond.map { rps in
-                RateLimiter(config: RateLimitConfig(
+            if let rps = key.rateLimitPerSecond {
+                let allowed = ExplicitKeyRateLimits.shared.allow(
+                    keyId: key.id,
                     requestsPerSecond: rps,
-                    burstSize: key.rateLimitBurst ?? 20
-                ))
-            } ?? globalRateLimiter
-
-            let rateKey = "key:\(key.id)"
-            guard rateLimiter.allow(key: rateKey) else {
-                let detail = OpenAIErrorDetail(
-                    message: "Rate limit exceeded.",
-                    type: "rate_limit_error",
-                    code: "rate_limit_exceeded"
+                    burst: key.rateLimitBurst ?? 20
                 )
-                return NovaMLXErrorMiddleware.jsonError(status: .tooManyRequests, detail: detail)
+                guard allowed else {
+                    let detail = OpenAIErrorDetail(
+                        message: "Rate limit exceeded.",
+                        type: "rate_limit_error",
+                        code: "rate_limit_exceeded"
+                    )
+                    return NovaMLXErrorMiddleware.jsonError(status: .tooManyRequests, detail: detail)
+                }
             }
 
             return try await next(request, context)
@@ -748,10 +745,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         )
         self.coordinator = coordinator
 
-        let rateLimiter = RateLimiter(config: RateLimitConfig())
         let securityHeaders = SecurityHeadersMiddleware()
         let requestSizeLimit = RequestSizeLimitMiddleware(maxMB: cfg.maxRequestSizeMB)
-        let rateLimitMiddleware = RateLimitMiddleware.perAPIKey(limiter: rateLimiter)
 
         let mainRouter = RouterBuilder(context: AppContext.self) {
             CORSMiddleware(allowedOrigins: "*")
@@ -759,8 +754,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             RequestLogMiddleware(store: RequestLogStore.shared)
             securityHeaders
             requestSizeLimit
-            rateLimitMiddleware
-            APIKeyAuthMiddleware(config: NovaMLXConfiguration.shared, globalRateLimiter: rateLimiter)
+            APIKeyAuthMiddleware(config: NovaMLXConfiguration.shared)
             NovaMLXErrorMiddleware()
             Get("/v1/models") { request, context in
                 let detector = self.capabilitiesDetector
@@ -1277,6 +1271,59 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
                 Self.applyKeepAlive(embReq.keepAlive, modelId: embReq.model, pool: inference.engine.pool)
                 return embHttpResponse
+            }
+            Post("/v1/decisions") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let raw = try JSONSerialization.jsonObject(with: Data(buffer: body)) as? [String: Any]
+                guard let raw, let model = raw["model"] as? String, !model.isEmpty else {
+                    throw NovaMLXError.apiError("decisions request needs model")
+                }
+                let state = try Self.decisionState(raw["state"])
+                guard let questionsRaw = raw["questions"] as? [String: Any], !questionsRaw.isEmpty else {
+                    throw NovaMLXError.apiError("decisions request needs questions")
+                }
+                let questions = try DecisionService.questions(from: questionsRaw)
+                let outcome = try await Self.ensureModelReady(
+                    modelId: model, isStreaming: false,
+                    cfg: cfg, inference: inference, embeddings: embeddings,
+                    coordinator: coordinator, request: request
+                )
+                let result = try inference.decisionService.predict(
+                    modelId: model, state: state, questions: questions
+                )
+                var answers: [String: DecisionHTTPResponse.Answer] = [:]
+                for (id, answer) in result.answers {
+                    answers[id] = DecisionHTTPResponse.Answer(
+                        type: answer.type,
+                        confidence: answer.confidence,
+                        choice: answer.choice,
+                        score: answer.score,
+                        noul: answer.noul,
+                        probabilities: answer.probabilities,
+                        legend: answer.legend,
+                        action: DecisionHTTPResponse.Action(actProbability: answer.actProbability)
+                    )
+                }
+                let response = DecisionHTTPResponse(
+                    model: result.modelId,
+                    answers: answers,
+                    usage: DecisionHTTPResponse.Usage(
+                        inputTokens: result.inputTokens, outputTokens: 0
+                    )
+                )
+                Self.recordTokenUsage(
+                    request: request,
+                    promptTokens: result.inputTokens,
+                    completionTokens: 0,
+                    model: model,
+                    endpoint: "/v1/decisions"
+                )
+                var http = try Self.jsonResponse(response)
+                if case .justLoaded(let ms) = outcome {
+                    http.headers[.init("X-Model-Cold-Load")!] = "true"
+                    http.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                }
+                return http
             }
             Post("/v1/audio/transcriptions") { request, context in
                 let body = try await request.body.collect(upTo: .max)
@@ -1837,6 +1884,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let body = try await request.body.collect(upTo: .max)
                 let req = try JSONDecoder().decode(InputTokensRequest.self, from: body)
                 return try await Self.handleInputTokensRequest(req: req, inference: inference)
+            }
+            Get("/demo/laya") { _, _ in
+                let html = LayaDemoPage.html
+                return Response(
+                    status: .ok,
+                    headers: [.contentType: "text/html; charset=utf-8"],
+                    body: .init(byteBuffer: ByteBuffer(string: html))
+                )
             }
             Get("/health") { _, _ in
                 let stats = inference.stats
@@ -2714,7 +2769,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     }
                 }
                 Get("/rate-limits") { _, _ in
-                    let stats = rateLimiter.getStats()
+                    let stats: [String: Any] = [
+                        "enabled": false,
+                        "requests_per_second": 0,
+                        "burst_size": 0,
+                        "note": "No global limit. A key is limited only when its own requests-per-second is set.",
+                    ]
                     let data = try JSONSerialization.data(withJSONObject: stats)
                     return Response(
                         status: .ok,

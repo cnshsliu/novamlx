@@ -5,6 +5,28 @@ import HummingbirdRouter
 import NovaMLXCore
 import NovaMLXUtils
 
+/// Buckets only for API keys that have an explicit requests-per-second setting.
+/// A key left blank is not limited.
+final class ExplicitKeyRateLimits: @unchecked Sendable {
+    static let shared = ExplicitKeyRateLimits()
+    private let lock = NovaMLXLock()
+    private var limiters: [String: RateLimiter] = [:]
+
+    func allow(keyId: String, requestsPerSecond: Double, burst: Int) -> Bool {
+        let id = "\(keyId)|\(requestsPerSecond)|\(burst)"
+        let limiter: RateLimiter = lock.withLock {
+            if let existing = limiters[id] { return existing }
+            let created = RateLimiter(config: RateLimitConfig(
+                requestsPerSecond: requestsPerSecond,
+                burstSize: max(1, burst)
+            ))
+            limiters[id] = created
+            return created
+        }
+        return limiter.allow(key: keyId)
+    }
+}
+
 public struct RateLimitConfig: Codable, Sendable {
     public let requestsPerSecond: Double
     public let burstSize: Int
