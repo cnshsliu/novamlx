@@ -276,6 +276,8 @@ struct DownloadsPageView: View {
             if let endpoint = await appState.huggingfaceEndpoint {
                 if endpoint.contains("modelscope") {
                     selectedMirrorOption = "modelscope"
+                } else if endpoint.contains("huggingface.co") {
+                    selectedMirrorOption = "official"
                 } else {
                     selectedMirrorOption = "custom"
                     customMirrorURL = endpoint
@@ -569,7 +571,7 @@ struct DownloadsPageView: View {
         } else if let task = appState.downloadTasks[repoId], task.status == .failed {
             VStack(alignment: .trailing, spacing: 2) {
                 HStack(spacing: 6) {
-                    Button(l10n.tr("models.resume")) { appState.startDownload(repoId: repoId) }
+                    Button(l10n.tr("models.resume")) { triggerDownload(repoId: repoId) }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     Button { appState.cancelAndDeleteDownload(
@@ -600,7 +602,7 @@ struct DownloadsPageView: View {
     }
 
     private func triggerDownload(repoId: String) {
-        appState.startDownload(repoId: repoId)
+        appState.startDownload(repoId: repoId, endpoint: endpointForMirrorOption(selectedMirrorOption))
     }
 
     // MARK: - Activity (downloads + live search)
@@ -667,14 +669,15 @@ struct DownloadsPageView: View {
         }
     }
 
-    /// `nil` means official huggingface.co (server default).
-    private func endpointForMirrorOption(_ option: String) -> String? {
+    /// Official is an explicit host. `nil` used to mean "whatever the server
+    /// started with", so switching Official after ModelScope kept modelscope.cn.
+    private func endpointForMirrorOption(_ option: String) -> String {
         switch option {
         case "modelscope": return "https://www.modelscope.cn"
         case "custom":
             let trimmed = customMirrorURL.trimmingCharacters(in: .whitespaces)
-            return trimmed.isEmpty ? nil : trimmed
-        default: return nil
+            return trimmed.isEmpty ? "https://huggingface.co" : trimmed
+        default: return "https://huggingface.co"
         }
     }
 
@@ -716,7 +719,7 @@ struct DownloadsPageView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 } else {
-                    Button(l10n.tr("models.resume")) { appState.startDownload(repoId: task.repoId) }
+                    Button(l10n.tr("models.resume")) { triggerDownload(repoId: task.repoId) }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     Button(l10n.tr("models.delete")) {
@@ -843,7 +846,7 @@ struct DownloadsPageView: View {
             }
 
             if task.status == .failed {
-                Button(l10n.tr("models.retry")) { appState.startDownload(repoId: task.repoId) }
+                Button(l10n.tr("models.retry")) { triggerDownload(repoId: task.repoId) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button { appState.cancelAndDeleteDownload(
@@ -940,7 +943,7 @@ struct DownloadsPageView: View {
         }
 
         searchRegexError = nil
-        currentSearchEndpoint = endpointForMirrorOption(selectedMirrorOption) ?? "https://huggingface.co"
+        currentSearchEndpoint = endpointForMirrorOption(selectedMirrorOption)
         lastSearchSourceName = currentMirrorHostName
 
         Task {
@@ -964,7 +967,7 @@ struct DownloadsPageView: View {
                 URLQueryItem(name: "limit", value: String(limit)),
                 URLQueryItem(name: "mlx_only", value: searchMlxOnly ? "true" : "false"),
             ]
-            if let searchEndpoint, !searchEndpoint.isEmpty {
+            if !searchEndpoint.isEmpty {
                 urlComps.queryItems?.append(URLQueryItem(name: "endpoint", value: searchEndpoint))
             }
             guard let url = urlComps.url else {
@@ -1102,7 +1105,7 @@ struct DownloadsPageView: View {
         Task {
             let adminPort = appState.adminPort
             let cardEndpoint = endpointForMirrorOption(selectedMirrorOption)
-            let cardQuery = cardEndpoint != nil ? "&endpoint=\(cardEndpoint!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" : ""
+            let cardQuery = "&endpoint=\(cardEndpoint.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
             guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/model-card?repo_id=\(repoId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? repoId)\(cardQuery)") else { return }
             do {
                 var request = URLRequest(url: url)

@@ -49,6 +49,12 @@ public final class ModelScopeService: Sendable {
             throw ModelScopeError.unexpectedFileListResponse
         }
 
+        if (json["Success"] as? Bool) == false {
+            let message = json["Message"] as? String ?? "request failed"
+            NovaMLXLog.error("[ModelScope] \(repoId) rejected: \(message)")
+            throw ModelScopeError.repositoryUnavailable(repoId, message)
+        }
+
         let dataObj = json["Data"] as? [String: Any] ?? json["data"] as? [String: Any] ?? [:]
         let filesArray = (dataObj["Files"] as? [[String: Any]])
                       ?? (dataObj["files"] as? [[String: Any]])
@@ -114,9 +120,12 @@ public struct ModelScopeFile: Sendable {
 
 public enum ModelScopeError: Error, LocalizedError {
     case unexpectedFileListResponse
+    case repositoryUnavailable(String, String)
 
     public var errorDescription: String? {
         switch self {
+        case .repositoryUnavailable(let repoId, let message):
+            return "\(repoId) is not on ModelScope (\(message)). This checkpoint is published on Hugging Face only."
         case .unexpectedFileListResponse:
             return "ModelScope returned an unexpected file list format. Check logs for raw response."
         }

@@ -550,13 +550,13 @@ public final class HuggingFaceService: @unchecked Sendable {
         adapter: any MirrorAdapter
     ) async throws -> [HFModelDetail.HFFile] {
         if adapter.kind == .huggingface {
-            let detail = try await Self.getModelDetailStatic(
+            let files = try await Self.listSiblingFiles(
                 repoId: repoId,
                 baseURL: adapter.endpoint,
                 session: session,
                 hfToken: hfToken
             )
-            return Self.filterDownloadable(detail.siblings ?? [])
+            return Self.filterDownloadable(files)
         } else {
             // ModelScope path — delegate to dedicated implementation
             NovaMLXLog.info("[HF][Download] ModelScope branch taken for \(repoId), adapter.endpoint=\(adapter.endpoint), kind=\(adapter.kind)")
@@ -589,9 +589,12 @@ public final class HuggingFaceService: @unchecked Sendable {
         // build a one-off adapter for this download only.
         // The HFDownloadTask is still registered in *this* service's activeTasks
         // (the one that the /tasks API reads), so the UI always sees it.
-        let effectiveAdapter = mirrorEndpoint != nil
-            ? Self.makeAdapter(for: mirrorEndpoint)
-            : self.adapter
+        // A missing endpoint is official Hugging Face. Falling back to the
+        // adapter captured at process start kept ModelScope after the user
+        // switched the picker back to huggingface.co.
+        let effectiveAdapter = Self.makeAdapter(
+            for: (mirrorEndpoint?.isEmpty == false) ? mirrorEndpoint : "https://huggingface.co"
+        )
 
         var task = HFDownloadTask(repoId: repoId)
         task.status = "downloading"
@@ -939,13 +942,42 @@ public final class HuggingFaceService: @unchecked Sendable {
         return 0
     }
 
-    private static func getModelDetailStatic(repoId: String, baseURL: String, session: URLSession, hfToken: String?) async throws -> HFModelDetail {
+    private static func listSiblingFiles(repoId: String, baseURL: String, session: URLSession, hfToken: String?) async throws -> [HFModelDetail.HFFile] {
         let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
         let url = URL(string: "\(baseURL)/api/models/\(encoded)")!
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if let t = hfToken { req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization") }
-        let (data, _) = try await session.data(for: req)
-        return try JSONDecoder().decode(HFModelDetail.self, from: data)
+        let (data, response) = try await session.data(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        return try parseSiblingFiles(data: data, statusCode: status)
+    }
+
+    /// File list only. The full model card is not decoded: Hugging Face
+    /// `cardData.language` is sometimes a string and sometimes an array, and a
+    /// rate-limit page is HTML. Either used to surface as "isn't in the correct format."
+    public static func parseSiblingFiles(data: Data, statusCode: Int) throws -> [HFModelDetail.HFFile] {
+        if statusCode == 429 {
+            throw NovaMLXError.apiError(
+                "Hugging Face rate limited this Mac (HTTP 429). The model is fine — wait a few minutes and download again."
+            )
+        }
+        guard statusCode == 200 else {
+            throw NovaMLXError.apiError("Hugging Face file list failed (HTTP \(statusCode)).")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NovaMLXError.apiError("Hugging Face returned a non-JSON file list (HTTP \(statusCode)).")
+        }
+        let rows = obj["siblings"] as? [[String: Any]] ?? []
+        let files: [HFModelDetail.HFFile] = rows.compactMap { row in
+            guard let name = row["rfilename"] as? String else { return nil }
+            let size = (row["size"] as? Int)
+                ?? (row["size"] as? NSNumber)?.intValue
+            return HFModelDetail.HFFile(rfilename: name, size: size)
+        }
+        if files.isEmpty {
+            throw NovaMLXError.apiError("Hugging Face listed no files for this model.")
+        }
+        return files
     }
 }
