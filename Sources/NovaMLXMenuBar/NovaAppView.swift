@@ -194,9 +194,17 @@ public struct NovaAppView: View {
         let history = appState.tpsHistory
         let hasData = !history.allSatisfy({ $0.tps == 0 })
         let currentTps = history.last?.tps ?? 0
+        let imageActivity = appState.liveActivity?.kind == .image ? appState.liveActivity : nil
 
         return Group {
-            if hasData {
+            if let imageActivity, !hasData {
+                Text(imageActivity.displayLine)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.accent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+            } else if hasData {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text(String(format: "%.0f tok/s", currentTps))
@@ -288,7 +296,7 @@ public struct NovaAppView: View {
                 .environmentObject(l10n)
                 .opacity(selectedPage == .videoSlice ? 1 : 0)
                 .allowsHitTesting(selectedPage == .videoSlice)
-            RequestLogPageView(appState: appState)
+            RequestLogPageView(appState: appState, inferenceService: inferenceService)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .requests ? 1 : 0)
                 .allowsHitTesting(selectedPage == .requests)

@@ -505,7 +505,7 @@ public final class HuggingFaceService: @unchecked Sendable {
                 "downloads": dict["Downloads"] ?? 0,
                 "likes": dict["Stars"] ?? 0,
                 "tags": Array(Set(((dict["Tags"] as? [String]) ?? []) + ((dict["Libraries"] as? [String]) ?? []))),
-                "pipelineTag": (dict["Tasks"] as? [String])?.first ?? (dict["ModelType"] as? String) ?? "" as String?
+                "pipelineTag": (dict["Tasks"] as? [String])?.first ?? (dict["ModelType"] as? String) ?? ""
             ]
             if let t = dict["CreatedTime"] ?? dict["LastUpdatedTime"] { norm["createdAt"] = "\(t)" }
 

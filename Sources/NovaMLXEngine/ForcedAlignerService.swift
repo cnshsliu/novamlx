@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXAudio
 import NovaMLXCore
 import NovaMLXUtils
 
@@ -14,32 +15,33 @@ public struct AlignedWord: Sendable {
     }
 }
 
-/// Word-level timestamps via mlx-audio Qwen3-ForcedAligner (Python).
+/// Word-level timestamps from the Swift Qwen3-ForcedAligner.
+/// Weights must already be on disk. This does not download.
 public enum ForcedAlignerService: Sendable {
     public static let defaultModelId = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+
+    private static let lock = NSLock()
+    private final class Cache: @unchecked Sendable {
+        var model: Qwen3ASRModel?
+        var path: String?
+    }
+    private static let cache = Cache()
 
     public static func isModelOnDisk() -> Bool {
         localModelPath() != nil
     }
 
-    /// Download/load Qwen3-ForcedAligner so the first alignment is not a surprise download.
+    /// Load Qwen3-ForcedAligner so the first alignment is not a cold read.
     public static func ensureModel(at dir: URL? = nil) async throws {
-        let script = try scriptURL()
-        let python = pythonExecutable()
-        let model = dir?.path ?? localModelPath() ?? defaultModelId
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: python)
-        proc.arguments = [script.path, "--prefetch", "--model", model]
-        let stdout = Pipe()
-        let stderr = Pipe()
-        proc.standardOutput = stdout
-        proc.standardError = stderr
-        proc.environment = ProcessInfo.processInfo.environment
-        try proc.run()
-        proc.waitUntilExit()
-        if proc.terminationStatus != 0 {
-            let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw NovaMLXError.apiError("Forced aligner prefetch failed: \(err)")
+        let url = try modelDirectory(dir)
+        if lock.withLock({ cache.path == url.path && cache.model != nil }) { return }
+        let model = try await Qwen3ASRModel.fromModelDirectory(url)
+        guard model.config.isForcedAligner else {
+            throw NovaMLXError.apiError("Not a Qwen3 ForcedAligner checkpoint: \(url.path)")
+        }
+        lock.withLock {
+            cache.model = model
+            cache.path = url.path
         }
     }
 
@@ -48,36 +50,27 @@ public enum ForcedAlignerService: Sendable {
         text: String,
         language: String? = nil
     ) async throws -> [AlignedWord] {
-        let script = try scriptURL()
-        let python = pythonExecutable()
+        try await ensureModel()
         let lang = resolvedLanguage(text: text, requested: language)
-        let model = localModelPath() ?? defaultModelId
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: python)
-        proc.arguments = [
-            script.path,
-            "--audio", audioURL.path,
-            "--text", text,
-            "--language", lang,
-            "--model", model,
-        ]
-        let stdout = Pipe()
-        let stderr = Pipe()
-        proc.standardOutput = stdout
-        proc.standardError = stderr
-        proc.environment = ProcessInfo.processInfo.environment
-
-        try proc.run()
-        proc.waitUntilExit()
-
-        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-        if proc.terminationStatus != 0 {
-            let err = String(data: errData, encoding: .utf8) ?? "aligner failed"
-            throw NovaMLXError.apiError("Forced aligner failed: \(err)")
+        let model = lock.withLock { cache.model }
+        guard let model else {
+            throw NovaMLXError.apiError("Forced aligner is not loaded")
         }
-        return try decodeWords(outData)
+        let (_, audio) = try loadAudioArray(from: audioURL, sampleRate: 16000)
+        let rows = try model.align(audio: audio, text: text, language: lang)
+        return rows.map { AlignedWord(text: $0.text, start: $0.start, end: $0.end) }
+    }
+
+    public static func alignedWords(in text: String, language: String) -> [String] {
+        Qwen3ForceAlignText.words(in: text, language: language)
+    }
+
+    public static func alignPrompt(words: [String], audioTokens: Int) -> String {
+        Qwen3ForceAlignText.prompt(words: words, audioTokens: audioTokens)
+    }
+
+    public static func fixAlignTimestamps(_ data: [Int]) -> [Int] {
+        Qwen3ForceAlignText.fixTimestamps(data)
     }
 
     public static func decodeWords(_ data: Data) throws -> [AlignedWord] {
@@ -102,18 +95,6 @@ public enum ForcedAlignerService: Sendable {
             || (0x3040...0x30FF).contains(s.value)
     }
 
-    private static func pythonExecutable() -> String {
-        let candidates = [
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3",
-        ]
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            return path
-        }
-        return "python3"
-    }
-
     private static func localModelPath() -> String? {
         let dir = NovaMLXPaths.directory(forModelId: defaultModelId)
         let cfg = dir.appendingPathComponent("config.json")
@@ -123,29 +104,20 @@ public enum ForcedAlignerService: Sendable {
         return nil
     }
 
-    private static func scriptURL() throws -> URL {
-        if let bundle = ResourceBundleLocator.find(bundleName: "NovaMLX_NovaMLXUtils") {
-            let subs = ["scripts", "Resources/scripts", nil] as [String?]
-            for sub in subs {
-                if let url = bundle.url(
-                    forResource: "forced_align", withExtension: "py", subdirectory: sub)
-                {
-                    return url
-                }
+    private static func modelDirectory(_ dir: URL?) throws -> URL {
+        if let dir {
+            let cfg = dir.appendingPathComponent("config.json")
+            guard FileManager.default.fileExists(atPath: cfg.path) else {
+                throw NovaMLXError.apiError("Forced aligner weights not found at \(dir.path)")
             }
+            return dir
         }
-        let sourceRelatives = [
-            URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("NovaMLXUtils/Resources/scripts/forced_align.py"),
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("Sources/NovaMLXUtils/Resources/scripts/forced_align.py"),
-        ]
-        for url in sourceRelatives where FileManager.default.fileExists(atPath: url.path) {
-            return url
+        if let path = localModelPath() {
+            return URL(fileURLWithPath: path)
         }
-        throw NovaMLXError.apiError("forced_align.py not found in app resources")
+        throw NovaMLXError.apiError(
+            "Forced aligner is not downloaded. Download \(defaultModelId) before aligning."
+        )
     }
 }
 

@@ -389,7 +389,7 @@ extension NovaMLXAPIServer {
             }
         }
 
-        var headers: HTTPFields = [
+        let headers: HTTPFields = [
             .contentType: "text/event-stream",
             .cacheControl: "no-cache",
             .init("X-Tokenhub-Provider")!: provider.name

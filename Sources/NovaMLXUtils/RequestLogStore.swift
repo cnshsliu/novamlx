@@ -20,6 +20,8 @@ public struct RequestLogEntry: Identifiable, Sendable {
     public var kind: InferenceKind?
     public let apiKeyId: String?
     public let apiKeyName: String?
+    /// Client IP, when the HTTP server recorded one.
+    public let clientAddress: String?
     public let startedAt: Date
     public var finishedAt: Date?
     public var durationMs: Double?
@@ -46,6 +48,7 @@ public struct RequestLogEntry: Identifiable, Sendable {
         kind: InferenceKind? = nil,
         apiKeyId: String? = nil,
         apiKeyName: String? = nil,
+        clientAddress: String? = nil,
         startedAt: Date = Date(),
         requestBody: Data? = nil,
         requestContentType: String? = nil,
@@ -58,6 +61,7 @@ public struct RequestLogEntry: Identifiable, Sendable {
         self.kind = kind
         self.apiKeyId = apiKeyId
         self.apiKeyName = apiKeyName
+        self.clientAddress = clientAddress
         self.startedAt = startedAt
         self.status = .pending
         self.requestBody = requestBody
@@ -73,6 +77,14 @@ public struct RequestLogEntry: Identifiable, Sendable {
         if path.hasPrefix("/v1/audio/speech") { return "/v1/audio/speech" }
         if path.hasPrefix("/v1/images/generations") { return "/v1/images/generations" }
         return path
+    }
+
+    /// Who called: API key name, source IP, or both.
+    public var callerLabel: String {
+        let key = apiKeyName ?? "no-key"
+        guard let clientAddress, !clientAddress.isEmpty else { return key }
+        if key == "no-key" { return clientAddress }
+        return "\(key) · \(clientAddress)"
     }
 }
 
@@ -105,6 +117,7 @@ public final class RequestLogStore: @unchecked Sendable {
         method: String,
         path: String,
         apiKeyToken: String?,
+        clientAddress: String? = nil,
         model: String? = nil,
         requestBody: Data? = nil,
         requestContentType: String? = nil,
@@ -118,6 +131,7 @@ public final class RequestLogStore: @unchecked Sendable {
             model: model,
             apiKeyId: keyInfo?.id,
             apiKeyName: keyInfo?.displayName,
+            clientAddress: clientAddress,
             requestBody: requestBody,
             requestContentType: requestContentType,
             requestBodyNote: requestBodyNote
@@ -275,6 +289,25 @@ public final class RequestLogStore: @unchecked Sendable {
     /// dropped stream). At least 4× `requestTimeout`, never under 30 minutes.
     public static func staleAge(requestTimeout: TimeInterval) -> TimeInterval {
         max(requestTimeout * 4, minimumStaleAge)
+    }
+
+    /// Stop one in-flight row and move it to history as cancelled.
+    /// No-op if that id is not active.
+    public func cancel(id: String) {
+        lock.withLock {
+            guard var entry = active[id] else { return }
+            finalizeLocked(&entry, status: .cancelled, error: "cancelled", durationMs: nil)
+            active.removeValue(forKey: id)
+            if let model = entry.model, let idx = activeByModel[model]?.firstIndex(of: id) {
+                var list = activeByModel[model] ?? []
+                list.remove(at: idx)
+                activeByModel[model] = list.isEmpty ? nil : list
+            }
+        }
+    }
+
+    public func path(for id: String) -> String? {
+        lock.withLock { active[id]?.path }
     }
 
     /// Cancel any entries still in flight older than `age` (safety net so stale

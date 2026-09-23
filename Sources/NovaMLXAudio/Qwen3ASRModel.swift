@@ -929,7 +929,14 @@ public class Qwen3ASRModel: Module {
         self._audioTower.wrappedValue = Qwen3ASRAudioEncoder(config.audioConfig)
         self._model.wrappedValue = Qwen3ASRTextModel(config.textConfig)
 
-        if config.textConfig.tieWordEmbeddings {
+        if config.isForcedAligner {
+            let classes = config.classifyNum ?? config.textConfig.vocabSize
+            self._lmHead.wrappedValue = Linear(
+                config.textConfig.hiddenSize,
+                classes,
+                bias: false
+            )
+        } else if config.textConfig.tieWordEmbeddings {
             self._lmHead.wrappedValue = nil
         } else {
             self._lmHead.wrappedValue = Linear(
@@ -1786,7 +1793,7 @@ public class Qwen3ASRModel: Module {
         }
 
         // Sanitize weights
-        let skipLmHead = config.textConfig.tieWordEmbeddings
+        let skipLmHead = config.textConfig.tieWordEmbeddings && !config.isForcedAligner
         let sanitizedWeights = Qwen3ASRModel.sanitize(weights: weights, skipLmHead: skipLmHead)
 
         // Quantize if needed

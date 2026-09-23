@@ -495,6 +495,8 @@ struct ModelsPageView: View {
             Button {
                 if isDecisionModel(modelId) {
                     openDecisionDemo(modelId)
+                } else if isQwenImage21Model(modelId) {
+                    openQwenImageDemo(modelId)
                 } else {
                     appState.pickInPlayground(modelId)
                 }
@@ -504,7 +506,7 @@ struct ModelsPageView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
-            .help(isDecisionModel(modelId) ? "Open decision demo" : "Open in Playground")
+            .help(playHelp(modelId))
         }
     }
 
@@ -513,8 +515,27 @@ struct ModelsPageView: View {
         return modelId.lowercased().contains("laya")
     }
 
+    private func isQwenImage21Model(_ modelId: String) -> Bool {
+        if modelManager.getRecord(modelId)?.family == .qwenImage21 { return true }
+        return QwenImage21Support.matches(id: modelId)
+    }
+
+    private func openQwenImageDemo(_ modelId: String) {
+        openDemo(path: "/demo/qwen-image", modelId: modelId)
+    }
+
+    private func playHelp(_ modelId: String) -> String {
+        if isDecisionModel(modelId) { return "Open decision demo" }
+        if isQwenImage21Model(modelId) { return "Open Qwen-Image 2.1 demo" }
+        return "Open in Playground"
+    }
+
     private func openDecisionDemo(_ modelId: String) {
-        var components = URLComponents(string: "http://127.0.0.1:\(appState.serverPort)/demo/laya")
+        openDemo(path: "/demo/laya", modelId: modelId)
+    }
+
+    private func openDemo(path: String, modelId: String) {
+        var components = URLComponents(string: "http://127.0.0.1:\(appState.serverPort)\(path)")
         var items = [URLQueryItem(name: "model", value: modelId)]
         if let key = appState.apiKey, !key.isEmpty {
             items.append(URLQueryItem(name: "key", value: key))

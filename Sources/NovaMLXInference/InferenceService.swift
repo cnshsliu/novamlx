@@ -52,6 +52,8 @@ public final class InferenceService: @unchecked Sendable {
     private var workerHybridModels: Set<String> = []
     private var workerNativeMtpModels: Set<String> = []
     private let loadDedup = LoadDedup()
+    private let httpLock = NovaMLXLock()
+    private var httpToEngine: [String: UUID] = [:]
     private var ttlSweepTask: Task<Void, Never>?
 
     // Cluster distributed inference mode
@@ -169,6 +171,8 @@ public final class InferenceService: @unchecked Sendable {
             useNativeMtp: finalRequest.useNativeMtp
         )
         finalRequest = autoInjectDraftModel(finalRequest)
+        track(finalRequest)
+        defer { untrack(finalRequest) }
 
         // Cluster mode: check readiness, then route to distributed inference
         if clusterMode, let runner = distributedRunner {
@@ -281,6 +285,7 @@ public final class InferenceService: @unchecked Sendable {
             useNativeMtp: finalRequest.useNativeMtp
         )
         finalRequest = autoInjectDraftModel(finalRequest)
+        track(finalRequest)
 
         // Cluster mode: route to distributed streaming when cluster is ready
         if clusterMode, let runner = distributedRunner {
@@ -402,6 +407,34 @@ public final class InferenceService: @unchecked Sendable {
             engine.abort(requestId: requestId)
             batcher.abort(requestId: requestId)
             fusedScheduler.abort(requestId: requestId)
+        }
+    }
+
+    /// Cancel the in-flight request shown in the request log. `id` is the HTTP
+    /// request id, not the engine UUID.
+    public func abort(httpRequestId: String) async {
+        let path = RequestLogStore.shared.path(for: httpRequestId)
+        let engineId = httpLock.withLock { httpToEngine.removeValue(forKey: httpRequestId) }
+        if let engineId {
+            await abort(requestId: engineId)
+        }
+        if path?.contains("/images/") == true {
+            imageGenerationService.requestCancel()
+        }
+        RequestLogStore.shared.cancel(id: httpRequestId)
+    }
+
+    private func track(_ request: InferenceRequest) {
+        guard let http = request.httpRequestId, !http.isEmpty else { return }
+        httpLock.withLock { httpToEngine[http] = request.id }
+    }
+
+    private func untrack(_ request: InferenceRequest) {
+        guard let http = request.httpRequestId else { return }
+        httpLock.withLock {
+            if httpToEngine[http] == request.id {
+                httpToEngine.removeValue(forKey: http)
+            }
         }
     }
 
@@ -579,7 +612,7 @@ public final class InferenceService: @unchecked Sendable {
         // Image models stay on the host ImageGenerationService (not the worker MLXEngine).
         let isImageFamily: Bool = {
             switch config.identifier.family {
-            case .flux, .flux2, .zImage, .qwenImage, .stableDiffusion: return true
+            case .flux, .flux2, .zImage, .qwenImage, .qwenImage21, .stableDiffusion: return true
             default: return false
             }
         }()

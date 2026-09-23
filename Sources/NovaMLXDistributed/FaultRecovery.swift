@@ -57,7 +57,7 @@ public final class FaultRecoveryManager: @unchecked Sendable {
     ///
     /// - Parameter nodeId: Identifier of the node to clear.
     public func clearDisconnect(nodeId: String) {
-        queue.sync { disconnectTimes.removeValue(forKey: nodeId) }
+        _ = queue.sync { disconnectTimes.removeValue(forKey: nodeId) }
     }
 
     // MARK: - L2 Spare Node Swap

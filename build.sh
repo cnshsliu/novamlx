@@ -95,6 +95,12 @@ if [ -d .build/checkouts/mlx-swift-lm ] && ! grep -q "NOVAMLX_FUSED_SDPA_PATCHED
 	python3 Scripts/patch-fused-sdpa.py
 fi
 
+# Profiler otherwise pulls github.com/ml-explore/mlx-swift beside vendors/mlx-swift.
+if [ -f vendors/flux-2-swift-mlx/Package.swift ] && ! grep -q "NOVAMLX_PROFILER_MLX_PATH" vendors/flux-2-swift-mlx/Package.swift 2>/dev/null; then
+	echo "→ Pointing swift-mlx-profiler at vendors/mlx-swift..."
+	python3 Scripts/patch-mlx-profiler-identity.py
+fi
+
 # Compile MLX Metal shaders if metallib is missing
 METAL_SRC="vendors/mlx-swift/Source/Cmlx/mlx-generated/metal"
 if [ -d "$METAL_SRC" ]; then

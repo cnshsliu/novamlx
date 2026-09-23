@@ -613,9 +613,9 @@ public final class SlicedForwardPolicy: ComputePolicy, @unchecked Sendable {
                 h = shardable.forwardLayers(range, input: embedded, caches: cacheBox.caches)
                 MLX.asyncEval(h)
             }
-            return h
+            return SendableBox(h)
         }
 
-        return result
+        return result.value
     }
 }

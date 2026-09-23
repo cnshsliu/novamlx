@@ -206,19 +206,29 @@ struct VideoSlicePipelineTests {
         #expect(t.contains("天天"))
     }
 
-    @Test("Anthropic Fable homophones are restored, plain 刷皮 is not")
-    func restoreAnthropicFable() {
-        let heard = "刷皮的飞豹五呢确实是非常贵但确实是太好"
+    @Test("tidy leaves product names for the LLM")
+    func tidyDoesNotRewriteNames() {
+        let heard = "刷皮的飞豹五呢确实是非常贵"
         let t = VideoSlicePipeline.tidyTranscript(heard)
-        #expect(t == "Anthropic的Fable 5确实是非常贵但确实是太好")
-        #expect(VideoSlicePipeline.tidyTranscript("刷皮的飞宝4很强") == "Anthropic的Fable 4很强")
-        #expect(VideoSlicePipeline.tidyTranscript("Anthropic的飞豹五发布了") == "Anthropic的Fable 5发布了")
-        let reskin = VideoSlicePipeline.tidyTranscript("这个游戏刷皮很贵")
-        #expect(reskin.contains("刷皮"))
-        #expect(!reskin.contains("Anthropic"))
-        let leopard = VideoSlicePipeline.tidyTranscript("飞豹五号选手赢了")
-        #expect(leopard.contains("飞豹五"))
-        #expect(!leopard.contains("Fable"))
+        #expect(t.contains("飞豹五"))
+        #expect(!t.contains("Fable"))
+    }
+
+    @Test("proper noun file merges with the page glossary")
+    func properNounFile() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("novamlx-nouns-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("proper-nouns.json")
+        try VideoSlicePipeline.ensureProperNounFile(at: url)
+        #expect(VideoSlicePipeline.properNounTerms(at: url).isEmpty)
+        let body = "{\"terms\":[\"Fable 5\",\"Methos\",\"Fable 5\"]}"
+        try body.write(to: url, atomically: true, encoding: .utf8)
+        let merged = VideoSlicePipeline.mergedGlossary(
+            uiText: "DeepSeek V4 Pro",
+            fileTerms: VideoSlicePipeline.properNounTerms(at: url)
+        )
+        #expect(merged == ["Fable 5", "Methos", "DeepSeek V4 Pro"])
     }
 
     @Test("glossary becomes an ASR vocabulary hint")
@@ -236,11 +246,11 @@ struct VideoSlicePipelineTests {
 
     @Test("a 14-character opening cut is not a headline")
     func titleIsNotPrefixCut() {
-        let spoken = "刷皮的飞豹五呢确实是非常贵但确实是太好。后面再讲它贵在哪里。"
+        let spoken = "这套方案确实是非常贵但确实是太好。后面再讲它贵在哪里。"
         let source = VideoSlicePipeline.tidyTranscript(spoken)
         let cut = String(source.prefix(14))
         #expect(!VideoSlicePipeline.isAcceptableHeadline(cut, source: source))
-        let chopped = "Anthropic的Fable 5确实是非常贵但"
+        let chopped = "这套方案确实是非常贵但"
         #expect(!VideoSlicePipeline.isAcceptableHeadline(chopped, source: source))
         let resolved = VideoSlicePipeline.resolveHeadline(
             proposedTitle: cut,
@@ -248,9 +258,9 @@ struct VideoSlicePipelineTests {
             source: source
         )
         #expect(!resolved.acceptedProposal)
-        #expect(resolved.title == "Anthropic的Fable 5确实是非常贵但确实是太好")
+        #expect(resolved.title.contains("确实是太好"))
         #expect(resolved.point.contains("贵在哪里"))
-        let summary = "Anthropic的Fable 5很贵但很好"
+        let summary = "这套方案很贵但很好"
         let ok = VideoSlicePipeline.resolveHeadline(
             proposedTitle: summary,
             proposedPoint: "贵，但确实好用",

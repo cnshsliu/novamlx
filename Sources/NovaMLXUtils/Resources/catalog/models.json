@@ -867,7 +867,26 @@
       "family": "qwenImage",
       "format": "mlx",
       "status": "preview"
+    },
+    {
+      "id": "Qwen/Qwen-Image-2.1",
+      "url": "https://huggingface.co/Qwen/Qwen-Image-2.1",
+      "name": "Qwen-Image-2.1",
+      "description": "Unified text-to-image and image-to-image. 7.1B DiT plus Qwen3-VL 8B. bf16, about 46 GB peak. Research license.",
+      "size": "~33 GB",
+      "tags": [
+        "MLX",
+        "bf16",
+        "Qwen-Image"
+      ],
+      "category": "image",
+      "sizeBytes": 33130000000,
+      "minRamGB": 64,
+      "family": "qwenImage21",
+      "format": "mlx",
+      "status": "preview",
+      "addedAt": "2026-09-22T00:00:00Z"
     }
   ],
-  "updatedAt": "2026-09-11T21:00:00Z"
+  "updatedAt": "2026-09-22T00:00:00Z"
 }

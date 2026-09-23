@@ -1229,8 +1229,6 @@ struct VoiceCloneSheet: View {
             }
             cloneError = nil
         } else {
-            // Check microphone permission first
-            let micStatus = CGPreflightScreenCaptureAccess()
             debugLog("Checking mic permission...")
 
             // Use AVCaptureDevice to check/request mic access on macOS
@@ -1364,7 +1362,7 @@ struct VoiceCloneSheet: View {
         let refText = l10n.tr("audio.tts.cloneText")
 
         do {
-            let profile = try VoiceProfileManager.shared.saveProfile(
+            _ = try VoiceProfileManager.shared.saveProfile(
                 name: profileName,
                 refAudioURL: url,
                 refTranscript: refText

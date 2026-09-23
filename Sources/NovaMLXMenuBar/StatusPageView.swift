@@ -113,11 +113,26 @@ struct StatusPageView: View {
             }
 
             if appState.tpsHistory.allSatisfy({ $0.tps == 0 }) {
-                Text(l10n.tr("status.noActivity"))
-                    .foregroundColor(.secondary)
-                    .font(.subheadline)
+                if let activity = appState.liveActivity, activity.kind == .image {
+                    VStack(spacing: 8) {
+                        ProgressView()
+                        Text(activity.displayLine)
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundColor(NovaTheme.Colors.accent)
+                        Text(activity.model)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 24)
+                } else {
+                    Text(l10n.tr("status.noActivity"))
+                        .foregroundColor(.secondary)
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 24)
+                }
             } else {
                 let history = appState.tpsHistory
                 Chart {
@@ -320,8 +335,10 @@ struct StatusPageView: View {
     /// Speed string for the active inference, e.g. "23.5 tok/s". Falls back to
     /// the recent LLM TPS when idle. Returns "" if nothing to show.
     private var liveSpeedText: String {
-        if let activity = appState.liveActivity, activity.speed > 0 {
-            return String(format: "%.1f %@", activity.speed, activity.unit)
+        if let activity = appState.liveActivity {
+            if activity.kind == .image || activity.speed > 0 {
+                return activity.displayLine
+            }
         }
         if let last = appState.tpsHistory.last, last.tps > 0 {
             return String(format: "%.1f tok/s", last.tps)

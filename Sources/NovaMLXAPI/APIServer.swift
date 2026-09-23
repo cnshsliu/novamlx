@@ -13,7 +13,20 @@ import NovaMLXMCP
 import NovaMLXModelManager
 import NovaMLXUtils
 
-typealias AppContext = BasicRouterRequestContext
+typealias AppContext = NovaRequestContext
+
+/// Router context that also keeps the client address for the request log.
+struct NovaRequestContext: RequestContext, RouterRequestContext {
+    var coreContext: CoreRequestContextStorage
+    var routerContext: RouterBuilderContext
+    var clientAddress: String?
+
+    init(source: ApplicationRequestContextSource) {
+        self.coreContext = .init(source: source)
+        self.routerContext = .init()
+        self.clientAddress = source.channel.remoteAddress?.ipAddress
+    }
+}
 
 final class LockedCounter: @unchecked Sendable {
     private var value = 0
@@ -197,7 +210,10 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
 
     let config: NovaMLXConfiguration
 
-    private static let publicPaths: Set<String> = ["/health", "/v1/models", "/v1/stats", "/demo/laya"]
+    private static let publicPaths: Set<String> = [
+        "/health", "/v1/models", "/v1/stats",
+        "/demo/laya", "/demo/qwen-image", "/demo/logo.png",
+    ]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
     func handle(
@@ -224,7 +240,10 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
         }
 
         let path = request.uri.path
-        if Self.publicPaths.contains(path) || Self.publicPrefixes.contains(where: { path.hasPrefix($0) }) {
+        if path == "/demo" || path.hasPrefix("/demo/")
+            || Self.publicPaths.contains(path)
+            || Self.publicPrefixes.contains(where: { path.hasPrefix($0) })
+        {
             return try await next(request, context)
         }
 
@@ -449,6 +468,7 @@ private struct RequestLogMiddleware: RouterMiddleware {
             method: method,
             path: path,
             apiKeyToken: token,
+            clientAddress: context.clientAddress,
             requestBody: bodyData,
             requestContentType: contentType.isEmpty ? nil : contentType,
             requestBodyNote: bodyNote
@@ -538,7 +558,9 @@ private struct RequestLogMiddleware: RouterMiddleware {
         let skipExact: Set<String> = [
             "/health", "/ready",
             "/favicon.ico", "/robots.txt",
-            "/v1/models", "/v1/stats"
+            "/v1/models", "/v1/stats",
+            "/v1/images/progress",
+            "/v1/images/models"
         ]
         if skipExact.contains(path) { return true }
         let skipPrefixes = [
@@ -1481,6 +1503,36 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 )
             }
 
+            Get("/v1/images/models") { _, _ in
+                let rows: [[String: Any]] = models.downloadedModels()
+                    .filter { $0.modelType == .image }
+                    .map { record in
+                        [
+                            "id": record.id,
+                            "loaded": inference.imageGenerationService.isLoaded(record.id),
+                        ]
+                    }
+                let data = try JSONSerialization.data(withJSONObject: ["data": rows])
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+
+            Get("/v1/images/progress") { request, _ in
+                let asked = request.uri.queryParameters.get("model")
+                let progress = inference.imageGenerationService.currentStep()
+                if let progress, asked == nil || asked == progress.modelId {
+                    let body: [String: Any] = [
+                        "active": true,
+                        "model": progress.modelId,
+                        "step": progress.step,
+                        "total": progress.total,
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: body)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                let idle = try JSONSerialization.data(withJSONObject: ["active": false])
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: idle)))
+            }
+
             Post("/v1/images/generations") { request, context in
                 let body = try await request.body.collect(upTo: .max)
                 let req = try JSONDecoder().decode(ImageGenerationRequest.self, from: body)
@@ -1583,6 +1635,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let n = Int(parts["n"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "1") ?? 1
                 let size = parts["size"].flatMap { String(data: $0.body, encoding: .utf8) }
                 let responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) }
+                let negativePrompt = parts["negative_prompt"].flatMap { String(data: $0.body, encoding: .utf8) } ?? ""
+                let steps = parts["steps"].flatMap { Int(String(data: $0.body, encoding: .utf8) ?? "") }
+                let seed = parts["seed"].flatMap { Int(String(data: $0.body, encoding: .utf8) ?? "") }
+                let strength = parts["strength"].flatMap { Double(String(data: $0.body, encoding: .utf8) ?? "") }
 
                 guard !prompt.isEmpty else {
                     throw NovaMLXError.apiError("'prompt' is required and must be non-empty")
@@ -1619,9 +1675,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     image: inputCGImage,
                     mask: maskCGImage,
                     prompt: prompt,
+                    negativePrompt: negativePrompt,
                     n: resolvedN,
                     width: width,
-                    height: height
+                    height: height,
+                    seed: seed.map { UInt64($0) },
+                    steps: steps,
+                    strength: strength
                 )
                 if let rid = HTTPHelpers.requestID(from: request) {
                     RequestLogStore.shared.finish(
@@ -1885,8 +1945,28 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let req = try JSONDecoder().decode(InputTokensRequest.self, from: body)
                 return try await Self.handleInputTokensRequest(req: req, inference: inference)
             }
+            Get("/demo/logo.png") { _, _ in
+                guard let url = Bundle.module.url(forResource: "logo", withExtension: "png", subdirectory: "Resources"),
+                      let data = try? Data(contentsOf: url)
+                else {
+                    return Response(status: .notFound)
+                }
+                return Response(
+                    status: .ok,
+                    headers: [.contentType: "image/png"],
+                    body: .init(byteBuffer: ByteBuffer(data: data))
+                )
+            }
             Get("/demo/laya") { _, _ in
                 let html = LayaDemoPage.html
+                return Response(
+                    status: .ok,
+                    headers: [.contentType: "text/html; charset=utf-8"],
+                    body: .init(byteBuffer: ByteBuffer(string: html))
+                )
+            }
+            Get("/demo/qwen-image") { _, _ in
+                let html = QwenImageDemoPage.html
                 return Response(
                     status: .ok,
                     headers: [.contentType: "text/html; charset=utf-8"],

@@ -100,7 +100,9 @@ let package = Package(
                 .product(name: "QwenImage", package: "qwen.image.swift"),
                 .product(name: "QwenImageRuntime", package: "qwen.image.swift"),
                 .product(name: "Flux2Core", package: "flux-2-swift-mlx"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
             ],
+            resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
         ),
         .target(

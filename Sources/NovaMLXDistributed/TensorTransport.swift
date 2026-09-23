@@ -110,7 +110,7 @@ enum WireFormat {
         for i in 0..<ndim {
             let offset = shapeStart + i * 8
             var dim64: Int64 = 0
-            withUnsafeMutableBytes(of: &dim64) { ptr in
+            _ = withUnsafeMutableBytes(of: &dim64) { ptr in
                 data.copyBytes(to: ptr, from: offset..<(offset + 8))
             }
             shape.append(Int(Int64(bigEndian: dim64)))
@@ -401,7 +401,7 @@ final class TCPConnection: @unchecked Sendable {
             for i in 0..<ndim {
                 let off = i * 8
                 var dim64: Int64 = 0
-                withUnsafeMutableBytes(of: &dim64) { ptr in
+                _ = withUnsafeMutableBytes(of: &dim64) { ptr in
                     payload.copyBytes(to: ptr, from: off..<(off + 8))
                 }
                 shape.append(Int(Int64(bigEndian: dim64)))

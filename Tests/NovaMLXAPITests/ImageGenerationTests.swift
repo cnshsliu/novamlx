@@ -39,6 +39,22 @@ struct ImageGenerationTests {
         #expect(req.negativePrompt == nil)
     }
 
+    @Test("Image size accepts Qwen-Image 2.1 multiples of 16")
+    func testQwenImage21Sizes() throws {
+        let wide = """
+        {"prompt":"sign","model":"Qwen/Qwen-Image-2.1","size":"2752x1536"}
+        """.data(using: .utf8)!
+        let square = """
+        {"prompt":"sign","model":"Qwen/Qwen-Image-2.1","size":"2048x2048"}
+        """.data(using: .utf8)!
+        let odd = """
+        {"prompt":"sign","model":"Qwen/Qwen-Image-2.1","size":"1000x1000"}
+        """.data(using: .utf8)!
+        #expect(try JSONDecoder().decode(ImageGenerationRequest.self, from: wide).resolvedSize == (2752, 1536))
+        #expect(try JSONDecoder().decode(ImageGenerationRequest.self, from: square).resolvedSize == (2048, 2048))
+        #expect(try JSONDecoder().decode(ImageGenerationRequest.self, from: odd).resolvedSize == (1024, 1024))
+    }
+
     @Test("ImageGenerationResponse encodes with b64_json")
     func testImageGenerationResponseEncode() throws {
         let response = ImageGenerationResponse(

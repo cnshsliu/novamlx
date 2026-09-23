@@ -286,7 +286,7 @@ struct LBEditView: View {
             Text("This load balancer has no members. Requests to it will fail with 503 until you add at least one. Click \"OK\" to keep editing, or \"Cancel edit\" to \(lbId == nil ? "discard this LB" : "revert your changes").")
         }
         .task {
-            if let lbId {
+            if lbId != nil {
                 await reload()
                 // Edit path: snapshot the original so Cancel can revert.
                 originalLB = lb

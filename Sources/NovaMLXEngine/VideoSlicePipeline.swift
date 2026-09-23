@@ -344,8 +344,39 @@ public enum VideoSlicePipeline {
         s = s.replacingOccurrences(of: #"([，。！？、])\1+"#, with: "$1", options: .regularExpression)
         s = s.replacingOccurrences(of: "，。", with: "。")
         s = collapseLooseSpaces(s)
-        s = restoreProductNames(s)
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static var properNounFileURL: URL {
+        NovaMLXPaths.baseDir.appendingPathComponent("proper-nouns.json")
+    }
+
+    /// Creates an empty term list the user can edit. Does not invent names.
+    public static func ensureProperNounFile(at url: URL = properNounFileURL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) { return }
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let body = "{\n  \"terms\": []\n}\n"
+        try body.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    public static func properNounTerms(at url: URL = properNounFileURL) -> [String] {
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data)
+        else { return [] }
+        let raw: [String]
+        if let list = obj as? [String] {
+            raw = list
+        } else if let dict = obj as? [String: Any], let list = dict["terms"] as? [String] {
+            raw = list
+        } else {
+            return []
+        }
+        return glossaryTerms(raw.joined(separator: "\n"))
+    }
+
+    public static func mergedGlossary(uiText: String, fileTerms: [String]) -> [String] {
+        glossaryTerms((fileTerms + glossaryTerms(uiText)).joined(separator: "\n"))
     }
 
     /// Hotword line for Qwen3-ASR's system context. Empty when nothing was supplied.
@@ -379,7 +410,7 @@ public enum VideoSlicePipeline {
             if seen.insert(key).inserted {
                 out.append(term)
             }
-            if out.count == 32 { break }
+            if out.count == 200 { break }
         }
         return out
     }
@@ -405,33 +436,6 @@ public enum VideoSlicePipeline {
             if out.count == 12 { break }
         }
         return out
-    }
-
-    /// Rewrite the heard collocation for Anthropic's Fable. Bare「刷皮」(a reskin) is left alone.
-    public static func restoreProductNames(_ text: String) -> String {
-        var s = replaceDigits(
-            pattern: "(?:刷皮|安索皮克|安斯罗皮克|安思罗皮克|安索罗皮克)的飞[豹宝]\\s*([0-9一二三四五六七八九两])",
-            in: text
-        ) { "Anthropic的Fable \($0)" }
-        s = replaceDigits(
-            pattern: "Anthropic的飞[豹宝]\\s*([0-9一二三四五六七八九两])",
-            in: s
-        ) { "Anthropic的Fable \($0)" }
-        s = s.replacingOccurrences(
-            of: #"(?:刷皮|安索皮克|安斯罗皮克|安思罗皮克|安索罗皮克)的Fable"#,
-            with: "Anthropic的Fable",
-            options: .regularExpression
-        )
-        s = replaceDigits(
-            pattern: "Fable\\s*([一二三四五六七八九两])",
-            in: s
-        ) { "Fable \($0)" }
-        s = s.replacingOccurrences(
-            of: #"Fable ([0-9])呢(?=\p{Han})"#,
-            with: "Fable $1",
-            options: .regularExpression
-        )
-        return s
     }
 
     public static func sanitizeHeadline(_ raw: String) -> String {
@@ -489,7 +493,7 @@ public enum VideoSlicePipeline {
 
     /// Complete corrected sentence, used when the model only sliced the opening.
     public static func headlineFallback(source: String) -> (title: String, point: String) {
-        let parts = splitSentences(restoreProductNames(source))
+        let parts = splitSentences(source)
         let title = completedLine(parts.first ?? source, maxLen: 36)
         let point: String
         if parts.count >= 2 {
@@ -1154,7 +1158,7 @@ public enum VideoSlicePipeline {
     }
 
     private static func completedLine(_ text: String, maxLen: Int) -> String {
-        var s = sanitizeHeadline(text)
+        let s = sanitizeHeadline(text)
         guard !s.isEmpty else { return "" }
         if displayLen(s) <= maxLen && !isDanglingTitle(s) { return s }
         var best = ""
@@ -1182,42 +1186,6 @@ public enum VideoSlicePipeline {
             hard = sanitizeHeadline(hard)
         }
         return hard
-    }
-
-    private static func arabicDigit(_ raw: String) -> String {
-        guard let ch = raw.first else { return raw }
-        switch ch {
-        case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
-            return String(ch)
-        case "一": return "1"
-        case "二", "两": return "2"
-        case "三": return "3"
-        case "四": return "4"
-        case "五": return "5"
-        case "六": return "6"
-        case "七": return "7"
-        case "八": return "8"
-        case "九": return "9"
-        default: return String(ch)
-        }
-    }
-
-    private static func replaceDigits(
-        pattern: String,
-        in text: String,
-        rewrite: (String) -> String
-    ) -> String {
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return text }
-        let ns = text as NSString
-        let matches = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
-        guard !matches.isEmpty else { return text }
-        let mutable = NSMutableString(string: text)
-        for match in matches.reversed() {
-            guard match.numberOfRanges > 1 else { continue }
-            let digit = mutable.substring(with: match.range(at: 1))
-            mutable.replaceCharacters(in: match.range(at: 0), with: rewrite(arabicDigit(digit)))
-        }
-        return mutable as String
     }
 
     private static func titleFontSize(text: String, style: TitleOverlayStyle) -> Int {

@@ -77,7 +77,7 @@ public struct CatalogAdminStore: Sendable {
             updatedAt: CatalogFile.utcNow(),
             models: file.models
         )
-        try stamped.validated()
+        _ = try stamped.validated()
         let data = try stamped.encodedPretty()
         try writeAtomically(data, to: catalogURL)
         try FileManager.default.createDirectory(

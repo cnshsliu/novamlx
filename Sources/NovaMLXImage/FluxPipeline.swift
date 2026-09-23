@@ -97,6 +97,9 @@ public class FluxPipeline: @unchecked Sendable {
 
         var lastXt: MLXArray!
         while let xt = denoiser.next() {
+            if ImageRunControl.shared.isCancelled {
+                throw NovaMLXError.apiError("Image generation cancelled")
+            }
             lastXt = xt
         }
 

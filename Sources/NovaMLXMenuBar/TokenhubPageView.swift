@@ -1175,7 +1175,7 @@ struct TokenhubPageView: View {
         updated.isEnabled = formEnabled
         updated.isFree = formIsFree
         updated.supportsResponsesAPI = formSupportsResponses
-        try? manager.update(updated)
+        _ = try? manager.update(updated)
         editingProvider = updated
         reloadProviders()
     }
@@ -1333,7 +1333,7 @@ struct TokenhubPageView: View {
                     if !ok {
                         if var p = manager.get(name) {
                             p.isEnabled = false
-                            try? manager.update(p)
+                            _ = try? manager.update(p)
                         }
                     }
                 }
@@ -1484,7 +1484,7 @@ struct TokenhubPageView: View {
             )
             if editingProvider == nil {
                 if manager.get(providerName) == nil {
-                    try? manager.create(provider)
+                    _ = try? manager.create(provider)
                 }
             } else {
                 _ = try? manager.update(provider)

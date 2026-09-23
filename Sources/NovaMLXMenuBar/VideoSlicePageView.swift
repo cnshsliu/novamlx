@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXEngine
 import NovaMLXInference
 import NovaMLXModelManager
@@ -58,6 +59,7 @@ struct VideoSlicePageView: View {
         .onAppear {
             refreshOutputError()
             restoreVideo()
+            refreshSliceLB()
         }
         .onChange(of: outputDirPath) { _, _ in refreshOutputError() }
     }
@@ -308,9 +310,7 @@ struct VideoSlicePageView: View {
                 await MainActor.run { log(l10n.tr("videoSlice.loadingAligner")) }
                 try await ForcedAlignerService.ensureModel()
                 await MainActor.run {
-                    if pickLLM() == nil {
-                        log(l10n.tr("videoSlice.needLLM"))
-                    }
+                    refreshSliceLB()
                     log(l10n.tr("videoSlice.stackReady"))
                     isLoadingStack = false
                 }
@@ -326,9 +326,21 @@ struct VideoSlicePageView: View {
     private func runPipeline() {
         guard let videoURL else { return }
         let asrId = inferenceService.transcriptionService.listLoadedModels().first
-        let llmId = pickLLM()
         guard let asrId else {
             errorText = l10n.tr("videoSlice.needASR")
+            return
+        }
+        switch sliceLBReadiness() {
+        case .ready:
+            break
+        case .createdEmpty:
+            errorText = l10n.tr("videoSlice.lbCreated")
+            return
+        case .noUsableModel:
+            errorText = l10n.tr("videoSlice.lbEmpty")
+            return
+        case .failed(let message):
+            errorText = message
             return
         }
         let destStatus = VideoSlicePipeline.inspectOutputDirectory(outputDirPath)
@@ -358,9 +370,6 @@ struct VideoSlicePageView: View {
                 try VideoSlicePipeline.extractAudio(from: videoURL, to: wav)
                 let duration = try VideoSlicePipeline.probeDuration(wav)
                 await MainActor.run { log(String(format: "audio %.1fs", duration)) }
-                if llmId == nil {
-                    await MainActor.run { log(l10n.tr("videoSlice.needLLM")) }
-                }
 
                 struct ASRChunk {
                     var start: Double
@@ -369,8 +378,15 @@ struct VideoSlicePageView: View {
                     var text: String
                 }
                 var chunks: [ASRChunk] = []
-                let asrContext = VideoSlicePipeline.asrContext(glossary: nameList, reference: ref)
-                let nameTerms = VideoSlicePipeline.glossaryTerms(nameList)
+                try VideoSlicePipeline.ensureProperNounFile()
+                let nameTerms = VideoSlicePipeline.mergedGlossary(
+                    uiText: nameList,
+                    fileTerms: VideoSlicePipeline.properNounTerms()
+                )
+                let asrContext = VideoSlicePipeline.asrContext(
+                    glossary: nameTerms.joined(separator: "\n"),
+                    reference: ref
+                )
                 let chunkLen: Double = duration <= 360 ? max(duration, 1) : 90
                 var t: Double = 0
                 var idx = 0
@@ -393,12 +409,10 @@ struct VideoSlicePageView: View {
                 }
 
                 var corrected = chunks.map { VideoSlicePipeline.tidyTranscript($0.text) }
-                if let llmId {
-                    await MainActor.run { log("LLM proofread") }
-                    corrected = await proofreadChunks(
-                        chunks: corrected, reference: ref, glossary: nameTerms, model: llmId)
-                    corrected = corrected.map { VideoSlicePipeline.tidyTranscript($0) }
-                }
+                await MainActor.run { log("LLM proofread via lb:for-video-slice") }
+                corrected = await proofreadChunks(
+                    chunks: corrected, reference: ref, glossary: nameTerms)
+                corrected = corrected.map { VideoSlicePipeline.tidyTranscript($0) }
                 let transcript = corrected.joined(separator: "\n")
                 try transcript.write(
                     to: destRoot.appendingPathComponent("transcript.txt"),
@@ -432,18 +446,18 @@ struct VideoSlicePageView: View {
                 }
 
                 var specs: [VideoSliceSpec] = []
-                if let llmId, !sents.isEmpty {
+                if !sents.isEmpty {
                     await MainActor.run { log("LLM theme plan") }
                     let planned = await planThemes(
-                        sentences: sents, maxDur: target, model: llmId)
+                        sentences: sents, maxDur: target)
                     specs = VideoSlicePipeline.applySentencePlan(planned, sentences: sents)
                 }
                 if specs.isEmpty {
                     specs = VideoSlicePipeline.packTopics(sentences: sents, maxDur: target)
                 }
-                if let llmId, !specs.isEmpty {
+                if !specs.isEmpty {
                     await MainActor.run { log("LLM titles") }
-                    specs = await summarizeSpecs(specs, model: llmId, glossary: nameTerms)
+                    specs = await summarizeSpecs(specs, glossary: nameTerms)
                 }
                 let themeDump = specs.enumerated().map { i, s in
                     "\(i + 1)\t\(String(format: "%.1f", s.start))-\(String(format: "%.1f", s.end))\t\(s.title)\t\(s.point)"
@@ -489,27 +503,120 @@ struct VideoSlicePageView: View {
         }
     }
 
-    private func pickLLM() -> String? {
-        inferenceService.listLoadedModels().first { id in
-            let lower = id.lowercased()
-            if lower.contains("dflash") || lower.contains("mtp") { return false }
-            if lower.contains("asr") || lower.contains("whisper")
-                || lower.contains("tts") || lower.contains("aligner")
-            {
-                return false
+    private enum SliceLBReadiness {
+        case ready
+        case createdEmpty
+        case noUsableModel
+        case failed(String)
+    }
+
+    private func sliceLBReadiness() -> SliceLBReadiness {
+        do {
+            try VideoSlicePipeline.ensureProperNounFile()
+            let slug = "for-video-slice"
+            guard let store = NovaDB.shared.loadBalancerStore,
+                  let memberStore = NovaDB.shared.lbMemberStore
+            else {
+                return .failed(l10n.tr("videoSlice.lbEmpty"))
             }
-            if let rec = modelManager.getRecord(id) {
-                return rec.modelType == .llm || rec.modelType == .vlm
+            var created = false
+            var lb = try store.getLBBySlug(slug)
+            if lb == nil {
+                let made = LoadBalancer(name: "Video Slice", slug: slug)
+                try store.upsertLB(made)
+                lb = made
+                created = true
             }
-            return true
+            guard let lb else { return .createdEmpty }
+            let members = try memberStore.listMembers(lbId: lb.id)
+            let usable = members.contains { member in
+                guard member.isEnabled else { return false }
+                switch member.kind {
+                case .remote:
+                    return true
+                case .local:
+                    return isUsableLocalLLM(member.ref)
+                }
+            }
+            if usable { return .ready }
+            return created ? .createdEmpty : .noUsableModel
+        } catch {
+            return .failed(error.localizedDescription)
         }
+    }
+
+    private func isUsableLocalLLM(_ modelId: String) -> Bool {
+        guard inferenceService.isModelLoaded(modelId) else { return false }
+        if let rec = modelManager.getRecord(modelId) {
+            return rec.modelType == .llm || rec.modelType == .vlm
+        }
+        let lower = modelId.lowercased()
+        if lower.contains("asr") || lower.contains("whisper")
+            || lower.contains("tts") || lower.contains("aligner")
+        {
+            return false
+        }
+        return true
+    }
+
+    private func refreshSliceLB() {
+        switch sliceLBReadiness() {
+        case .ready:
+            if isSliceLBError { errorText = nil }
+        case .createdEmpty:
+            errorText = l10n.tr("videoSlice.lbCreated")
+        case .noUsableModel:
+            errorText = l10n.tr("videoSlice.lbEmpty")
+        case .failed(let message):
+            errorText = message
+        }
+    }
+
+    private var isSliceLBError: Bool {
+        guard let errorText else { return false }
+        return errorText == l10n.tr("videoSlice.lbCreated")
+            || errorText == l10n.tr("videoSlice.lbEmpty")
+            || errorText == l10n.tr("videoSlice.needLLM")
+    }
+
+    private func askSliceLB(_ prompt: String, maxTokens: Int, temperature: Double) async throws -> String {
+        guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
+            throw NovaMLXError.apiError("Bad local API URL")
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let key = appState.apiKey, !key.isEmpty {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        let body: [String: Any] = [
+            "model": "lb:for-video-slice",
+            "temperature": temperature,
+            "max_tokens": maxTokens,
+            "enable_thinking": false,
+            "messages": [["role": "user", "content": prompt]],
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        if status >= 400 {
+            let message = ((obj?["error"] as? [String: Any])?["message"] as? String) ?? "HTTP \(status)"
+            throw NovaMLXError.apiError(message)
+        }
+        let choices = obj?["choices"] as? [[String: Any]]
+        let message = choices?.first?["message"] as? [String: Any]
+        let text = (message?["content"] as? String) ?? ""
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw NovaMLXError.apiError("lb:for-video-slice returned an empty reply")
+        }
+        return text
     }
 
     private func proofreadChunks(
         chunks: [String],
         reference: String,
-        glossary: [String],
-        model: String
+        glossary: [String]
     ) async -> [String] {
         guard chunks.contains(where: { !$0.isEmpty }) else { return chunks }
         let listing = chunks.enumerated().map { i, text in
@@ -522,7 +629,9 @@ struct VideoSlicePageView: View {
         2. 补上。！？，让每一句都是完整意思。
         3. 不要发明没说的内容，不要总结，不要改写口吻。
         4. chunks 数量必须与输入一致。
-        5. 公司、实验室、模型、产品写成官方名称，数字用阿拉伯数字。中文谐音不要留着。不确定就保持原文。
+        5. 用常识改正明显听错的词：公司、模型、单位、价格。例如讲模型价格时「图跟」写成 Token。
+        6. 词表里的官方写法优先。词表没有、又不能从上下文确定的，保持原文。
+        7. 不要把专有名词改成中文谐音。
         只输出 JSON。
         示例：输入 [0] 今天天汽不错，我先讲讲一下
         输出 {"chunks":[{"i":0,"text":"今天天气不错。我先讲一下。"}]}
@@ -539,14 +648,6 @@ struct VideoSlicePageView: View {
             \(listed)
             """
         }
-        let heard = chunks.joined()
-        if Self.mentionsFable(heard, glossary: glossary) {
-            prompt += """
-
-
-            若上下文是在讲这款模型：「刷皮的飞豹五」写成「Anthropic的Fable 5」。只说游戏换皮肤时不要改「刷皮」。
-            """
-        }
         if !reference.isEmpty {
             prompt += """
 
@@ -555,16 +656,13 @@ struct VideoSlicePageView: View {
             \(reference.prefix(8000))
             """
         }
-        let req = InferenceRequest(
-            model: model,
-            messages: [ChatMessage(role: .user, content: prompt)],
-            temperature: 0.2,
-            maxTokens: min(8192, max(1024, chunks.joined().count + 512)),
-            enableThinking: false
-        )
         do {
-            let r = try await inferenceService.generate(req)
-            return VideoSlicePipeline.parseCorrectedChunks(r.text, fallback: chunks)
+            let text = try await askSliceLB(
+                prompt,
+                maxTokens: min(8192, max(1024, chunks.joined().count + 512)),
+                temperature: 0.2
+            )
+            return VideoSlicePipeline.parseCorrectedChunks(text, fallback: chunks)
         } catch {
             return chunks
         }
@@ -572,8 +670,7 @@ struct VideoSlicePageView: View {
 
     private func planThemes(
         sentences: [TimedSentence],
-        maxDur: Double,
-        model: String
+        maxDur: Double
     ) async -> [PlannedSlice] {
         guard !sentences.isEmpty else { return [] }
         let listing = sentences.prefix(160).enumerated().map { i, s in
@@ -592,51 +689,21 @@ struct VideoSlicePageView: View {
 
         \(listing)
         """
-        let req = InferenceRequest(
-            model: model,
-            messages: [ChatMessage(role: .user, content: prompt)],
-            temperature: 0.2,
-            maxTokens: 2048,
-            enableThinking: false
-        )
         do {
-            let r = try await inferenceService.generate(req)
-            return VideoSlicePipeline.parseSlicePlan(r.text)
+            let text = try await askSliceLB(prompt, maxTokens: 2048, temperature: 0.2)
+            return VideoSlicePipeline.parseSlicePlan(text)
         } catch {
             return []
         }
     }
 
-    private static func mentionsFable(_ text: String, glossary: [String]) -> Bool {
-        if text.contains("飞豹") || text.contains("飞宝") || text.contains("Fable") || text.contains("Anthropic") {
-            return true
-        }
-        return glossary.contains {
-            $0.localizedCaseInsensitiveContains("fable") || $0.localizedCaseInsensitiveContains("anthropic")
-        }
-    }
-
-    private static func titleExample(texts: [String], glossary: [String]) -> String {
-        if mentionsFable(texts.joined(), glossary: glossary) {
-            return """
-            差的标题：刷皮的飞豹五呢确实是非常贵但
-            好的标题：Anthropic的Fable 5很贵但很好
-            """
-        }
-        return """
-        差的标题：今天我们来讲讲这个东西它其实
-        好的标题：这套做法比旧方案更省事
-        """
-    }
-
     private func summarizeSpecs(
         _ specs: [VideoSliceSpec],
-        model: String,
         glossary: [String]
     ) async -> [VideoSliceSpec] {
         var specs = specs
         let texts = specs.map { VideoSlicePipeline.joinWords($0.words) }
-        let first = await headlineBatch(texts: texts, model: model, glossary: glossary, rejected: nil)
+        let first = await headlineBatch(texts: texts, glossary: glossary, rejected: nil)
         var retry: [Int] = []
         for i in specs.indices {
             let proposed = i < first.count ? first[i] : (title: "", point: "")
@@ -656,7 +723,6 @@ struct VideoSlicePageView: View {
             let rejected = i < first.count ? first[i].title : ""
             let second = await headlineBatch(
                 texts: [texts[i]],
-                model: model,
                 glossary: glossary,
                 rejected: rejected
             )
@@ -677,7 +743,6 @@ struct VideoSlicePageView: View {
 
     private func headlineBatch(
         texts: [String],
-        model: String,
         glossary: [String],
         rejected: String?
     ) async -> [(title: String, point: String)] {
@@ -693,7 +758,8 @@ struct VideoSlicePageView: View {
           不要停在「但、而、因为、所以、如果、的」。
           不要照抄第一句，不要用第一句的前十几个字。
         - point：不超过 32 字的核心观点，同样不要截取原文开头。
-        \(Self.titleExample(texts: texts, glossary: glossary))
+        差的标题：今天我们来讲讲这个东西它其实
+        好的标题：这套做法比旧方案更省事
         只输出 JSON：
         {"items":[{"i":0,"title":"...","point":"..."}]}
 
@@ -705,16 +771,13 @@ struct VideoSlicePageView: View {
         if let rejected, !rejected.isEmpty {
             prompt += "\n\n不要再输出这个不合格标题：\(rejected)"
         }
-        let req = InferenceRequest(
-            model: model,
-            messages: [ChatMessage(role: .user, content: prompt)],
-            temperature: 0.3,
-            maxTokens: min(4096, 240 * max(1, texts.count) + 200),
-            enableThinking: false
-        )
         do {
-            let r = try await inferenceService.generate(req)
-            return VideoSlicePipeline.parseHeadlines(r.text, count: texts.count)
+            let text = try await askSliceLB(
+                prompt,
+                maxTokens: min(4096, 240 * max(1, texts.count) + 200),
+                temperature: 0.3
+            )
+            return VideoSlicePipeline.parseHeadlines(text, count: texts.count)
         } catch {
             return Array(repeating: (title: "", point: ""), count: texts.count)
         }

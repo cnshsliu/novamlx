@@ -318,8 +318,9 @@ private class BailingHybridMLA: Module {
         let kvLatent = kvALayerNorm(compressedKv)  // [B, L, kvLoraRank]
 
         // RoPE — offset = cache.offset BEFORE update (number of previously cached tokens)
-        qPe = applyRotaryPosition(rope, to: qPe, cache: cache)
-        kPe = applyRotaryPosition(rope, to: kPe, cache: cache)
+        let ropeOffset = cache?.ropeOffset
+        qPe = applyRotaryPosition(rope, to: qPe, offset: ropeOffset)
+        kPe = applyRotaryPosition(rope, to: kPe, offset: ropeOffset)
 
         // Expand kvLatent: [B, L, kvLoraRank] -> [B, 1, L, kvLoraRank]
         var kvExpanded = expandedDimensions(kvLatent, axis: 1)

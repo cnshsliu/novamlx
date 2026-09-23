@@ -48,7 +48,7 @@ public final class TTSService: @unchecked Sendable {
         if hadPrevious {
             ttsLog.info("[TTS] Replacing existing TTS model, clearing GPU cache...")
             lock.withLock { pipeline = nil; qwen3ModelDir = nil; loadedModelId = nil }
-            MLX.GPU.clearCache()
+            MLX.Memory.clearCache()
         }
 
         let dirContents = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
@@ -103,7 +103,7 @@ public final class TTSService: @unchecked Sendable {
             qwen3ModelDir = nil
             loadedModelId = nil
         }
-        MLX.GPU.clearCache()
+        MLX.Memory.clearCache()
         ttsLog.info("[TTS] Model unloaded")
     }
 
@@ -197,7 +197,7 @@ public final class TTSService: @unchecked Sendable {
                 throw NovaMLXError.apiError("Failed to load voice profile audio")
             }
 
-            var params = DotsTTSPipeline.Params()
+            let params = DotsTTSPipeline.Params()
             let audio = pipe.generate(
                 targetText: text,
                 refAudio48k: refAudio,

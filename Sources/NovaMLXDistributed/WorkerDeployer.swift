@@ -245,7 +245,7 @@ public final class WorkerDeployer: @unchecked Sendable {
 
                     let configJSON = workerConfigJSON(coordinatorHost: coordinatorHost, coordinatorPort: coordinatorPort)
                     let configCmd = "mkdir -p ~/.nova && cat > ~/.nova/config.json <<'NOVAMLX_EOF'\n\(configJSON)\nNOVAMLX_EOF"
-                    let (cfgOut, cfgCode) = try await sshCommandWithOutput(host: host, username: username, command: configCmd)
+                    let (_, cfgCode) = try await sshCommandWithOutput(host: host, username: username, command: configCmd)
                     guard cfgCode == 0 else {
                         throw DeployError.remoteCommandFailed("write config", cfgCode)
                     }
@@ -253,7 +253,7 @@ public final class WorkerDeployer: @unchecked Sendable {
                     // Write separate cluster-policy.json with Thunderbolt policy from Coordinator's config
                     let policyJSON = clusterPolicyJSON(coordinatorHost: coordinatorHost, coordinatorPort: coordinatorPort)
                     let policyCmd = "mkdir -p ~/.nova && cat > ~/.nova/cluster-policy.json <<'NOVAMLX_EOF'\n\(policyJSON)\nNOVAMLX_EOF"
-                    let (policyOut, policyCode) = try await sshCommandWithOutput(host: host, username: username, command: policyCmd)
+                    let (_, policyCode) = try await sshCommandWithOutput(host: host, username: username, command: policyCmd)
                     guard policyCode == 0 else {
                         throw DeployError.remoteCommandFailed("write cluster-policy.json", policyCode)
                     }

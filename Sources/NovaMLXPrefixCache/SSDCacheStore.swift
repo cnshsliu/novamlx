@@ -317,8 +317,9 @@ public final class SSDCacheStore: @unchecked Sendable {
             _ = index.remove(entry.blockHash)
         }
         index.clear()
+        let removed = allEntries
         writeQueue.async {
-            for entry in allEntries {
+            for entry in removed {
                 try? FileManager.default.removeItem(at: entry.filePath)
             }
         }

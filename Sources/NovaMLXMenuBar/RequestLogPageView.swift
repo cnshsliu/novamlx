@@ -8,6 +8,7 @@ import NovaMLXUtils
 /// fed by the HTTP middleware (start) and the inference layer (finish).
 struct RequestLogPageView: View {
     @ObservedObject var appState: MenuBarAppState
+    let inferenceService: InferenceService
 
     /// Refresh timer so the active-requests section updates live (the store
     /// mutates on the inference queue; we poll on the main thread).
@@ -66,7 +67,7 @@ struct RequestLogPageView: View {
             } else {
                 VStack(spacing: 6) {
                     ForEach(active) { entry in
-                        ActiveRequestRow(entry: entry, now: refreshTick)
+                        ActiveRequestRow(entry: entry, now: refreshTick, inferenceService: inferenceService)
                     }
                 }
             }
@@ -134,6 +135,7 @@ struct RequestLogPageView: View {
 private struct ActiveRequestRow: View {
     let entry: RequestLogEntry
     let now: Date
+    let inferenceService: InferenceService
     @State private var isExpanded: Bool = false
 
     private var elapsed: TimeInterval { now.timeIntervalSince(entry.startedAt) }
@@ -159,9 +161,11 @@ private struct ActiveRequestRow: View {
                             .lineLimit(1)
                     }
                     HStack(spacing: 6) {
-                        Text(entry.apiKeyName ?? "no-key")
+                        Text(entry.callerLabel)
                             .font(.system(size: 10.5))
                             .foregroundColor(NovaTheme.Colors.textTertiary)
+                            .lineLimit(1)
+                            .help(entry.callerLabel)
                         if entry.kind == nil {
                             Text("pending")
                                 .font(.system(size: 10.5))
@@ -180,6 +184,17 @@ private struct ActiveRequestRow: View {
                 Text(String(format: "%.1fs", elapsed))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(NovaTheme.Colors.textSecondary)
+
+                Button {
+                    let id = entry.id
+                    Task { await inferenceService.abort(httpRequestId: id) }
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(NovaTheme.Colors.statusError)
+                }
+                .buttonStyle(.borderless)
+                .help("Cancel this request")
 
                 chevron
             }
@@ -244,12 +259,12 @@ private struct CompletedRequestRow: View {
                     .frame(minWidth: 90, alignment: .leading)
                     .lineLimit(1)
 
-                Text(entry.apiKeyName ?? "no-key")
+                Text(entry.callerLabel)
                     .font(.system(size: 10.5))
                     .foregroundColor(NovaTheme.Colors.textTertiary)
-                    .frame(maxWidth: 110, alignment: .leading)
+                    .frame(maxWidth: 160, alignment: .leading)
                     .lineLimit(1)
-                    .help(entry.apiKeyName ?? "no-key")
+                    .help(entry.callerLabel)
 
                 Spacer()
 
@@ -332,6 +347,7 @@ private struct RequestDetailPanel: View {
             if let status = entry.responseStatus {
                 statusBadge(status)
             }
+            metaTag("caller", value: entry.callerLabel)
             if let ct = entry.requestContentType, !ct.isEmpty {
                 metaTag("Content-Type", value: ct)
             }

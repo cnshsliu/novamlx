@@ -1,10 +1,17 @@
 import Foundation
+import NovaMLXAudio
 import NovaMLXCore
 import NovaMLXUtils
 
-/// Qwen3-TTS Base voice cloning via mlx-audio (Python).
-/// CustomVoice / VoiceDesign checkpoints are rejected — they are a different recipe.
+/// Qwen3-TTS Base voice cloning in Swift. The vocoder decodes generated
+/// codec frames only. CustomVoice / VoiceDesign checkpoints are rejected.
 public enum Qwen3TTSCloneService: Sendable {
+    private static let lock = NSLock()
+    private final class Holder: @unchecked Sendable {
+        var model: Qwen3TTSCloneModel?
+        var path: String?
+    }
+    private static let holder = Holder()
     public static let defaultModelId = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
     public static let dotsModelId = "smcleod/dots.tts-soar-mlx"
 
@@ -66,8 +73,13 @@ public enum Qwen3TTSCloneService: Sendable {
     }
 
     public static func ensureModel(at dir: URL? = nil) async throws {
-        let model = dir?.path ?? localModelPath() ?? defaultModelId
-        try runPython(arguments: ["--prefetch", "--model", model])
+        let url = try modelDirectory(dir)
+        if lock.withLock({ holder.path == url.path && holder.model != nil }) { return }
+        let model = try await Qwen3TTSCloneModel.load(directory: url)
+        lock.withLock {
+            holder.model = model
+            holder.path = url.path
+        }
     }
 
     public static func synthesize(
@@ -77,15 +89,18 @@ public enum Qwen3TTSCloneService: Sendable {
         modelDir: URL,
         output: URL? = nil
     ) async throws -> Data {
+        try await ensureModel(at: modelDir)
+        let model = lock.withLock { holder.model }
+        guard let model else {
+            throw NovaMLXError.apiError("Qwen3-TTS clone model is not loaded")
+        }
+        let (_, audio) = try loadAudioArray(from: refAudio, sampleRate: model.sampleRate)
+        let samples = try model.synthesize(
+            text: text, refAudio: audio, refText: refText, language: nil, temperature: 0.6
+        )
         let dest = output ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("novamlx_qwen3tts_\(UUID().uuidString).wav")
-        try runPython(arguments: [
-            "--model", modelDir.path,
-            "--text", text,
-            "--ref-audio", refAudio.path,
-            "--ref-text", refText,
-            "--output", dest.path,
-        ])
+        try AudioUtils.writeWavFile(samples: samples, sampleRate: model.sampleRate, fileURL: dest)
         let data = try Data(contentsOf: dest)
         if output == nil {
             try? FileManager.default.removeItem(at: dest)
@@ -93,37 +108,17 @@ public enum Qwen3TTSCloneService: Sendable {
         return data
     }
 
+    public static func uniqueRefPrefix(_ refText: String, _ text: String) -> String {
+        Qwen3TTSCloneModel.uniqueRefPrefix(refText, text)
+    }
+
+    public static func prefixCutSamples(out: Int, ref: Int, text: String, refText: String) -> Int? {
+        Qwen3TTSCloneModel.prefixCutSamples(out: out, ref: ref, text: text, refText: refText)
+    }
+
     public static func decodePrefetchJSON(_ data: Data) throws -> Bool {
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         return obj?["ok"] as? Bool == true
-    }
-
-    private static func runPython(arguments: [String]) throws {
-        let script = try scriptURL()
-        let python = pythonExecutable()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: python)
-        proc.arguments = [script.path] + arguments
-        let stdout = Pipe()
-        let stderr = Pipe()
-        proc.standardOutput = stdout
-        proc.standardError = stderr
-        var env = ProcessInfo.processInfo.environment
-        env["TRANSFORMERS_VERBOSITY"] = "error"
-        env["TOKENIZERS_PARALLELISM"] = "false"
-        env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-        proc.environment = env
-        try proc.run()
-        proc.waitUntilExit()
-        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if !out.isEmpty {
-            NovaMLXLog.info("[Qwen3TTS] \(out.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))")
-        }
-        if proc.terminationStatus != 0 {
-            NovaMLXLog.error("[Qwen3TTS] clone failed: \(err.prefix(800))")
-            throw NovaMLXError.apiError(Self.shortCloneError(stderr: err, stdout: out))
-        }
     }
 
     static func shortCloneError(stderr: String, stdout: String) -> String {
@@ -152,18 +147,6 @@ public enum Qwen3TTSCloneService: Sendable {
         return msg
     }
 
-    private static func pythonExecutable() -> String {
-        let candidates = [
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3",
-        ]
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            return path
-        }
-        return "python3"
-    }
-
     private static func localModelPath() -> String? {
         let dir = NovaMLXPaths.directory(forModelId: defaultModelId)
         if isQwen3TTSDirectory(dir) { return dir.path }
@@ -172,28 +155,20 @@ public enum Qwen3TTSCloneService: Sendable {
         return nil
     }
 
-    private static func scriptURL() throws -> URL {
-        if let bundle = ResourceBundleLocator.find(bundleName: "NovaMLX_NovaMLXUtils") {
-            let subs = ["scripts", "Resources/scripts", nil] as [String?]
-            for sub in subs {
-                if let url = bundle.url(
-                    forResource: "qwen3_tts_clone", withExtension: "py", subdirectory: sub)
-                {
-                    return url
-                }
+    private static func modelDirectory(_ dir: URL?) throws -> URL {
+        if let dir {
+            guard isQwen3TTSDirectory(dir) || FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("config.json").path
+            ) else {
+                throw NovaMLXError.apiError("Qwen3-TTS weights not found at \(dir.path)")
             }
+            return dir
         }
-        let sourceRelatives = [
-            URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .appendingPathComponent("NovaMLXUtils/Resources/scripts/qwen3_tts_clone.py"),
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("Sources/NovaMLXUtils/Resources/scripts/qwen3_tts_clone.py"),
-        ]
-        for url in sourceRelatives where FileManager.default.fileExists(atPath: url.path) {
-            return url
+        if let path = localModelPath() {
+            return URL(fileURLWithPath: path)
         }
-        throw NovaMLXError.apiError("qwen3_tts_clone.py not found in app resources")
+        throw NovaMLXError.apiError(
+            "Qwen3-TTS Base is not downloaded. Download \(defaultModelId) before cloning."
+        )
     }
 }

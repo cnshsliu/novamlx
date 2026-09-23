@@ -184,6 +184,7 @@ struct ChatPageView: View {
             if record.family == .dotsTts || record.family == .qwen3Tts { return .tts }
             if record.family == .flux || record.family == .flux2
                 || record.family == .zImage || record.family == .qwenImage
+                || record.family == .qwenImage21
                 || record.family == .stableDiffusion {
                 return .image
             }

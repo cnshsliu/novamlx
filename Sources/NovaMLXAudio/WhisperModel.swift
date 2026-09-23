@@ -90,8 +90,8 @@ fileprivate class WhisperAttention: Module {
         let nState = q.dim(2)
         let scale = pow(MLXArray(Float(nState / nHead)), -0.25)
 
-        var qR = q.reshaped([nBatch, nCtx, nHead, nState / nHead]).transposed(0, 2, 1, 3) * scale
-        var kR = k.reshaped([k.dim(0), k.dim(1), nHead, nState / nHead]).transposed(0, 2, 3, 1) * scale
+        let qR = q.reshaped([nBatch, nCtx, nHead, nState / nHead]).transposed(0, 2, 1, 3) * scale
+        let kR = k.reshaped([k.dim(0), k.dim(1), nHead, nState / nHead]).transposed(0, 2, 3, 1) * scale
         let vR = v.reshaped([v.dim(0), v.dim(1), nHead, nState / nHead]).transposed(0, 2, 1, 3)
 
         var qk = matmul(qR, kR)
@@ -288,13 +288,7 @@ public class WhisperModel: Module {
     // MARK: - Generation
 
     public func detectLanguage(mel: MLXArray, tokenizer: Tokenizers.Tokenizer) -> (language: String, languageToken: Int) {
-        let nAudioCtx = mel.dim(1)
-        let nAudioState = dims.nAudioState
-        let nAudioHead = dims.nAudioHead
-
-        // Start of transcript + language tokens
         let sotToken = 50258 // <|startoftranscript|>
-        let allLanguageTokens = Array(50259..<50259 + 99) // language tokens
 
         let x = MLXArray([sotToken]).reshaped([1, 1])
         let audioFeatures = encoder(mel)
@@ -336,8 +330,6 @@ public class WhisperModel: Module {
             whisperLog.warning("Whisper: no tokenizer loaded, cannot transcribe")
             return ("", [], "en", 0.0)
         }
-
-        let nAudioCtx = mel.dim(1)
 
         // Detect or use provided language
         var langToken: Int
@@ -427,7 +419,6 @@ public class WhisperModel: Module {
                     return
                 }
 
-                do {
                     var langToken: Int
                     var detectedLang: String
                     if let language = language {
@@ -508,9 +499,6 @@ public class WhisperModel: Module {
                         totalTime: elapsed
                     )))
                     continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
@@ -570,10 +558,8 @@ public class WhisperModel: Module {
 
         if hasQuantization {
             quantize(model: model) { path, module in
-                if let linear = module as? Linear {
-                    if weights["\(path).scales"] != nil {
-                        return (64, 4)
-                    }
+                if module is Linear, weights["\(path).scales"] != nil {
+                    return (groupSize: 64, bits: 4, mode: .affine)
                 }
                 return nil
             }

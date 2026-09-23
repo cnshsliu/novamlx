@@ -105,6 +105,8 @@ struct NovaMLXWorker {
                 case WorkerMessageType.abort:
                     if let reqId = msg.requestId, let uuid = UUID(uuidString: reqId) {
                         engine.abort(requestId: uuid)
+                        batcher.abort(requestId: uuid)
+                        fusedScheduler.abort(requestId: uuid)
                     }
 
                 case WorkerMessageType.ping:

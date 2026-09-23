@@ -19,19 +19,30 @@ struct ImageGenerationRequest: Codable, Sendable {
     }
 
     var resolvedN: Int { min(max(n ?? 1, 1), 4) }
-    var resolvedSize: (width: Int, height: Int) {
-        switch size ?? "1024x1024" {
-        case "256x256": return (256, 256)
-        case "512x512": return (512, 512)
-        case "1024x1024": return (1024, 1024)
-        case "768x1344": return (768, 1344)
-        case "1344x768": return (1344, 768)
-        case "864x1152": return (864, 1152)
-        case "1152x864": return (1152, 864)
-        default: return (1024, 1024)
-        }
-    }
+    var resolvedSize: (width: Int, height: Int) { novaImageSize(size) }
     var resolvedResponseFormat: String { responseFormat ?? "b64_json" }
+}
+
+func novaImageSize(_ size: String?) -> (width: Int, height: Int) {
+    let raw = size ?? "1024x1024"
+    switch raw {
+    case "256x256": return (256, 256)
+    case "512x512": return (512, 512)
+    case "1024x1024": return (1024, 1024)
+    case "768x1344": return (768, 1344)
+    case "1344x768": return (1344, 768)
+    case "864x1152": return (864, 1152)
+    case "1152x864": return (1152, 864)
+    default:
+        let parts = raw.lowercased().split(separator: "x", omittingEmptySubsequences: false)
+        if parts.count == 2, let width = Int(parts[0]), let height = Int(parts[1]),
+           (256...2816).contains(width), (256...2816).contains(height),
+           width.isMultiple(of: 16), height.isMultiple(of: 16)
+        {
+            return (width, height)
+        }
+        return (1024, 1024)
+    }
 }
 
 struct ImageGenerationResponse: Codable, Sendable {
@@ -66,18 +77,7 @@ struct ImageEditRequest {
     let responseFormat: String?
 
     var resolvedN: Int { min(max(n ?? 1, 1), 4) }
-    var resolvedSize: (width: Int, height: Int) {
-        switch size ?? "1024x1024" {
-        case "256x256": return (256, 256)
-        case "512x512": return (512, 512)
-        case "1024x1024": return (1024, 1024)
-        case "768x1344": return (768, 1344)
-        case "1344x768": return (1344, 768)
-        case "864x1152": return (864, 1152)
-        case "1152x864": return (1152, 864)
-        default: return (1024, 1024)
-        }
-    }
+    var resolvedSize: (width: Int, height: Int) { novaImageSize(size) }
     var resolvedResponseFormat: String { responseFormat ?? "b64_json" }
 }
 
@@ -93,17 +93,6 @@ struct ImageVariationRequest {
     let responseFormat: String?
 
     var resolvedN: Int { min(max(n ?? 1, 1), 4) }
-    var resolvedSize: (width: Int, height: Int) {
-        switch size ?? "1024x1024" {
-        case "256x256": return (256, 256)
-        case "512x512": return (512, 512)
-        case "1024x1024": return (1024, 1024)
-        case "768x1344": return (768, 1344)
-        case "1344x768": return (1344, 768)
-        case "864x1152": return (864, 1152)
-        case "1152x864": return (1152, 864)
-        default: return (1024, 1024)
-        }
-    }
+    var resolvedSize: (width: Int, height: Int) { novaImageSize(size) }
     var resolvedResponseFormat: String { responseFormat ?? "b64_json" }
 }

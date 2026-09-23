@@ -19,6 +19,9 @@ import NovaMLXUtils
 ///
 /// Multiple addresses per rank enable parallel TCP connections for throughput.
 public final class RingTransportManager: @unchecked Sendable {
+    private final class GroupBox: @unchecked Sendable {
+        var group: DistributedGroup = .uninitialized
+    }
 
     public static let shared = RingTransportManager()
 
@@ -130,12 +133,11 @@ public final class RingTransportManager: @unchecked Sendable {
 
         NovaMLXLog.info("[RingTransport] Initializing Ring backend from hostfile JSON (rank=\(rank))...")
         NovaMLXLog.info("[RingTransport] Hostfile path: \(hostfilePath)")
-        if let content = try? String(contentsOfFile: hostfilePath) {
-            NovaMLXLog.info("[RingTransport] Hostfile content:\n\(content)")
-        }
+        let hostfileText = (try? String(contentsOfFile: hostfilePath, encoding: .utf8)) ?? "unreadable"
+        NovaMLXLog.info("[RingTransport] Hostfile content:\n\(hostfileText)")
 
         logToRingDebug("Starting Ring init - hostfile=\(hostfilePath), rank=\(rank)")
-        logToRingDebug("Hostfile content:\n\(try? String(contentsOfFile: hostfilePath) ?? "unreadable")")
+        logToRingDebug("Hostfile content:\n\(hostfileText)")
 
         // Dump current IPv4 interfaces for diagnostics (very useful when debugging link-local vs static IP issues)
         dumpIPv4Interfaces()
@@ -372,7 +374,7 @@ public final class RingTransportManager: @unchecked Sendable {
     /// Prevents the entire worker process from hanging forever on a bad Ring init.
     private func initializeRingWithTimeout(hostfilePath: String, rank: Int, timeoutSeconds: TimeInterval) -> DistributedGroup {
         let semaphore = DispatchSemaphore(value: 0)
-        var resultGroup: DistributedGroup = .uninitialized
+        let resultGroup = GroupBox()
 
         DispatchQueue.global(qos: .userInitiated).async {
             // We re-set the env vars inside the background task to be extra safe
@@ -384,7 +386,7 @@ public final class RingTransportManager: @unchecked Sendable {
 
             NovaMLXLog.info("[RingTransport] (background) Calling MLXDistributedWrapper.initialize for ring (rank=\(rank))...")
             let g = MLXDistributedWrapper.initialize(strict: false, backend: "ring")
-            resultGroup = g
+            resultGroup.group = g
             semaphore.signal()
         }
 
@@ -398,8 +400,8 @@ public final class RingTransportManager: @unchecked Sendable {
             return .uninitialized
         }
 
-        logToRingDebug("Ring init completed. valid=\(resultGroup.isValid), size=\(resultGroup.size)")
-        return resultGroup
+        logToRingDebug("Ring init completed. valid=\(resultGroup.group.isValid), size=\(resultGroup.group.size)")
+        return resultGroup.group
     }
 
     // MARK: - Transport

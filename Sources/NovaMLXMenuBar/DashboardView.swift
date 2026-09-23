@@ -285,6 +285,10 @@ public struct DashboardView: View {
     // MARK: - Live inference speed helpers
 
     private var dashboardSpeedValue: String {
+        if let activity = appState.liveActivity, activity.kind == .image, activity.speed <= 0 {
+            let elapsed = max(0, Date().timeIntervalSince(activity.startedAt))
+            return String(format: "%.0f", elapsed)
+        }
         if let activity = appState.liveActivity, activity.speed > 0 {
             return String(format: "%.1f", activity.speed)
         }
@@ -292,6 +296,9 @@ public struct DashboardView: View {
     }
 
     private var dashboardSpeedSubtitle: String {
+        if let activity = appState.liveActivity, activity.kind == .image, activity.speed <= 0 {
+            return "image · s"
+        }
         if let activity = appState.liveActivity, activity.speed > 0 {
             return activity.unit
         }

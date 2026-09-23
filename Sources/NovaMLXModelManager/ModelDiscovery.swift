@@ -109,6 +109,8 @@ public final class ModelDiscovery: Sendable {
         "ZImageTransformer2DModel",
         "QwenImagePipeline",
         "QwenImageTransformer2DModel",
+        "QwenImage21Pipeline",
+        "QwenImage21Transformer2DModel",
     ]
 
     private static let imageModelTypes: Set<String> = [
@@ -146,6 +148,7 @@ public final class ModelDiscovery: Sendable {
         "flux2": .flux2, "flux_2": .flux2,
         "z_image": .zImage, "zimage": .zImage,
         "qwen_image": .qwenImage, "qwenimage": .qwenImage,
+        "qwen_image_21": .qwenImage21, "qwenimage21": .qwenImage21,
     ]
 
     private static let familyByArchitecture: [String: ModelFamily] = [
@@ -176,6 +179,8 @@ public final class ModelDiscovery: Sendable {
         "ZImagePipeline": .zImage,
         "QwenImageTransformer2DModel": .qwenImage,
         "QwenImagePipeline": .qwenImage,
+        "QwenImage21Transformer2DModel": .qwenImage21,
+        "QwenImage21Pipeline": .qwenImage21,
     ]
 
     public init() {}
@@ -283,7 +288,7 @@ public final class ModelDiscovery: Sendable {
         }
 
         let modelType = detectModelType(config: config, path: path)
-        let family = detectFamily(config: config, modelId: id)
+        let family = refineImageFamily(detectFamily(config: config, modelId: id), path: path, id: id)
         let size = estimateSize(at: path)
         let complete = Self.checkCompleteness(at: path, isAdapter: isAdapter)
 
@@ -339,7 +344,11 @@ public final class ModelDiscovery: Sendable {
     private func registerDiffusersModel(at path: URL, id: String) -> DiscoveredModel? {
         let size = estimateSize(at: path)
         let modelType = detectModelType(config: HFConfig(architectures: nil, modelType: nil, visionConfig: nil), path: path)
-        let family = detectFamily(config: HFConfig(architectures: nil, modelType: nil, visionConfig: nil), modelId: id)
+        let family = refineImageFamily(
+            detectFamily(config: HFConfig(architectures: nil, modelType: nil, visionConfig: nil), modelId: id),
+            path: path,
+            id: id
+        )
 
         NovaMLXLog.info("[Discovery] Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=[], size=\(size.bytesFormatted), complete=true (diffusers)")
 
@@ -555,6 +564,9 @@ public final class ModelDiscovery: Sendable {
         // into ~/.nova/templates/registry.json under `familyDetection`.
 
         let idLower = modelId.lowercased()
+        if QwenImage21Support.matches(id: modelId) {
+            return .qwenImage21
+        }
         if idLower.contains("flux.2") || idLower.contains("flux2")
             || idLower.contains("flux-2") {
             return .flux2
@@ -601,6 +613,33 @@ public final class ModelDiscovery: Sendable {
         if idLower.contains("starcoder") { return .starcoder }
 
         return .other
+    }
+
+    /// Qwen-Image-2.1 shares the "qwen-image" name with the 20B checkpoint. The diffusers
+    /// class name is the reliable signal when the folder was renamed.
+    private func refineImageFamily(_ family: ModelFamily, path: URL, id: String) -> ModelFamily {
+        if QwenImage21Support.matches(id: id) { return .qwenImage21 }
+        if let name = Self.diffusersClassName(at: path),
+           name == "QwenImage21Transformer2DModel" || name == "QwenImage21Pipeline"
+        {
+            return .qwenImage21
+        }
+        return family
+    }
+
+    private static func diffusersClassName(at path: URL) -> String? {
+        let candidates = [
+            path.appendingPathComponent("transformer/config.json"),
+            path.appendingPathComponent("model_index.json"),
+        ]
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = obj["_class_name"] as? String
+            else { continue }
+            return name
+        }
+        return nil
     }
 
     private func estimateSize(at url: URL) -> UInt64 {

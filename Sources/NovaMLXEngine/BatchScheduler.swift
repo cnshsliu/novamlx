@@ -108,7 +108,7 @@ public final class BatchScheduler: @unchecked Sendable {
         let cachesBox = MutableSendableBox<[KVCache]?>(nil)
         let prefillParams: GenerateParameters = {
             var p = GenerateParameters(maxTokens: 1, temperature: 0.6)
-            p.prefillStepSize = 512
+            p.prefill.stepSize = 512
             return p
         }()
 

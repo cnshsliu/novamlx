@@ -183,7 +183,7 @@ enum ImagePreprocessor {
         }
 
         // Build Anthropic Messages API format with image content block
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "model": model,
             "max_tokens": 1024,
             "messages": [
@@ -249,7 +249,7 @@ enum ImagePreprocessor {
             return "[Image: invalid endpoint]"
         }
 
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "model": model,
             "max_tokens": 1024,
             "messages": [

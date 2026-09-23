@@ -1464,7 +1464,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         if let enforcer = memoryEnforcer {
             let status = await enforcer.status
             if status.enabled && status.softLimitBytes > 0 {
-                let softLimitMB = status.softLimitBytes / 1_048_576
                 if currentBytes + neededBytes > status.softLimitBytes {
                     // Would need LRU eviction — borderline
                     let freeAfterEvict = status.softLimitBytes > currentBytes
@@ -2636,7 +2635,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                        drafter.mtpBlockSize >= 2
                     {
                         let numDraft = request.numDraftTokens ?? drafter.mtpBlockSize
-                        var mtpIterator = try MtpTokenIterator(
+                        let mtpIterator = try MtpTokenIterator(
                             input: effectiveInput,
                             target: target,
                             drafter: drafter,

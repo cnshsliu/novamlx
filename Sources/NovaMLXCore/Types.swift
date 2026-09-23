@@ -103,6 +103,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case flux2
     case zImage
     case qwenImage
+    case qwenImage21
     case laya
     case other
 
@@ -354,6 +355,32 @@ public struct InferenceRequest: @unchecked Sendable {
 
     /// Native in-graph MTP and companion MTP auto-inject. `nil` means on.
     public var allowsMtp: Bool { useNativeMtp != false }
+}
+
+/// Cooperative cancel for work that is not an LLM request id, such as one
+/// in-flight image generation.
+public final class ImageRunControl: @unchecked Sendable {
+    public static let shared = ImageRunControl()
+    private let lock = NSLock()
+    private var cancelled = false
+
+    public func reset() {
+        lock.lock()
+        cancelled = false
+        lock.unlock()
+    }
+
+    public func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    public var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
 }
 
 public struct ChatMessage: Codable, Sendable {

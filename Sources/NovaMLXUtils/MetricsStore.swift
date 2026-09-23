@@ -98,6 +98,23 @@ public struct LiveActivity: Sendable, Equatable {
         self.startedAt = startedAt
         self.updatedAt = updatedAt
     }
+
+    /// What the status panel should show. Image diffusion has no tok/s, so an
+    /// in-progress image reports the sampler step, or elapsed time before the
+    /// first step arrives.
+    public var displayLine: String {
+        if kind == .image, unit.hasPrefix("/") {
+            return String(format: "step %.0f%@", speed, unit)
+        }
+        if kind == .image && speed <= 0 {
+            let elapsed = max(0, Date().timeIntervalSince(startedAt))
+            return String(format: "Image · %.0fs", elapsed)
+        }
+        if speed > 0 {
+            return String(format: "%.1f %@", speed, unit)
+        }
+        return kind.label
+    }
 }
 
 public final class MetricsStore: @unchecked Sendable {
@@ -183,6 +200,17 @@ public final class MetricsStore: @unchecked Sendable {
                 let now = Date()
                 _liveActivity = LiveActivity(model: model, kind: kind, speed: speed, unit: unit, startedAt: now, updatedAt: now)
             }
+            _lastActivityUpdate = Date()
+        }
+    }
+
+    /// Keep an in-progress image activity from looking idle while a step is still running.
+    public func touchActivity(model: String) {
+        lock.withLock {
+            guard let activity = _liveActivity, activity.model == model else { return }
+            _liveActivity = LiveActivity(
+                model: activity.model, kind: activity.kind, speed: activity.speed, unit: activity.unit,
+                startedAt: activity.startedAt, updatedAt: Date())
             _lastActivityUpdate = Date()
         }
     }

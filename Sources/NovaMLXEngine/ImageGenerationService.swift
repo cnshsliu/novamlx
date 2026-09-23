@@ -15,7 +15,7 @@ public final class ImageGenerationContainer: @unchecked Sendable {
 
     public var isFlux: Bool {
         switch config.identifier.family {
-        case .flux, .flux2, .zImage, .qwenImage: return true
+        case .flux, .flux2, .zImage, .qwenImage, .qwenImage21: return true
         default: return false
         }
     }
@@ -99,6 +99,10 @@ public final class ImageGenerationService: @unchecked Sendable {
             let qwen = QwenImageGenPipeline(directoryURL: url)
             try await qwen.load()
             pipeline = qwen
+        case .qwenImage21:
+            let qwen = QwenImage21Pipeline(directoryURL: url)
+            try await qwen.load()
+            pipeline = qwen
         default:
             pipeline = try SDPipeline(directoryURL: url)
         }
@@ -122,6 +126,32 @@ public final class ImageGenerationService: @unchecked Sendable {
         lock.withLock {
             containers[modelId]?.isLoaded ?? false
         }
+    }
+
+    public struct StepProgress: Sendable {
+        public var modelId: String
+        public var step: Int
+        public var total: Int
+    }
+
+    public func currentStep() -> StepProgress? {
+        lock.withLock { stepProgress }
+    }
+
+    private var stepProgress: StepProgress?
+
+    private func noteImageStep(modelId: String, step: Int, total: Int) {
+        lock.withLock {
+            stepProgress = StepProgress(modelId: modelId, step: step, total: total)
+        }
+        let unit = total > 0 ? "/\(total)" : "step"
+        metricsStore?.reportActivity(model: modelId, kind: .image, speed: Double(step), unit: unit)
+    }
+
+    public func requestCancel() {
+        ImageRunControl.shared.cancel()
+        let pipeline = lock.withLock { containers[activeModelId]?.pipeline }
+        (pipeline as? QwenImage21Pipeline)?.interrupt()
     }
 
     public func listLoadedModels() -> [String] {
@@ -162,11 +192,32 @@ public final class ImageGenerationService: @unchecked Sendable {
         width: Int = 1024,
         height: Int = 1024,
         seed: UInt64? = nil,
-        steps: Int? = nil
+        steps: Int? = nil,
+        strength: Double? = nil
     ) async throws -> ImageGenerationResult {
-        guard let container = lock.withLock({ containers[modelId] }),
-              !container.isFlux
-        else {
+        guard let container = lock.withLock({ containers[modelId] }), container.isLoaded else {
+            throw NovaMLXError.modelNotFound(modelId)
+        }
+
+        if container.pipeline is QwenImage21Pipeline {
+            return try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "edit") { pipeline, imageSeed in
+                guard let qwen = pipeline as? QwenImage21Pipeline else {
+                    throw NovaMLXError.apiError("Image editing requires the Qwen-Image-2.1 pipeline")
+                }
+                return try await qwen.editImage(
+                    image: image,
+                    prompt: prompt,
+                    negativePrompt: negativePrompt,
+                    steps: steps,
+                    seed: imageSeed,
+                    width: width,
+                    height: height,
+                    strength: strength
+                )
+            }
+        }
+
+        guard !container.isFlux else {
             throw NovaMLXError.apiError("Image editing is not supported by FLUX models")
         }
 
@@ -252,6 +303,7 @@ public final class ImageGenerationService: @unchecked Sendable {
             lock.withLock { isGenerating = false }
         }
 
+        ImageRunControl.shared.reset()
         let startTime = Date()
         var base64Images: [String] = []
         let defaultSeed = UInt64(Date().timeIntervalSince1970 * 1000)
@@ -259,14 +311,35 @@ public final class ImageGenerationService: @unchecked Sendable {
         var usedSeed: UInt64 = resolvedSeed
 
         // Report live activity so the status panel reflects image generation.
+        // One image can take much longer than the 5s activity timeout, so keep
+        // refreshing while the sampler runs.
         self.activeModelId = modelId
         metricsStore?.reportActivity(model: modelId, kind: .image, speed: 0, unit: "img/s")
+        let heartbeat = Task { [metricsStore, modelId] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { break }
+                metricsStore?.touchActivity(model: modelId)
+            }
+        }
         defer {
+            heartbeat.cancel()
             metricsStore?.clearActivity(forModel: modelId)
             self.activeModelId = ""
+            lock.withLock { stepProgress = nil }
         }
 
+        if let qwen = pipeline as? QwenImage21Pipeline {
+            qwen.onStep = { [weak self] step, total in
+                self?.noteImageStep(modelId: modelId, step: step, total: total)
+            }
+        }
+        defer { (pipeline as? QwenImage21Pipeline)?.onStep = nil }
+
         for i in 0..<n {
+            if ImageRunControl.shared.isCancelled {
+                throw NovaMLXError.apiError("Image generation cancelled")
+            }
             let imageSeed = n == 1 ? usedSeed : usedSeed &+ UInt64(i)
             let result = try await generateBlock(pipeline, imageSeed)
             if i == 0 { usedSeed = result.seed }
