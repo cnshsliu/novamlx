@@ -92,3 +92,17 @@ public enum Frame: Equatable, Sendable {
     case demandUpdate([DemandEntry])
     case error(String)
 }
+
+extension Frame {
+    /// True when this frame carries upstream payload bytes.
+    public var isChunk: Bool {
+        if case .responseChunk = self { return true }
+        return false
+    }
+
+    /// True when this is a terminal `responseEnd` that completed successfully.
+    public var isCompletedEnd: Bool {
+        if case .responseEnd(_, let result) = self { return result.status == .completed }
+        return false
+    }
+}
