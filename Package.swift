@@ -24,8 +24,8 @@ let package = Package(
         .library(name: "NovaMLXDistributed", targets: ["NovaMLXDistributed"]),
         .library(name: "NovaMLXMenuBar", targets: ["NovaMLXMenuBar"]),
         .library(name: "NovaMLXDB", targets: ["NovaMLXDB"]),
-        .library(name: "NovaMLXTknetNode", targets: ["NovaMLXTknetNode"]),
-        .executable(name: "tknet-node", targets: ["tknet-node"]),
+        .library(name: "NovaMLXTknetPeer", targets: ["NovaMLXTknetPeer"]),
+        .executable(name: "tknet-peer", targets: ["tknet-peer"]),
     ],
     dependencies: [
         .package(path: "vendors/mlx-swift"),
@@ -193,7 +193,7 @@ let package = Package(
                 "NovaMLXAPI",
                 "NovaMLXDistributed",
                 "NovaMLXDB",
-                "NovaMLXTknetNode",
+                "NovaMLXTknetPeer",
             ],
             resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
@@ -256,7 +256,7 @@ let package = Package(
             swiftSettings: concurrencySettings
         ),
         .target(
-            name: "NovaMLXTknetNode",
+            name: "NovaMLXTknetPeer",
             dependencies: [
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
                 .product(name: "HummingbirdWSClient", package: "hummingbird-websocket"),
@@ -266,17 +266,17 @@ let package = Package(
             swiftSettings: concurrencySettings
         ),
         .executableTarget(
-            name: "tknet-node",
+            name: "tknet-peer",
             dependencies: [
-                "NovaMLXTknetNode",
+                "NovaMLXTknetPeer",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: concurrencySettings
         ),
         .testTarget(
-            name: "NovaMLXTknetNodeTests",
+            name: "NovaMLXTknetPeerTests",
             dependencies: [
-                "NovaMLXTknetNode",
+                "NovaMLXTknetPeer",
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "HummingbirdRouter", package: "hummingbird"),
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),

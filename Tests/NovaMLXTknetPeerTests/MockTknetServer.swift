@@ -4,7 +4,7 @@ import Hummingbird
 /// Minimal tknet.ai stand-in: POST /api/node/register, GET /api/node/demand.
 /// Shares MockSourceServer's bind machinery (port 0 + onServerRunning
 /// continuation + Once guard) so `port` is the real bound port. The fixed
-/// node token "tok-42" lives only in test bodies; the server never logs.
+/// peer token "tok-42" lives only in test bodies; the server never logs.
 final class MockTknetServer: @unchecked Sendable {
     private let lock = NSLock()
     private var _port = 0
@@ -15,7 +15,7 @@ final class MockTknetServer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return _port
     }
 
-    static let registerBody = #"{"nodeId":"node-42","token":"tok-42"}"#
+    static let registerBody = #"{"peerId":"peer-42","token":"tok-42"}"#
     static let demandBody =
         #"{"entries":[{"demandId":"d1","model":"m","modality":"language","note":null}]}"#
     static let validToken = "tok-42"

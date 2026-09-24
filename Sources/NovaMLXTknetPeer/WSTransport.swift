@@ -13,7 +13,7 @@ public enum WSTransportError: Error, Equatable {
 }
 
 /// Production transport: outbound WebSocket carrying FrameCodec text frames
-/// (one frame per WS text message). The node token rides the Authorization
+/// (one frame per WS text message). The peer token rides the Authorization
 /// header of the WS upgrade request — it is loaded fresh from the SecretStore
 /// on every dial so a re-registered token works without a restart, and it is
 /// never logged.
@@ -87,7 +87,7 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
             let client = WebSocketClient(
                 url: dialURL.absoluteString,
                 configuration: configuration,
-                logger: Logger(label: "tknet.node.ws-transport")
+                logger: Logger(label: "tknet.peer.ws-transport")
             ) { inboundStream, outbound, _ in
                 transport.activate(writer: outbound)
                 once.run { dialContinuation.resume(returning: transport) }

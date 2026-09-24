@@ -15,7 +15,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case voiceClone = "Voice Clone"
     case videoSlice = "Video Slice"
     case cluster = "Cluster"
-    case tknetNode = "Tknet Node"
+    case tknetPeer = "Tknet Peer"
     case requests = "Requests"
     case apiKeys = "API Keys"
     case catalogAdmin = "Catalog Admin"
@@ -34,7 +34,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .voiceClone: return "waveform.badge.mic"
         case .videoSlice: return "film"
         case .cluster: return "xserve"
-        case .tknetNode: return "point.3.connected.trianglepath.dotted"
+        case .tknetPeer: return "point.3.connected.trianglepath.dotted"
         case .requests: return "list.bullet.rectangle"
         case .apiKeys: return "key.fill"
         case .catalogAdmin: return "checkmark.seal.fill"
@@ -271,9 +271,9 @@ public struct NovaAppView: View {
                 .environmentObject(l10n)
                 .opacity(selectedPage == .cluster ? 1 : 0)
                 .allowsHitTesting(selectedPage == .cluster)
-            TknetNodePageView()
-                .opacity(selectedPage == .tknetNode ? 1 : 0)
-                .allowsHitTesting(selectedPage == .tknetNode)
+            TknetPeerPageView()
+                .opacity(selectedPage == .tknetPeer ? 1 : 0)
+                .allowsHitTesting(selectedPage == .tknetPeer)
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .localInference ? 1 : 0)
@@ -326,7 +326,7 @@ public struct NovaAppView: View {
         switch page {
         case .status: return l10n.tr("app.status")
         case .cluster: return l10n.tr("app.cluster")
-        case .tknetNode: return l10n.tr("app.tknetNode")
+        case .tknetPeer: return l10n.tr("app.tknetPeer")
         case .localInference: return l10n.tr("app.local_inference")
         case .downloads: return l10n.tr("app.downloads")
         case .tokenhub: return l10n.tr("app.tokenhub")

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 @Suite("WS transport")
 struct WSTransportTests {
@@ -12,17 +12,17 @@ struct WSTransportTests {
 
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-ws-\(UUID().uuidString)"))
-        secrets.save("tok", for: "node/token")
+        secrets.save("tok", for: "peer/token")
         let factory = WSTransport.factory(
             server: URL(string: "ws://127.0.0.1:\(tunnel.port)")!,
-            tokenRef: "node/token", secrets: secrets)
+            tokenRef: "peer/token", secrets: secrets)
         let transport = try await factory()
 
         try await transport.send(.heartbeat(Heartbeat(activeReq: 0, queueDepth: 0)))
         let seen = await tunnel.receivedFrames.stream.next(timeout: 10)
         #expect(seen == .heartbeat(Heartbeat(activeReq: 0, queueDepth: 0)))
 
-        // The node token rode the Authorization header of the WS upgrade request.
+        // The peer token rode the Authorization header of the WS upgrade request.
         #expect(tunnel.lastAuthorization == "Bearer tok")
 
         await transport.close()
@@ -45,10 +45,10 @@ struct WSTransportTests {
 
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-ws-\(UUID().uuidString)"))
-        secrets.save("tok", for: "node/token")
+        secrets.save("tok", for: "peer/token")
         let transport = try await WSTransport.factory(
             server: URL(string: "ws://127.0.0.1:\(tunnel.port)")!,
-            tokenRef: "node/token", secrets: secrets)()
+            tokenRef: "peer/token", secrets: secrets)()
 
         let demand = [DemandEntry(demandId: "d1", model: "m", modality: "language", note: nil)]
         await tunnel.push(.demandUpdate(demand))

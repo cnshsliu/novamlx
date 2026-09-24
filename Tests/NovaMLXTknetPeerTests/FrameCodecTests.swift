@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 @Suite("Frame codec")
 struct FrameCodecTests {
@@ -10,7 +10,7 @@ struct FrameCodecTests {
             demandId: "d1", model: "qwen-3-8b", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0.5, priceOut: 1.0
         )
-        let frame = Frame.hello(nodeId: "node-1", capabilities: [cap])
+        let frame = Frame.hello(peerId: "peer-1", capabilities: [cap])
         let encoded = FrameCodec.encode(frame)
         let decoded = try FrameCodec.decode(encoded)
         #expect(decoded == frame)

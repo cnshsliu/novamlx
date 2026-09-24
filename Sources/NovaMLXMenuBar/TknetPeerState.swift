@@ -1,25 +1,25 @@
 import Foundation
 import NovaMLXDB
-import NovaMLXTknetNode
+import NovaMLXTknetPeer
 
-/// Bridges the cross-platform NodeService into the Mac UI. Owns the service
+/// Bridges the cross-platform PeerService into the Mac UI. Owns the service
 /// for the page's lifetime (the app keeps every page alive via the opacity
 /// switch in `NovaAppView.detailView`, so this object lives as long as the
-/// app) and tears it down on `stop()`/`deinit` — NodeService must never be
+/// app) and tears it down on `stop()`/`deinit` — PeerService must never be
 /// dropped without `stop()` (the relay's AsyncHTTPClient traps in debug).
 @MainActor
-final class TknetNodeState: ObservableObject {
-    @Published private(set) var config: NodeConfig
-    @Published private(set) var status: NodeStatus?
+final class TknetPeerState: ObservableObject {
+    @Published private(set) var config: PeerConfig
+    @Published private(set) var status: PeerStatus?
     @Published private(set) var demand: [DemandEntry] = []
     @Published private(set) var running = false
     @Published private(set) var lastError: String?
 
-    /// Same location the `tknet-node` CLI uses, so the app and CLI share one
-    /// node identity and source set.
+    /// Same location the `tknet-peer` CLI uses, so the app and CLI share one
+    /// peer identity and source set.
     private let configURL: URL
     private let secrets: FileSecretStore
-    private var service: NodeService?
+    private var service: PeerService?
     /// Consumes `service.statusStream` — the stream NEVER finishes, so the
     /// task's lifetime is tied to this object: cancelled in `stop()` (and
     /// `deinit`), otherwise it would capture the service forever.
@@ -31,15 +31,15 @@ final class TknetNodeState: ObservableObject {
 
     init() {
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/tknet-node")
-        self.configURL = dir.appendingPathComponent("node.json")
+            .appendingPathComponent(".config/tknet-peer")
+        self.configURL = dir.appendingPathComponent("peer.json")
         self.secrets = FileSecretStore(directory: dir.appendingPathComponent("secrets"))
         self.config = (try? ConfigStore.load(from: configURL)) ?? .defaultConfig()
     }
 
     deinit {
         statusTask?.cancel()
-        // NodeService must be stopped before being dropped; the REST client
+        // PeerService must be stopped before being dropped; the REST client
         // must be shut down exactly once. Both are Sendable, so hand them to
         // a detached task (deinit cannot await).
         let service = self.service
@@ -52,10 +52,10 @@ final class TknetNodeState: ObservableObject {
 
     // MARK: - Registration
 
-    /// Register this Mac with the tknet server, storing nodeId + token
+    /// Register this Mac with the tknet server, storing peerId + token
     /// locally. The token only ever travels to `FileSecretStore` — it is
     /// never logged and never appears in UI state.
-    func register(server: URL, nodeName: String) async {
+    func register(server: URL, peerName: String) async {
         guard let scheme = server.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               let host = server.host, !host.isEmpty else {
@@ -64,10 +64,10 @@ final class TknetNodeState: ObservableObject {
         }
         do {
             var config = self.config
-            let (nodeId, token) = try await rest.register(server: server, nodeName: nodeName)
-            config.nodeId = nodeId
+            let (peerId, token) = try await rest.register(server: server, peerName: peerName)
+            config.peerId = peerId
             config.serverURL = Self.tunnelURL(fromREST: server)
-            secrets.save(token, for: "node/token")
+            secrets.save(token, for: "peer/token")
             try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
             try ConfigStore.save(config, to: configURL)
@@ -84,8 +84,8 @@ final class TknetNodeState: ObservableObject {
     /// One-shot REST fetch (used before the tunnel is up); the running
     /// service keeps `demand` fresh via `statusStream` afterwards.
     func fetchDemand() async {
-        guard config.nodeId != nil,
-              let token = secrets.load("node/token"), !token.isEmpty else { return }
+        guard config.peerId != nil,
+              let token = secrets.load("peer/token"), !token.isEmpty else { return }
         guard let restBase = Self.restURL(fromTunnel: config.serverURL) else { return }
         do {
             demand = try await rest.fetchDemand(server: restBase, token: token)
@@ -97,15 +97,15 @@ final class TknetNodeState: ObservableObject {
     // MARK: - Start / stop
 
     func start() async {
-        guard service == nil, config.nodeId != nil else { return }
-        guard let token = secrets.load("node/token"), !token.isEmpty else {
-            lastError = "No node token stored — register again."
+        guard service == nil, config.peerId != nil else { return }
+        guard let token = secrets.load("peer/token"), !token.isEmpty else {
+            lastError = "No peer token stored — register again."
             return
         }
-        let service = NodeService(
+        let service = PeerService(
             config: config, secrets: secrets,
             transportFactory: WSTransport.factory(
-                server: config.serverURL, tokenRef: "node/token", secrets: secrets),
+                server: config.serverURL, tokenRef: "peer/token", secrets: secrets),
             onConfigChange: { [configURL] updated in
                 // Demand retire/revive reconciliations must survive restarts.
                 try? ConfigStore.save(updated, to: configURL)
@@ -190,7 +190,7 @@ final class TknetNodeState: ObservableObject {
 
     /// Persist an edited config and, while running, propagate it to the live
     /// relay (capability edits ride the next frame set without a reconnect).
-    private func commit(_ config: NodeConfig) async {
+    private func commit(_ config: PeerConfig) async {
         do {
             try ConfigStore.save(config, to: configURL)
             self.config = config
@@ -204,7 +204,7 @@ final class TknetNodeState: ObservableObject {
         }
     }
 
-    // MARK: - URL scheme helpers (mirror TknetNodeCLI)
+    // MARK: - URL scheme helpers (mirror TknetPeerCLI)
 
     /// REST base (`https://…`) → tunnel base (`wss://…`).
     private static func tunnelURL(fromREST base: URL) -> URL {

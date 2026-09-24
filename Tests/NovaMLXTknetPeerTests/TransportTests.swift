@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 @Suite("Transport")
 struct TransportTests {
@@ -8,14 +8,14 @@ struct TransportTests {
     func pairDelivery() async throws {
         let pair = InMemoryTransportPair()
         let server = pair.serverSide
-        let node = pair.nodeSide
+        let peer = pair.peerSide
 
-        try await node.send(.heartbeat(Heartbeat(activeReq: 0, queueDepth: 0)))
+        try await peer.send(.heartbeat(Heartbeat(activeReq: 0, queueDepth: 0)))
         let got = await server.inbound.next()
         #expect(got == .heartbeat(Heartbeat(activeReq: 0, queueDepth: 0)))
 
         try await server.send(.requestCancel(reqId: "r1"))
-        let cancel = await node.inbound.next()
+        let cancel = await peer.inbound.next()
         #expect(cancel == .requestCancel(reqId: "r1"))
     }
 }

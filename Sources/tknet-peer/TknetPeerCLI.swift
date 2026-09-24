@@ -1,25 +1,25 @@
 import ArgumentParser
 import Foundation
-import NovaMLXTknetNode
+import NovaMLXTknetPeer
 
 @main
-struct TknetNodeCLI: AsyncParsableCommand {
+struct TknetPeerCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "tknet-node",
-        abstract: "Tknet inference supply node",
-        version: TknetNode.version,
+        commandName: "tknet-peer",
+        abstract: "Tknet inference supply peer",
+        version: TknetPeer.version,
         subcommands: [Setup.self, Serve.self]
     )
 }
 
 // MARK: - Shared helpers
 
-extension TknetNodeCLI {
+extension TknetPeerCLI {
     /// Portable default display name. `Host.current()` is AppKit-adjacent and
     /// unavailable off macOS; `hostName` is Foundation-portable.
-    static var defaultNodeName: String {
+    static var defaultPeerName: String {
         let host = ProcessInfo.processInfo.hostName
-        return host.isEmpty ? "tknet-node" : "tknet-node-\(host.prefix(20))"
+        return host.isEmpty ? "tknet-peer" : "tknet-peer-\(host.prefix(20))"
     }
 
     static func configURL(_ path: String) -> URL {
@@ -28,10 +28,10 @@ extension TknetNodeCLI {
 
     /// Loads the config at `path`, falling back to defaults when the file is
     /// absent so a fresh machine can run `setup` without a pre-seeded file.
-    static func loadConfig(_ path: String) throws -> NodeConfig {
+    static func loadConfig(_ path: String) throws -> PeerConfig {
         let url = configURL(path)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            return NodeConfig.defaultConfig()
+            return PeerConfig.defaultConfig()
         }
         do {
             return try ConfigStore.load(from: url)
@@ -40,7 +40,7 @@ extension TknetNodeCLI {
         }
     }
 
-    static func saveConfig(_ config: NodeConfig, path: String) throws {
+    static func saveConfig(_ config: PeerConfig, path: String) throws {
         let url = configURL(path)
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -68,10 +68,10 @@ extension TknetNodeCLI {
 
 // MARK: - setup
 
-extension TknetNodeCLI {
+extension TknetPeerCLI {
     struct Setup: AsyncParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Register and configure this node")
+            abstract: "Register and configure this peer")
 
         @Option(help: "Config file path")
         var config: String = CLIConfig.defaultConfigPath
@@ -79,8 +79,8 @@ extension TknetNodeCLI {
         @Option(help: "tknet.ai base URL (https)")
         var server: String = "https://tknet.ai"
 
-        @Option(help: "Display name for this node")
-        var name: String = TknetNodeCLI.defaultNodeName
+        @Option(help: "Display name for this peer")
+        var name: String = TknetPeerCLI.defaultPeerName
 
         func run() async throws {
             guard let restBase = URL(string: server),
@@ -103,28 +103,28 @@ extension TknetNodeCLI {
         }
 
         private func performSetup(rest: TknetREST, restBase: URL) async throws {
-            var nodeConfig = try TknetNodeCLI.loadConfig(config)
-            let secrets = FileSecretStore(directory: TknetNodeCLI.secretsDirectory(for: config))
-            nodeConfig.serverURL = TknetNodeCLI.tunnelURL(fromREST: restBase)
+            var peerConfig = try TknetPeerCLI.loadConfig(config)
+            let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
+            peerConfig.serverURL = TknetPeerCLI.tunnelURL(fromREST: restBase)
 
-            if nodeConfig.nodeId == nil {
+            if peerConfig.peerId == nil {
                 print("Registering with \(server) …")
-                let (nodeId, token) = try await rest.register(server: restBase, nodeName: name)
-                nodeConfig.nodeId = nodeId
-                secrets.save(token, for: "node/token")
-                print("Registered: \(nodeId)")
+                let (peerId, token) = try await rest.register(server: restBase, peerName: name)
+                peerConfig.peerId = peerId
+                secrets.save(token, for: "peer/token")
+                print("Registered: \(peerId)")
             }
             // The token is a secret: loaded here, never printed or logged.
-            guard let token = secrets.load("node/token"), !token.isEmpty else {
+            guard let token = secrets.load("peer/token"), !token.isEmpty else {
                 throw ValidationError(
-                    "No node token in \(TknetNodeCLI.secretsDirectory(for: config).path) — " +
-                    "delete the config file and re-run `tknet-node setup` to re-register.")
+                    "No peer token in \(TknetPeerCLI.secretsDirectory(for: config).path) — " +
+                    "delete the config file and re-run `tknet-peer setup` to re-register.")
             }
 
             print("Fetching demand list …")
             let demand = try await rest.fetchDemand(server: restBase, token: token)
             if demand.isEmpty {
-                try TknetNodeCLI.saveConfig(nodeConfig, path: config)
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
                 print("The server has no demand right now. Saved \(CLIConfig.expandTilde(config)); re-run setup later.")
                 return
             }
@@ -134,7 +134,7 @@ extension TknetNodeCLI {
             }
             print("Enter the numbers to serve (comma-separated), then per pick: source endpoint, API key, upstream model, prices.")
             guard let line = readLine(), !line.isEmpty else {
-                try TknetNodeCLI.saveConfig(nodeConfig, path: config)
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
                 print("Nothing selected. Saved \(CLIConfig.expandTilde(config)).")
                 return
             }
@@ -167,20 +167,20 @@ extension TknetNodeCLI {
                     .compactMap { Double($0) }
 
                 let sourceId = "src-\(entry.demandId)"
-                nodeConfig.sources.removeAll { $0.id == sourceId }
-                nodeConfig.sources.append(SourceConfig(
+                peerConfig.sources.removeAll { $0.id == sourceId }
+                peerConfig.sources.append(SourceConfig(
                     id: sourceId, name: entry.model, type: .openaiCompatible,
                     endpoint: endpointURL, apiKeyRef: "src/\(sourceId)",
                     upstreamModel: upstream))
                 secrets.save(key, for: "src/\(sourceId)")
-                nodeConfig.capabilities.removeAll { $0.demandId == entry.demandId }
-                nodeConfig.capabilities.append(Capability(
+                peerConfig.capabilities.removeAll { $0.demandId == entry.demandId }
+                peerConfig.capabilities.append(Capability(
                     demandId: entry.demandId, model: entry.model, sourceId: sourceId,
                     sourceType: .openaiCompatible,
                     priceIn: prices.first ?? 0, priceOut: prices.last ?? 0))
             }
-            try TknetNodeCLI.saveConfig(nodeConfig, path: config)
-            print("Saved \(CLIConfig.expandTilde(config)). Run `tknet-node serve`.")
+            try TknetPeerCLI.saveConfig(peerConfig, path: config)
+            print("Saved \(CLIConfig.expandTilde(config)). Run `tknet-peer serve`.")
         }
 
         /// Reads one line from stdin; empty input falls back to `default`.
@@ -194,28 +194,28 @@ extension TknetNodeCLI {
 
 // MARK: - serve
 
-extension TknetNodeCLI {
+extension TknetPeerCLI {
     struct Serve: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Run the node")
+        static let configuration = CommandConfiguration(abstract: "Run the peer")
 
         @Option(help: "Config file path")
         var config: String = CLIConfig.defaultConfigPath
 
         func run() async throws {
-            let configURL = TknetNodeCLI.configURL(config)
-            let nodeConfig = try TknetNodeCLI.loadConfig(config)
-            guard nodeConfig.nodeId != nil else {
-                throw ValidationError("Not registered — run `tknet-node setup` first.")
+            let configURL = TknetPeerCLI.configURL(config)
+            let peerConfig = try TknetPeerCLI.loadConfig(config)
+            guard peerConfig.peerId != nil else {
+                throw ValidationError("Not registered — run `tknet-peer setup` first.")
             }
-            let secrets = FileSecretStore(directory: TknetNodeCLI.secretsDirectory(for: config))
-            guard let token = secrets.load("node/token"), !token.isEmpty else {
-                throw ValidationError("Missing node token — re-run `tknet-node setup`.")
+            let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
+            guard let token = secrets.load("peer/token"), !token.isEmpty else {
+                throw ValidationError("Missing peer token — re-run `tknet-peer setup`.")
             }
-            let service = NodeService(
-                config: nodeConfig,
+            let service = PeerService(
+                config: peerConfig,
                 secrets: secrets,
                 transportFactory: WSTransport.factory(
-                    server: nodeConfig.serverURL, tokenRef: "node/token", secrets: secrets),
+                    server: peerConfig.serverURL, tokenRef: "peer/token", secrets: secrets),
                 onConfigChange: { updated in
                     // Demand reconciliations (retire/revive) must survive restarts.
                     try? ConfigStore.save(updated, to: configURL)
@@ -228,7 +228,7 @@ extension TknetNodeCLI {
                 }
             }
 
-            // SIGINT/SIGTERM → clean teardown. NodeService must never be
+            // SIGINT/SIGTERM → clean teardown. PeerService must never be
             // dropped without stop(): the relay's AsyncHTTPClient traps in
             // debug builds otherwise.
             let stopSignal = ShutdownSignal()

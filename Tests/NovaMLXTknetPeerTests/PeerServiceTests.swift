@@ -1,10 +1,10 @@
 import Foundation
 import os
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
-@Suite("Node service")
-struct NodeServiceTests {
+@Suite("Peer service")
+struct PeerServiceTests {
     /// Fixed 10 ms sleep regardless of the requested duration: backoffs are
     /// fast and heartbeat loops don't spin hot (the requested values are the
     /// client's concern, not ours).
@@ -14,10 +14,10 @@ struct NodeServiceTests {
 
     /// Thread-safe append-only log of published statuses.
     private final class StatusRecorder: @unchecked Sendable {
-        private let state = OSAllocatedUnfairLock(initialState: [NodeStatus]())
+        private let state = OSAllocatedUnfairLock(initialState: [PeerStatus]())
         private var task: Task<Void, Never>?
 
-        func record(_ stream: AsyncStream<NodeStatus>) {
+        func record(_ stream: AsyncStream<PeerStatus>) {
             task = Task {
                 for await status in stream {
                     self.state.withLock { $0.append(status) }
@@ -25,11 +25,11 @@ struct NodeServiceTests {
             }
         }
 
-        var all: [NodeStatus] { state.withLock { $0 } }
+        var all: [PeerStatus] { state.withLock { $0 } }
 
         /// Polls until some published status satisfies the predicate.
         @discardableResult
-        func wait(until predicate: (NodeStatus) -> Bool,
+        func wait(until predicate: (PeerStatus) -> Bool,
                   timeout: TimeInterval = 10) async -> Bool {
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
@@ -42,19 +42,19 @@ struct NodeServiceTests {
 
     /// Thread-safe box for the last config the persist hook received.
     private final class ConfigBox: @unchecked Sendable {
-        private let state = OSAllocatedUnfairLock(initialState: nil as NodeConfig?)
-        func store(_ config: NodeConfig) { state.withLock { $0 = config } }
-        var last: NodeConfig? { state.withLock { $0 } }
+        private let state = OSAllocatedUnfairLock(initialState: nil as PeerConfig?)
+        func store(_ config: PeerConfig) { state.withLock { $0 = config } }
+        var last: PeerConfig? { state.withLock { $0 } }
     }
 
     private func makeService(
         pair: InMemoryTransportPair,
         sourceEndpoint: URL,
-        nodeId: String? = "node-1",
-        onConfigChange: (@Sendable (NodeConfig) -> Void)? = nil
-    ) -> NodeService {
-        var config = NodeConfig.defaultConfig()
-        config.nodeId = nodeId
+        peerId: String? = "peer-1",
+        onConfigChange: (@Sendable (PeerConfig) -> Void)? = nil
+    ) -> PeerService {
+        var config = PeerConfig.defaultConfig()
+        config.peerId = peerId
         config.sources = [SourceConfig(
             id: "s1", name: "mock", type: .openaiCompatible,
             endpoint: sourceEndpoint, apiKeyRef: "s1", upstreamModel: "u")]
@@ -64,9 +64,9 @@ struct NodeServiceTests {
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-ns-\(UUID().uuidString)"))
         secrets.save("k", for: "s1")
-        return NodeService(
+        return PeerService(
             config: config, secrets: secrets,
-            transportFactory: { pair.nodeSide },
+            transportFactory: { pair.peerSide },
             delay: Self.quickDelay,
             onConfigChange: onConfigChange)
     }
@@ -97,12 +97,12 @@ struct NodeServiceTests {
         try await service.start()
         let server = pair.serverSide
 
-        guard case .hello(let nodeId, let caps)? = await nextSignificant(from: server.inbound)
+        guard case .hello(let peerId, let caps)? = await nextSignificant(from: server.inbound)
         else {
             Issue.record("expected hello")
             return
         }
-        #expect(nodeId == "node-1")
+        #expect(peerId == "peer-1")
         #expect(caps.map(\.demandId) == ["d1"])
 
         try await server.send(.request(RequestFrame(
@@ -136,13 +136,13 @@ struct NodeServiceTests {
         await service.stop()  // idempotent
     }
 
-    @Test("start() refuses an unregistered node")
+    @Test("start() refuses an unregistered peer")
     func startRequiresRegistration() async throws {
         let pair = InMemoryTransportPair()
         let service = makeService(
             pair: pair,
             sourceEndpoint: URL(string: "http://127.0.0.1:1/v1")!,
-            nodeId: nil)
+            peerId: nil)
         await #expect(throws: TunnelError.notRegistered) {
             try await service.start()
         }
@@ -223,7 +223,7 @@ struct NodeServiceTests {
 
     @Test("reconcile retires absent demands and revives returning ones")
     func reconcileLifecycle() {
-        var config = NodeConfig.defaultConfig()
+        var config = PeerConfig.defaultConfig()
         config.capabilities = [
             Capability(demandId: "d1", model: "a", sourceId: "s1",
                        sourceType: .openaiCompatible, priceIn: 0, priceOut: 0),

@@ -1,6 +1,6 @@
 import Foundation
 
-/// An upstream the node can forward to. `localNovaMLX` is a loopback preset
+/// An upstream the peer can forward to. `localNovaMLX` is a loopback preset
 /// over the app's own OpenAI-compatible API (spec Phase-1 deviation).
 public struct SourceConfig: Codable, Equatable, Sendable, Identifiable {
     public var id: String
@@ -19,8 +19,8 @@ public struct SourceConfig: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-public struct NodeConfig: Codable, Equatable, Sendable {
-    public var nodeId: String?
+public struct PeerConfig: Codable, Equatable, Sendable {
+    public var peerId: String?
     public var serverURL: URL
     public var sources: [SourceConfig]
     public var capabilities: [Capability]
@@ -31,18 +31,18 @@ public struct NodeConfig: Codable, Equatable, Sendable {
     /// nothing is deleted. Persisted so retirement survives restarts.
     private var retiredDemandIds: Set<String> = []
 
-    public init(nodeId: String? = nil, serverURL: URL,
+    public init(peerId: String? = nil, serverURL: URL,
                 sources: [SourceConfig] = [], capabilities: [Capability] = [],
                 concurrencyLimit: Int = 1, requestTimeoutSeconds: Double = 300,
                 idleMinutesBeforeSlowPoll: Double = 5) {
-        self.nodeId = nodeId; self.serverURL = serverURL; self.sources = sources
+        self.peerId = peerId; self.serverURL = serverURL; self.sources = sources
         self.capabilities = capabilities; self.concurrencyLimit = concurrencyLimit
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.idleMinutesBeforeSlowPoll = idleMinutesBeforeSlowPoll
     }
 
     private enum CodingKeys: String, CodingKey {
-        case nodeId, serverURL, sources, capabilities, concurrencyLimit
+        case peerId, serverURL, sources, capabilities, concurrencyLimit
         case requestTimeoutSeconds, idleMinutesBeforeSlowPoll, retiredDemandIds
     }
 
@@ -50,7 +50,7 @@ public struct NodeConfig: Codable, Equatable, Sendable {
     /// (and hand-edited files) still load: every key is optional with defaults.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        nodeId = try c.decodeIfPresent(String.self, forKey: .nodeId)
+        peerId = try c.decodeIfPresent(String.self, forKey: .peerId)
         serverURL = try c.decode(URL.self, forKey: .serverURL)
         sources = try c.decodeIfPresent([SourceConfig].self, forKey: .sources) ?? []
         capabilities = try c.decodeIfPresent([Capability].self, forKey: .capabilities) ?? []
@@ -60,8 +60,8 @@ public struct NodeConfig: Codable, Equatable, Sendable {
         retiredDemandIds = try c.decodeIfPresent(Set<String>.self, forKey: .retiredDemandIds) ?? []
     }
 
-    public static func defaultConfig() -> NodeConfig {
-        NodeConfig(serverURL: URL(string: "wss://tknet.ai")!)
+    public static func defaultConfig() -> PeerConfig {
+        PeerConfig(serverURL: URL(string: "wss://tknet.ai")!)
     }
 
     /// Capabilities whose demandId is still in the server's demand list.
@@ -73,16 +73,16 @@ public struct NodeConfig: Codable, Equatable, Sendable {
     /// Nothing is deleted: sources are reusable assets (spec: Demand lifecycle).
     @discardableResult
     public mutating func markRetired(demandIds: Set<String>) -> [String] {
-        // Phase 1: server simply stops dispatching retired demands; the node
+        // Phase 1: server simply stops dispatching retired demands; the peer
         // keeps declarations for UI greying. The demand list itself is the
-        // source of truth, exposed via NodeService.
+        // source of truth, exposed via PeerService.
         let mine = Set(capabilities.map(\.demandId)).intersection(demandIds)
         retiredDemandIds.formUnion(mine)
         return mine.sorted()
     }
 
     /// Two-way reconciliation against the server's live demand list: ids this
-    /// node declares but the list no longer carries are retired, and ids that
+    /// peer declares but the list no longer carries are retired, and ids that
     /// come back are un-retired (retirement is a latch, not a tombstone).
     /// Returns the ids newly retired by this call. Declarations are never
     /// deleted (spec: Demand lifecycle — sources are reusable assets).
@@ -97,15 +97,15 @@ public struct NodeConfig: Codable, Equatable, Sendable {
 }
 
 public enum ConfigStore {
-    public static func load(from url: URL) throws -> NodeConfig {
-        try NodeConfig(from: Data(contentsOf: url))
+    public static func load(from url: URL) throws -> PeerConfig {
+        try PeerConfig(from: Data(contentsOf: url))
     }
 
-    /// Atomic write with 0600 so a shared machine can't read node secrets refs.
+    /// Atomic write with 0600 so a shared machine can't read peer secrets refs.
     /// `.completeFileProtection` is deliberately absent: it fails EPERM on
     /// volumes that don't support FileVault-style protection (e.g. $TMPDIR),
     /// and the POSIX 0600 chmod is the binding spec requirement.
-    public static func save(_ config: NodeConfig, to url: URL) throws {
+    public static func save(_ config: PeerConfig, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(config)
@@ -114,8 +114,8 @@ public enum ConfigStore {
     }
 }
 
-extension NodeConfig {
+extension PeerConfig {
     fileprivate init(from data: Data) throws {
-        self = try JSONDecoder().decode(NodeConfig.self, from: data)
+        self = try JSONDecoder().decode(PeerConfig.self, from: data)
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import os
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 @Suite("Tunnel client")
 struct TunnelClientTests {
@@ -39,7 +39,7 @@ struct TunnelClientTests {
                 failedOnce = true
                 throw TunnelError.connectionClosed
             }
-            return pair.nodeSide
+            return pair.peerSide
         }
     }
 
@@ -70,10 +70,10 @@ struct TunnelClientTests {
     ) async throws {
         let thePair = pair ?? InMemoryTransportPair()
         let factory: @Sendable () async throws -> TunnelTransport =
-            transportFactory ?? { thePair.nodeSide }
+            transportFactory ?? { thePair.peerSide }
         let delayLog = DelayRecorder()
-        var config = NodeConfig.defaultConfig()
-        config.nodeId = "node-1"
+        var config = PeerConfig.defaultConfig()
+        config.peerId = "peer-1"
         config.capabilities = [Capability(
             demandId: "d1", model: "m", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
@@ -134,11 +134,11 @@ struct TunnelClientTests {
             let task = Task { await client.start() }
             defer { client.stop(); task.cancel() }
             let hello = await nextSignificantFrame(from: server.inbound)
-            guard case .hello(let nodeId, let caps)? = hello else {
+            guard case .hello(let peerId, let caps)? = hello else {
                 Issue.record("expected hello, got \(String(describing: hello))")
                 return
             }
-            #expect(nodeId == "node-1")
+            #expect(peerId == "peer-1")
             #expect(caps.count == 1)
             let hb = await server.inbound.next(timeout: 10)
             guard case .heartbeat = hb else {
@@ -222,13 +222,13 @@ struct TunnelClientTests {
 
     @Test("reconnect hello advertises post-applyConfig capabilities, not init's")
     func reconnectHelloUsesLatestCapabilities() async throws {
-        // Drive through NodeService so the regression covers the real
+        // Drive through PeerService so the regression covers the real
         // applyConfig → updateRelay → updateConfig wiring end-to-end.
         let pair1 = InMemoryTransportPair()
         let pair2 = InMemoryTransportPair()
-        let factory = SequentialFactory([pair1.nodeSide, pair2.nodeSide])
-        var config = NodeConfig.defaultConfig()
-        config.nodeId = "node-1"
+        let factory = SequentialFactory([pair1.peerSide, pair2.peerSide])
+        var config = PeerConfig.defaultConfig()
+        config.peerId = "peer-1"
         config.sources = [SourceConfig(
             id: "s1", name: "x", type: .openaiCompatible,
             endpoint: URL(string: "http://127.0.0.1:1/v1")!, apiKeyRef: "s1",
@@ -236,7 +236,7 @@ struct TunnelClientTests {
         config.capabilities = [Capability(
             demandId: "d1", model: "m", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
-        let service = NodeService(
+        let service = PeerService(
             config: config,
             secrets: FileSecretStore(directory: FileManager.default.temporaryDirectory
                 .appendingPathComponent("tknet-tc-\(UUID().uuidString)")),
@@ -328,7 +328,7 @@ struct TunnelClientTests {
                     return
                 }
                 #expect(r2.status == .failed)
-                #expect(r2.errorMessage?.contains("node busy") == true)
+                #expect(r2.errorMessage?.contains("peer busy") == true)
                 #expect(r1.status == .completed)
             }
         } catch {

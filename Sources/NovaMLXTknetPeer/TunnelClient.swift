@@ -7,7 +7,7 @@ public enum TunnelStatus: Equatable, Sendable {
 
 public enum TunnelError: Error { case notRegistered, connectionClosed }
 
-/// Owns one node↔server tunnel: connect, hello, heartbeat, reconnect with
+/// Owns one peer↔server tunnel: connect, hello, heartbeat, reconnect with
 /// jittered exponential backoff, request dispatch to the Relay, cancel and
 /// demand lifecycle propagation. Transport-agnostic (WS now, slow-poll later).
 public final class TunnelClient: @unchecked Sendable {
@@ -22,7 +22,7 @@ public final class TunnelClient: @unchecked Sendable {
         var demand: [DemandEntry] = []
         /// Latest operator config, if `updateConfig` ever ran. Every hello
         /// advertises these capabilities; falls back to the init config.
-        var config: NodeConfig?
+        var config: PeerConfig?
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
 
@@ -31,8 +31,8 @@ public final class TunnelClient: @unchecked Sendable {
     private let demandContinuation: AsyncStream<[DemandEntry]>.Continuation
     public let demandStream: AsyncStream<[DemandEntry]>
 
-    private let config: NodeConfig
-    /// Internal (not private): Task 7's NodeService rebinds this relay when
+    private let config: PeerConfig
+    /// Internal (not private): Task 7's PeerService rebinds this relay when
     /// the operator edits config, without rebuilding the client.
     let relay: Relay
     private let transportFactory: TransportFactory
@@ -54,11 +54,11 @@ public final class TunnelClient: @unchecked Sendable {
     public var demand: [DemandEntry] { state.withLock { $0.demand } }
 
     /// Fired once per terminal `responseEnd` dispatched through the relay, on
-    /// the dispatch task. Set before `start()`; owners (NodeService) aggregate
+    /// the dispatch task. Set before `start()`; owners (PeerService) aggregate
     /// request/token counters from it. Never carries secret material.
     public var onResult: (@Sendable (RequestResult) -> Void)?
 
-    public init(config: NodeConfig, relay: Relay,
+    public init(config: PeerConfig, relay: Relay,
                 transportFactory: @escaping TransportFactory,
                 delay: @escaping @Sendable (Double) async throws -> Void = { seconds in
                     try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -122,8 +122,8 @@ public final class TunnelClient: @unchecked Sendable {
 
     /// Record the latest operator config so every future hello advertises
     /// the current capabilities, never the set frozen at init. Called from
-    /// `updateRelay` (NodeService.applyConfig's path).
-    public func updateConfig(_ config: NodeConfig) {
+    /// `updateRelay` (PeerService.applyConfig's path).
+    public func updateConfig(_ config: PeerConfig) {
         state.withLock { $0.config = config }
     }
 
@@ -131,7 +131,7 @@ public final class TunnelClient: @unchecked Sendable {
     /// reconnect. Capability edits additionally go out as a
     /// `capabilitiesUpdate` frame via `updateCapabilities(_:)` and ride the
     /// next hello after any reconnect (`updateConfig`).
-    public func updateRelay(_ config: NodeConfig) {
+    public func updateRelay(_ config: PeerConfig) {
         updateConfig(config)
         relay.updateConfig(config)
     }
@@ -144,7 +144,7 @@ public final class TunnelClient: @unchecked Sendable {
     }
 
     private func runSession(transport: any TunnelTransport) async throws {
-        guard let nodeId = config.nodeId else {
+        guard let peerId = config.peerId else {
             throw TunnelError.notRegistered
         }
         state.withLock { $0.currentTransport = transport }
@@ -161,7 +161,7 @@ public final class TunnelClient: @unchecked Sendable {
             let liveIds = Set(state.demand.map(\.demandId))
             return declared.filter { liveIds.contains($0.demandId) }
         }
-        try await sendOn(transport, .hello(nodeId: nodeId, capabilities: helloCapabilities))
+        try await sendOn(transport, .hello(peerId: peerId, capabilities: helloCapabilities))
         let pending = state.withLock { state -> [Capability]? in
             let pending = state.pendingCapabilities
             state.pendingCapabilities = nil
@@ -223,7 +223,7 @@ public final class TunnelClient: @unchecked Sendable {
                 let refuse = Frame.responseEnd(reqId: request.reqId, result: RequestResult(
                     status: .failed, ttftMs: 0, totalMs: 0, promptTokens: 0, completionTokens: 0,
                     upstreamStatus: 0,
-                    errorMessage: "node busy (concurrency \(config.concurrencyLimit))"))
+                    errorMessage: "peer busy (concurrency \(config.concurrencyLimit))"))
                 Task { try? await sendOn(transport, refuse) }
                 return
             }
@@ -252,7 +252,7 @@ public final class TunnelClient: @unchecked Sendable {
             state.withLock { $0.demand = entries }
             demandContinuation.yield(entries)
         case .hello, .capabilitiesUpdate, .heartbeat, .responseChunk, .responseEnd, .error:
-            break  // server→node protocol violation; ignore silently in v1
+            break  // server→peer protocol violation; ignore silently in v1
         }
     }
 
@@ -277,7 +277,7 @@ public final class TunnelClient: @unchecked Sendable {
     }
 }
 
-/// Counting semaphore for async code. Task 7's NodeService uses it to cap
+/// Counting semaphore for async code. Task 7's PeerService uses it to cap
 /// tunnel-level work; it lives here so the client module owns the primitive
 /// (no dependencies, transport-agnostic).
 public final class AsyncSemaphore: @unchecked Sendable {

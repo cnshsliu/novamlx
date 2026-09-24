@@ -1,9 +1,9 @@
 import Foundation
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
-@Suite("Node config")
-struct NodeConfigTests {
+@Suite("Peer config")
+struct PeerConfigTests {
     private func tmpPath() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-\(UUID().uuidString).json")
@@ -13,8 +13,8 @@ struct NodeConfigTests {
     func roundTrip() throws {
         let url = tmpPath()
         defer { try? FileManager.default.removeItem(at: url) }
-        var config = NodeConfig.defaultConfig()
-        config.nodeId = "node-9"
+        var config = PeerConfig.defaultConfig()
+        config.peerId = "peer-9"
         config.sources = [SourceConfig(
             id: "s1", name: "Local NovaMLX", type: .localNovaMLX,
             endpoint: URL(string: "http://127.0.0.1:6590/v1")!,
@@ -32,7 +32,7 @@ struct NodeConfigTests {
 
     @Test("retired demands drop out of active capabilities but keep source configs")
     func retirement() {
-        var config = NodeConfig.defaultConfig()
+        var config = PeerConfig.defaultConfig()
         config.capabilities = [
             Capability(demandId: "d1", model: "a", sourceId: "s1", sourceType: .openaiCompatible, priceIn: 0, priceOut: 0),
             Capability(demandId: "d2", model: "b", sourceId: "s1", sourceType: .openaiCompatible, priceIn: 0, priceOut: 0),
@@ -56,7 +56,7 @@ struct NodeConfigTests {
 
     @Test("default config has the spec defaults")
     func defaults() {
-        let c = NodeConfig.defaultConfig()
+        let c = PeerConfig.defaultConfig()
         #expect(c.concurrencyLimit == 1)
         #expect(c.requestTimeoutSeconds == 300)
         #expect(c.idleMinutesBeforeSlowPoll == 5)

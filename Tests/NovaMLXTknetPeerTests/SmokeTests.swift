@@ -1,10 +1,10 @@
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
-@Suite("Tknet Node smoke")
+@Suite("Tknet Peer smoke")
 struct SmokeTests {
     @Test("module exposes a version")
     func versionExists() {
-        #expect(!TknetNode.version.isEmpty)
+        #expect(!TknetPeer.version.isEmpty)
     }
 }

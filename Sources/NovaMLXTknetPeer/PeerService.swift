@@ -3,11 +3,11 @@ import Logging
 import os
 
 /// Aggregated snapshot the CLI and the Mac page render. `capabilities` is the
-/// live serving set (`NodeConfig.activeCapabilities` — declarations whose
+/// live serving set (`PeerConfig.activeCapabilities` — declarations whose
 /// demand retired are excluded; the full declaration list lives in
 /// `currentConfig`). `totalRequests` counts requests that reached a terminal
 /// `responseEnd` (matches the relay's one-end-per-request contract).
-public struct NodeStatus: Equatable, Sendable {
+public struct PeerStatus: Equatable, Sendable {
     public var connection: TunnelStatus
     public var activeRequests: Int
     public var totalRequests: Int
@@ -29,16 +29,16 @@ public struct NodeStatus: Equatable, Sendable {
 /// and the tunnel client, aggregates status, and applies operator config
 /// edits live. Call `start()` once and `stop()` before dropping it — the
 /// relay's AsyncHTTPClient traps in debug builds when dropped un-shutdown.
-public final class NodeService: @unchecked Sendable {
-    public let statusStream: AsyncStream<NodeStatus>
-    private let statusContinuation: AsyncStream<NodeStatus>.Continuation
+public final class PeerService: @unchecked Sendable {
+    public let statusStream: AsyncStream<PeerStatus>
+    private let statusContinuation: AsyncStream<PeerStatus>.Continuation
 
     /// Everything mutable lives under one lock (same pattern as
     /// TunnelClient); no lock scope ever awaits. `connection` and `demand`
     /// are mirrors of the client's streams so a publish never has to hop
     /// onto another task.
     private struct State {
-        var config: NodeConfig
+        var config: PeerConfig
         var client: TunnelClient?
         var relay: Relay?
         var runTask: Task<Void, Never>?
@@ -66,15 +66,15 @@ public final class NodeService: @unchecked Sendable {
     /// the service itself changes the config — demand reconciliation and
     /// `applyConfig` today. Nil (default) means the process holds the config
     /// in memory only.
-    private let onConfigChange: (@Sendable (NodeConfig) -> Void)?
-    private let logger = Logger(label: "TknetNode.NodeService")
+    private let onConfigChange: (@Sendable (PeerConfig) -> Void)?
+    private let logger = Logger(label: "TknetPeer.PeerService")
 
-    public init(config: NodeConfig, secrets: any SecretStore,
+    public init(config: PeerConfig, secrets: any SecretStore,
                 transportFactory: @escaping TransportFactory,
                 delay: @escaping @Sendable (Double) async throws -> Void = {
                     try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
                 },
-                onConfigChange: (@Sendable (NodeConfig) -> Void)? = nil) {
+                onConfigChange: (@Sendable (PeerConfig) -> Void)? = nil) {
         self.secrets = secrets
         self.transportFactory = transportFactory
         self.delay = delay
@@ -84,7 +84,7 @@ public final class NodeService: @unchecked Sendable {
     }
 
     /// Connects the tunnel and keeps it alive until `stop()`. Throws
-    /// `TunnelError.notRegistered` when the node has no id yet (register
+    /// `TunnelError.notRegistered` when the peer has no id yet (register
     /// first, then start).
     public func start() async throws {
         guard let initialConfig = takeStartConfig() else {
@@ -179,7 +179,7 @@ public final class NodeService: @unchecked Sendable {
     /// and are advertised by every subsequent hello (including after
     /// reconnects). `concurrencyLimit` and the hello identity stay bound to
     /// the config `start()` saw — restart to change those.
-    public func applyConfig(_ newConfig: NodeConfig) async {
+    public func applyConfig(_ newConfig: PeerConfig) async {
         let client = state.withLock { state -> TunnelClient? in
             state.config = newConfig
             return state.client
@@ -190,7 +190,7 @@ public final class NodeService: @unchecked Sendable {
         publish()
     }
 
-    public var currentConfig: NodeConfig {
+    public var currentConfig: PeerConfig {
         state.withLock { $0.config }
     }
 
@@ -212,7 +212,7 @@ public final class NodeService: @unchecked Sendable {
     }
 
     private func updateDemand(_ entries: [DemandEntry]) {
-        let (newlyRetired, snapshot): ([String], NodeConfig) = state.withLock { state in
+        let (newlyRetired, snapshot): ([String], PeerConfig) = state.withLock { state in
             let newlyRetired = state.config.reconcile(demandIds: Set(entries.map(\.demandId)))
             state.aggregates.demand = entries
             return (newlyRetired, state.config)
@@ -237,7 +237,7 @@ public final class NodeService: @unchecked Sendable {
 
     private func publish() {
         let status = state.withLock { state in
-            NodeStatus(
+            PeerStatus(
                 connection: state.aggregates.connection,
                 activeRequests: state.aggregates.activeRequests,
                 totalRequests: state.aggregates.totalRequests,
@@ -251,10 +251,10 @@ public final class NodeService: @unchecked Sendable {
 
     // MARK: - State helpers (non-async so the unfair lock is legal there)
 
-    /// Config snapshot if the node is registered and not yet started.
-    private func takeStartConfig() -> NodeConfig? {
+    /// Config snapshot if the peer is registered and not yet started.
+    private func takeStartConfig() -> PeerConfig? {
         state.withLock { state in
-            guard state.config.nodeId != nil else { return nil }
+            guard state.config.peerId != nil else { return nil }
             return state.config
         }
     }
@@ -298,7 +298,7 @@ public final class NodeService: @unchecked Sendable {
     }
 }
 
-/// Transport decorator feeding NodeService's in-flight counter. A request
+/// Transport decorator feeding PeerService's in-flight counter. A request
 /// counts as active from the inbound `.request` frame until its terminal
 /// frame: an outbound `responseEnd` (normal, refused, timed out, cancelled
 /// mid-flight) or an inbound `requestCancel`. A cancellation race can produce

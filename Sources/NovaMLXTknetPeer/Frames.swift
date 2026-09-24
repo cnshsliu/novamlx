@@ -4,7 +4,7 @@ public enum APIFormat: String, Codable, Sendable, Equatable { case openai, anthr
 
 public enum SourceType: String, Codable, Sendable, Equatable { case openaiCompatible, anthropic, localNovaMLX }
 
-/// Which demand entries this node serves, at what price. Sent in `hello`
+/// Which demand entries this peer serves, at what price. Sent in `hello`
 /// and `capabilities.update`; prices are per 1k tokens.
 public struct Capability: Codable, Equatable, Sendable {
     public var demandId: String
@@ -79,11 +79,11 @@ public struct RequestResult: Codable, Equatable, Sendable {
     }
 }
 
-/// Tunnel frame. The node token never appears in any frame — it rides the
+/// Tunnel frame. The peer token never appears in any frame — it rides the
 /// WebSocket upgrade's `Authorization: Bearer` header (see `WSTransport`);
 /// source API keys never appear in any frame either.
 public enum Frame: Equatable, Sendable {
-    case hello(nodeId: String, capabilities: [Capability])
+    case hello(peerId: String, capabilities: [Capability])
     case capabilitiesUpdate([Capability])
     case heartbeat(Heartbeat)
     case responseChunk(reqId: String, payload: Data)     // raw SSE/JSON bytes

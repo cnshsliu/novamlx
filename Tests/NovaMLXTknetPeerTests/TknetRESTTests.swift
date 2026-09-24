@@ -1,19 +1,19 @@
 import Foundation
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 @Suite("Tknet REST")
 struct TknetRESTTests {
-    @Test("register returns node id and token")
+    @Test("register returns peer id and token")
     func register() async throws {
         let server = MockTknetServer()
         try await server.start()
         defer { Task { await server.stop() } }
         let rest = TknetREST()
         defer { Task { try? await rest.shutdown() } }
-        let (nodeId, token) = try await rest.register(
-            server: URL(string: "http://127.0.0.1:\(server.port)")!, nodeName: "lucas-mac")
-        #expect(nodeId == "node-42")
+        let (peerId, token) = try await rest.register(
+            server: URL(string: "http://127.0.0.1:\(server.port)")!, peerName: "lucas-mac")
+        #expect(peerId == "peer-42")
         #expect(token == "tok-42")
     }
 

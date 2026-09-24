@@ -12,10 +12,10 @@ public protocol TunnelTransport: Sendable {
 /// Factory so clients can dial reconnects; tests inject the in-memory pair.
 public typealias TransportFactory = @Sendable () async throws -> TunnelTransport
 
-/// Two transports wired to each other. `nodeSide` is what TunnelClient holds;
+/// Two transports wired to each other. `peerSide` is what TunnelClient holds;
 /// `serverSide` is what the test drives as a fake tknet.ai.
 public final class InMemoryTransportPair: @unchecked Sendable {
-    public let nodeSide: TunnelTransport
+    public let peerSide: TunnelTransport
     public let serverSide: TunnelTransport
 
     private final class Side: TunnelTransport, @unchecked Sendable {
@@ -48,12 +48,12 @@ public final class InMemoryTransportPair: @unchecked Sendable {
     }
 
     public init() {
-        var nodeCont: AsyncStream<Frame>.Continuation?
+        var peerCont: AsyncStream<Frame>.Continuation?
         var serverCont: AsyncStream<Frame>.Continuation?
-        let nodeStream = AsyncStream<Frame> { nodeCont = $0 }
+        let peerStream = AsyncStream<Frame> { peerCont = $0 }
         let serverStream = AsyncStream<Frame> { serverCont = $0 }
-        guard let nc = nodeCont, let sc = serverCont else { fatalError("stream init") }
-        self.nodeSide = Side(mine: nodeStream, mineCont: nc, otherCont: sc)
+        guard let nc = peerCont, let sc = serverCont else { fatalError("stream init") }
+        self.peerSide = Side(mine: peerStream, mineCont: nc, otherCont: sc)
         self.serverSide = Side(mine: serverStream, mineCont: sc, otherCont: nc)
     }
 }

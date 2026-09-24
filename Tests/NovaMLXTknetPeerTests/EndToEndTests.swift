@@ -1,7 +1,7 @@
 import Foundation
 import os
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 /// Task 12 release gate: the whole chain over real sockets —
 /// MockTunnelServer (tknet.ai) ← WebSocket ← TunnelClient ← Relay ←
@@ -55,7 +55,7 @@ struct EndToEndTests {
         }
     }
 
-    @Test("user request flows tknet→node→source and streams back")
+    @Test("user request flows tknet→peer→source and streams back")
     func fullChain() async throws {
         let source = MockSourceServer()
         try await source.start()
@@ -70,10 +70,10 @@ struct EndToEndTests {
             .appendingPathComponent("tknet-e2e-\(UUID().uuidString)")
         let secrets = FileSecretStore(directory: dir.appendingPathComponent("secrets"))
         secrets.save("k", for: "s1")
-        secrets.save("tok", for: "node/token")
+        secrets.save("tok", for: "peer/token")
 
-        var config = NodeConfig.defaultConfig()
-        config.nodeId = "node-1"
+        var config = PeerConfig.defaultConfig()
+        config.peerId = "peer-1"
         config.serverURL = URL(string: "ws://127.0.0.1:\(tunnel.port)")!
         config.sources = [SourceConfig(
             id: "s1", name: "mock", type: .openaiCompatible,
@@ -83,25 +83,25 @@ struct EndToEndTests {
             demandId: "d1", model: "m", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
 
-        let service = NodeService(
+        let service = PeerService(
             config: config, secrets: secrets,
             transportFactory: WSTransport.factory(
-                server: config.serverURL, tokenRef: "node/token", secrets: secrets),
+                server: config.serverURL, tokenRef: "peer/token", secrets: secrets),
             delay: Self.quickDelay)
         let collector = FrameCollector()
         collector.collect(tunnel.receivedFrames.stream)
         try await service.start()
 
-        // The node identified itself over the real tunnel.
-        guard case .hello(let nodeId, let caps)? = await collector.nextSignificant(after: 0)?.frame
+        // The peer identified itself over the real tunnel.
+        guard case .hello(let peerId, let caps)? = await collector.nextSignificant(after: 0)?.frame
         else {
             Issue.record("expected hello as the first significant tunnel frame")
             await service.stop(); await source.stop(); await tunnel.stop()
             return
         }
-        #expect(nodeId == "node-1")
+        #expect(peerId == "peer-1")
         #expect(caps.map(\.demandId) == ["d1"])
-        // The node token rode the real WS upgrade request.
+        // The peer token rode the real WS upgrade request.
         #expect(tunnel.lastAuthorization == "Bearer tok")
 
         // tknet.ai pushes an end-user request down the live tunnel.
@@ -130,7 +130,7 @@ struct EndToEndTests {
 
         // The relay translated the demand model to the source's upstream model
         // and attached the source key — to the source only, never onto the
-        // tunnel (the tunnel saw the node token, asserted above).
+        // tunnel (the tunnel saw the peer token, asserted above).
         #expect(source.lastBodyModel == "u")
         #expect(source.lastAuthorizationHeader == "Bearer k")
 

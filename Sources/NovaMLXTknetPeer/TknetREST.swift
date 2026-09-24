@@ -2,7 +2,7 @@ import AsyncHTTPClient
 import Foundation
 import NIOCore
 
-/// Registration + demand-list REST calls against tknet.ai. The node token is
+/// Registration + demand-list REST calls against tknet.ai. The peer token is
 /// a secret: it is returned to the caller and only ever travels in the
 /// `authorization` header — it is never logged and never appears in errors.
 public struct TknetREST: Sendable {
@@ -18,23 +18,23 @@ public struct TknetREST: Sendable {
     /// dropping the instance.
     public func shutdown() async throws { try await client.shutdown() }
 
-    /// Registers this node with tknet.ai and returns the assigned node id
+    /// Registers this peer with tknet.ai and returns the assigned peer id
     /// plus the secret token used for all later authenticated calls.
-    public func register(server: URL, nodeName: String) async throws -> (nodeId: String, token: String) {
+    public func register(server: URL, peerName: String) async throws -> (peerId: String, token: String) {
         struct RegisterRequest: Encodable { let name: String }
-        struct Payload: Decodable { let nodeId: String; let token: String }
+        struct Payload: Decodable { let peerId: String; let token: String }
 
         var request = HTTPClientRequest(
             url: server.appendingPathComponent("api/node/register").absoluteString)
         request.method = .POST
         request.headers.add(name: "content-type", value: "application/json")
-        request.body = .bytes(try JSONEncoder().encode(RegisterRequest(name: nodeName)))
+        request.body = .bytes(try JSONEncoder().encode(RegisterRequest(name: peerName)))
 
         let response = try await client.execute(request, timeout: .seconds(30))
         guard response.status == .ok else { throw RESTError.badStatus(Int(response.status.code)) }
         let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
         let payload = try JSONDecoder().decode(Payload.self, from: data)
-        return (nodeId: payload.nodeId, token: payload.token)
+        return (peerId: payload.peerId, token: payload.token)
     }
 
     /// Fetches the current demand list; requires the registration token.

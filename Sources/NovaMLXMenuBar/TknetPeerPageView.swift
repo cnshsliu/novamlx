@@ -1,42 +1,42 @@
 import SwiftUI
 import NovaMLXCore
 import NovaMLXDB
-import NovaMLXTknetNode
+import NovaMLXTknetPeer
 
-// MARK: - TknetNodePageView (Task 11)
+// MARK: - TknetPeerPageView (Task 11)
 //
 // In-page strings are literal English, matching LoadBalancersPageView's
-// convention; only the sidebar page title is localized (app.tknetNode).
+// convention; only the sidebar page title is localized (app.tknetPeer).
 
-struct TknetNodePageView: View {
-    @StateObject private var node = TknetNodeState()
+struct TknetPeerPageView: View {
+    @StateObject private var peer = TknetPeerState()
     @State private var serverText = "https://tknet.ai"
-    @State private var nodeNameText = "tknet-node-\(ProcessInfo.processInfo.hostName.prefix(20))"
+    @State private var peerNameText = "tknet-peer-\(ProcessInfo.processInfo.hostName.prefix(20))"
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 header
                 statusRow
-                if node.config.nodeId == nil {
+                if peer.config.peerId == nil {
                     registrationSection
                 } else {
                     demandSection
-                    if !node.config.capabilities.isEmpty {
+                    if !peer.config.capabilities.isEmpty {
                         capabilitiesSection
                     }
                 }
             }
             .padding(24)
         }
-        .navigationTitle("Tknet Node")
-        .task { if node.config.nodeId != nil { await node.fetchDemand() } }
+        .navigationTitle("Tknet Peer")
+        .task { if peer.config.peerId != nil { await peer.fetchDemand() } }
     }
 
     // MARK: Header + status
 
     private var connectionText: String {
-        switch node.status?.connection {
+        switch peer.status?.connection {
         case .connecting: return "connecting"
         case .connected: return "connected"
         case .backingOff(let seconds): return "reconnecting in \(Int(seconds))s"
@@ -46,7 +46,7 @@ struct TknetNodePageView: View {
     }
 
     private var connectionColor: Color {
-        switch node.status?.connection {
+        switch peer.status?.connection {
         case .connected: return .green
         case .connecting, .backingOff: return .orange
         default: return .secondary
@@ -56,17 +56,17 @@ struct TknetNodePageView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading) {
-                Text("Tknet Node").font(.title2.bold())
+                Text("Tknet Peer").font(.title2.bold())
                 Text("Serve tknet.ai demand from this Mac")
                     .font(.caption).foregroundColor(.secondary)
             }
             Spacer()
-            Button(node.running ? "Stop" : "Start") {
-                Task { node.running ? await node.stop() : await node.start() }
+            Button(peer.running ? "Stop" : "Start") {
+                Task { peer.running ? await peer.stop() : await peer.start() }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(node.config.nodeId == nil)
-            .help(node.config.nodeId == nil ? "Register this node first" : "")
+            .disabled(peer.config.peerId == nil)
+            .help(peer.config.peerId == nil ? "Register this peer first" : "")
         }
     }
 
@@ -75,11 +75,11 @@ struct TknetNodePageView: View {
             Label(connectionText, systemImage: "antenna.radiowaves.left.and.right")
                 .font(.caption)
                 .foregroundColor(connectionColor)
-            Text("\(node.status?.activeRequests ?? 0)/\(node.status?.totalRequests ?? 0) requests")
+            Text("\(peer.status?.activeRequests ?? 0)/\(peer.status?.totalRequests ?? 0) requests")
                 .font(.caption.monospaced()).foregroundColor(.secondary)
-            Text("\(node.status?.totalCompletionTokens ?? 0) tokens")
+            Text("\(peer.status?.totalCompletionTokens ?? 0) tokens")
                 .font(.caption.monospaced()).foregroundColor(.secondary)
-            if let error = node.lastError {
+            if let error = peer.lastError {
                 Text(error).font(.caption).foregroundColor(.red).lineLimit(2)
             }
             Spacer()
@@ -100,13 +100,13 @@ struct TknetNodePageView: View {
                     TextField("https://tknet.ai", text: $serverText)
                 }
                 GridRow {
-                    Text("Node name").font(.caption)
-                    TextField("Node name", text: $nodeNameText)
+                    Text("Peer name").font(.caption)
+                    TextField("Peer name", text: $peerNameText)
                 }
             }
             Button("Register") {
                 guard let url = URL(string: serverText.trimmingCharacters(in: .whitespaces)) else { return }
-                Task { await node.register(server: url, nodeName: nodeNameText) }
+                Task { await peer.register(server: url, peerName: peerNameText) }
             }
             .buttonStyle(.bordered)
         }
@@ -120,17 +120,17 @@ struct TknetNodePageView: View {
     private var demandSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Demand (\(node.demand.count))").font(.headline)
+                Text("Demand (\(peer.demand.count))").font(.headline)
                 Spacer()
-                Button("Refresh") { Task { await node.fetchDemand() } }
+                Button("Refresh") { Task { await peer.fetchDemand() } }
             }
-            if node.demand.isEmpty {
+            if peer.demand.isEmpty {
                 Text("No open demand right now.")
                     .font(.caption).foregroundColor(.secondary)
                     .padding(.top, 4)
             } else {
                 LazyVStack(spacing: 8) {
-                    ForEach(node.demand, id: \.demandId) { entry in
+                    ForEach(peer.demand, id: \.demandId) { entry in
                         demandRow(entry)
                     }
                 }
@@ -139,8 +139,8 @@ struct TknetNodePageView: View {
     }
 
     private func demandRow(_ entry: DemandEntry) -> some View {
-        let claimed = node.config.capabilities.first { $0.demandId == entry.demandId }
-        let active = claimed.map { node.config.activeCapabilities.contains($0) } ?? false
+        let claimed = peer.config.capabilities.first { $0.demandId == entry.demandId }
+        let active = claimed.map { peer.config.activeCapabilities.contains($0) } ?? false
         return HStack {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -165,7 +165,7 @@ struct TknetNodePageView: View {
                     .font(.caption).foregroundColor(.secondary)
             } else {
                 Button("Serve via NovaMLX (local)") {
-                    Task { await node.addLocalSource(for: entry, apiKeyStore: NovaDB.shared.apiKeyStore) }
+                    Task { await peer.addLocalSource(for: entry, apiKeyStore: NovaDB.shared.apiKeyStore) }
                 }
                 .buttonStyle(.bordered)
             }
@@ -179,10 +179,10 @@ struct TknetNodePageView: View {
 
     private var capabilitiesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Declared Capabilities (\(node.config.capabilities.count))").font(.headline)
+            Text("Declared Capabilities (\(peer.config.capabilities.count))").font(.headline)
             LazyVStack(spacing: 8) {
-                ForEach(node.config.capabilities, id: \.demandId) { cap in
-                    CapabilityRow(capability: cap, node: node)
+                ForEach(peer.config.capabilities, id: \.demandId) { cap in
+                    CapabilityRow(capability: cap, peer: peer)
                 }
             }
         }
@@ -193,17 +193,17 @@ struct TknetNodePageView: View {
 
 private struct CapabilityRow: View {
     let capability: Capability
-    @ObservedObject var node: TknetNodeState
+    @ObservedObject var peer: TknetPeerState
     @State private var upstream: String
 
-    init(capability: Capability, node: TknetNodeState) {
+    init(capability: Capability, peer: TknetPeerState) {
         self.capability = capability
-        self.node = node
-        _upstream = State(initialValue: node.upstreamModel(for: capability))
+        self.peer = peer
+        _upstream = State(initialValue: peer.upstreamModel(for: capability))
     }
 
     private var retired: Bool {
-        !node.config.activeCapabilities.contains(capability)
+        !peer.config.activeCapabilities.contains(capability)
     }
 
     var body: some View {
@@ -225,7 +225,7 @@ private struct CapabilityRow: View {
             TextField("Upstream model", text: $upstream)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 220)
-                .onSubmit { Task { await node.updateUpstreamModel(for: capability.demandId, to: upstream) } }
+                .onSubmit { Task { await peer.updateUpstreamModel(for: capability.demandId, to: upstream) } }
             if retired {
                 Text("retired").font(.caption2).foregroundColor(.secondary)
             }

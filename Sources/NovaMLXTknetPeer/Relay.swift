@@ -10,16 +10,16 @@ public final class Relay: Sendable {
     /// Holds the live config so capability edits take effect without restarts.
     public final class ConfigHolder: @unchecked Sendable {
         private let lock = NSLock()
-        private var config: NodeConfig
+        private var config: PeerConfig
 
-        public init(_ config: NodeConfig) { self.config = config }
+        public init(_ config: PeerConfig) { self.config = config }
 
-        public var value: NodeConfig {
+        public var value: PeerConfig {
             lock.lock(); defer { lock.unlock() }
             return config
         }
 
-        public func update(_ config: NodeConfig) {
+        public func update(_ config: PeerConfig) {
             lock.lock(); defer { lock.unlock() }
             self.config = config
         }
@@ -29,7 +29,7 @@ public final class Relay: Sendable {
     private let secrets: any SecretStore
     private let client: HTTPClient
 
-    public init(config: NodeConfig, secrets: any SecretStore) {
+    public init(config: PeerConfig, secrets: any SecretStore) {
         self.configHolder = ConfigHolder(config)
         self.secrets = secrets
         // `.singleton` shares one NIO event loop group across all relays in
@@ -38,7 +38,7 @@ public final class Relay: Sendable {
         self.client = HTTPClient(eventLoopGroupProvider: .singleton)
     }
 
-    public func updateConfig(_ config: NodeConfig) { configHolder.update(config) }
+    public func updateConfig(_ config: PeerConfig) { configHolder.update(config) }
 
     /// Stops the upstream HTTP client. AsyncHTTPClient asserts in debug builds
     /// if it is deallocated without shutdown, so owners must call this before

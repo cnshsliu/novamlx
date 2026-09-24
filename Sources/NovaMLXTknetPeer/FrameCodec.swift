@@ -17,8 +17,8 @@ public enum FrameCodec {
     public static func encode(_ frame: Frame) -> String {
         let obj: [String: Any]
         switch frame {
-        case .hello(let nodeId, let caps):
-            obj = ["type": "hello", "data": jsonValue(HelloPayload(nodeId: nodeId, capabilities: caps, version: TknetNode.version))]
+        case .hello(let peerId, let caps):
+            obj = ["type": "hello", "data": jsonValue(HelloPayload(peerId: peerId, capabilities: caps, version: TknetPeer.version))]
         case .capabilitiesUpdate(let caps):
             obj = ["type": "capabilities.update", "data": ["capabilities": jsonValue(caps)]]
         case .heartbeat(let hb):
@@ -57,7 +57,7 @@ public enum FrameCodec {
         switch type {
         case "hello":
             let p = try decodePayload(HelloPayload.self)
-            return .hello(nodeId: p.nodeId, capabilities: p.capabilities)
+            return .hello(peerId: p.peerId, capabilities: p.capabilities)
         case "capabilities.update":
             let p = try decodePayload(CapabilitiesPayload.self)
             return .capabilitiesUpdate(p.capabilities)
@@ -91,7 +91,7 @@ public enum FrameCodec {
     }
 }
 
-struct HelloPayload: Codable { var nodeId: String; var capabilities: [Capability]; var version: String }
+struct HelloPayload: Codable { var peerId: String; var capabilities: [Capability]; var version: String }
 struct CapabilitiesPayload: Codable { var capabilities: [Capability] }
 struct ChunkPayload: Codable { var reqId: String; var payload: String }
 struct EndPayload: Codable { var reqId: String; var result: RequestResult }

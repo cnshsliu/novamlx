@@ -2,7 +2,7 @@ import Foundation
 import Hummingbird
 import HummingbirdWebSocket
 import os
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 /// Real local tknet.ai tunnel stand-in over a real WebSocket upgrade.
 /// Accepts any Authorization header (records it for assertions), decodes

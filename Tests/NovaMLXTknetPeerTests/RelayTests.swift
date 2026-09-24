@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import NovaMLXTknetNode
+@testable import NovaMLXTknetPeer
 
 @Suite("Relay")
 struct RelayTests {
@@ -18,7 +18,7 @@ struct RelayTests {
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-relay-\(UUID().uuidString)"))
         secrets.save("sk-source-key", for: "s1")
-        var config = NodeConfig.defaultConfig()
+        var config = PeerConfig.defaultConfig()
         config.requestTimeoutSeconds = requestTimeoutSeconds
         config.sources = [SourceConfig(
             id: "s1", name: "mock", type: sourceType,
