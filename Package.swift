@@ -24,6 +24,8 @@ let package = Package(
         .library(name: "NovaMLXDistributed", targets: ["NovaMLXDistributed"]),
         .library(name: "NovaMLXMenuBar", targets: ["NovaMLXMenuBar"]),
         .library(name: "NovaMLXDB", targets: ["NovaMLXDB"]),
+        .library(name: "NovaMLXTknetNode", targets: ["NovaMLXTknetNode"]),
+        .executable(name: "tknet-node", targets: ["tknet-node"]),
     ],
     dependencies: [
         .package(path: "vendors/mlx-swift"),
@@ -38,6 +40,9 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
+        .package(url: "https://github.com/swift-server/async-http-client", from: "1.33.0"),
+        .package(url: "https://github.com/hummingbird-project/hummingbird-websocket", from: "2.0.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
     ],
     targets: [
         .target(
@@ -246,6 +251,33 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Hub", package: "swift-transformers"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .target(
+            name: "NovaMLXTknetNode",
+            dependencies: [
+                .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "Logging", package: "swift-log"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .executableTarget(
+            name: "tknet-node",
+            dependencies: [
+                "NovaMLXTknetNode",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .testTarget(
+            name: "NovaMLXTknetNodeTests",
+            dependencies: [
+                "NovaMLXTknetNode",
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "HummingbirdRouter", package: "hummingbird"),
+                .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
             ],
             swiftSettings: concurrencySettings
         ),
