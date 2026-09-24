@@ -77,13 +77,16 @@ public final class Relay: Sendable {
             fail("no source \(capability.sourceId) for model \(request.model)")
             return
         }
-        let formatSupported: Bool
-        switch source.type {
-        case .anthropic: formatSupported = request.apiFormat == .anthropic
-        case .openaiCompatible: formatSupported = request.apiFormat == .openai
-        case .localNovaMLX: formatSupported = true
+        // Anthropic-source forwarding needs a different wire path (/v1/messages,
+        // x-api-key scheme); it is not implemented in Phase 1. Reject outright
+        // rather than silently mis-forwarding an OpenAI-shaped request.
+        guard source.type != .anthropic else {
+            fail("anthropic source forwarding not yet supported")
+            return
         }
-        guard formatSupported else {
+        // Remaining source types (openaiCompatible, localNovaMLX) are
+        // OpenAI-format only.
+        guard request.apiFormat == .openai else {
             fail("api format \(request.apiFormat.rawValue) unsupported by source \(source.id)")
             return
         }
@@ -150,6 +153,13 @@ public final class Relay: Sendable {
         } catch is CancellationError {
             emit(.responseEnd(reqId: request.reqId, result: RequestResult(
                 status: .cancelled, ttftMs: ttftMs, totalMs: elapsedMs(),
+                promptTokens: 0, completionTokens: 0,
+                upstreamStatus: upstreamStatus, errorMessage: nil)))
+        } catch let error as HTTPClientError where error == .deadlineExceeded {
+            // Whole-request deadline expiry, including mid-body; telemetry
+            // callers expect a distinct timeout status, not a generic failure.
+            emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+                status: .timeout, ttftMs: ttftMs, totalMs: elapsedMs(),
                 promptTokens: 0, completionTokens: 0,
                 upstreamStatus: upstreamStatus, errorMessage: nil)))
         } catch {

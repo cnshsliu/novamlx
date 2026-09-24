@@ -9,6 +9,7 @@ import Hummingbird
 final class MockSourceServer: @unchecked Sendable {
     private let lock = NSLock()
     private var _failNextWithStatus = 0
+    private var _delayNextResponse: TimeInterval = 0
     private var _lastAuthorizationHeader: String?
     private var _lastBodyModel: String?
     private var serverTask: Task<Void, Never>?
@@ -18,6 +19,13 @@ final class MockSourceServer: @unchecked Sendable {
     var failNextWithStatus: Int {
         get { lock.lock(); defer { lock.unlock() }; return _failNextWithStatus }
         set { lock.lock(); defer { lock.unlock() }; _failNextWithStatus = newValue }
+    }
+    /// Test hook: when non-zero, the next request sleeps this many seconds in
+    /// its handler before producing any response (drives client deadline
+    /// testing; a slow upstream head is what triggers deadlineExceeded).
+    var delayNextResponse: TimeInterval {
+        get { lock.lock(); defer { lock.unlock() }; return _delayNextResponse }
+        set { lock.lock(); defer { lock.unlock() }; _delayNextResponse = newValue }
     }
     /// Last `authorization` header the server saw (nil when none was sent).
     var lastAuthorizationHeader: String? {
@@ -44,6 +52,11 @@ final class MockSourceServer: @unchecked Sendable {
                 return Response(status: .internalServerError, body: Self.textBody("server gone"))
             }
             let body = try await request.body.collect(upTo: .max)
+            if self.delayNextResponse > 0 {
+                let delay = self.delayNextResponse
+                self.delayNextResponse = 0
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
             let json = (try? JSONSerialization.jsonObject(with: Data(body.readableBytesView))) as? [String: Any]
             self.record(authorization: request.headers[.authorization], model: json?["model"] as? String)
             return self.respond()
