@@ -258,6 +258,7 @@ let package = Package(
             name: "NovaMLXTknetNode",
             dependencies: [
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
+                .product(name: "HummingbirdWSClient", package: "hummingbird-websocket"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "Logging", package: "swift-log"),
             ],
