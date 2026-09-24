@@ -349,8 +349,12 @@ public final class ModelDiscovery: Sendable {
             path: path,
             id: id
         )
+        // Diffusers shards live in subfolders; checkCompleteness scans those
+        // for in-progress .aria2/.download sidecars. A holed aria2 download is
+        // non-zero bytes, so the sidecar is the only reliable incomplete signal.
+        let complete = Self.checkCompleteness(at: path, isAdapter: false)
 
-        NovaMLXLog.info("[Discovery] Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=[], size=\(size.bytesFormatted), complete=true (diffusers)")
+        NovaMLXLog.info("[Discovery] Discovered \(id): type=\(modelType.rawValue), family=\(family.rawValue), archs=[], size=\(size.bytesFormatted), complete=\(complete) (diffusers)")
 
         return DiscoveredModel(
             modelId: id,
@@ -361,7 +365,7 @@ public final class ModelDiscovery: Sendable {
             architectures: [],
             configModelType: "",
             isAdapter: false,
-            isComplete: true
+            isComplete: complete
         )
     }
 
@@ -409,6 +413,17 @@ public final class ModelDiscovery: Sendable {
                 guard let nested = try? fm.contentsOfDirectory(
                     at: child, includingPropertiesForKeys: nil
                 ) else { continue }
+                // Same in-progress sidecars can sit next to the nested shards.
+                // A sparse holed download is non-zero bytes, so the sidecar is
+                // the only reliable "still incomplete" signal here.
+                if nested.contains(where: {
+                    $0.pathExtension == "download" || $0.pathExtension == "aria2"
+                }) {
+                    #if DEBUG
+                    NovaMLXLog.info("[Discovery] Incomplete model: .download temp files found in \(path.lastPathComponent)/\(name)")
+                    #endif
+                    return false
+                }
                 weightFiles.append(contentsOf: nested.filter {
                     $0.pathExtension == "safetensors" || $0.pathExtension == "gguf"
                 })

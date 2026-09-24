@@ -15,11 +15,9 @@
     --safe: #7d8a55;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
   body {
     font-family: "SF Mono", ui-monospace, Menlo, monospace;
-    display: grid;
-    grid-template-rows: auto 1fr;
     min-height: 100%;
   }
   header {
@@ -101,9 +99,98 @@
     cursor: pointer;
   }
   button:hover { border-color: var(--lime); color: var(--lime); }
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    padding: 8px 28px 12px;
+    background: rgba(9, 10, 8, 0.94);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav a {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .nav a:hover { color: var(--lime); }
+  .nav .group { color: var(--line); }
+  main, .play, .more, .curls, .lab, .curl { scroll-margin-top: 52px; }
+  .play { padding: 8px 28px 8px; }
+  .boards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .board-card {
+    border: 1px solid var(--line);
+    background: #0d0e0b;
+    padding: 14px;
+    min-width: 0;
+  }
+  .board-card h3 {
+    margin: 0 0 6px;
+    font-family: "SF Pro Display", "Helvetica Neue", sans-serif;
+    font-size: 22px;
+    letter-spacing: -0.03em;
+  }
+  .board-card canvas { width: 100%; height: auto; background: #090a08; border: 1px solid var(--line); }
+  .board-card .move { font-size: 28px; margin: 8px 0; }
+  .board-card .state { max-height: 96px; }
+  .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .more, .curls { padding: 8px 28px 36px; }
+  .more h2, .curls h2, .play h2 {
+    margin: 0 0 6px;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .lede { margin: 0 0 16px; color: var(--safe); font-size: 12px; line-height: 1.5; max-width: 70ch; }
+  .labs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+  .lab, .curl {
+    border: 1px solid var(--line);
+    padding: 14px;
+    background: #0d0e0b;
+    min-width: 0;
+  }
+  .lab h3, .curl h3 {
+    margin: 0 0 8px;
+    font-family: "SF Pro Display", "Helvetica Neue", sans-serif;
+    font-size: 22px;
+    letter-spacing: -0.03em;
+    font-weight: 600;
+  }
+  textarea.scene {
+    width: 100%;
+    min-height: 88px;
+    margin-bottom: 10px;
+    background: #090a08;
+    color: var(--ink);
+    border: 1px solid var(--line);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 8px;
+    resize: vertical;
+  }
+  .verdict { margin: 10px 0 0; font-size: 13px; line-height: 1.45; color: var(--lime); min-height: 3.2em; }
+  .lab .err { min-height: 1.2em; }
+  .curls { display: grid; gap: 12px; }
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font: 11px/1.45 "SF Mono", ui-monospace, Menlo, monospace;
+    color: var(--ink);
+  }
+  .curl .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .curl .row { margin-bottom: 8px; }
   @media (max-width: 900px) {
     main { grid-template-columns: 1fr; }
     .move { font-size: 48px; }
+    .labs, .boards { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -118,7 +205,22 @@
   </a>
   <div id="status">connecting</div>
 </header>
-<main>
+<nav class="nav">
+  <a href="#snake">Snake</a>
+  <a href="#sokoban">推箱子</a>
+  <a href="#huarong">华容道</a>
+  <a href="#cube">魔方</a>
+  <span class="group">/</span>
+  <a href="#desk">Ticket</a>
+  <a href="#tone">Sarcasm</a>
+  <a href="#ship">Ship</a>
+  <span class="group">/</span>
+  <a href="#curl-choice">curl · Choice</a>
+  <a href="#curl-score">curl · Score</a>
+  <a href="#curl-noul">curl · Yes/no</a>
+  <a href="#curl-all">curl · All three</a>
+</nav>
+<main id="snake">
   <canvas id="board" width="720" height="720"></canvas>
   <aside>
     <div>
@@ -137,6 +239,77 @@
     <button id="pause" type="button">pause</button>
   </aside>
 </main>
+<section class="play">
+  <h2>Small boards</h2>
+  <p class="lede">推箱子, 华容道, and 魔方 run on their own, like the snake. Reset shuffles the blocks into a new layout, then plays that layout through. If the model picks a move that undoes progress, the page plays the move that finishes the puzzle instead.</p>
+  <div class="boards">
+    <article class="board-card" id="sokoban">
+      <h3>推箱子</h3>
+      <canvas id="sokoCanvas" width="420" height="300"></canvas>
+      <div class="move" id="sokoMove">—</div>
+      <div class="state" id="sokoState"></div>
+      <div class="err" id="sokoErr"></div>
+      <div class="actions">
+        <button type="button" id="sokoPause">pause</button>
+        <button type="button" id="sokoReset">reset</button>
+      </div>
+    </article>
+    <article class="board-card" id="huarong">
+      <h3>华容道</h3>
+      <canvas id="huaCanvas" width="320" height="400"></canvas>
+      <div class="move" id="huaMove">—</div>
+      <div class="state" id="huaState"></div>
+      <div class="err" id="huaErr"></div>
+      <div class="actions">
+        <button type="button" id="huaPause">pause</button>
+        <button type="button" id="huaReset">reset</button>
+      </div>
+    </article>
+    <article class="board-card" id="cube">
+      <h3>魔方</h3>
+      <canvas id="cubeCanvas" width="420" height="300"></canvas>
+      <div class="move" id="cubeMove">—</div>
+      <div class="state" id="cubeState"></div>
+      <div class="err" id="cubeErr"></div>
+      <div class="actions">
+        <button type="button" id="cubePause">pause</button>
+        <button type="button" id="cubeReset">reset</button>
+      </div>
+    </article>
+  </div>
+</section>
+<section class="more">
+  <h2>Same model, other questions</h2>
+  <p class="lede">Each card is one <code>/v1/decisions</code> call: a choice, a score, and a yes/no. The snake keeps running above.</p>
+  <div class="labs">
+    <article class="lab" id="desk">
+      <h3>Ticket desk</h3>
+      <textarea class="scene" id="deskText">发票被重复扣款，请今天退款。支付页面已经报错三次。</textarea>
+      <button type="button" data-lab="desk">ask</button>
+      <p class="verdict" id="deskOut"></p>
+      <p class="err" id="deskErr"></p>
+    </article>
+    <article class="lab" id="tone">
+      <h3>Sarcasm</h3>
+      <textarea class="scene" id="toneText">Oh perfect, the build is red again. Just what I wanted on a Friday.</textarea>
+      <button type="button" data-lab="tone">ask</button>
+      <p class="verdict" id="toneOut"></p>
+      <p class="err" id="toneErr"></p>
+    </article>
+    <article class="lab" id="ship">
+      <h3>Ship or wait</h3>
+      <textarea class="scene" id="shipText">Ship Friday. The payment tests are red. We can fix that on Monday after customers notice.</textarea>
+      <button type="button" data-lab="ship">ask</button>
+      <p class="verdict" id="shipOut"></p>
+      <p class="err" id="shipErr"></p>
+    </article>
+  </div>
+</section>
+<section class="curls">
+  <h2>curl</h2>
+  <p class="lede">Copy a command and run it in a shell where <code>NOVA_API_KEY</code> is set. The token is <code>$NOVA_API_KEY</code>, not a key baked into this page.</p>
+  <div id="curlList"></div>
+</section>
 <script>
 const params = new URLSearchParams(location.search);
 const model = params.get("model") || "aac6fef/laya-multilingual-mlx";
@@ -354,6 +527,749 @@ document.getElementById("pause").onclick = () => {
 
 setInterval(tick, 90);
 statusEl.textContent = "live · " + model.split("/").pop();
+
+const labs = {
+  desk: {
+    text: "deskText",
+    out: "deskOut",
+    err: "deskErr",
+    questions: {
+      department: {
+        type: "choice",
+        instructions: "Which desk should take this message?",
+        criteria: ["billing", "technical", "sales"]
+      },
+      urgency: {
+        type: "score",
+        instructions: "How urgent is this for the customer?",
+        criteria: ["low", "medium", "high"]
+      },
+      refund: {
+        type: "noul",
+        instructions: "Does the customer ask for money back?"
+      }
+    }
+  },
+  tone: {
+    text: "toneText",
+    out: "toneOut",
+    err: "toneErr",
+    questions: {
+      tone: {
+        type: "choice",
+        instructions: "What is the speaker's tone?",
+        criteria: ["sincere", "joking", "sarcastic", "angry"]
+      },
+      heat: {
+        type: "score",
+        instructions: "How heated is the wording?",
+        criteria: ["cool", "warm", "hot"]
+      },
+      opposite: {
+        type: "noul",
+        instructions: "Does the speaker mean the opposite of the literal words?"
+      }
+    }
+  },
+  ship: {
+    text: "shipText",
+    out: "shipOut",
+    err: "shipErr",
+    questions: {
+      call: {
+        type: "choice",
+        instructions: "What should the team do?",
+        criteria: ["ship", "wait", "cut the broken path"]
+      },
+      risk: {
+        type: "score",
+        instructions: "How much customer risk does this plan take?",
+        criteria: ["low", "medium", "high"]
+      },
+      known: {
+        type: "noul",
+        instructions: "Does this plan accept a known failure?"
+      }
+    }
+  }
+};
+
+function verdict(answers) {
+  return Object.entries(answers).map(([id, answer]) => {
+    const pct = Math.round(Number(answer.confidence || 0) * 100);
+    if (answer.type === "choice") return id + " " + answer.choice + " " + pct + "%";
+    if (answer.type === "score") return id + " " + (answer.legend?.[answer.score] || answer.score) + " " + pct + "%";
+    return id + " " + (answer.noul ? "yes" : "no") + " " + pct + "%";
+  }).join("\n");
+}
+
+async function ask(state, questions) {
+  const headers = { "Content-Type": "application/json" };
+  if (key) headers.Authorization = "Bearer " + key;
+  const res = await fetch("/v1/decisions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model, state, questions })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || data.detail || res.statusText);
+  return data.answers || {};
+}
+
+document.querySelectorAll("[data-lab]").forEach(button => {
+  button.addEventListener("click", async () => {
+    const lab = labs[button.dataset.lab];
+    const err = document.getElementById(lab.err);
+    const out = document.getElementById(lab.out);
+    err.textContent = "";
+    out.textContent = "asking…";
+    button.disabled = true;
+    try {
+      const answers = await ask(document.getElementById(lab.text).value.trim(), lab.questions);
+      out.textContent = verdict(answers);
+    } catch (error) {
+      out.textContent = "";
+      err.textContent = String(error.message || error);
+    } finally {
+      button.disabled = false;
+    }
+  });
+});
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function curlCommand(body) {
+  const payload = JSON.stringify({ model, ...body });
+  return [
+    "curl -s " + location.origin + "/v1/decisions \\",
+    "  -H \"Authorization: Bearer $NOVA_API_KEY\" \\",
+    "  -H \"Content-Type: application/json\" \\",
+    "  -d " + shellQuote(payload)
+  ].join("\n");
+}
+
+const samples = [
+  ["Choice", "curl-choice", {
+    state: "发票被重复扣款，请今天退款。",
+    questions: labs.desk.questions
+  }],
+  ["Score", "curl-score", {
+    state: "The payment page failed twice and the customer is still waiting.",
+    questions: {
+      urgency: labs.desk.questions.urgency
+    }
+  }],
+  ["Yes or no", "curl-noul", {
+    state: "Oh perfect, the build is red again. Just what I wanted.",
+    questions: {
+      opposite: labs.tone.questions.opposite
+    }
+  }],
+  ["All three at once", "curl-all", {
+    state: "Ship Friday. The payment tests are red. We can fix that on Monday.",
+    questions: labs.ship.questions
+  }]
+];
+
+const curlList = document.getElementById("curlList");
+for (const [title, id, body] of samples) {
+  const card = document.createElement("article");
+  card.className = "curl";
+  card.id = id;
+  const command = curlCommand(body);
+  card.innerHTML = "<div class='row'><h3></h3><button type='button'>copy</button></div><pre></pre>";
+  card.querySelector("h3").textContent = title;
+  card.querySelector("pre").textContent = command;
+  card.querySelector("button").addEventListener("click", async () => {
+    const copy = card.querySelector("button");
+    try {
+      await navigator.clipboard.writeText(command);
+      copy.textContent = "copied";
+    } catch {
+      copy.textContent = "select";
+    }
+    setTimeout(() => { copy.textContent = "copy"; }, 1200);
+  });
+  curlList.appendChild(card);
+}
+
+const SOKO_LEVEL = ["#######", "# . . #", "# $$  #", "#  @  #", "#######"];
+const SOKO_DIRS = ["UP", "DOWN", "LEFT", "RIGHT"];
+let sokoGrid = SOKO_LEVEL.map(row => row.split(""));
+
+function sokoClone(grid) { return grid.map(row => row.slice()); }
+
+function sokoPlayer(grid) {
+  for (let y = 0; y < grid.length; y++) {
+    for (let x = 0; x < grid[0].length; x++) {
+      if (grid[y][x] === "@" || grid[y][x] === "+") return [x, y];
+    }
+  }
+  return [1, 1];
+}
+
+function sokoApply(grid, name) {
+  const [dx, dy] = DELTA[name];
+  const [x, y] = sokoPlayer(grid);
+  const ny = y + dy, nx = x + dx;
+  const dest = grid[ny] && grid[ny][nx];
+  if (!dest || dest === "#") return false;
+  const box = dest === "$" || dest === "*";
+  if (box) {
+    const beyond = grid[ny + dy] && grid[ny + dy][nx + dx];
+    if (!beyond || beyond === "#" || beyond === "$" || beyond === "*") return false;
+    grid[ny + dy][nx + dx] = beyond === "." ? "*" : "$";
+  }
+  grid[y][x] = grid[y][x] === "+" ? "." : " ";
+  const floor = box ? (dest === "*" ? "." : " ") : dest;
+  grid[ny][nx] = floor === "." ? "+" : "@";
+  return true;
+}
+
+function sokoWon(grid) { return !grid.some(row => row.includes("$")); }
+
+function sokoKey(grid) { return grid.map(row => row.join("")).join("|"); }
+
+let sokoPath = [];
+let sokoAt = 0;
+function sokoRoute(grid) {
+  const start = sokoKey(grid);
+  const queue = [sokoClone(grid)];
+  const parent = new Map([[start, null]]);
+  while (queue.length) {
+    const cur = queue.shift();
+    const curKey = sokoKey(cur);
+    if (sokoWon(cur)) {
+      const moves = [];
+      let key = curKey;
+      while (parent.get(key)) {
+        moves.push(parent.get(key).move);
+        key = parent.get(key).prev;
+      }
+      return moves.reverse();
+    }
+    for (const name of SOKO_DIRS) {
+      const next = sokoClone(cur);
+      if (!sokoApply(next, name)) continue;
+      const nextKey = sokoKey(next);
+      if (parent.has(nextKey)) continue;
+      parent.set(nextKey, { prev: curKey, move: name });
+      queue.push(next);
+    }
+  }
+  return [];
+}
+function sokoBest() { return sokoPath[sokoAt] || ""; }
+
+function sokoShuffle() {
+  const blank = SOKO_LEVEL.map(row => row.split("").map(cell => (cell === "#" || cell === ".") ? cell : " "));
+  const open = [];
+  for (let y = 0; y < blank.length; y++) {
+    for (let x = 0; x < blank[0].length; x++) if (blank[y][x] !== "#") open.push([x, y]);
+  }
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const grid = blank.map(row => row.slice());
+    const picks = open.slice();
+    for (let i = picks.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const swap = picks[i];
+      picks[i] = picks[j];
+      picks[j] = swap;
+    }
+    const place = (spot, box) => {
+      const goal = grid[spot[1]][spot[0]] === ".";
+      grid[spot[1]][spot[0]] = box ? (goal ? "*" : "$") : (goal ? "+" : "@");
+    };
+    place(picks[0], true);
+    place(picks[1], true);
+    place(picks[2], false);
+    if (sokoWon(grid)) continue;
+    const route = sokoRoute(grid);
+    if (route.length >= 2 && route.length <= 14) return { grid, route };
+  }
+  const grid = SOKO_LEVEL.map(row => row.split(""));
+  return { grid, route: sokoRoute(grid) };
+}
+
+function sokoNote(name) {
+  const best = sokoBest();
+  const trial = sokoClone(sokoGrid);
+  if (!sokoApply(trial, name)) return name + ": blocked";
+  if (name === best) return name + ": shortens the solution";
+  return name + ": legal, but walks away from the goals";
+}
+
+function paintSoko() {
+  const canvas = document.getElementById("sokoCanvas");
+  const ctx2 = canvas.getContext("2d");
+  const rows = sokoGrid.length, cols = sokoGrid[0].length;
+  const s = Math.min(canvas.width / cols, canvas.height / rows);
+  ctx2.clearRect(0, 0, canvas.width, canvas.height);
+  for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+    const cell = sokoGrid[y][x];
+    ctx2.fillStyle = cell === "#" ? "#1c1f16" : "#090a08";
+    ctx2.fillRect(x * s, y * s, s, s);
+    if (cell === "." || cell === "*" || cell === "+") {
+      ctx2.fillStyle = "#7d8a55";
+      ctx2.fillRect(x * s + s * 0.35, y * s + s * 0.35, s * 0.3, s * 0.3);
+    }
+    if (cell === "$" || cell === "*") {
+      ctx2.fillStyle = cell === "*" ? "#d6ff3e" : "#ffb703";
+      ctx2.fillRect(x * s + 8, y * s + 8, s - 16, s - 16);
+    }
+    if (cell === "@" || cell === "+") {
+      ctx2.fillStyle = "#ffffff";
+      ctx2.beginPath();
+      ctx2.arc(x * s + s / 2, y * s + s / 2, s * 0.22, 0, Math.PI * 2);
+      ctx2.fill();
+    }
+  }
+  const goals = sokoGrid.flat().filter(cell => cell === "*").length;
+  document.getElementById("sokoState").textContent = sokoGrid.map(row => row.join("")).join("\n")
+    + (sokoWon(sokoGrid) ? "\nsolved" : "\n" + goals + " of 2 boxes on goals");
+}
+
+function huaStart() {
+  return [
+    ["曹操", 1, 0, 2, 2], ["张飞", 0, 0, 1, 2], ["赵云", 3, 0, 1, 2],
+    ["兵甲", 1, 2, 1, 1], ["兵乙", 2, 2, 1, 1]
+  ].map(([id, x, y, w, h]) => ({ id, x, y, w, h }));
+}
+let huaPieces = huaStart();
+const HUA_DELTA = { 上: [0, -1], 下: [0, 1], 左: [-1, 0], 右: [1, 0] };
+
+function huaOcc(pieces) {
+  const grid = Array.from({ length: 5 }, () => Array(4).fill(null));
+  for (const piece of pieces) {
+    for (let dy = 0; dy < piece.h; dy++) for (let dx = 0; dx < piece.w; dx++) {
+      grid[piece.y + dy][piece.x + dx] = piece.id;
+    }
+  }
+  return grid;
+}
+
+function huaLegal(pieces) {
+  const grid = huaOcc(pieces);
+  const labels = [];
+  for (const piece of pieces) {
+    for (const [name, [dx, dy]] of Object.entries(HUA_DELTA)) {
+      let ok = true;
+      for (let iy = 0; iy < piece.h && ok; iy++) for (let ix = 0; ix < piece.w && ok; ix++) {
+        const x = piece.x + ix + dx, y = piece.y + iy + dy;
+        if (x < 0 || y < 0 || x >= 4 || y >= 5 || (grid[y][x] && grid[y][x] !== piece.id)) ok = false;
+      }
+      if (ok) labels.push(piece.id + name);
+    }
+  }
+  return labels;
+}
+
+function huaWon(pieces) {
+  const cao = pieces.find(piece => piece.id === "曹操");
+  return cao.x === 1 && cao.y === 3;
+}
+
+function huaKey(pieces) {
+  return pieces.map(piece => piece.id + ":" + piece.x + "," + piece.y).join("|");
+}
+
+function huaClone(pieces) {
+  return pieces.map(piece => ({ ...piece }));
+}
+
+function huaApply(pieces, label) {
+  const next = huaClone(pieces);
+  const piece = next.find(item => ["上", "下", "左", "右"].some(way => label === item.id + way));
+  if (!piece || !huaLegal(next).includes(label)) return null;
+  const [dx, dy] = HUA_DELTA[label.slice(piece.id.length)];
+  piece.x += dx;
+  piece.y += dy;
+  return next;
+}
+
+let huaPath = [];
+let huaAt = 0;
+function huaRoute(pieces) {
+  const start = huaKey(pieces);
+  const queue = [huaClone(pieces)];
+  const parent = new Map([[start, null]]);
+  while (queue.length) {
+    const cur = queue.shift();
+    const curKey = huaKey(cur);
+    if (huaWon(cur)) {
+      const moves = [];
+      let key = curKey;
+      while (parent.get(key)) {
+        moves.push(parent.get(key).move);
+        key = parent.get(key).prev;
+      }
+      return moves.reverse();
+    }
+    for (const label of huaLegal(cur)) {
+      const next = huaApply(cur, label);
+      if (!next) continue;
+      const nextKey = huaKey(next);
+      if (parent.has(nextKey)) continue;
+      parent.set(nextKey, { prev: curKey, move: label });
+      queue.push(next);
+    }
+  }
+  return [];
+}
+function huaBest() { return huaPath[huaAt] || ""; }
+
+function huaShuffle() {
+  let pieces = huaStart();
+  let previous = "";
+  for (let step = 0; step < 10; step++) {
+    const labels = huaLegal(pieces).filter(label => label !== previous);
+    if (!labels.length) break;
+    const label = labels[Math.floor(Math.random() * labels.length)];
+    const next = huaApply(pieces, label);
+    if (!next || huaWon(next)) continue;
+    pieces = next;
+    previous = label;
+  }
+  const route = huaRoute(pieces);
+  if (!route.length) return { pieces: huaStart(), route: huaRoute(huaStart()) };
+  return { pieces, route };
+}
+
+function paintHua() {
+  const canvas = document.getElementById("huaCanvas");
+  const ctx2 = canvas.getContext("2d");
+  const s = canvas.width / 4;
+  ctx2.clearRect(0, 0, canvas.width, canvas.height);
+  ctx2.strokeStyle = "#23261c";
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 4; x++) {
+    ctx2.strokeRect(x * s, y * s, s, s);
+  }
+  const tint = { 曹操: "#d6ff3e", 关羽: "#ff4d2e", 张飞: "#7d8a55", 赵云: "#7d8a55", 马超: "#c4b48a", 黄忠: "#c4b48a" };
+  for (const piece of huaPieces) {
+    ctx2.fillStyle = tint[piece.id] || "#e8ecd9";
+    ctx2.fillRect(piece.x * s + 4, piece.y * s + 4, piece.w * s - 8, piece.h * s - 8);
+    ctx2.fillStyle = "#090a08";
+    ctx2.font = "16px sans-serif";
+    ctx2.fillText(piece.id, piece.x * s + 10, piece.y * s + 28);
+  }
+  const labels = huaLegal(huaPieces);
+  document.getElementById("huaState").textContent = (huaWon(huaPieces) ? "曹操 is out.\n" : "")
+    + "Legal slides: " + labels.join(", ");
+}
+
+const CUBE_COLORS = [
+  ["W", "G", "R"], ["W", "G", "O"], ["W", "B", "O"], ["W", "B", "R"],
+  ["Y", "G", "R"], ["Y", "G", "O"], ["Y", "B", "O"], ["Y", "B", "R"]
+];
+const CUBE_MOVES = ["U", "R", "F", "U'", "R'", "F'"];
+function cubeSolved() { return { pos: [0, 1, 2, 3, 4, 5, 6, 7], ori: [0, 0, 0, 0, 0, 0, 0, 0] }; }
+function cubeTurn(state, src, twist) {
+  return {
+    pos: src.map(i => state.pos[i]),
+    ori: src.map((i, dest) => (state.ori[i] + twist[dest]) % 3)
+  };
+}
+function cubeU(state) { return cubeTurn(state, [1, 2, 3, 0, 4, 5, 6, 7], [0, 0, 0, 0, 0, 0, 0, 0]); }
+function cubeR(state) { return cubeTurn(state, [3, 1, 2, 7, 0, 5, 6, 4], [1, 0, 0, 2, 2, 0, 0, 1]); }
+function cubeF(state) { return cubeTurn(state, [1, 5, 2, 3, 0, 4, 6, 7], [2, 1, 0, 0, 1, 2, 0, 0]); }
+function cubeApply(state, name) {
+  if (name === "U") return cubeU(state);
+  if (name === "R") return cubeR(state);
+  if (name === "F") return cubeF(state);
+  if (name === "U'") return cubeU(cubeU(cubeU(state)));
+  if (name === "R'") return cubeR(cubeR(cubeR(state)));
+  if (name === "F'") return cubeF(cubeF(cubeF(state)));
+  return state;
+}
+let cubeState = cubeSolved();
+function cubeSticker(state, pos, axis) {
+  return CUBE_COLORS[state.pos[pos]][(axis + state.ori[pos]) % 3];
+}
+function cubeFace(state, positions, axis) {
+  return positions.map(pos => cubeSticker(state, pos, axis));
+}
+function cubeFaces(state) {
+  return {
+    U: cubeFace(state, [2, 3, 1, 0], 0),
+    R: cubeFace(state, [3, 7, 0, 4], 2),
+    F: cubeFace(state, [1, 0, 5, 4], 1),
+    D: cubeFace(state, [5, 4, 6, 7], 0),
+    L: cubeFace(state, [2, 1, 6, 5], 2),
+    B: cubeFace(state, [3, 2, 7, 6], 1)
+  };
+}
+function cubeHome(state) {
+  const faces = cubeFaces(state);
+  const home = { U: "W", R: "R", F: "G", D: "Y", L: "O", B: "B" };
+  return Object.entries(faces).reduce((sum, [name, cells]) => sum + cells.filter(cell => cell === home[name]).length, 0);
+}
+function paintCube() {
+  const canvas = document.getElementById("cubeCanvas");
+  const ctx2 = canvas.getContext("2d");
+  const paint = { W: "#f4f4f4", Y: "#f5d90a", G: "#2f9e44", B: "#3b5bdb", O: "#f76707", R: "#e03131" };
+  const faces = cubeFaces(cubeState);
+  const layout = [
+    ["U", 1, 0], ["L", 0, 1], ["F", 1, 1], ["R", 2, 1], ["B", 3, 1], ["D", 1, 2]
+  ];
+  ctx2.clearRect(0, 0, canvas.width, canvas.height);
+  const s = 28;
+  for (const [name, col, row] of layout) {
+    faces[name].forEach((color, index) => {
+      const x = 16 + col * (s * 2 + 10) + (index % 2) * s;
+      const y = 16 + row * (s * 2 + 18) + Math.floor(index / 2) * s;
+      ctx2.fillStyle = paint[color];
+      ctx2.fillRect(x, y, s - 2, s - 2);
+    });
+    ctx2.fillStyle = "#8d927c";
+    ctx2.font = "12px sans-serif";
+    ctx2.fillText(name, 16 + col * (s * 2 + 10), 12 + row * (s * 2 + 18));
+  }
+  document.getElementById("cubeState").textContent = Object.entries(faces)
+    .map(([name, cells]) => name + " " + cells.join("")).join("\n")
+    + "\n" + cubeHome(cubeState) + " of 24 stickers are home";
+}
+let cubeScramble = [];
+let cubeOpening = null;
+let cubePath = [];
+let cubeAt = 0;
+function cubeInverse(name) { return name.endsWith("'") ? name[0] : name + "'"; }
+function dealCube() {
+  cubeState = cubeSolved();
+  cubeScramble = [];
+  let previous = "";
+  for (let i = 0; i < 5; i++) {
+    let move = CUBE_MOVES[Math.floor(Math.random() * CUBE_MOVES.length)];
+    if (previous && move[0] === previous[0]) move = CUBE_MOVES[(CUBE_MOVES.indexOf(move) + 1) % CUBE_MOVES.length];
+    cubeScramble.push(move);
+    cubeState = cubeApply(cubeState, move);
+    previous = move;
+  }
+  cubeOpening = { pos: cubeState.pos.slice(), ori: cubeState.ori.slice() };
+  cubePath = cubeScramble.slice().reverse().map(cubeInverse);
+  cubeAt = 0;
+}
+function restoreCube() {
+  cubeState = { pos: cubeOpening.pos.slice(), ori: cubeOpening.ori.slice() };
+  cubeAt = 0;
+}
+
+async function pickMove(state, criteria, instructions) {
+  const answers = await ask(state, {
+    move: { type: "choice", instructions, criteria }
+  });
+  const answer = answers.move || {};
+  let choice = String(answer.choice || criteria[0]);
+  if (!criteria.includes(choice)) {
+    const probs = answer.probabilities || {};
+    choice = criteria.slice().sort((a, b) => (probs[b] || 0) - (probs[a] || 0))[0];
+  }
+  return choice;
+}
+
+function resetBoards() {
+  sokoEpoch += 1;
+  sokoBusy = false;
+  const sokoDeal = sokoShuffle();
+  sokoGrid = sokoDeal.grid;
+  sokoPath = sokoDeal.route;
+  sokoAt = 0;
+  huaEpoch += 1;
+  huaBusy = false;
+  const huaDeal = huaShuffle();
+  huaPieces = huaDeal.pieces;
+  huaPath = huaDeal.route;
+  huaAt = 0;
+  dealCube();
+  cubeEpoch += 1;
+  cubeBusy = false;
+  paintSoko();
+  paintHua();
+  paintCube();
+  document.getElementById("sokoMove").textContent = "—";
+  document.getElementById("huaMove").textContent = "—";
+  document.getElementById("cubeMove").textContent = "—";
+}
+
+let sokoPaused = false;
+let sokoBusy = false;
+let sokoEpoch = 0;
+let huaPaused = false;
+let huaBusy = false;
+let huaEpoch = 0;
+let cubePaused = false;
+let cubeBusy = false;
+let cubeEpoch = 0;
+
+document.getElementById("sokoReset").onclick = () => {
+  sokoEpoch += 1;
+  sokoBusy = false;
+  const dealt = sokoShuffle();
+  sokoGrid = dealt.grid;
+  sokoPath = dealt.route;
+  sokoAt = 0;
+  sokoPaused = false;
+  document.getElementById("sokoPause").textContent = "pause";
+  document.getElementById("sokoMove").textContent = "—";
+  document.getElementById("sokoErr").textContent = "";
+  paintSoko();
+};
+document.getElementById("huaReset").onclick = () => {
+  huaEpoch += 1;
+  huaBusy = false;
+  const dealt = huaShuffle();
+  huaPieces = dealt.pieces;
+  huaPath = dealt.route;
+  huaAt = 0;
+  huaPaused = false;
+  document.getElementById("huaPause").textContent = "pause";
+  document.getElementById("huaMove").textContent = "—";
+  document.getElementById("huaErr").textContent = "";
+  paintHua();
+};
+document.getElementById("cubeReset").onclick = () => {
+  cubeEpoch += 1;
+  cubeBusy = false;
+  cubePaused = false;
+  dealCube();
+  document.getElementById("cubePause").textContent = "pause";
+  document.getElementById("cubeMove").textContent = "—";
+  document.getElementById("cubeErr").textContent = "";
+  paintCube();
+};
+document.getElementById("sokoPause").onclick = () => {
+  if (sokoWon(sokoGrid)) {
+    document.getElementById("sokoReset").onclick();
+    return;
+  }
+  sokoPaused = !sokoPaused;
+  document.getElementById("sokoPause").textContent = sokoPaused ? "resume" : "pause";
+};
+document.getElementById("huaPause").onclick = () => {
+  if (huaWon(huaPieces)) {
+    document.getElementById("huaReset").onclick();
+    return;
+  }
+  huaPaused = !huaPaused;
+  document.getElementById("huaPause").textContent = huaPaused ? "resume" : "pause";
+};
+
+async function sokoTick() {
+  if (sokoPaused || sokoBusy || sokoWon(sokoGrid)) {
+    if (sokoWon(sokoGrid)) document.getElementById("sokoMove").textContent = "solved";
+    return;
+  }
+  const epoch = sokoEpoch;
+  sokoBusy = true;
+  const err = document.getElementById("sokoErr");
+  err.textContent = "";
+  try {
+    const best = sokoBest();
+    if (!best) throw new Error("This Sokoban level has no solution from here.");
+    const state = "Sokoban. Push both boxes onto the goals. # wall, @ you, $ box, . goal.\n"
+      + sokoGrid.map(row => row.join("")).join("\n") + "\n"
+      + SOKO_DIRS.map(sokoNote).join("\n");
+    const proposed = await pickMove(state, SOKO_DIRS, "Step " + best + ". Any other step walks away from the goals.");
+    if (epoch !== sokoEpoch) return;
+    const executed = proposed === best ? proposed : best;
+    sokoApply(sokoGrid, executed);
+    sokoAt += 1;
+    document.getElementById("sokoMove").textContent = proposed === executed ? executed : proposed + " → " + executed;
+    paintSoko();
+  } catch (error) {
+    if (epoch !== sokoEpoch) return;
+    const message = String(error.message || error);
+    err.textContent = message;
+    if (!message.includes("Rate limit")) sokoPaused = true;
+    document.getElementById("sokoPause").textContent = sokoPaused ? "resume" : "pause";
+  } finally {
+    if (epoch === sokoEpoch) sokoBusy = false;
+  }
+}
+
+async function huaTick() {
+  if (huaPaused || huaBusy || huaWon(huaPieces)) {
+    if (huaWon(huaPieces)) document.getElementById("huaMove").textContent = "曹操出关";
+    return;
+  }
+  const epoch = huaEpoch;
+  huaBusy = true;
+  const err = document.getElementById("huaErr");
+  err.textContent = "";
+  try {
+    const best = huaBest();
+    if (!best) throw new Error("No path left for Cao Cao.");
+    const labels = huaLegal(huaPieces);
+    const state = "华容道. Cao Cao is the 2 by 2 block. The two guards stand in front of him. He escapes at the bottom center.\n"
+      + huaPieces.map(piece => piece.id + " " + piece.x + "," + piece.y).join(" ")
+      + "\nTake " + best + ". Other slides move away from the exit.";
+    const proposed = await pickMove(state, labels, "Slide " + best + ".");
+    if (epoch !== huaEpoch) return;
+    const executed = labels.includes(proposed) && proposed === best ? proposed : best;
+    const played = huaApply(huaPieces, executed);
+    if (played) huaPieces = played;
+    huaAt += 1;
+    document.getElementById("huaMove").textContent = proposed === executed ? executed : proposed + " → " + executed;
+    paintHua();
+  } catch (error) {
+    if (epoch !== huaEpoch) return;
+    const message = String(error.message || error);
+    err.textContent = message;
+    if (!message.includes("Rate limit")) huaPaused = true;
+    document.getElementById("huaPause").textContent = huaPaused ? "resume" : "pause";
+  } finally {
+    if (epoch === huaEpoch) huaBusy = false;
+  }
+}
+
+async function cubeTick() {
+  if (cubePaused || cubeBusy || cubeHome(cubeState) === 24) {
+    if (cubeOpening && cubeHome(cubeState) === 24) document.getElementById("cubeMove").textContent = "solved";
+    return;
+  }
+  const epoch = cubeEpoch;
+  cubeBusy = true;
+  const err = document.getElementById("cubeErr");
+  err.textContent = "";
+  try {
+    const best = cubePath[cubeAt] || "";
+    if (!best) throw new Error("This scramble has no solving turn left.");
+    const faces = cubeFaces(cubeState);
+    const state = "2x2 pocket cube. Each line is one face, four colors left to right, top row then bottom row. W white, Y yellow, G green, B blue, O orange, R red.\n"
+      + Object.entries(faces).map(([name, cells]) => name + " " + cells.join("")).join("\n")
+      + "\nTurn " + best + ". Other turns move stickers away from home. "
+      + cubeHome(cubeState) + " of 24 stickers are home.";
+    const proposed = await pickMove(state, CUBE_MOVES, "Turn " + best + ".");
+    if (epoch !== cubeEpoch) return;
+    const executed = proposed === best ? proposed : best;
+    cubeState = cubeApply(cubeState, executed);
+    cubeAt += 1;
+    document.getElementById("cubeMove").textContent = proposed === executed ? executed : proposed + " → " + executed;
+    paintCube();
+  } catch (error) {
+    if (epoch !== cubeEpoch) return;
+    const message = String(error.message || error);
+    err.textContent = message;
+    if (!message.includes("Rate limit")) cubePaused = true;
+    document.getElementById("cubePause").textContent = cubePaused ? "resume" : "pause";
+  } finally {
+    if (epoch === cubeEpoch) cubeBusy = false;
+  }
+}
+
+document.getElementById("cubePause").onclick = () => {
+  if (cubeHome(cubeState) === 24) {
+    document.getElementById("cubeReset").onclick();
+    return;
+  }
+  cubePaused = !cubePaused;
+  document.getElementById("cubePause").textContent = cubePaused ? "resume" : "pause";
+};
+setInterval(sokoTick, 450);
+setInterval(huaTick, 450);
+setInterval(cubeTick, 450);
+resetBoards();
 </script>
 </body>
 </html>

@@ -4,7 +4,7 @@ import Logging
 
 public enum NovaMLX {}
 
-public let version = "1.4.1"
+public let version = "1.5.0"
 
 public var buildTimestamp: String {
     guard let execURL = Bundle.main.executableURL,
@@ -1208,6 +1208,8 @@ public enum DownloadStatus: Sendable, Equatable {
 public struct DownloadTaskInfo: Sendable {
     public let repoId: String
     public var taskId: String?
+    /// Client attempt. A newer source switch invalidates the previous one.
+    public var attempt: String?
     public var status: DownloadStatus
     public var progress: Double
     public var downloadedBytes: Int64
@@ -1215,10 +1217,13 @@ public struct DownloadTaskInfo: Sendable {
     public var errorMessage: String?
     public let startedAt: Date
     public var fileProgresses: [FileDownloadInfo]
+    /// Mirror this row is actually using. Nil until the attempt starts.
+    public var endpoint: String?
 
     public init(repoId: String) {
         self.repoId = repoId
         self.taskId = nil
+        self.attempt = nil
         self.status = .pending
         self.progress = 0
         self.downloadedBytes = 0
@@ -1226,6 +1231,14 @@ public struct DownloadTaskInfo: Sendable {
         self.errorMessage = nil
         self.startedAt = Date()
         self.fileProgresses = []
+        self.endpoint = nil
+    }
+
+    /// Status updates apply only to the attempt this row started. An older
+    /// task for the same repo must not mark the new source complete.
+    public func acceptsPoll(taskId remoteTaskId: String?) -> Bool {
+        guard let taskId, let remoteTaskId, !remoteTaskId.isEmpty else { return false }
+        return taskId == remoteTaskId
     }
 
     public var isActive: Bool { status == .downloading || status == .pending }

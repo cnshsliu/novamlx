@@ -6,6 +6,7 @@ struct QwenImage21SupportTests {
     @Test("2.1 ids match")
     func matches21() {
         #expect(QwenImage21Support.matches(id: "Qwen/Qwen-Image-2.1"))
+        #expect(QwenImage21Support.matches(id: "mlx-community/Qwen-Image-2.1-MLX-4bit"))
         #expect(QwenImage21Support.matches(id: "qwen-image-21-mlx"))
         #expect(QwenImage21Support.matches(id: "org/Qwen_Image_2.1"))
     }

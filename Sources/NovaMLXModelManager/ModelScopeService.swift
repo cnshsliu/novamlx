@@ -28,9 +28,7 @@ public final class ModelScopeService: Sendable {
         repoId: String,
         revision: String = "master"
     ) async throws -> [ModelScopeFile] {
-        let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
-        // Live site uses ?Revision=...&Root=  (Recursive=true also works but we match production)
-        let url = URL(string: "\(endpoint)/api/v1/models/\(encoded)/repo/files?Revision=\(revision)&Root=")!
+        let url = Self.fileListURL(endpoint: endpoint, repoId: repoId, revision: revision)
 
         NovaMLXLog.info("[ModelScope] Listing files: \(url)")
 
@@ -91,6 +89,16 @@ public final class ModelScopeService: Sendable {
     }
 
     // MARK: - Download URLs
+
+    /// Whole-repo listing. `Root=` without `Recursive=true` returns only the
+    /// top directory, so nested weights were skipped and the download was
+    /// reported complete after a few kilobytes.
+    public static func fileListURL(endpoint: String, repoId: String, revision: String) -> URL {
+        let base = endpoint.hasSuffix("/") ? String(endpoint.dropLast()) : endpoint
+        let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
+        let rev = revision.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? revision
+        return URL(string: "\(base)/api/v1/models/\(encoded)/repo/files?Revision=\(rev)&Recursive=true")!
+    }
 
     /// Returns the direct download URL for a file.
     /// Current pattern used by the site for raw content / resolve.

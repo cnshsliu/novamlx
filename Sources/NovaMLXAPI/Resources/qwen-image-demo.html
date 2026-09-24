@@ -198,6 +198,11 @@
         <label for="size">Size</label>
         <select id="size" name="size">
           <option value="1024x1024" selected>1024 × 1024</option>
+          <option value="1280x720">1280 × 720 · 16:9</option>
+          <option value="720x1280">720 × 1280 · 9:16</option>
+          <option value="1536x864">1536 × 864 · 16:9</option>
+          <option value="864x1536">864 × 1536 · 9:16</option>
+          <option value="1920x1080">1920 × 1080</option>
           <option value="1344x768">1344 × 768</option>
           <option value="768x1344">768 × 1344</option>
           <option value="1536x1024">1536 × 1024</option>
@@ -385,29 +390,81 @@ document.getElementById("keep10").addEventListener("click", () => {
 loadModels();
 renderHistory();
 
+function progressLabel(data) {
+  const name = String(data.model || "image").split("/").pop();
+  if (data.total) return name + " · step " + data.step + "/" + data.total;
+  return name + " · starting";
+}
+
+async function readProgress() {
+  const progress = await fetch("/v1/images/progress", { headers: headers(false) });
+  if (!progress.ok) return null;
+  return progress.json();
+}
+
+let following = false;
+
+async function followRunningJob() {
+  if (following) return;
+  const first = await readProgress();
+  if (!first || !first.active) return;
+  following = true;
+  go.disabled = true;
+  errEl.textContent = "An image is already generating. This page follows that run. Press Generate again when it finishes.";
+  statusEl.textContent = progressLabel(first);
+  try {
+    while (true) {
+      const data = await readProgress();
+      if (!data || !data.active) break;
+      statusEl.textContent = progressLabel(data);
+      statusEl.style.color = "";
+      if (data.total) {
+        meter.style.width = Math.min(100, (Number(data.step) / Number(data.total)) * 100) + "%";
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    statusEl.textContent = "idle";
+    errEl.textContent = "";
+    meter.style.width = "0%";
+  } catch (_) {
+    statusEl.textContent = "idle";
+  } finally {
+    following = false;
+    go.disabled = false;
+  }
+}
+
+followRunningJob();
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (following) return;
   errEl.textContent = "";
   go.disabled = true;
   const started = performance.now();
   clearInterval(timer);
   meter.style.width = "0%";
+  statusEl.style.color = "";
+  const running = await readProgress();
+  if (running && running.active) {
+    go.disabled = false;
+    followRunningJob();
+    return;
+  }
   timer = setInterval(async () => {
     const seconds = ((performance.now() - started) / 1000).toFixed(0);
     let label = "generating " + seconds + "s";
     try {
-      const progress = await fetch("/v1/images/progress?model=" + encodeURIComponent(model), { headers: headers(false) });
-      if (progress.ok) {
-        const data = await progress.json();
-        if (data.active && data.total) {
-          label = "step " + data.step + "/" + data.total + " · " + seconds + "s";
-          meter.style.width = Math.min(100, (Number(data.step) / Number(data.total)) * 100) + "%";
-        }
+      const data = await readProgress();
+      if (data && data.active && data.total) {
+        label = progressLabel(data) + " · " + seconds + "s";
+        meter.style.width = Math.min(100, (Number(data.step) / Number(data.total)) * 100) + "%";
       }
     } catch (_) {}
     statusEl.textContent = label;
   }, 500);
   statusEl.textContent = "generating 0s";
+  let watchInstead = false;
   try {
     const prompt = document.getElementById("prompt").value.trim();
     const negative = document.getElementById("negative").value.trim();
@@ -446,17 +503,23 @@ form.addEventListener("submit", async (event) => {
     const seconds = ((performance.now() - started) / 1000).toFixed(1);
     meter.style.width = "100%";
     remember(b64, seconds);
-    statusEl.textContent = "ready " + seconds + "s · " + model;
+    statusEl.textContent = "ready " + seconds + "s · " + model.split("/").pop();
   } catch (err) {
     const message = String(err.message || err);
-    errEl.textContent = message === "Failed to fetch"
-      ? "NovaMLX closed the connection. Reload this page after the app is running again."
-      : message;
-    statusEl.textContent = "error";
+    if (/already in progress/i.test(message)) {
+      watchInstead = true;
+    } else {
+      errEl.textContent = message === "Failed to fetch"
+        ? "NovaMLX closed the connection. Reload this page after the app is running again."
+        : message;
+      statusEl.textContent = message === "Failed to fetch" ? "disconnected" : message.replace(/^API error:\s*/, "");
+      statusEl.style.color = "var(--danger)";
+    }
   } finally {
     clearInterval(timer);
-    go.disabled = false;
+    if (!watchInstead) go.disabled = false;
   }
+  if (watchInstead) followRunningJob();
 });
 </script>
 </body>

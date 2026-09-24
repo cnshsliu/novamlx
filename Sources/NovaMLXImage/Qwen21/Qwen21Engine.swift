@@ -36,9 +36,9 @@ final class Qwen21Engine: @unchecked Sendable {
         )
         prompts = Qwen21PromptEncoder(tokenizer: tokenizer)
         try Qwen21Weights.installText(directory: directory, model: text)
-        try Qwen21Weights.installTransformer(directory: directory, model: transformer)
+        let transformerPacked = try Qwen21Weights.installTransformer(directory: directory, model: transformer)
         try Qwen21Weights.installVAE(directory: directory, model: vae)
-        if let quantBits {
+        if let quantBits, !transformerPacked {
             quantize(model: transformer, groupSize: 64, bits: quantBits) { path, module in
                 guard module is Linear else { return false }
                 let last = path.split(separator: ".").last.map(String.init) ?? ""
@@ -125,16 +125,7 @@ final class Qwen21Engine: @unchecked Sendable {
     }
 
     private func quantizeArrayLinears(bits: Int) {
-        if let linear = transformer.modulation.layers[1] as? Linear {
-            var layers = transformer.modulation.layers
-            layers[1] = linear.toQuantized(groupSize: 64, bits: bits, mode: .affine)
-            transformer.modulation.layers = layers
-        }
-        for block in transformer.blocks {
-            if let quantized = block.attn.toOut[0].toQuantized(groupSize: 64, bits: bits, mode: .affine) as? Linear {
-                block.attn.toOut = [quantized]
-            }
-        }
+        Qwen21Weights.quantizeArrayLinears(transformer, bits: bits)
     }
 
     private func noise(seed: UInt64, height: Int, width: Int) -> MLXArray {

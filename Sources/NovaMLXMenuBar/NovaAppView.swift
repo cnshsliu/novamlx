@@ -273,7 +273,7 @@ public struct NovaAppView: View {
                 .environmentObject(l10n)
                 .opacity(selectedPage == .localInference ? 1 : 0)
                 .allowsHitTesting(selectedPage == .localInference)
-            DownloadsPageView(appState: appState, modelManager: modelManager)
+            DownloadsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .downloads ? 1 : 0)
                 .allowsHitTesting(selectedPage == .downloads)

@@ -495,8 +495,8 @@ struct ModelsPageView: View {
             Button {
                 if isDecisionModel(modelId) {
                     openDecisionDemo(modelId)
-                } else if isQwenImage21Model(modelId) {
-                    openQwenImageDemo(modelId)
+                } else if isImageModel(modelId) {
+                    openImageDemo(modelId)
                 } else {
                     appState.pickInPlayground(modelId)
                 }
@@ -515,18 +515,30 @@ struct ModelsPageView: View {
         return modelId.lowercased().contains("laya")
     }
 
-    private func isQwenImage21Model(_ modelId: String) -> Bool {
-        if modelManager.getRecord(modelId)?.family == .qwenImage21 { return true }
-        return QwenImage21Support.matches(id: modelId)
+    private func isImageModel(_ modelId: String) -> Bool {
+        if let record = modelManager.getRecord(modelId) {
+            if record.modelType == .image { return true }
+            switch record.family {
+            case .stableDiffusion, .flux, .flux2, .zImage, .qwenImage, .qwenImage21:
+                return true
+            default:
+                break
+            }
+        }
+        if QwenImage21Support.matches(id: modelId) { return true }
+        let lower = modelId.lowercased()
+        return lower.contains("qwen-image") || lower.contains("qwen_image")
+            || lower.contains("flux") || lower.contains("z-image") || lower.contains("zimage")
+            || lower.contains("stable-diffusion") || lower.contains("sdxl")
     }
 
-    private func openQwenImageDemo(_ modelId: String) {
+    private func openImageDemo(_ modelId: String) {
         openDemo(path: "/demo/qwen-image", modelId: modelId)
     }
 
     private func playHelp(_ modelId: String) -> String {
         if isDecisionModel(modelId) { return "Open decision demo" }
-        if isQwenImage21Model(modelId) { return "Open Qwen-Image 2.1 demo" }
+        if isImageModel(modelId) { return "Open image demo" }
         return "Open in Playground"
     }
 

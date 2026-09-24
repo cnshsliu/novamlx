@@ -301,6 +301,12 @@ final class Qwen21Transformer: Module {
     @ModuleInfo(key: "norm_out") var normOut: Qwen21AdaNorm
     @ModuleInfo(key: "proj_out") var projOut: Linear
     private var geometry: [GeometryKey: (MLXArray, MLXArray)] = [:]
+    /// Compiled 32-block step, keyed by prompt length and image token count.
+    /// Sigma is an argument, so every sampling step reuses the graph. A negative
+    /// prompt has its own length and therefore its own graph, instead of
+    /// recompiling on every step.
+    private var compiledDenoise:
+        [DenoiseKey: @Sendable (MLXArray, MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray] = [:]
 
     init(
         inChannels: Int = 64,
@@ -331,10 +337,32 @@ final class Qwen21Transformer: Module {
         latentWidth: Int
     ) -> MLXArray {
         let textLen = encoder.dim(1)
-        let imageTokens = latents.dim(1)
-        let timestep = MLXArray([sigma, Float(0)]).asType(.float32)
         let (ropeCos, ropeSin) = geometry(
             textLen: textLen, height: latentHeight, width: latentWidth
+        )
+        let key = DenoiseKey(textLen: textLen, imageTokens: latents.dim(1))
+        if compiledDenoise[key] == nil {
+            compiledDenoise[key] = compile { [unowned self] latents, encoder, sigma, ropeCos, ropeSin in
+                self.denoise(
+                    latents: latents, encoder: encoder, sigma: sigma, ropeCos: ropeCos, ropeSin: ropeSin
+                )
+            }
+        }
+        return compiledDenoise[key]!(latents, encoder, MLXArray(sigma), ropeCos, ropeSin)
+    }
+
+    /// Lazy across all 32 blocks. The caller evaluates once per sampling step.
+    private func denoise(
+        latents: MLXArray,
+        encoder: MLXArray,
+        sigma: MLXArray,
+        ropeCos: MLXArray,
+        ropeSin: MLXArray
+    ) -> MLXArray {
+        let textLen = encoder.dim(1)
+        let imageTokens = latents.dim(1)
+        let timestep = concatenated(
+            [sigma.asType(.float32).reshaped([1]), MLXArray(Float(0)).reshaped([1])], axis: 0
         )
         let temb = timeEmbed(timestep)
         let mods = modulation(temb).split(parts: 2, axis: -1)
@@ -342,8 +370,9 @@ final class Qwen21Transformer: Module {
         let mod2 = Self.selectRows(mods[1], textLen: textLen, imageTokens: imageTokens)
         var hidden = concatenated([textIn(encoder), imageIn(latents)], axis: 1)
         for block in blocks {
-            hidden = block(hidden, mod1: mod1, mod2: mod2, ropeCos: ropeCos, ropeSin: ropeSin, textLen: textLen)
-            eval(hidden)
+            hidden = block(
+                hidden, mod1: mod1, mod2: mod2, ropeCos: ropeCos, ropeSin: ropeSin, textLen: textLen
+            )
         }
         let scale = Self.selectRows(normOut.scale(for: temb), textLen: textLen, imageTokens: imageTokens)
         hidden = projOut(normOut(hidden, scale: scale))
@@ -372,6 +401,11 @@ private struct GeometryKey: Hashable {
     let textLen: Int
     let height: Int
     let width: Int
+}
+
+private struct DenoiseKey: Hashable {
+    let textLen: Int
+    let imageTokens: Int
 }
 
 private func outer(_ a: MLXArray, _ b: MLXArray) -> MLXArray {

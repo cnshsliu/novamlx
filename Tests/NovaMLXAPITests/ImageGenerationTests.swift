@@ -53,6 +53,10 @@ struct ImageGenerationTests {
         #expect(try JSONDecoder().decode(ImageGenerationRequest.self, from: wide).resolvedSize == (2752, 1536))
         #expect(try JSONDecoder().decode(ImageGenerationRequest.self, from: square).resolvedSize == (2048, 2048))
         #expect(try JSONDecoder().decode(ImageGenerationRequest.self, from: odd).resolvedSize == (1024, 1024))
+        let hd = """
+        {"prompt":"sign","model":"Qwen/Qwen-Image-2.1","size":"1920x1080"}
+        """.data(using: .utf8)!
+        #expect(try JSONDecoder().decode(ImageGenerationRequest.self, from: hd).resolvedSize == (1920, 1080))
     }
 
     @Test("ImageGenerationResponse encodes with b64_json")

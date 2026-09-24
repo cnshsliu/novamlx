@@ -253,8 +253,12 @@ for bundle_src in "$BUILD_BIN_DIR"/*.bundle; do
 	[ -d "$bundle_src" ] || continue
 	bname=$(basename "$bundle_src")
 	bundle_dst="$APP_RESOURCES/$bname"
-	if [ ! -d "$bundle_dst" ] || [ "$bundle_src" -nt "$bundle_dst" ]; then
-		chmod -R u+w "$bundle_dst" 2>/dev/null || true; cp -R "$bundle_src" "$bundle_dst"
+	# cp -R into an existing directory nests a second .bundle and leaves the
+	# old resources in place. Replace the destination so the app reads this build.
+	if [ ! -d "$bundle_dst" ] || [ "$bundle_src" -nt "$bundle_dst" ] || [ -d "$bundle_dst/$bname" ]; then
+		chmod -R u+w "$bundle_dst" 2>/dev/null || true
+		rm -rf "$bundle_dst"
+		cp -R "$bundle_src" "$APP_RESOURCES/"
 		UPDATED+=("$bname")
 	fi
 done

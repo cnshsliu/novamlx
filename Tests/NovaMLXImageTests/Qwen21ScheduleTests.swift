@@ -1,10 +1,86 @@
 import Foundation
 import ImageIO
+import MLX
+import MLXNN
 import Testing
 @testable import NovaMLXImage
 
 @Suite("Qwen-Image 2.1 schedule")
 struct Qwen21ScheduleTests {
+    @Test("4-bit MLX keys land on the same modules as the bf16 checkpoint")
+    func remapsQuantizedKeys() {
+        let text = Qwen21Weights.remapText([
+            "language_model.model.layers.0.mlp.down_proj.scales": MLXArray(Float(1)),
+            "model.language_model.norm.weight": MLXArray(Float(1)),
+        ])
+        #expect(text["model.language_model.layers.0.mlp.down_proj.scales"] != nil)
+        #expect(text["model.language_model.norm.weight"] != nil)
+
+        let transformer = Qwen21Weights.remapTransformer([
+            "modulation.0.weight": MLXArray(Float(1)),
+            "modulation.0.scales": MLXArray(Float(1)),
+            "time_text_embed.linear_1.biases": MLXArray(Float(1)),
+            "img_in.weight": MLXArray(Float(1)),
+        ])
+        #expect(transformer["modulation.1.weight"] != nil)
+        #expect(transformer["modulation.1.scales"] != nil)
+        #expect(transformer["time_text_embed.timestep_embedder.linear_1.biases"] != nil)
+        #expect(transformer["img_in.weight"] != nil)
+        #expect(transformer["modulation.0.weight"] == nil)
+    }
+
+    @Test("diffusers convolutions become MLX layout and MLX convolutions stay put")
+    func convolutionLayout() {
+        let diffusers = Qwen21Weights.convolutionWeight(MLXArray.zeros([96, 4, 3, 3]))
+        #expect(diffusers.shape == [96, 3, 3, 4])
+        let point = Qwen21Weights.convolutionWeight(MLXArray.zeros([128, 128, 1, 1]))
+        #expect(point.shape == [128, 1, 1, 128])
+        let mlx = Qwen21Weights.convolutionWeight(MLXArray.zeros([96, 3, 3, 4]))
+        #expect(mlx.shape == [96, 3, 3, 4])
+        let mlxPoint = Qwen21Weights.convolutionWeight(MLXArray.zeros([128, 1, 1, 128]))
+        #expect(mlxPoint.shape == [128, 1, 1, 128])
+    }
+
+    @Test("packed modulation weights fit the quantized linear, not the cached float one")
+    func quantizedModulationAcceptsPackedWeight() throws {
+        let modulation = Qwen21Modulation(dim: 64)
+        _ = modulation.leafModules()
+        Qwen21Weights.quantizeLayers(modulation, index: 1, bits: 4, group: 64)
+        let packed = ModuleParameters.unflattened([
+            ("layers.1.weight", MLXArray.zeros([256, 8]).asType(.uint32)),
+            ("layers.1.scales", MLXArray.zeros([256, 1])),
+            ("layers.1.biases", MLXArray.zeros([256, 1])),
+        ])
+        try modulation.update(parameters: packed, verify: [.allModelKeysSet, .shapeMismatch])
+    }
+
+    @Test("packed attention output weights fit the quantized list slot")
+    func quantizedAttentionOutputAcceptsPackedWeight() throws {
+        let attention = Qwen21Attention(dim: 64, numHeads: 1, headDim: 64)
+        _ = attention.leafModules()
+        Qwen21Weights.quantizeOutputs(attention, bits: 4, group: 64)
+        let packed = ModuleParameters.unflattened([
+            ("to_out.0.weight", MLXArray.zeros([64, 8]).asType(.uint32)),
+            ("to_out.0.scales", MLXArray.zeros([64, 1])),
+            ("to_out.0.biases", MLXArray.zeros([64, 1])),
+        ])
+        try attention.update(parameters: packed, verify: [.shapeMismatch])
+    }
+
+    @Test("4-bit linear packing matches the MLX community checkpoint")
+    func quantizedLinearShape() {
+        let linear = Linear(64, 4096, bias: false)
+        let quantized = linear.toQuantized(groupSize: 64, bits: 4, mode: .affine) as? QuantizedLinear
+        #expect(quantized?.weight.shape == [4096, 8])
+        #expect(quantized?.scales.shape == [4096, 1])
+        #expect(quantized?.biases?.shape == [4096, 1])
+        let embed = Embedding(embeddingCount: 64, dimensions: 4096)
+        let quantizedEmbed = embed.toQuantized(groupSize: 64, bits: 4, mode: .affine) as? QuantizedEmbedding
+        #expect(quantizedEmbed?.weight.shape == [64, 512])
+        #expect(quantizedEmbed?.scales.shape == [64, 64])
+        #expect(quantizedEmbed?.biases?.shape == [64, 64])
+    }
+
     @Test("1024 schedule matches the shifted flow-match sigmas")
     func sigmas1024() {
         let sigmas = Qwen21Schedule.sigmas(steps: 40, width: 1024, height: 1024)

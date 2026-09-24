@@ -133,6 +133,8 @@ public struct HFDownloadTask: Codable, Sendable {
     public let startedAt: Date
     public var completedAt: Date?
     public var fileProgresses: [FileProgress]
+    /// Host this attempt is listing and downloading from.
+    public var endpoint: String
     public init(repoId: String) {
         self.id = UUID().uuidString
         self.repoId = repoId
@@ -142,6 +144,7 @@ public struct HFDownloadTask: Codable, Sendable {
         self.totalBytes = 0
         self.startedAt = Date()
         self.fileProgresses = []
+        self.endpoint = ""
     }
 }
 
@@ -327,8 +330,7 @@ private struct ModelScopeAdapter: MirrorAdapter {
     }
 
     func fileListURL(repoId: String) -> URL {
-        let encoded = repoId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? repoId
-        return URL(string: "\(endpoint)/api/v1/models/\(encoded)/repo/files?Revision=\(defaultRevision)&Recursive=true")!
+        ModelScopeService.fileListURL(endpoint: endpoint, repoId: repoId, revision: defaultRevision)
     }
 
     func resolveURL(repoId: String, filename: String, revision: String?) -> URL {
@@ -356,6 +358,10 @@ public final class HuggingFaceService: @unchecked Sendable {
     private let adapter: any MirrorAdapter
     private let lock = NovaMLXLock()
     private var activeTasks: [String: HFDownloadTask] = [:]
+    /// Highest client generation accepted per repo. A late request from the
+    /// previous mirror is ignored, so it cannot replace the source the user
+    /// just switched to.
+    private var downloadGeneration: [String: Int] = [:]
     /// Live Swift `Task` handles keyed by task ID. We keep these separate from
     /// `activeTasks` (which is Codable metadata only) so cancellation actually
     /// propagates into the in-flight download instead of just flipping a flag.
@@ -575,15 +581,38 @@ public final class HuggingFaceService: @unchecked Sendable {
         hfToken: String? = nil,
         mirrorEndpoint: String? = nil,
         revision: String? = nil,
-        destinationDirectory: URL? = nil
+        destinationDirectory: URL? = nil,
+        generation: Int? = nil
     ) async throws -> HFDownloadTask {
+        if let generation {
+            enum Decision { case start, keep(HFDownloadTask), drop }
+            let decision = lock.withLock { () -> Decision in
+                let accepted = downloadGeneration[repoId] ?? 0
+                if generation < accepted {
+                    if let current = activeTasks.values.first(where: { $0.repoId == repoId }) {
+                        return .keep(current)
+                    }
+                    return .drop
+                }
+                downloadGeneration[repoId] = generation
+                return .start
+            }
+            switch decision {
+            case .start:
+                break
+            case .keep(let current):
+                return current
+            case .drop:
+                throw CancellationError()
+            }
+        }
         // Idempotent Resume: kill any in-flight tasks for the SAME repoId
         // before minting a new one. Without this, a user clicking Resume
         // repeatedly would spawn N concurrent downloads all writing to the
         // same `.download` temp files — guaranteed corruption + wasted bandwidth.
         // We can't rely on the client-side dedup guard alone; restart crashes,
         // race windows, and rapid clicks all leak through.
-        cancelTasksForRepo(repoId: repoId)
+        supersedeTasks(for: repoId)
 
         // If the caller supplied a live mirror (ModelScope, custom HF host),
         // build a one-off adapter for this download only.
@@ -598,10 +627,11 @@ public final class HuggingFaceService: @unchecked Sendable {
 
         var task = HFDownloadTask(repoId: repoId)
         task.status = "downloading"
+        task.endpoint = effectiveAdapter.endpoint
         lock.withLock { activeTasks[task.id] = task }
 
         #if DEBUG
-        NovaMLXLog.info("[DL] Starting download for \(repoId) (task=\(task.id.prefix(8)))")
+        NovaMLXLog.info("[DL] Starting download for \(repoId) from \(effectiveAdapter.endpoint) (task=\(task.id.prefix(8)))")
         #endif
 
         let taskCopy = task
@@ -677,6 +707,25 @@ public final class HuggingFaceService: @unchecked Sendable {
         return idsToCancel.count
     }
 
+    /// Drop every previous attempt for this repo, including one that already
+    /// completed. Otherwise the status poll still sees the old task and the
+    /// new source looks like it finished with the previous download's bytes.
+    private func supersedeTasks(for repoId: String) {
+        var handles: [Task<Void, Never>] = []
+        lock.withLock {
+            let ids = activeTasks.filter { $0.value.repoId == repoId }.map(\.key)
+            guard !ids.isEmpty else { return }
+            #if DEBUG
+            NovaMLXLog.info("[DL] Replace \(ids.count) earlier task(s) for \(repoId)")
+            #endif
+            for id in ids {
+                if let handle = activeTaskHandles.removeValue(forKey: id) { handles.append(handle) }
+                activeTasks.removeValue(forKey: id)
+            }
+        }
+        for handle in handles { handle.cancel() }
+    }
+
     public func removeTask(id: String) -> Bool {
         lock.withLock { activeTasks.removeValue(forKey: id) != nil }
     }
@@ -698,6 +747,12 @@ public final class HuggingFaceService: @unchecked Sendable {
 
         func save(_ t: HFDownloadTask) {
             lock.withLock {
+                // A newer attempt for this repo already took the slot. Do not
+                // write this cancelled or completed attempt back on top of it.
+                if activeTasks[t.id] == nil,
+                   activeTasks.values.contains(where: { $0.repoId == t.repoId && $0.id != t.id }) {
+                    return
+                }
                 activeTasks[t.id] = t
                 // Drop the live Task handle once we've reached a terminal
                 // status. Keeps the dict from leaking handles for finished
@@ -871,6 +926,9 @@ public final class HuggingFaceService: @unchecked Sendable {
                 currentTask.error = "Missing/corrupt: \(failed.prefix(5).joined(separator: ", "))"
                 save(currentTask); return
             }
+
+            let stillCurrent = lock.withLock { activeTasks[task.id] != nil }
+            guard stillCurrent, !Task.isCancelled else { throw CancellationError() }
 
             // Step 6: Complete
             currentTask.status = "completed"

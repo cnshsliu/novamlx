@@ -138,6 +138,19 @@ public final class ImageGenerationService: @unchecked Sendable {
         lock.withLock { stepProgress }
     }
 
+    /// The running job, including the gap before the first sampler step.
+    /// `step` and `total` are 0 until the pipeline reports a step.
+    public func inFlight() -> StepProgress? {
+        lock.withLock {
+            guard isGenerating else { return nil }
+            return StepProgress(
+                modelId: activeModelId,
+                step: stepProgress?.step ?? 0,
+                total: stepProgress?.total ?? 0
+            )
+        }
+    }
+
     private var stepProgress: StepProgress?
 
     private func noteImageStep(modelId: String, step: Int, total: Int) {
@@ -291,13 +304,16 @@ public final class ImageGenerationService: @unchecked Sendable {
             throw NovaMLXError.modelNotFound(modelId)
         }
 
-        let wasGenerating = lock.withLock { () -> Bool in
-            if isGenerating { return true }
+        let blocker = lock.withLock { () -> String? in
+            if isGenerating {
+                return activeModelId.isEmpty ? modelId : activeModelId
+            }
             isGenerating = true
-            return false
+            activeModelId = modelId
+            return nil
         }
-        if wasGenerating {
-            throw NovaMLXError.apiError("Image generation already in progress for \(modelId)")
+        if let blocker {
+            throw NovaMLXError.apiError("Image generation already in progress for \(blocker)")
         }
         defer {
             lock.withLock { isGenerating = false }
@@ -313,7 +329,6 @@ public final class ImageGenerationService: @unchecked Sendable {
         // Report live activity so the status panel reflects image generation.
         // One image can take much longer than the 5s activity timeout, so keep
         // refreshing while the sampler runs.
-        self.activeModelId = modelId
         metricsStore?.reportActivity(model: modelId, kind: .image, speed: 0, unit: "img/s")
         let heartbeat = Task { [metricsStore, modelId] in
             while !Task.isCancelled {

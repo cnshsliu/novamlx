@@ -1516,10 +1516,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
 
-            Get("/v1/images/progress") { request, _ in
-                let asked = request.uri.queryParameters.get("model")
-                let progress = inference.imageGenerationService.currentStep()
-                if let progress, asked == nil || asked == progress.modelId {
+            Get("/v1/images/progress") { _, _ in
+                if let progress = inference.imageGenerationService.inFlight() {
                     let body: [String: Any] = [
                         "active": true,
                         "model": progress.modelId,
@@ -3235,6 +3233,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let repoId = json["repo_id"] as? String ?? ""
                             let hfToken = json["hf_token"] as? String
                             let endpoint = json["endpoint"] as? String
+                            let generation = (json["generation"] as? Int)
+                                ?? (json["generation"] as? Double).map { Int($0) }
                             guard !repoId.isEmpty else {
                                 return try Self.jsonResponse(["error": "repo_id required"], httpStatus: .badRequest)
                             }
@@ -3259,7 +3259,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 hfToken: hfToken,
                                 mirrorEndpoint: endpoint,
                                 revision: exact?.revision,
-                                destinationDirectory: dest
+                                destinationDirectory: dest,
+                                generation: generation
                             )
                             return try Self.jsonResponse(["success": "true", "task_id": task.id] as [String: String])
                         } catch {

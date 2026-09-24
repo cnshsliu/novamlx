@@ -1,11 +1,13 @@
 import SwiftUI
 import NovaMLXCore
 import NovaMLXDB
+import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
 
 struct DownloadsPageView: View {
     @ObservedObject var appState: MenuBarAppState
+    let inferenceService: InferenceService
     let modelManager: ModelManager
     @EnvironmentObject var l10n: L10n
     @State private var typeFilter: ModelsPageView.ModelTypeFilter = .all
@@ -33,6 +35,7 @@ struct DownloadsPageView: View {
     // Alert / API key
     @State private var showAlert = false
     @State private var alertMessage = ""
+    @State private var loadingModelId: String?
     @State private var showApiKeyPrompt = false
     @State private var newApiKey = ""
     @State private var isSavingApiKey = false
@@ -47,6 +50,12 @@ struct DownloadsPageView: View {
     // Mirror toast
     @State private var showMirrorChangeNote = false
     @State private var mirrorChangeMessage = ""
+    /// Last source the user or the saved setting actually applied.
+    /// Hydrating the picker must not look like a new choice.
+    @State private var appliedMirrorOption: String?
+    /// Bumped when the user changes the source, so a late settings read
+    /// cannot put the picker back on the previous host.
+    @State private var mirrorEpoch = 0
 
     var body: some View {
         let activeOrFailed = appState.downloadTasks.values
@@ -219,19 +228,10 @@ struct DownloadsPageView: View {
                         .pickerStyle(.menu)
                         .accessibilityIdentifier("model-source-picker")
                         .onChange(of: selectedMirrorOption) { _, newOption in
-                            Task { await appState.setHuggingfaceEndpoint(endpointForMirrorOption(newOption)) }
-                            switch newOption {
-                            case "official":
-                                mirrorChangeMessage = "Switched to official Hugging Face"
-                            case "modelscope":
-                                mirrorChangeMessage = "Switched to ModelScope. New downloads will use modelscope.cn."
-                            default:
-                                mirrorChangeMessage = "Mirror changed. New downloads will use the selected source."
-                            }
-                            showMirrorChangeNote = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                                showMirrorChangeNote = false
-                            }
+                            guard newOption != appliedMirrorOption else { return }
+                            mirrorEpoch += 1
+                            appliedMirrorOption = newOption
+                            commitMirrorSelection()
                         }
                     }
 
@@ -257,10 +257,9 @@ struct DownloadsPageView: View {
                         .font(.system(size: 11, design: .monospaced))
                         .accessibilityIdentifier("model-source-custom-field")
                         .onSubmit {
-                            Task {
-                                let trimmed = customMirrorURL.trimmingCharacters(in: .whitespaces)
-                                await appState.setHuggingfaceEndpoint(trimmed.isEmpty ? nil : trimmed)
-                            }
+                            mirrorEpoch += 1
+                            appliedMirrorOption = "custom"
+                            commitMirrorSelection()
                         }
                 }
 
@@ -273,17 +272,16 @@ struct DownloadsPageView: View {
         }
         .sectionCard()
         .task {
-            if let endpoint = await appState.huggingfaceEndpoint {
-                if endpoint.contains("modelscope") {
-                    selectedMirrorOption = "modelscope"
-                } else if endpoint.contains("huggingface.co") {
-                    selectedMirrorOption = "official"
-                } else {
-                    selectedMirrorOption = "custom"
-                    customMirrorURL = endpoint
-                }
-            } else {
-                selectedMirrorOption = "official"
+            let epochAtStart = mirrorEpoch
+            let endpoint = await appState.huggingfaceEndpoint
+            guard epochAtStart == mirrorEpoch else { return }
+            let option = mirrorOption(for: endpoint)
+            if option == "custom", let endpoint {
+                customMirrorURL = endpoint
+            }
+            appliedMirrorOption = option
+            if selectedMirrorOption != option {
+                selectedMirrorOption = option
             }
         }
     }
@@ -526,9 +524,13 @@ struct DownloadsPageView: View {
     @ViewBuilder
     private func downloadActionButton(for repoId: String) -> some View {
         if modelManager.isDownloaded(repoId) {
-            Label(l10n.tr("models.downloaded"), systemImage: "checkmark.circle.fill")
-                .foregroundColor(NovaTheme.Colors.statusOK)
-                .font(.caption)
+            HStack(spacing: 8) {
+                Label(l10n.tr("models.downloaded"), systemImage: "checkmark.circle.fill")
+                    .foregroundColor(NovaTheme.Colors.statusOK)
+                    .font(.caption)
+                    .lineLimit(1)
+                loadControl(for: repoId)
+            }
         } else if let task = appState.downloadTasks[repoId], task.isActive {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -601,8 +603,103 @@ struct DownloadsPageView: View {
         }
     }
 
+    @ViewBuilder
+    private func loadControl(for repoId: String) -> some View {
+        if loadingModelId == repoId || appState.restoringModels.contains(repoId) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(l10n.tr("models.loading"))
+                    .font(.caption)
+                    .foregroundColor(NovaTheme.Colors.accent)
+                    .lineLimit(1)
+            }
+        } else if appState.loadedModels.contains(repoId) {
+            Button(l10n.tr("models.unload")) {
+                Task { await unloadDownloaded(repoId) }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        } else {
+            Button(l10n.tr("models.load")) {
+                loadingModelId = repoId
+                Task { await loadDownloaded(repoId) }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+    }
+
+    private func loadDownloaded(_ repoId: String) async {
+        defer { loadingModelId = nil }
+        guard let record = modelManager.getRecord(repoId) else {
+            alertMessage = "\(repoId) is not available to load."
+            showAlert = true
+            return
+        }
+        let config = ModelConfig(
+            identifier: ModelIdentifier(id: record.id, family: record.family),
+            modelType: record.modelType
+        )
+        do {
+            try await inferenceService.loadModel(at: record.localURL, config: config)
+            appState.loadedModels = inferenceService.listLoadedModels()
+        } catch {
+            alertMessage = error.localizedDescription
+            showAlert = true
+        }
+    }
+
+    private func unloadDownloaded(_ repoId: String) async {
+        guard let record = modelManager.getRecord(repoId) else { return }
+        await inferenceService.unloadModel(ModelIdentifier(id: record.id, family: record.family))
+        appState.loadedModels = inferenceService.listLoadedModels()
+    }
+
     private func triggerDownload(repoId: String) {
         appState.startDownload(repoId: repoId, endpoint: endpointForMirrorOption(selectedMirrorOption))
+    }
+
+    /// The picker and every in-progress download switch together. A finished
+    /// row keeps the source that produced it.
+    private func commitMirrorSelection() {
+        let endpoint = endpointForMirrorOption(selectedMirrorOption)
+        let host = URL(string: endpoint)?.host ?? endpoint
+        let repos = appState.downloadTasks.compactMap { repoId, task -> String? in
+            guard task.isActive, task.endpoint != endpoint else { return nil }
+            return repoId
+        }
+        if repos.isEmpty {
+            switch selectedMirrorOption {
+            case "official":
+                mirrorChangeMessage = "Switched to official Hugging Face"
+            case "modelscope":
+                mirrorChangeMessage = "Switched to ModelScope. New downloads will use \(host)."
+            default:
+                mirrorChangeMessage = "Mirror changed. New downloads will use \(host)."
+            }
+        } else {
+            mirrorChangeMessage = "Switched to \(host). \(repos.count) download\(repos.count == 1 ? "" : "s") now use it."
+        }
+        showMirrorChangeNote = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            showMirrorChangeNote = false
+        }
+        Task { await appState.setHuggingfaceEndpoint(endpoint) }
+        for repoId in repos {
+            appState.startDownload(repoId: repoId, endpoint: endpoint)
+        }
+    }
+
+    private func mirrorOption(for endpoint: String?) -> String {
+        guard let endpoint, !endpoint.isEmpty else { return "official" }
+        if endpoint.contains("modelscope") { return "modelscope" }
+        if endpoint.contains("huggingface.co") { return "official" }
+        return "custom"
+    }
+
+    private func sourceHost(_ endpoint: String?) -> String? {
+        guard let endpoint, !endpoint.isEmpty else { return nil }
+        return URL(string: endpoint)?.host ?? endpoint
     }
 
     // MARK: - Activity (downloads + live search)
@@ -692,6 +789,12 @@ struct DownloadsPageView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(task.repoId).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    if let host = sourceHost(task.endpoint) {
+                        Text(host)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                     if task.isActive {
                         HStack(spacing: 8) {
                             ProgressView(value: task.progress, total: 100)
@@ -818,6 +921,11 @@ struct DownloadsPageView: View {
                 HStack(spacing: 6) {
                     Text(task.status == .completed ? l10n.tr("models.downloadedOk") : (task.errorMessage ?? "Failed"))
                         .font(.caption2).foregroundColor(.secondary)
+                    if let host = sourceHost(task.endpoint) {
+                        Text(host)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                     if task.downloadedBytes > 0 {
                         Text("(\(formatBytes(task.downloadedBytes)))")
                             .font(.caption2).foregroundColor(.secondary)

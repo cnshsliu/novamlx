@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-21T22:40:00Z",
+  "updatedAt": "2026-09-23T00:00:00Z",
   "models": [
     {
       "id": "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit",
@@ -886,7 +886,26 @@
       "format": "mlx",
       "status": "preview",
       "addedAt": "2026-09-22T00:00:00Z"
+    },
+    {
+      "id": "mlx-community/Qwen-Image-2.1-MLX-4bit",
+      "url": "https://huggingface.co/mlx-community/Qwen-Image-2.1-MLX-4bit",
+      "name": "Qwen-Image-2.1 4-bit",
+      "description": "Same Qwen-Image 2.1 model in 4-bit. Smaller download. Install and load it on its own, or alongside the full model, and generate with whichever one you pick.",
+      "size": "~10.5 GB",
+      "tags": [
+        "MLX",
+        "4bit",
+        "Qwen-Image"
+      ],
+      "category": "image",
+      "sizeBytes": 10500000000,
+      "minRamGB": 32,
+      "family": "qwenImage21",
+      "format": "mlx",
+      "quant": "4bit",
+      "status": "preview",
+      "addedAt": "2026-09-23T00:00:00Z"
     }
-  ],
-  "updatedAt": "2026-09-22T00:00:00Z"
+  ]
 }

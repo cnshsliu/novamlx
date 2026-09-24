@@ -39,6 +39,12 @@ public final class MenuBarAppState: ObservableObject {
     @Published public var totalTokensGenerated: UInt64 = 0
     @Published public var uptime: TimeInterval = 0
     @Published public var downloadTasks: [String: DownloadTaskInfo] = [:]
+    /// In-flight POST that starts a download. Cancelled when the source changes
+    /// again, so the previous host cannot start after the new one.
+    private var downloadKickoffs: [String: Task<Void, Never>] = [:]
+    /// Increments every time a repo is started. Sent with the request so a
+    /// slower request from the previous source cannot win.
+    private var downloadGeneration: [String: Int] = [:]
     @Published public var requestedPage: AppPage? = nil
     /// When non-nil, ChatPageView should pre-select this model on its next
     /// appear / onReceive. Cleared after consumption. Drives the
@@ -343,9 +349,18 @@ public final class MenuBarAppState: ObservableObject {
         // them click Resume (which kills + restarts server-side) is the
         // intended escape hatch. The local DownloadTaskInfo is rebuilt to
         // reset progress + status to .pending so the UI shows immediate feedback.
-        downloadTasks[repoId] = DownloadTaskInfo(repoId: repoId)
+        downloadKickoffs[repoId]?.cancel()
+        downloadGeneration[repoId, default: 0] += 1
+        let generation = downloadGeneration[repoId] ?? 1
+        var info = DownloadTaskInfo(repoId: repoId)
+        let attempt = UUID().uuidString
+        info.attempt = attempt
+        if let endpoint, !endpoint.isEmpty {
+            info.endpoint = endpoint
+        }
+        downloadTasks[repoId] = info
 
-        Task {
+        let kickoff = Task {
             // The Downloads picker passes the host it is showing. Do not wait
             // for the async settings write — that race kept ModelScope after
             // the user had already switched back to Hugging Face.
@@ -356,6 +371,8 @@ public final class MenuBarAppState: ObservableObject {
             } else {
                 currentEndpoint = await self.huggingfaceEndpoint ?? "https://huggingface.co"
             }
+            guard downloadTasks[repoId]?.attempt == attempt else { return }
+            downloadTasks[repoId]?.endpoint = currentEndpoint
 
             guard let url = URL(string: "http://127.0.0.1:\(String(adminPort))/admin/api/hf/download") else {
                 downloadTasks[repoId]?.status = .failed
@@ -368,13 +385,14 @@ public final class MenuBarAppState: ObservableObject {
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
 
-                // Send current mirror so the server uses the latest setting without restart
                 let body: [String: Any] = [
                     "repo_id": repoId,
-                    "endpoint": currentEndpoint
+                    "endpoint": currentEndpoint,
+                    "generation": generation
                 ]
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
                 let (data, response) = try await URLSession.shared.data(for: request)
+                guard downloadTasks[repoId]?.attempt == attempt else { return }
                 if let httpResp = response as? HTTPURLResponse, httpResp.statusCode != 200 {
                     let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
                         ?? "HTTP \(httpResp.statusCode)"
@@ -387,11 +405,15 @@ public final class MenuBarAppState: ObservableObject {
                     downloadTasks[repoId]?.taskId = taskId
                 }
                 downloadTasks[repoId]?.status = .downloading
+            } catch is CancellationError {
+                return
             } catch {
+                guard downloadTasks[repoId]?.attempt == attempt else { return }
                 downloadTasks[repoId]?.status = .failed
                 downloadTasks[repoId]?.errorMessage = error.localizedDescription
             }
         }
+        downloadKickoffs[repoId] = kickoff
     }
 
     public func cancelDownload(repoId: String) {
@@ -484,7 +506,8 @@ public final class MenuBarAppState: ObservableObject {
 
             for taskJson in tasks {
                 guard let repoId = taskJson["repoId"] as? String,
-                      downloadTasks[repoId] != nil else { continue }
+                      let local = downloadTasks[repoId],
+                      local.acceptsPoll(taskId: taskJson["id"] as? String) else { continue }
 
                 let status = taskJson["status"] as? String ?? ""
                 let progress = taskJson["progress"] as? Double ?? 0
@@ -509,6 +532,10 @@ public final class MenuBarAppState: ObservableObject {
                         )
                     }
                     downloadTasks[repoId]?.fileProgresses = parsed
+                }
+
+                if let endpoint = taskJson["endpoint"] as? String, !endpoint.isEmpty {
+                    downloadTasks[repoId]?.endpoint = endpoint
                 }
 
                 switch status {

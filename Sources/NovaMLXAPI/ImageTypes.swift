@@ -33,6 +33,7 @@ func novaImageSize(_ size: String?) -> (width: Int, height: Int) {
     case "1344x768": return (1344, 768)
     case "864x1152": return (864, 1152)
     case "1152x864": return (1152, 864)
+    case "1920x1080": return (1920, 1080)
     default:
         let parts = raw.lowercased().split(separator: "x", omittingEmptySubsequences: false)
         if parts.count == 2, let width = Int(parts[0]), let height = Int(parts[1]),
