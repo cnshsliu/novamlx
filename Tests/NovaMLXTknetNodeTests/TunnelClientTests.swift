@@ -43,6 +43,21 @@ struct TunnelClientTests {
         }
     }
 
+    /// Transport factory handing out one transport per dial, in order, so a
+    /// test can close the first session server-side and observe the hello
+    /// the reconnect sends on a fresh pair.
+    private final class SequentialFactory: @unchecked Sendable {
+        private let lock = NSLock()
+        private var remaining: [any TunnelTransport]
+        init(_ transports: [any TunnelTransport]) { self.remaining = transports }
+
+        func make() throws -> TunnelTransport {
+            lock.lock(); defer { lock.unlock() }
+            guard !remaining.isEmpty else { throw TunnelError.connectionClosed }
+            return remaining.removeFirst()
+        }
+    }
+
     /// Builds a client around an in-memory pair and a relay. The relay is
     /// always shut down (AsyncHTTPClient asserts in debug builds when dropped
     /// without shutdown), even when assertions fail.
@@ -203,6 +218,70 @@ struct TunnelClientTests {
                 #expect(first >= 0.5 && first <= 1.5)
             }
         }
+    }
+
+    @Test("reconnect hello advertises post-applyConfig capabilities, not init's")
+    func reconnectHelloUsesLatestCapabilities() async throws {
+        // Drive through NodeService so the regression covers the real
+        // applyConfig → updateRelay → updateConfig wiring end-to-end.
+        let pair1 = InMemoryTransportPair()
+        let pair2 = InMemoryTransportPair()
+        let factory = SequentialFactory([pair1.nodeSide, pair2.nodeSide])
+        var config = NodeConfig.defaultConfig()
+        config.nodeId = "node-1"
+        config.sources = [SourceConfig(
+            id: "s1", name: "x", type: .openaiCompatible,
+            endpoint: URL(string: "http://127.0.0.1:1/v1")!, apiKeyRef: "s1",
+            upstreamModel: "u")]
+        config.capabilities = [Capability(
+            demandId: "d1", model: "m", sourceId: "s1",
+            sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
+        let service = NodeService(
+            config: config,
+            secrets: FileSecretStore(directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("tknet-tc-\(UUID().uuidString)")),
+            transportFactory: { try factory.make() },
+            delay: { _ in try await Task.sleep(nanoseconds: 10_000_000) })
+        defer { Task { await service.stop() } }
+        try await service.start()
+
+        // Session 1: hello carries the init capability d1.
+        guard case .hello(_, let firstCaps)? =
+            await nextSignificantFrame(from: pair1.serverSide.inbound)
+        else {
+            Issue.record("expected hello on first connect")
+            return
+        }
+        #expect(firstCaps.map(\.demandId) == ["d1"])
+
+        // Operator edits capabilities to d2 while connected (hot
+        // capabilitiesUpdate) ...
+        var edited = service.currentConfig
+        edited.capabilities = [Capability(
+            demandId: "d2", model: "m", sourceId: "s1",
+            sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
+        await service.applyConfig(edited)
+        guard case .capabilitiesUpdate(let hotCaps)? =
+            await nextSignificantFrame(from: pair1.serverSide.inbound)
+        else {
+            Issue.record("expected capabilitiesUpdate after applyConfig")
+            return
+        }
+        #expect(hotCaps.map(\.demandId) == ["d2"])
+
+        // ... then the server closes and the tunnel reconnects: the second
+        // hello must advertise the LATEST capabilities (d2), not the stale
+        // init set (d1).
+        await pair1.serverSide.close()
+        guard case .hello(_, let secondCaps)? =
+            await nextSignificantFrame(from: pair2.serverSide.inbound)
+        else {
+            Issue.record("expected hello after reconnect")
+            return
+        }
+        #expect(secondCaps.map(\.demandId) == ["d2"])
+
+        await service.stop()
     }
 
     @Test("concurrency cap refuses over-dispatch with a failed end frame")

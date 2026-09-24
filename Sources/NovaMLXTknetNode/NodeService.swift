@@ -176,9 +176,9 @@ public final class NodeService: @unchecked Sendable {
     /// Operator edited config (sources, capabilities, limits, prices).
     /// Propagates to the live relay without a reconnect; capability edits
     /// additionally go out as a `capabilitiesUpdate` frame when connected
-    /// (and ride the next hello otherwise). `concurrencyLimit` and the hello
-    /// identity stay bound to the config `start()` saw — restart to change
-    /// those.
+    /// and are advertised by every subsequent hello (including after
+    /// reconnects). `concurrencyLimit` and the hello identity stay bound to
+    /// the config `start()` saw — restart to change those.
     public func applyConfig(_ newConfig: NodeConfig) async {
         let client = state.withLock { state -> TunnelClient? in
             state.config = newConfig

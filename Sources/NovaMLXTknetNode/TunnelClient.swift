@@ -20,6 +20,9 @@ public final class TunnelClient: @unchecked Sendable {
         var pendingCapabilities: [Capability]?
         var currentTransport: (any TunnelTransport)?
         var demand: [DemandEntry] = []
+        /// Latest operator config, if `updateConfig` ever ran. Every hello
+        /// advertises these capabilities; falls back to the init config.
+        var config: NodeConfig?
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
 
@@ -117,10 +120,19 @@ public final class TunnelClient: @unchecked Sendable {
         try await send(.capabilitiesUpdate(capabilities))
     }
 
+    /// Record the latest operator config so every future hello advertises
+    /// the current capabilities, never the set frozen at init. Called from
+    /// `updateRelay` (NodeService.applyConfig's path).
+    public func updateConfig(_ config: NodeConfig) {
+        state.withLock { $0.config = config }
+    }
+
     /// Push a config edit into the live relay (sources/prices) without a
     /// reconnect. Capability edits additionally go out as a
-    /// `capabilitiesUpdate` frame via `updateCapabilities(_:)`.
+    /// `capabilitiesUpdate` frame via `updateCapabilities(_:)` and ride the
+    /// next hello after any reconnect (`updateConfig`).
     public func updateRelay(_ config: NodeConfig) {
+        updateConfig(config)
         relay.updateConfig(config)
     }
 
@@ -139,7 +151,17 @@ public final class TunnelClient: @unchecked Sendable {
         defer { state.withLock { $0.currentTransport = nil } }
         defer { cancelAllRequests() }
 
-        try await sendOn(transport, .hello(nodeId: nodeId, capabilities: config.capabilities))
+        // Advertise the LATEST capabilities (post-applyConfig), filtered to
+        // the server's live demand list when we have one: retired demands
+        // must not be re-advertised on reconnect. With no demand list yet
+        // (fresh connect) advertise everything declared, as before.
+        let helloCapabilities: [Capability] = state.withLock { state in
+            let declared = state.config?.capabilities ?? config.capabilities
+            guard !state.demand.isEmpty else { return declared }
+            let liveIds = Set(state.demand.map(\.demandId))
+            return declared.filter { liveIds.contains($0.demandId) }
+        }
+        try await sendOn(transport, .hello(nodeId: nodeId, capabilities: helloCapabilities))
         let pending = state.withLock { state -> [Capability]? in
             let pending = state.pendingCapabilities
             state.pendingCapabilities = nil
@@ -152,9 +174,13 @@ public final class TunnelClient: @unchecked Sendable {
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask { [heartbeatInterval, weak self] in
-                    while let self, self.status == .connected {
+                    // Honour cancellation: the `try?` swallows the delay's
+                    // CancellationError, so without the isCancelled checks a
+                    // cancelled heartbeat task would spin forever and the
+                    // group (hence the reconnect loop) could never exit.
+                    while let self, self.status == .connected, !Task.isCancelled {
                         try? await self.delay(heartbeatInterval * Double.random(in: 0.9...1.1))
-                        guard self.status == .connected else { break }
+                        guard self.status == .connected, !Task.isCancelled else { break }
                         try await self.send(.heartbeat(Heartbeat(
                             activeReq: self.activeCount(), queueDepth: 0)))
                     }

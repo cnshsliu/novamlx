@@ -79,8 +79,9 @@ public struct RequestResult: Codable, Equatable, Sendable {
     }
 }
 
-/// Tunnel frame. The node token travels only inside `hello` on the TLS tunnel;
-/// source API keys never appear in any frame.
+/// Tunnel frame. The node token never appears in any frame — it rides the
+/// WebSocket upgrade's `Authorization: Bearer` header (see `WSTransport`);
+/// source API keys never appear in any frame either.
 public enum Frame: Equatable, Sendable {
     case hello(nodeId: String, capabilities: [Capability])
     case capabilitiesUpdate([Capability])
