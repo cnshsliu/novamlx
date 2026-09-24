@@ -74,6 +74,10 @@ One outbound connection per node: `wss://tknet.ai/api/node/tunnel`, authenticate
 | node→server | `response.end` | `{reqId, status, ttftMs, totalMs, promptTokens, completionTokens, upstreamStatus}` — billing + reputation feed |
 | server→node | `request` | `{reqId, model, apiFormat (openai\|anthropic), body}` |
 | server→node | `request.cancel` | `{reqId}` |
+| server→node | `demand.update` | Current demand list (added/removed/changed entries); the `hello` response also carries the full list for reconciliation after reconnect |
+| node→server | `capabilities.update` | Node-side declaration changes (price, retire an entry, source swap) without re-registering |
+
+**Demand lifecycle.** When tknet.ai retires a demand entry, the scheduler simply stops dispatching it (eligibility is computed live from demand list × capabilities; stale demandIds are ignored server-side). On the node: the mapping is marked **retired** (greyed in UI) but **not deleted** — source configs are reusable assets. The Mac app notifies the operator that any model loaded solely for that demand can be unloaded, but never auto-unloads. New demand entries arrive on the same `demand.update` frame and surface as opportunities ("new demand X — one of your sources may serve it").
 
 Forwarding rules: the node strips all tknet.ai credentials and injects its own source key before contacting the source. WebSocket backpressure applies naturally. Every reconnect/heartbeat/poll interval carries jitter to prevent thundering herds at scale.
 
