@@ -1,7 +1,7 @@
 import Foundation
 import Hummingbird
 
-/// Minimal tknet.ai stand-in: POST /api/node/register, GET /api/node/demand.
+/// Minimal tknet.ai stand-in: POST /api/peer/register, GET /api/peer/demand.
 /// Shares MockSourceServer's bind machinery (port 0 + onServerRunning
 /// continuation + Once guard) so `port` is the real bound port. The fixed
 /// peer token "tok-42" lives only in test bodies; the server never logs.
@@ -24,14 +24,14 @@ final class MockTknetServer: @unchecked Sendable {
     /// listener is up.
     func start() async throws {
         let router = Router()
-        router.post("/api/node/register") { request, _ -> Response in
+        router.post("/api/peer/register") { request, _ -> Response in
             _ = try await request.body.collect(upTo: .max)
             return Response(
                 status: .ok,
                 headers: [.contentType: "application/json"],
                 body: Self.textBody(Self.registerBody))
         }
-        router.get("/api/node/demand") { request, _ -> Response in
+        router.get("/api/peer/demand") { request, _ -> Response in
             guard request.headers[.authorization] == "Bearer \(Self.validToken)" else {
                 return Response(status: .unauthorized, body: Self.textBody("{}"))
             }

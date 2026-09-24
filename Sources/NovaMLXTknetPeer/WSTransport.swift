@@ -48,7 +48,7 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
     }
 
     /// `TransportFactory` for the CLI `serve` command and the Mac page.
-    /// Dials `<server>/api/node/tunnel` with `Bearer <token>` on the upgrade
+    /// Dials `<server>/api/peer/tunnel` with `Bearer <token>` on the upgrade
     /// request. `ws`/`wss` schemes pass through; `http`/`https` are converted
     /// to `ws`/`wss`. TLS for `wss` uses the client library's default client
     /// TLS configuration.
@@ -57,7 +57,7 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
             // Fresh token each dial: a re-registered token works without restart.
             let token = (try? secrets.load(tokenRef)) ?? ""
             return try await dial(
-                url: server.appendingPathComponent("api/node/tunnel"),
+                url: server.appendingPathComponent("api/peer/tunnel"),
                 authorization: "Bearer \(token)")
         }
     }

@@ -25,7 +25,7 @@ public struct TknetREST: Sendable {
         struct Payload: Decodable { let peerId: String; let token: String }
 
         var request = HTTPClientRequest(
-            url: server.appendingPathComponent("api/node/register").absoluteString)
+            url: server.appendingPathComponent("api/peer/register").absoluteString)
         request.method = .POST
         request.headers.add(name: "content-type", value: "application/json")
         request.body = .bytes(try JSONEncoder().encode(RegisterRequest(name: peerName)))
@@ -42,7 +42,7 @@ public struct TknetREST: Sendable {
         struct Payload: Decodable { let entries: [DemandEntry] }
 
         var request = HTTPClientRequest(
-            url: server.appendingPathComponent("api/node/demand").absoluteString)
+            url: server.appendingPathComponent("api/peer/demand").absoluteString)
         request.headers.add(name: "authorization", value: "Bearer \(token)")
 
         let response = try await client.execute(request, timeout: .seconds(30))

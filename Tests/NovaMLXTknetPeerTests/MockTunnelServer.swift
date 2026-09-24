@@ -28,8 +28,8 @@ final class MockTunnelServer: @unchecked Sendable {
     /// Authorization header of the most recent WS upgrade request, if any.
     var lastAuthorization: String? { state.withLock { $0.lastAuthorization } }
 
-    /// The upgrade path `WSTransport.factory` dials (`<server>/api/node/tunnel`).
-    static let tunnelPath = "/api/node/tunnel"
+    /// The upgrade path `WSTransport.factory` dials (`<server>/api/peer/tunnel`).
+    static let tunnelPath = "/api/peer/tunnel"
 
     /// Thread-safe frame recorder. New subscribers first see every frame
     /// recorded so far (replay), then live frames.

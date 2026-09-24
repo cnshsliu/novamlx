@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6 (StrictConcurrency), Foundation, Hummingbird 2.21 (mock servers), hummingbird-websocket 2.x (WS client + mock tunnel), swift-async-http-client 1.33 (source forwarding), swift-argument-parser (CLI), Swift Testing.
 
-**Spec:** `docs/superpowers/specs/2026-09-24-tknet-node-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-24-tknet-peer-design.md` (renamed Node→Peer on 2026-09-24, after this plan executed; this plan keeps its original Node-era terminology as a historical record)
 
 ## Global Constraints
 
