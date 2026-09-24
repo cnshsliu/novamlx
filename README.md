@@ -555,6 +555,22 @@ Use provider catalog presets for popular services (OpenAI, Anthropic, Groq, Toge
 
 ---
 
+## Tknet Node
+
+NovaMLX can act as a **Tknet Node**: tknet.ai routes end-user model requests to
+this machine over an outbound WebSocket tunnel, and the node forwards them to a
+**source** — NovaMLX's own inference (`http://127.0.0.1:6590/v1`), another local
+service (ollama, llama.cpp), or any cloud API. Source API keys never leave the
+node.
+
+- macOS: enable in the app → **Tknet Node** page.
+- Linux/Windows: `swift build -c release --product tknet-node`, then
+  `tknet-node setup` and `tknet-node serve`.
+
+Design: `docs/superpowers/specs/2026-09-24-tknet-node-design.md`.
+
+---
+
 ## Requirements
 
 - **macOS 15.0** (Sequoia) or later
