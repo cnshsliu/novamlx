@@ -32,7 +32,10 @@ public final class Relay: Sendable {
     public init(config: NodeConfig, secrets: any SecretStore) {
         self.configHolder = ConfigHolder(config)
         self.secrets = secrets
-        self.client = HTTPClient(eventLoopGroupProvider: .createNew)
+        // `.singleton` shares one NIO event loop group across all relays in
+        // the process; each HTTPClient still owns its lifecycle and is shut
+        // down in `shutdown()` below.
+        self.client = HTTPClient(eventLoopGroupProvider: .singleton)
     }
 
     public func updateConfig(_ config: NodeConfig) { configHolder.update(config) }

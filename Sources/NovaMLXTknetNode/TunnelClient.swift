@@ -50,6 +50,11 @@ public final class TunnelClient: @unchecked Sendable {
     public var status: TunnelStatus { state.withLock { $0.status } }
     public var demand: [DemandEntry] { state.withLock { $0.demand } }
 
+    /// Fired once per terminal `responseEnd` dispatched through the relay, on
+    /// the dispatch task. Set before `start()`; owners (NodeService) aggregate
+    /// request/token counters from it. Never carries secret material.
+    public var onResult: (@Sendable (RequestResult) -> Void)?
+
     public init(config: NodeConfig, relay: Relay,
                 transportFactory: @escaping TransportFactory,
                 delay: @escaping @Sendable (Double) async throws -> Void = { seconds in
@@ -110,6 +115,13 @@ public final class TunnelClient: @unchecked Sendable {
             return
         }
         try await send(.capabilitiesUpdate(capabilities))
+    }
+
+    /// Push a config edit into the live relay (sources/prices) without a
+    /// reconnect. Capability edits additionally go out as a
+    /// `capabilitiesUpdate` frame via `updateCapabilities(_:)`.
+    public func updateRelay(_ config: NodeConfig) {
+        relay.updateConfig(config)
     }
 
     // MARK: - Internals
@@ -194,6 +206,7 @@ public final class TunnelClient: @unchecked Sendable {
             let task = Task { [relay, weak self, slot] in
                 for await reply in relay.handle(request) {
                     guard let self else { return }
+                    if case .responseEnd(_, let result) = reply { self.onResult?(result) }
                     try? await self.sendOn(transport, reply)
                 }
                 // The relay guarantees exactly one terminal `responseEnd`

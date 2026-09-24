@@ -80,6 +80,20 @@ public struct NodeConfig: Codable, Equatable, Sendable {
         retiredDemandIds.formUnion(mine)
         return mine.sorted()
     }
+
+    /// Two-way reconciliation against the server's live demand list: ids this
+    /// node declares but the list no longer carries are retired, and ids that
+    /// come back are un-retired (retirement is a latch, not a tombstone).
+    /// Returns the ids newly retired by this call. Declarations are never
+    /// deleted (spec: Demand lifecycle — sources are reusable assets).
+    @discardableResult
+    public mutating func reconcile(demandIds: Set<String>) -> [String] {
+        let mine = Set(capabilities.map(\.demandId))
+        retiredDemandIds.subtract(mine.intersection(demandIds))
+        let newlyRetired = mine.subtracting(demandIds).subtracting(retiredDemandIds)
+        retiredDemandIds.formUnion(newlyRetired)
+        return newlyRetired.sorted()
+    }
 }
 
 public enum ConfigStore {
