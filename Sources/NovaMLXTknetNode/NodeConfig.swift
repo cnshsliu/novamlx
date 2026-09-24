@@ -102,11 +102,14 @@ public enum ConfigStore {
     }
 
     /// Atomic write with 0600 so a shared machine can't read node secrets refs.
+    /// `.completeFileProtection` is deliberately absent: it fails EPERM on
+    /// volumes that don't support FileVault-style protection (e.g. $TMPDIR),
+    /// and the POSIX 0600 chmod is the binding spec requirement.
     public static func save(_ config: NodeConfig, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(config)
-        try data.write(to: url, options: [.atomic, .completeFileProtection])
+        try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
