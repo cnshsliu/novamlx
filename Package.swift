@@ -193,6 +193,7 @@ let package = Package(
                 "NovaMLXAPI",
                 "NovaMLXDistributed",
                 "NovaMLXDB",
+                "NovaMLXTknetNode",
             ],
             resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
