@@ -139,14 +139,26 @@ public final class Relay: Sendable {
                 return
             }
 
+            var usageRemainder = ""
             for try await buffer in response.body {
                 if !sawFirstByte {
                     sawFirstByte = true
                     ttftMs = elapsedMs()
                 }
                 let data = Data(buffer.readableBytesView)
-                usage = Relay.parseUsage(from: data, previous: usage)
+                // Line-buffered usage parse: usage objects split across body
+                // reads must still count (P1.4). The chunk bytes are forwarded
+                // unchanged.
+                let consumed = Relay.consumeUsage(incoming: data, remainder: usageRemainder, previous: usage)
+                usage = consumed.usage
+                usageRemainder = consumed.remainder
                 emit(.responseChunk(reqId: request.reqId, payload: data))
+            }
+            // A clean end may leave one final usage object without a trailing
+            // newline — parse it too.
+            if !usageRemainder.isEmpty {
+                let tail = Relay.consumeUsage(incoming: Data(), remainder: usageRemainder + "\n", previous: usage)
+                usage = tail.usage
             }
             let tokens = usage ?? (prompt: 0, completion: 0)
             emit(.responseEnd(reqId: request.reqId, result: RequestResult(
@@ -181,10 +193,36 @@ public final class Relay: Sendable {
     static func parseUsage(
         from data: Data, previous: (prompt: Int, completion: Int)?
     ) -> (prompt: Int, completion: Int)? {
-        guard let text = String(data: data, encoding: .utf8) else { return previous }
+        let consumed = Relay.consumeUsage(incoming: data, remainder: "", previous: previous)
+        return consumed.usage
+    }
+
+    /// Line-buffered usage extraction (P1.4): a `usage` object split across two
+    /// body reads used to stay at zero tokens. Only complete lines are parsed;
+    /// the trailing partial line is carried into the next call. The last
+    /// complete usage object wins, matching the previous single-buffer behavior.
+    static func consumeUsage(
+        incoming: Data,
+        remainder: String,
+        previous: (prompt: Int, completion: Int)?
+    ) -> (usage: (prompt: Int, completion: Int)?, remainder: String) {
+        guard let incomingText = String(data: incoming, encoding: .utf8) else {
+            return (previous, remainder)
+        }
+        let text = remainder + incomingText
         var result = previous ?? (0, 0)
         var found = false
-        for line in text.split(separator: "\n") {
+        var trailing = ""
+        var lines: [Substring] = text.split(separator: "\n", omittingEmptySubsequences: true)
+        // text.split drops a trailing separator; detect an incomplete last line
+        // (no newline after it) and carry it instead of parsing garbage.
+        if !text.isEmpty && !text.hasSuffix("\n") {
+            if let last = lines.last {
+                trailing = String(last)
+                lines = Array(lines.dropLast())
+            }
+        }
+        for line in lines {
             let payload = line.hasPrefix("data: ") ? String(line.dropFirst(6)) : String(line)
             guard payload != "[DONE]",
                   let chunk = payload.data(using: .utf8),
@@ -194,6 +232,6 @@ public final class Relay: Sendable {
             result.completion = usage["completion_tokens"] as? Int ?? result.completion
             found = true
         }
-        return found ? result : previous
+        return (found ? result : previous, trailing)
     }
 }
