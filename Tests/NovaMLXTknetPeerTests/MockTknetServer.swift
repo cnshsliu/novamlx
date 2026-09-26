@@ -26,8 +26,11 @@ final class MockTknetServer: @unchecked Sendable {
         let router = Router()
         router.post("/api/peer/register") { request, _ -> Response in
             _ = try await request.body.collect(upTo: .max)
+            // Real tknet.ai answers 201 Created (src/routes/api/peer/register).
+            // The mock must match: an earlier `.ok`-only mock hid the client's
+            // `== .ok` status check, which rejected every real registration.
             return Response(
-                status: .ok,
+                status: .created,
                 headers: [.contentType: "application/json"],
                 body: Self.textBody(Self.registerBody))
         }

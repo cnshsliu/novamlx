@@ -1,6 +1,7 @@
 import Foundation
 import NovaMLXDB
 import NovaMLXTknetPeer
+import NovaMLXUtils
 
 /// Bridges the cross-platform PeerService into the Mac UI. Owns the service
 /// for the page's lifetime (the app keeps every page alive via the opacity
@@ -75,6 +76,9 @@ final class TknetPeerState: ObservableObject {
             lastError = nil
             await fetchDemand()
         } catch {
+            // Network failures (connectTimeout, DNS, …) otherwise leave no trace
+            // in the app log — log them so the next one is diagnosable.
+            NovaMLXLog.error("[TknetPeer] register failed for \(server.absoluteString): \(error)")
             lastError = String(describing: error)
         }
     }

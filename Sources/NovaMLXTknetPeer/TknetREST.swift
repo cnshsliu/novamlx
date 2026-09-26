@@ -31,7 +31,10 @@ public struct TknetREST: Sendable {
         request.body = .bytes(try JSONEncoder().encode(RegisterRequest(name: peerName)))
 
         let response = try await client.execute(request, timeout: .seconds(30))
-        guard response.status == .ok else { throw RESTError.badStatus(Int(response.status.code)) }
+        // The server answers 201 Created on success — accept any 2xx, not just 200.
+        guard (200..<300).contains(response.status.code) else {
+            throw RESTError.badStatus(Int(response.status.code))
+        }
         let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
         let payload = try JSONDecoder().decode(Payload.self, from: data)
         return (peerId: payload.peerId, token: payload.token)
@@ -46,7 +49,9 @@ public struct TknetREST: Sendable {
         request.headers.add(name: "authorization", value: "Bearer \(token)")
 
         let response = try await client.execute(request, timeout: .seconds(30))
-        guard response.status == .ok else { throw RESTError.badStatus(Int(response.status.code)) }
+        guard (200..<300).contains(response.status.code) else {
+            throw RESTError.badStatus(Int(response.status.code))
+        }
         let data = Data(try await response.body.collect(upTo: 16 << 20).readableBytesView)
         return try JSONDecoder().decode(Payload.self, from: data).entries
     }
