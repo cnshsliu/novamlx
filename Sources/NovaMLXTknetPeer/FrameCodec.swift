@@ -17,8 +17,8 @@ public enum FrameCodec {
     public static func encode(_ frame: Frame) -> String {
         let obj: [String: Any]
         switch frame {
-        case .hello(let peerId, let caps):
-            obj = ["type": "hello", "data": jsonValue(HelloPayload(peerId: peerId, capabilities: caps, version: TknetPeer.version))]
+        case .hello(let peerId, let caps, let protocolVersion, let appVersion):
+            obj = ["type": "hello", "data": jsonValue(HelloPayload(peerId: peerId, capabilities: caps, version: appVersion, protocolVersion: protocolVersion))]
         case .capabilitiesUpdate(let caps):
             obj = ["type": "capabilities.update", "data": ["capabilities": jsonValue(caps)]]
         case .heartbeat(let hb):
@@ -57,7 +57,8 @@ public enum FrameCodec {
         switch type {
         case "hello":
             let p = try decodePayload(HelloPayload.self)
-            return .hello(peerId: p.peerId, capabilities: p.capabilities)
+            return .hello(peerId: p.peerId, capabilities: p.capabilities,
+                          protocolVersion: p.protocolVersion, appVersion: p.version)
         case "capabilities.update":
             let p = try decodePayload(CapabilitiesPayload.self)
             return .capabilitiesUpdate(p.capabilities)
@@ -91,7 +92,35 @@ public enum FrameCodec {
     }
 }
 
-struct HelloPayload: Codable { var peerId: String; var capabilities: [Capability]; var version: String }
+struct HelloPayload: Codable {
+    var peerId: String
+    var capabilities: [Capability]
+    /// App version — telemetry only, never gates traffic.
+    var version: String
+    /// Wire protocol — the server refuses tunnels below its minimum.
+    var protocolVersion: Int
+
+    enum CodingKeys: String, CodingKey {
+        case peerId, capabilities, version
+        case protocolVersion = "protocol"
+    }
+
+    init(peerId: String, capabilities: [Capability], version: String, protocolVersion: Int) {
+        self.peerId = peerId
+        self.capabilities = capabilities
+        self.version = version
+        self.protocolVersion = protocolVersion
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        peerId = try c.decode(String.self, forKey: .peerId)
+        capabilities = try c.decode([Capability].self, forKey: .capabilities)
+        version = (try? c.decode(String.self, forKey: .version)) ?? ""
+        // Absent protocol = legacy peer = 0.
+        protocolVersion = (try? c.decode(Int.self, forKey: .protocolVersion)) ?? 0
+    }
+}
 struct CapabilitiesPayload: Codable { var capabilities: [Capability] }
 struct ChunkPayload: Codable { var reqId: String; var payload: String }
 struct EndPayload: Codable { var reqId: String; var result: RequestResult }

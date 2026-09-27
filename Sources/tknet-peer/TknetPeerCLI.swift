@@ -225,6 +225,14 @@ extension TknetPeerCLI {
                 for await status in service.statusStream {
                     let error = status.lastError.map { " err=\($0)" } ?? ""
                     print("status: \(status.connection) req=\(status.totalRequests) tok=\(status.totalCompletionTokens)\(error)")
+                    if status.connection == .upgradeRequired {
+                        // Terminal: the server refuses this protocol version.
+                        // One clear line, then exit — retrying would hammer
+                        // the server's bcrypt forever.
+                        print("Upgrade required: this build's peer protocol is below the server minimum. Download the latest tknet-peer / NovaMLX from \(TknetPeer.downloadURL)")
+                        await service.stop()
+                        Darwin.exit(2)
+                    }
                 }
             }
 

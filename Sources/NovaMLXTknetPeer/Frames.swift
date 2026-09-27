@@ -83,7 +83,9 @@ public struct RequestResult: Codable, Equatable, Sendable {
 /// WebSocket upgrade's `Authorization: Bearer` header (see `WSTransport`);
 /// source API keys never appear in any frame either.
 public enum Frame: Equatable, Sendable {
-    case hello(peerId: String, capabilities: [Capability])
+    /// `protocolVersion` is the WIRE CONTRACT (gates traffic server-side);
+/// `appVersion` is telemetry only and never gates anything.
+case hello(peerId: String, capabilities: [Capability], protocolVersion: Int, appVersion: String)
     case capabilitiesUpdate([Capability])
     case heartbeat(Heartbeat)
     case responseChunk(reqId: String, payload: Data)     // raw SSE/JSON bytes

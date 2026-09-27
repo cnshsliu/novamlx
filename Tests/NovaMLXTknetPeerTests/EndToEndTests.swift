@@ -93,7 +93,7 @@ struct EndToEndTests {
         try await service.start()
 
         // The peer identified itself over the real tunnel.
-        guard case .hello(let peerId, let caps)? = await collector.nextSignificant(after: 0)?.frame
+        guard case .hello(let peerId, let caps, let proto, _)? = await collector.nextSignificant(after: 0)?.frame
         else {
             Issue.record("expected hello as the first significant tunnel frame")
             await service.stop(); await source.stop(); await tunnel.stop()

@@ -7,6 +7,14 @@ public protocol TunnelTransport: Sendable {
     var inbound: AsyncStream<Frame> { get }
     func send(_ frame: Frame) async throws
     func close() async
+    /// Close code the server sent when the session ended (nil when unknown).
+    /// The upgrade-required gate (4005) rides on this.
+    var closeCode: UInt16? { get }
+}
+
+extension TunnelTransport {
+    /// In-memory and test transports have no WS close semantics.
+    public var closeCode: UInt16? { nil }
 }
 
 /// Factory so clients can dial reconnects; tests inject the in-memory pair.

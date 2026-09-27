@@ -97,7 +97,7 @@ struct PeerServiceTests {
         try await service.start()
         let server = pair.serverSide
 
-        guard case .hello(let peerId, let caps)? = await nextSignificant(from: server.inbound)
+        guard case .hello(let peerId, let caps, _, _)? = await nextSignificant(from: server.inbound)
         else {
             Issue.record("expected hello")
             return

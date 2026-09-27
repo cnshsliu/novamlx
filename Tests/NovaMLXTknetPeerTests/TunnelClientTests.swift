@@ -134,7 +134,7 @@ struct TunnelClientTests {
             let task = Task { await client.start() }
             defer { client.stop(); task.cancel() }
             let hello = await nextSignificantFrame(from: server.inbound)
-            guard case .hello(let peerId, let caps)? = hello else {
+            guard case .hello(let peerId, let caps, _, _)? = hello else {
                 Issue.record("expected hello, got \(String(describing: hello))")
                 return
             }
@@ -246,7 +246,7 @@ struct TunnelClientTests {
         try await service.start()
 
         // Session 1: hello carries the init capability d1.
-        guard case .hello(_, let firstCaps)? =
+        guard case .hello(_, let firstCaps, _, _)? =
             await nextSignificantFrame(from: pair1.serverSide.inbound)
         else {
             Issue.record("expected hello on first connect")
@@ -273,7 +273,7 @@ struct TunnelClientTests {
         // hello must advertise the LATEST capabilities (d2), not the stale
         // init set (d1).
         await pair1.serverSide.close()
-        guard case .hello(_, let secondCaps)? =
+        guard case .hello(_, let secondCaps, _, _)? =
             await nextSignificantFrame(from: pair2.serverSide.inbound)
         else {
             Issue.record("expected hello after reconnect")
@@ -282,6 +282,66 @@ struct TunnelClientTests {
         #expect(secondCaps.map(\.demandId) == ["d2"])
 
         await service.stop()
+    }
+
+
+    @Test("close 4005 upgrade-required is terminal — no reconnect, terminal status")
+    func upgradeRequiredStopsReconnect() async throws {
+        // Decorator: peerSide of a pair, but reporting the server's close code.
+        final class CodedTransport: TunnelTransport, @unchecked Sendable {
+            let wrapped: TunnelTransport
+            private let code = OSAllocatedUnfairLock(initialState: UInt16?.none)
+
+            init(_ wrapped: TunnelTransport) { self.wrapped = wrapped }
+
+            // The server "sent" close 4005 the moment its side finished —
+            // TunnelClient reads closeCode after runSession returns, without
+            // calling close() itself.
+            lazy var inbound: AsyncStream<Frame> = {
+                AsyncStream { cont in
+                    let pump = Task {
+                        for await f in wrapped.inbound { cont.yield(f) }
+                        code.withLock { $0 = 4005 }
+                        cont.finish()
+                    }
+                    cont.onTermination = { _ in pump.cancel() }
+                }
+            }()
+
+            func send(_ frame: Frame) async throws { try await wrapped.send(frame) }
+            func close() async { await wrapped.close() }
+            var closeCode: UInt16? { code.withLock { $0 } }
+        }
+
+        let thePair = InMemoryTransportPair()
+        let coded = CodedTransport(thePair.peerSide)
+        try await withClient(
+            pair: thePair,
+            transportFactory: { coded }
+        ) { client, server, delayLog in
+            let statuses = LockedStatusLog()
+            let observe = Task { for await s in client.statusStream { statuses.add(s) } }
+            let runLoop = Task { await client.start() }
+
+            // Server receives hello, then closes with 4005 (the decorator
+            // reports it once close() ran).
+            _ = await nextSignificantFrame(from: server.inbound)
+            await server.close()
+
+            // The client must land on .upgradeRequired and STOP without a
+            // single backoff — a reconnecting loop would record one (and
+            // hammer the server's bcrypt forever).
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < deadline {
+                if statuses.contains(.upgradeRequired) { break }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            #expect(statuses.contains(.upgradeRequired))
+            #expect(delayLog.backoffValues.isEmpty)
+            observe.cancel()
+            runLoop.cancel()
+            await client.stop()
+        }
     }
 
     @Test("concurrency cap refuses over-dispatch with a failed end frame")
@@ -337,4 +397,11 @@ struct TunnelClientTests {
         }
         await source.stop()
     }
+}
+
+/// Thread-safe TunnelStatus collector (OSAllocatedUnfairLock: async-safe).
+private final class LockedStatusLog: @unchecked Sendable {
+    private let items = OSAllocatedUnfairLock(initialState: [TunnelStatus]())
+    func add(_ s: TunnelStatus) { items.withLock { $0.append(s) } }
+    func contains(_ s: TunnelStatus) -> Bool { items.withLock { $0.contains(s) } }
 }

@@ -1,6 +1,7 @@
 import Foundation
 import HummingbirdWSClient
 import Logging
+import NIOWebSocket
 import os
 
 public enum WSTransportError: Error, Equatable {
@@ -36,6 +37,8 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
         var writer: WebSocketOutboundWriter?
         var runTask: Task<Void, Never>?
         var closed = false
+        var closeCode: UInt16?
+        var closeReason: String?
     }
 
     private let continuation: AsyncStream<Frame>.Continuation
@@ -105,7 +108,10 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
             }
             let task = Task<Void, Never> {
                 do {
-                    _ = try await client.run()
+                    // The close frame (code + reason) is the upgrade-required
+                    // contract: 4005 means stop reconnecting and tell the user.
+                    let closeFrame = try await client.run()
+                    transport.recordClose(code: closeFrame.map { Self.rawCode($0.closeCode) }, reason: closeFrame?.reason)
                     once.run { dialContinuation.resume(throwing: WSTransportError.connectionClosedDuringDial) }
                 } catch {
                     once.run { dialContinuation.resume(throwing: error) }
@@ -139,7 +145,24 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
         _ = await task.value
     }
 
+    /// Close code the server sent (nil when the connection died without one).
+    public var closeCode: UInt16? {
+        state.withLock { $0.closeCode }
+    }
+
+    /// Close reason string the server sent, if any.
+    public var closeReason: String? {
+        state.withLock { $0.closeReason }
+    }
+
     // MARK: - Called from the client handler task
+
+    private func recordClose(code: UInt16?, reason: String?) {
+        state.withLock { s in
+            s.closeCode = code
+            s.closeReason = reason
+        }
+    }
 
     private func activate(writer: WebSocketOutboundWriter) {
         state.withLock { $0.writer = writer }
@@ -159,6 +182,26 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
             guard !done else { return }
             done = true
             body()
+        }
+    }
+}
+
+extension WSTransport {
+    /// NIO names the well-known codes and boxes the rest as .unknown(raw) —
+    /// 4005 (upgrade-required) is ours, so it always rides .unknown.
+    static func rawCode(_ code: WebSocketErrorCode) -> UInt16 {
+        switch code {
+        case .normalClosure: 1000
+        case .goingAway: 1001
+        case .protocolError: 1002
+        case .unacceptableData: 1003
+        case .dataInconsistentWithMessage: 1007
+        case .policyViolation: 1008
+        case .messageTooLarge: 1009
+        case .missingExtension: 1010
+        case .unexpectedServerError: 1011
+        case .unknown(let raw): raw
+        @unknown default: 0
         }
     }
 }

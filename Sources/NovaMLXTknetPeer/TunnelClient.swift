@@ -3,6 +3,10 @@ import os
 
 public enum TunnelStatus: Equatable, Sendable {
     case idle, connecting, connected, backingOff(seconds: Double), stopping
+    /// Server closed the tunnel with 4005: this build's protocol is below the
+    /// server minimum. TERMINAL — the reconnect loop stops (retrying would
+    /// hammer bcrypt forever), and the UI/CLI must tell the user to upgrade.
+    case upgradeRequired
 }
 
 public enum TunnelError: Error { case notRegistered, connectionClosed }
@@ -82,15 +86,27 @@ public final class TunnelClient: @unchecked Sendable {
         var attempt = 0
         while state.withLock({ $0.running }) && !Task.isCancelled {
             setStatus(.connecting)
+            // The session's transport outlives the do/catch: a session ends
+            // EITHER by returning OR by throwing (reader throws
+            // connectionClosed when the server closes), and the 4005 check
+            // must run on BOTH paths.
+            var sessionTransport: (any TunnelTransport)?
             do {
                 let transport = try await transportFactory()
+                sessionTransport = transport
                 setStatus(.connected)
                 attempt = 0
                 try await runSession(transport: transport)
-                // Session ended cleanly (server closed) → reconnect below.
             } catch {
                 // Dial failure or fatal session error → reconnect below.
                 if Task.isCancelled { break }
+            }
+            // Session ended (clean close or throw). Reconnect below —
+            // UNLESS the server sent 4005 upgrade-required: terminal.
+            if sessionTransport?.closeCode == 4005 {
+                state.withLock { $0.running = false }
+                setStatus(.upgradeRequired)
+                break
             }
             guard status != .stopping else { break }
             attempt += 1
@@ -161,7 +177,8 @@ public final class TunnelClient: @unchecked Sendable {
             let liveIds = Set(state.demand.map(\.demandId))
             return declared.filter { liveIds.contains($0.demandId) }
         }
-        try await sendOn(transport, .hello(peerId: peerId, capabilities: helloCapabilities))
+        try await sendOn(transport, .hello(peerId: peerId, capabilities: helloCapabilities,
+                                     protocolVersion: TknetPeer.protocolVersion, appVersion: TknetPeer.version))
         let pending = state.withLock { state -> [Capability]? in
             let pending = state.pendingCapabilities
             state.pendingCapabilities = nil
