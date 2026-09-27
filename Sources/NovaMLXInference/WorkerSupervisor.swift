@@ -241,7 +241,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
             self.lock.unlock()
             NovaMLXLog.info("[Sup:\(reqTag)] sendStream: queuing stream msg to worker (model=\(request.model))")
 
-            continuation.onTermination = { [weak self] _ in
+            continuation.onTermination = { [weak self] reason in
                 self?.lock.lock()
                 self?.streamContinuations.removeValue(forKey: requestId)
                 self?.streamFinishReasons.removeValue(forKey: requestId)
@@ -249,6 +249,15 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 self?.streamDispatchStarts.removeValue(forKey: requestId)
                 self?.streamFirstTokenLogged.removeValue(forKey: requestId)
                 self?.lock.unlock()
+                // Client disconnect (SSE writer error, relay cancel): tell the
+                // worker to abort the generation. Without this the worker keeps
+                // decoding to EOS/token-cap after every disconnected reader —
+                // a zombie holding the serial decode slot, so the NEXT request
+                // queues behind work nobody will read. `.finished` is normal
+                // completion (worker already ended) — no abort needed.
+                if case .cancelled = reason, let uuid = UUID(uuidString: requestId) {
+                    self?.sendAbort(requestId: uuid)
+                }
             }
 
             do {
