@@ -110,6 +110,10 @@ public final class Relay: Sendable {
             url: source.endpoint.appendingPathComponent("chat/completions").absoluteString)
         headRequest.method = .POST
         headRequest.headers.add(name: "content-type", value: "application/json")
+        // Fail fast when the upstream model is not resident instead of
+        // queue-behind-load: NovaMLX answers 503 "model not loaded" before
+        // any SSE byte, and the gateway fails over to another peer.
+        headRequest.headers.add(name: "X-No-Autoload", value: "1")
         let key = (try? secrets.load(source.apiKeyRef)) ?? nil
         if let key, !key.isEmpty {
             headRequest.headers.add(name: "authorization", value: "Bearer \(key)")
@@ -131,8 +135,18 @@ public final class Relay: Sendable {
                     let text = String(buffer: buffer)
                     if let data = text.data(using: .utf8),
                        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                       let error = object["error"] as? String {
-                        message = error
+                       let error = object["error"] {
+                        // Two shapes in the wild: {"error":"<string>"} and
+                        // OpenAI-style {"error":{"message":"..."}}. NovaMLX
+                        // uses the nested one — without this branch the relay
+                        // would report "upstream status 503" and the gateway's
+                        // reputation skip on "model not loaded" would miss.
+                        if let nested = error as? [String: Any],
+                           let nestedMessage = nested["message"] as? String {
+                            message = nestedMessage
+                        } else if let plain = error as? String {
+                            message = plain
+                        }
                     }
                 }
                 fail(message, upstreamStatus: upstreamStatus)

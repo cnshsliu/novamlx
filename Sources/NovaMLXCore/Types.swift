@@ -28,6 +28,11 @@ public enum NovaMLXError: Error, LocalizedError {
     case contextWindowExceeded(promptTokens: Int, maxTokens: Int, contextLength: Int)
     case insufficientMemory(neededMB: UInt64, availableMB: UInt64, modelId: String)
     case modelNotLoaded(String)
+    /// Peer-relay fast-fail (X-No-Autoload): upstream weights not resident.
+    /// The description is a WIRE CONTRACT — the tknet gateway skips
+    /// reputation sampling on exactly "model not loaded". Never localize,
+    /// never append the model id.
+    case modelNotResident
     case modelLoadInProgress(modelId: String, etaSeconds: Int?)
     case mtpCompanionNotLoadable(String)
     case tieConversionFailed(String, String)
@@ -49,6 +54,8 @@ public enum NovaMLXError: Error, LocalizedError {
             "Insufficient memory to load '\(modelId)': need \(neededMB)MB but only \(availableMB)MB available under the current memory limit. Unload unused models, pin important ones, or increase maxProcessMemory."
         case .modelNotLoaded(let id):
             "Model '\(id)' is not loaded. Send the request again with auto-load enabled or use POST /admin/models/load first."
+        case .modelNotResident:
+            "model not loaded"
         case .modelLoadInProgress(let id, let eta):
             "Model '\(id)' is loading. Retry in approximately \(eta ?? 60) seconds."
         case .mtpCompanionNotLoadable(let id):

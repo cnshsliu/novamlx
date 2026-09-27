@@ -18,6 +18,14 @@ extension NovaMLXAPIServer {
         responseModelOverride: String? = nil,
         httpRequest: Request? = nil
     ) async throws -> Response {
+        // Peer-relay fast-fail (X-No-Autoload): when the caller opted out of
+        // queue-behind-load, a non-resident model must 503 BEFORE any SSE
+        // byte. Holding the connection while weights load becomes a
+        // first-frame timeout upstream. The thrown message is a wire contract.
+        if Self.wantsNoAutoload(httpRequest), !inference.isModelLoaded(openAIReq.model) {
+            throw NovaMLXError.modelNotResident
+        }
+
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: openAIReq.model,
             userTemperature: openAIReq.temperature,
@@ -185,6 +193,13 @@ extension NovaMLXAPIServer {
         httpRequest: Request? = nil
     ) async throws -> Response {
         let responseModel = responseModelOverride ?? openAIReq.model
+        // Peer-relay fast-fail (X-No-Autoload): when the caller opted out of
+        // queue-behind-load, a non-resident model must 503 BEFORE any SSE
+        // byte. Holding the connection while weights load becomes a
+        // first-frame timeout upstream. The thrown message is a wire contract.
+        if Self.wantsNoAutoload(httpRequest), !inference.isModelLoaded(openAIReq.model) {
+            throw NovaMLXError.modelNotResident
+        }
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: openAIReq.model,
             userTemperature: openAIReq.temperature,
@@ -896,5 +911,15 @@ extension NovaMLXAPIServer {
             headers: [.contentType: "text/event-stream", .cacheControl: "no-cache", .connection: "keep-alive", .init("X-Accel-Buffering")!: "no"],
             body: body
         )
+    }
+}
+
+extension NovaMLXAPIServer {
+    /// True when the caller asked to fail fast instead of queue-behind-load.
+    /// The tknet peer relay sets this so a non-resident upstream answers 503
+    /// "model not loaded" immediately (the gateway then fails over).
+    static func wantsNoAutoload(_ request: Request?) -> Bool {
+        guard let request else { return false }
+        return request.headers[.init("X-No-Autoload")!]?.first == "1"
     }
 }

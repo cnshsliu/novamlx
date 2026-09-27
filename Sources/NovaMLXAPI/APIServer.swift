@@ -654,6 +654,7 @@ extension NovaMLXError {
         case .contextWindowExceeded: .badRequest
         case .insufficientMemory: .serviceUnavailable
         case .modelNotLoaded: .notFound
+        case .modelNotResident: .serviceUnavailable
         case .modelLoadInProgress: .serviceUnavailable
         case .mtpCompanionNotLoadable: .badRequest
         case .tieConversionFailed: .internalServerError
@@ -674,6 +675,7 @@ extension NovaMLXError {
         case .contextWindowExceeded: "invalid_request_error"
         case .insufficientMemory: "server_error"
         case .modelNotLoaded: "not_found_error"
+        case .modelNotResident: "server_error"
         case .modelLoadInProgress: "server_error"
         case .mtpCompanionNotLoadable: "invalid_request_error"
         case .tieConversionFailed: "server_error"
@@ -694,6 +696,7 @@ extension NovaMLXError {
         case .contextWindowExceeded: "context_window_exceeded"
         case .insufficientMemory: "insufficient_memory"
         case .modelNotLoaded: "model_not_loaded"
+        case .modelNotResident: "model_not_resident"
         case .modelLoadInProgress: "model_load_in_progress"
         case .mtpCompanionNotLoadable: "mtp_companion_not_loadable"
         case .tieConversionFailed: "tie_conversion_failed"

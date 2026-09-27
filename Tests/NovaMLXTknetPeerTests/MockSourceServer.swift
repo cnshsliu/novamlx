@@ -20,6 +20,19 @@ final class MockSourceServer: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return _failNextWithStatus }
         set { lock.lock(); defer { lock.unlock() }; _failNextWithStatus = newValue }
     }
+    private var _failNextBody = #"{"error":"boom"}"#
+    /// Test hook: body of the failure response (defaults to the flat
+    /// {"error":"boom"} shape). Set to NovaMLX's nested
+    /// {"error":{"message":...}} shape to exercise extraction.
+    var failNextBody: String {
+        get { lock.lock(); defer { lock.unlock() }; return _failNextBody }
+        set { lock.lock(); defer { lock.unlock() }; _failNextBody = newValue }
+    }
+    private var _lastNoAutoloadHeader: String?
+    /// Last X-No-Autoload header value the server saw (nil when absent).
+    var lastNoAutoloadHeader: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastNoAutoloadHeader
+    }
     /// Test hook: when non-zero, the next request sleeps this many seconds in
     /// its handler before producing any response (drives client deadline
     /// testing; a slow upstream head is what triggers deadlineExceeded).
@@ -58,7 +71,7 @@ final class MockSourceServer: @unchecked Sendable {
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
             let json = (try? JSONSerialization.jsonObject(with: Data(body.readableBytesView))) as? [String: Any]
-            self.record(authorization: request.headers[.authorization], model: json?["model"] as? String)
+            self.record(authorization: request.headers[.authorization], model: json?["model"] as? String, noAutoload: request.headers[values: .init("X-No-Autoload")!].first)
             return self.respond()
         }
 
@@ -109,10 +122,11 @@ final class MockSourceServer: @unchecked Sendable {
         }
     }
 
-    private func record(authorization: String?, model: String?) {
+    private func record(authorization: String?, model: String?, noAutoload: String?) {
         lock.lock(); defer { lock.unlock() }
         _lastAuthorizationHeader = authorization
         _lastBodyModel = model
+        _lastNoAutoloadHeader = noAutoload
     }
 
     private func setPort(_ port: Int) {
@@ -124,7 +138,8 @@ final class MockSourceServer: @unchecked Sendable {
         if failNextWithStatus > 0 {
             let code = failNextWithStatus
             failNextWithStatus = 0
-            return Response(status: .init(code: code), body: Self.textBody(#"{"error":"boom"}"#))
+            let body = failNextBody
+            return Response(status: .init(code: code), body: Self.textBody(body))
         }
         let lines = ["data: \(Self.chunk1)", "data: \(Self.chunk2)", "data: [DONE]"]
         return Response(

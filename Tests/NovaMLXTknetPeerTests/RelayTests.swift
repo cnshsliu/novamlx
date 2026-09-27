@@ -113,6 +113,27 @@ struct RelayTests {
         }
     }
 
+    @Test("sends X-No-Autoload and extracts NovaMLX's nested error.message")
+    func noAutoloadAndNestedError() async throws {
+        try await withRelay { relay, server in
+            // The relay must opt out of queue-behind-load on every request.
+            _ = await collect(relay.handle(makeRequest()))
+            #expect(server.lastNoAutoloadHeader == "1")
+
+            // NovaMLX answers {"error":{"message":"model not loaded"}} — the
+            // relay must surface the nested string verbatim so the gateway's
+            // reputation skip (exact match) sees it.
+            server.failNextWithStatus = 503
+            server.failNextBody = #"{"error":{"message":"model not loaded","type":"server_error"}}"#
+            let frames = await collect(relay.handle(makeRequest()))
+            #expect(frames.count == 1)
+            let result = try endResult(frames.first)
+            #expect(result.status == .failed)
+            #expect(result.upstreamStatus == 503)
+            #expect(result.errorMessage == "model not loaded")
+        }
+    }
+
     @Test("unknown model becomes a failed end frame")
     func unknownModel() async throws {
         try await withRelay { relay, _ in
