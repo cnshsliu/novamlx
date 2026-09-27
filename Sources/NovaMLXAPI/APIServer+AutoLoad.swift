@@ -32,6 +32,15 @@ extension NovaMLXAPIServer {
             return .alreadyLoaded
         }
 
+        // Peer-relay fast-fail (X-No-Autoload): checked BEFORE the auto-load
+        // decision — the tknet peer relay opts out of queue-behind-load, so a
+        // non-resident model must 503 "model not loaded" immediately (the
+        // gateway fails over to another peer). Interactive clients without
+        // the header keep the auto-load behavior.
+        if Self.wantsNoAutoload(request) {
+            throw NovaMLXError.modelNotResident
+        }
+
         // Auto-load disabled — throw original error
         if !cfg.autoLoad.enabled {
             throw NovaMLXError.modelNotLoaded(modelId)
