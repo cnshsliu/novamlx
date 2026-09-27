@@ -15,6 +15,7 @@ final class TknetPeerState: ObservableObject {
     @Published private(set) var demand: [DemandEntry] = []
     @Published private(set) var running = false
     @Published private(set) var lastError: String?
+    @Published private(set) var earnings: PeerEarningsSummary?
 
     /// Same location the `tknet-peer` CLI uses, so the app and CLI share one
     /// peer identity and source set.
@@ -84,6 +85,18 @@ final class TknetPeerState: ObservableObject {
     }
 
     // MARK: - Demand list
+
+    /// Supplier money view (fetched on demand — Refresh on the earnings card).
+    func fetchEarnings() async {
+        guard config.peerId != nil,
+              let token = secrets.load("peer/token"), !token.isEmpty else { return }
+        guard let restBase = Self.restURL(fromTunnel: config.serverURL) else { return }
+        do {
+            earnings = try await rest.fetchEarnings(server: restBase, token: token)
+        } catch {
+            NovaMLXLog.error("[TknetPeer] fetchEarnings failed: \(error)")
+        }
+    }
 
     /// One-shot REST fetch (used before the tunnel is up); the running
     /// service keeps `demand` fresh via `statusStream` afterwards.

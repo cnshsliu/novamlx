@@ -55,6 +55,53 @@ public struct TknetREST: Sendable {
         let data = Data(try await response.body.collect(upTo: 16 << 20).readableBytesView)
         return try JSONDecoder().decode(Payload.self, from: data).entries
     }
+
+    /// Supplier money view: totals, payout availability (7-day hold),
+    /// per-model breakdown, recent ledger entries.
+    public func fetchEarnings(server: URL, token: String) async throws -> PeerEarningsSummary {
+        var request = HTTPClientRequest(
+            url: server.appendingPathComponent("api/peer/earnings").absoluteString)
+        request.headers.add(name: "authorization", value: "Bearer \(token)")
+        request.headers.add(name: "x-peer-protocol", value: "1")
+
+        let response = try await client.execute(request, timeout: .seconds(30))
+        guard (200..<300).contains(response.status.code) else {
+            throw RESTError.badStatus(Int(response.status.code))
+        }
+        let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
+        return try JSONDecoder().decode(PeerEarningsSummary.self, from: data)
+    }
+}
+
+/// GET /api/peer/earnings payload (snake_case keys match the server).
+public struct PeerEarningsSummary: Decodable, Sendable {
+    public struct Availability: Decodable, Sendable {
+        public let totalEarned: String
+        public let available: String
+        public let onHold: String
+        public let paidOut: String
+    }
+
+    public struct ModelRow: Decodable, Sendable {
+        public let model: String
+        public let requests: Int
+        public let tokens: Int
+        public let earned: String
+    }
+
+    public struct Entry: Decodable, Sendable {
+        public let requestId: String
+        public let model: String
+        public let promptTokens: Int
+        public let completionTokens: Int
+        public let grossAmount: String
+        public let payoutId: Int?
+        public let createdAt: String
+    }
+
+    public let availability: Availability
+    public let byModel: [ModelRow]
+    public let recent: [Entry]
 }
 
 public enum RESTError: Error, Equatable {

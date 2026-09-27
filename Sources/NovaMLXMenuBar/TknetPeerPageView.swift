@@ -143,6 +143,50 @@ struct TknetPeerPageView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    // MARK: Earnings
+
+    private var earningsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Earnings").font(.headline)
+                Spacer()
+                Button("Refresh") { Task { await peer.fetchEarnings() } }
+            }
+            if let e = peer.earnings {
+                let a = e.availability
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading) {
+                        Text("Total earned").font(.caption2).foregroundColor(.secondary)
+                        Text("$\(a.totalEarned)").font(.title3.bold().monospacedDigit())
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Payout available").font(.caption2).foregroundColor(.secondary)
+                        Text("$\(a.available)").font(.title3.bold().monospacedDigit()).foregroundColor(.green)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("On hold (7d)").font(.caption2).foregroundColor(.secondary)
+                        Text("$\(a.onHold)").font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                ForEach(e.byModel, id: \.model) { m in
+                    HStack {
+                        Text(m.model).font(.caption.monospaced())
+                        Spacer()
+                        Text("\(m.requests) req · \(m.tokens) tok").font(.caption).foregroundColor(.secondary)
+                        Text("$\(m.earned)").font(.caption.monospacedDigit())
+                    }
+                }
+            } else {
+                Text("No earnings data yet — refresh after serving traffic.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
     // MARK: Demand list
 
     private var demandSection: some View {

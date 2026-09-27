@@ -8,13 +8,66 @@ struct TknetPeerCLI: AsyncParsableCommand {
         commandName: "tknet-peer",
         abstract: "Tknet inference supply peer",
         version: TknetPeer.version,
-        subcommands: [Setup.self, Serve.self]
+        subcommands: [Setup.self, Serve.self, Earnings.self]
     )
 }
 
 // MARK: - Shared helpers
 
 extension TknetPeerCLI {
+    struct Earnings: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Show what this peer has earned (supplier money view)")
+
+        @Option(help: "Config file path")
+        var config: String = CLIConfig.defaultConfigPath
+
+        func run() async throws {
+            let peerConfig = try TknetPeerCLI.loadConfig(config)
+            guard var comps = URLComponents(url: peerConfig.serverURL, resolvingAgainstBaseURL: false) else {
+                throw ValidationError("Invalid server URL in config: \(peerConfig.serverURL)")
+            }
+            switch comps.scheme?.lowercased() {
+            case "wss": comps.scheme = "https"
+            case "ws": comps.scheme = "http"
+            default: break
+            }
+            guard let restBase = comps.url else {
+                throw ValidationError("Invalid server URL in config: \(peerConfig.serverURL)")
+            }
+            let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
+            guard let token = secrets.load("peer/token"), !token.isEmpty else {
+                throw ValidationError("Missing peer token — run `tknet-peer setup` first.")
+            }
+            let rest = TknetREST()
+            do {
+                let summary = try await rest.fetchEarnings(server: restBase, token: token)
+                let a = summary.availability
+                print("Total earned:   $\(a.totalEarned)")
+                print("Available:      $\(a.available)  (on hold $\(a.onHold), paid out $\(a.paidOut))")
+                if !summary.byModel.isEmpty {
+                    print("")
+                    print("By model:")
+                    for m in summary.byModel {
+                        print("  \(m.model): \(m.requests) requests, \(m.tokens) tokens, $\(m.earned)")
+                    }
+                }
+                if !summary.recent.isEmpty {
+                    print("")
+                    print("Recent:")
+                    for e in summary.recent.prefix(10) {
+                        let paid = e.payoutId != nil ? " [paid]" : ""
+                        print("  \(e.createdAt) \(e.model) in=\(e.promptTokens) out=\(e.completionTokens) $\(e.grossAmount)\(paid)")
+                    }
+                }
+                try await rest.shutdown()
+            } catch {
+                try? await rest.shutdown()
+                throw error
+            }
+        }
+    }
+
     /// Portable default display name. `Host.current()` is AppKit-adjacent and
     /// unavailable off macOS; `hostName` is Foundation-portable.
     static var defaultPeerName: String {
