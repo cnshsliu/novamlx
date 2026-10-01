@@ -1347,9 +1347,8 @@ struct TokenhubPageView: View {
 
     private static func testSingleProvider(_ provider: TokenhubProvider, localApiKey: String?) async -> Bool {
         guard !provider.remoteModel.isEmpty else { return false }
-        let endpoint = provider.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let url = URL(string: endpoint) else { return false }
-        var request = URLRequest(url: url.appendingPathComponent("chat/completions"))
+        guard let url = EndpointNormalizer.url(endpoint: provider.endpoint, suffix: "chat/completions") else { return false }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 30
@@ -1383,17 +1382,16 @@ struct TokenhubPageView: View {
     private func queryModels() {
         isQueryingModels = true
         queryError = nil
-        let endpoint = formEndpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let key = formApiKey
         Task {
-            guard let url = URL(string: endpoint) else {
+            guard let url = EndpointNormalizer.url(endpoint: formEndpoint, suffix: "models") else {
                 await MainActor.run {
                     queryError = "Invalid endpoint URL"
                     isQueryingModels = false
                 }
                 return
             }
-            var request = URLRequest(url: url.appendingPathComponent("models"))
+            var request = URLRequest(url: url)
             request.timeoutInterval = 15
             if !key.isEmpty {
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -1434,14 +1432,13 @@ struct TokenhubPageView: View {
     private func testProviderEndpoint() {
         testEndpointRunning = true
         testEndpointResult = nil
-        let endpoint = formEndpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let key = formApiKey
         Task {
-            guard let url = URL(string: endpoint) else {
+            guard let url = EndpointNormalizer.url(endpoint: formEndpoint, suffix: "models") else {
                 await MainActor.run { testEndpointResult = "Invalid URL"; testEndpointRunning = false }
                 return
             }
-            var request = URLRequest(url: url.appendingPathComponent("models"))
+            var request = URLRequest(url: url)
             request.timeoutInterval = 15
             if !key.isEmpty {
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")

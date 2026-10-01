@@ -140,7 +140,8 @@ extension NovaMLXAPIServer {
         Self.warnIfCacheControlDropped(rawBody: rawBody, provider: provider)
 
         let chatBody = buildOpenAIChatCompletionsBody(from: anthropicReq, remoteModel: provider.remoteModel)
-        let url = URL(string: provider.endpoint)!.appendingPathComponent("chat/completions")
+        let url = EndpointNormalizer.url(endpoint: provider.endpoint, suffix: "chat/completions")
+            ?? URL(string: provider.endpoint)!.appendingPathComponent("chat/completions") // unreachable for stored providers
 
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
@@ -208,7 +209,8 @@ extension NovaMLXAPIServer {
             chatBody["stream_options"] = ["include_usage": true]
         }
 
-        let url = URL(string: provider.endpoint)!.appendingPathComponent("chat/completions")
+        let url = EndpointNormalizer.url(endpoint: provider.endpoint, suffix: "chat/completions")
+            ?? URL(string: provider.endpoint)!.appendingPathComponent("chat/completions") // unreachable for stored providers
         var mutableRequest = URLRequest(url: url)
         mutableRequest.httpMethod = "POST"
         mutableRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")

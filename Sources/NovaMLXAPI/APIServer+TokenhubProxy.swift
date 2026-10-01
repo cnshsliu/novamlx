@@ -96,8 +96,13 @@ extension NovaMLXAPIServer {
         }
 
         let bodyData = try JSONSerialization.data(withJSONObject: bodyDict)
-        let baseURL = URL(string: provider.endpoint)!
-        var urlRequest = URLRequest(url: baseURL.appendingPathComponent(path))
+        guard let url = EndpointNormalizer.url(endpoint: provider.endpoint, suffix: path) else {
+            return try Self.jsonResponse(
+                ["error": ["message": "Invalid provider endpoint: \(provider.endpoint)", "type": "invalid_request_error"]],
+                httpStatus: .badRequest
+            )
+        }
+        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let apiKey = effectiveApiKey(provider)

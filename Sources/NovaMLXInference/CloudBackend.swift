@@ -65,9 +65,9 @@ public actor CloudBackend {
     public func proxy(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
         let remoteModel = provider.remoteModel
         let startTime = Date()
-        let baseURL = try Self.validatedURL(provider.endpoint)
+        let url = try Self.requestURL(provider.endpoint, suffix: "chat/completions")
 
-        var urlRequest = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
+        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !provider.apiKey.isEmpty {
@@ -98,8 +98,8 @@ public actor CloudBackend {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let baseURL = try Self.validatedURL(endpoint)
-                    var urlRequest = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
+                    let url = try Self.requestURL(endpoint, suffix: "chat/completions")
+                    var urlRequest = URLRequest(url: url)
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     if !apiKey.isEmpty {
@@ -138,9 +138,9 @@ public actor CloudBackend {
     public func proxyAnthropic(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
         let remoteModel = provider.remoteModel
         let startTime = Date()
-        let baseURL = try Self.validatedURL(provider.endpoint)
+        let url = try Self.requestURL(provider.endpoint, suffix: "messages")
 
-        var urlRequest = URLRequest(url: baseURL.appendingPathComponent("messages"))
+        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
@@ -172,8 +172,8 @@ public actor CloudBackend {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let baseURL = try Self.validatedURL(endpoint)
-                    var urlRequest = URLRequest(url: baseURL.appendingPathComponent("messages"))
+                    let url = try Self.requestURL(endpoint, suffix: "messages")
+                    var urlRequest = URLRequest(url: url)
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
@@ -210,8 +210,8 @@ public actor CloudBackend {
     // MARK: - Health Check (Provider)
 
     public func healthCheck(provider: TokenhubProvider) async -> Bool {
-        guard let baseURL = URL(string: provider.endpoint) else { return false }
-        var request = URLRequest(url: baseURL.appendingPathComponent("models"))
+        guard let url = EndpointNormalizer.url(endpoint: provider.endpoint, suffix: "models") else { return false }
+        var request = URLRequest(url: url)
         request.timeoutInterval = 10
         if !provider.apiKey.isEmpty {
             request.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
@@ -226,8 +226,11 @@ public actor CloudBackend {
 
     // MARK: - Private Helpers
 
-    private static func validatedURL(_ endpoint: String) throws -> URL {
-        guard let url = URL(string: endpoint) else {
+    /// Any-endpoint rule: the user's endpoint may be a base URL, a full
+    /// request URL already ending in the suffix, query-stringed, or
+    /// scheme-less. The normalizer handles every form.
+    private static func requestURL(_ endpoint: String, suffix: String) throws -> URL {
+        guard let url = EndpointNormalizer.url(endpoint: endpoint, suffix: suffix) else {
             throw CloudError.remoteError(-1, "Invalid provider endpoint: \(endpoint)")
         }
         return url
