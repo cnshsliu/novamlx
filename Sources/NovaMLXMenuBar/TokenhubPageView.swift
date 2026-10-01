@@ -89,7 +89,6 @@ struct TokenhubPageView: View {
     @State private var showAlert = false
 
     // Provider limit alert
-    @State private var showProviderLimitAlert = false
 
     private let manager = TokenhubManager.shared
 
@@ -123,7 +122,6 @@ struct TokenhubPageView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
-            manager.enforceProviderLimits()
             reloadProviders()
         }
         .onChange(of: formName) { resetVerification() }
@@ -134,16 +132,6 @@ struct TokenhubPageView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(alertMessage)
-        }
-        .alert("Provider Limit", isPresented: $showProviderLimitAlert) {
-            Button("OK", role: .cancel) {}
-            Button("Go to Settings") {
-                DispatchQueue.main.async {
-                    appState.requestedPage = .settings
-                }
-            }
-        } message: {
-            Text("Up to 3 custom providers allowed. To add more, enter your tknet.ai API Key in Settings to unlock unlimited providers.")
         }
         .alert("Restart Codex?", isPresented: $showCodexRestartConfirm) {
             Button("Restart", role: .destructive) {
@@ -209,12 +197,6 @@ struct TokenhubPageView: View {
                 Text("My Providers")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(NovaTheme.Colors.textSecondary)
-                if !manager.hasValidTknetKey() {
-                    let userCount = providers.filter { !$0.tags.contains("managed") }.count
-                    Text("\(userCount)/\(TokenhubManager.freeProviderLimit)")
-                        .font(.system(size: 9))
-                        .foregroundColor(NovaTheme.Colors.textTertiary)
-                }
                 Spacer()
                 Button(action: bulkTestAll) {
                     if bulkTestRunning {
@@ -1086,10 +1068,6 @@ struct TokenhubPageView: View {
     // MARK: - Actions
 
     private func startCreating() {
-        if !manager.hasValidTknetKey() && manager.userProviderCount() >= TokenhubManager.freeProviderLimit {
-            showProviderLimitAlert = true
-            return
-        }
         isCreatingNew = true
         editingProvider = nil
         selectedProvider = nil
@@ -1248,10 +1226,6 @@ struct TokenhubPageView: View {
 
     /// Duplicate a provider with a unique name suffix.
     private func duplicateProvider(_ provider: TokenhubProvider) {
-        if !manager.hasValidTknetKey() && manager.userProviderCount() >= TokenhubManager.freeProviderLimit {
-            showProviderLimitAlert = true
-            return
-        }
         var baseName = provider.name
         // Strip existing numeric suffix like "-2", "-3" etc.
         if let range = baseName.range(of: #"-\d+$"#, options: .regularExpression) {

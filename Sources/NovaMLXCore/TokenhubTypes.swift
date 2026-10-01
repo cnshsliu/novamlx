@@ -164,14 +164,11 @@ public final class TokenhubManager: @unchecked Sendable {
         return result.sorted()
     }
 
-    // MARK: - Subscription Limits
-
-    public static let freeProviderLimit = 3
+    // MARK: - Catalog Providers
 
     /// Catalog tag: bulk-imported model catalogs (e.g. OpenRouter free
-    /// models). Catalog providers are exempt from the free-tier provider
-    /// limit — a built-in catalog is not a user slot — and an empty
-    /// apiKey falls back to the first keyed provider on the same endpoint.
+    /// models). An empty apiKey falls back to the first keyed provider
+    /// on the same endpoint.
     public static let catalogTag = "catalog"
 
     private func isCatalog(_ p: TokenhubProvider) -> Bool {
@@ -196,41 +193,6 @@ public final class TokenhubManager: @unchecked Sendable {
     public func isSubscribed() -> Bool {
         if let cache = AuthCache.load(), !cache.isExpired, cache.valid { return true }
         return false
-    }
-
-    /// Count of user-created providers. Post-Task-6 all providers are user-created
-    /// (locals are gone, cloud-managed providers are added via provisionManagedProviders
-    /// with the "managed" tag — those still count here since they share the user's quota).
-    public func userProviderCount() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadAll().filter { !isCatalog($0) }.count
-    }
-
-    /// Enforce free-tier limits: disable excess user providers beyond 3.
-    /// Called on every page load. Returns names of providers that were disabled.
-    @discardableResult
-    public func enforceProviderLimits() -> [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        if hasValidTknetKey() { return [] }
-
-        var all = loadAll()
-        let userProviders = all.filter { $0.isEnabled && !isCatalog($0) }
-        guard userProviders.count > Self.freeProviderLimit else { return [] }
-
-        let excess = userProviders.count - Self.freeProviderLimit
-        let toDisable = Array(userProviders.sorted { $0.name > $1.name }.prefix(excess))
-        var disabled = [String]()
-        for p in toDisable {
-            if let idx = all.firstIndex(where: { $0.id == p.id }) {
-                all[idx].isEnabled = false
-                disabled.append(all[idx].name)
-            }
-        }
-        if !disabled.isEmpty { try? saveAll(all) }
-        log.info("[Tokenhub] Enforced free limit: disabled \(disabled) providers")
-        return disabled
     }
 
     /// Load tknet.ai API Key from the SQLite ConfigStore. Post-Phase-B
@@ -401,14 +363,6 @@ public final class TokenhubManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var all = loadAll()
-        // Free-tier limit check (managed + catalog providers bypass via tags)
-        let isManaged = provider.tags.contains("managed")
-        if !isManaged && !isCatalog(provider) {
-            let userCount = all.filter { !$0.tags.contains("managed") && !isCatalog($0) }.count
-            if !hasValidTknetKey() && userCount >= Self.freeProviderLimit {
-                throw TokenhubError.limitReached
-            }
-        }
         guard !all.contains(where: { $0.id == provider.id }) else {
             throw TokenhubError.duplicateName(provider.name)
         }
@@ -478,14 +432,12 @@ public enum TokenhubError: Error, LocalizedError {
     case notFound(String)
     case duplicateName(String)
     case invalidEndpoint(String)
-    case limitReached
 
     public var errorDescription: String? {
         switch self {
         case .notFound(let name): "Tokenhub provider not found: \(name)"
         case .duplicateName(let name): "Tokenhub provider already exists: \(name)"
         case .invalidEndpoint(let url): "Invalid endpoint URL: \(url)"
-        case .limitReached: "Free tier limited to \(TokenhubManager.freeProviderLimit) providers. Subscribe for unlimited."
         }
     }
 }
