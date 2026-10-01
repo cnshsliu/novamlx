@@ -168,6 +168,30 @@ public final class TokenhubManager: @unchecked Sendable {
 
     public static let freeProviderLimit = 3
 
+    /// Catalog tag: bulk-imported model catalogs (e.g. OpenRouter free
+    /// models). Catalog providers are exempt from the free-tier provider
+    /// limit — a built-in catalog is not a user slot — and an empty
+    /// apiKey falls back to the first keyed provider on the same endpoint.
+    public static let catalogTag = "catalog"
+
+    private func isCatalog(_ p: TokenhubProvider) -> Bool {
+        p.tags.contains(Self.catalogTag)
+    }
+
+    /// Effective API key for a provider. Managed providers inherit the
+    /// session token; catalog providers with an empty key share the key
+    /// of any provider on the same endpoint (one key per provider
+    /// endpoint, not one key per model).
+    public func effectiveApiKey(for provider: TokenhubProvider) -> String {
+        if provider.tags.contains("managed") { return AuthCache.loadSession() ?? "" }
+        if !provider.apiKey.isEmpty { return provider.apiKey }
+        if isCatalog(provider) {
+            let same = loadAll().first { $0.endpoint == provider.endpoint && !$0.apiKey.isEmpty }
+            if let same { return same.apiKey }
+        }
+        return provider.apiKey
+    }
+
     /// Synchronous subscription check (disk cache only, no network).
     public func isSubscribed() -> Bool {
         if let cache = AuthCache.load(), !cache.isExpired, cache.valid { return true }
@@ -180,7 +204,7 @@ public final class TokenhubManager: @unchecked Sendable {
     public func userProviderCount() -> Int {
         lock.lock()
         defer { lock.unlock() }
-        return loadAll().count
+        return loadAll().filter { !isCatalog($0) }.count
     }
 
     /// Enforce free-tier limits: disable excess user providers beyond 3.
@@ -192,7 +216,7 @@ public final class TokenhubManager: @unchecked Sendable {
         if hasValidTknetKey() { return [] }
 
         var all = loadAll()
-        let userProviders = all.filter { $0.isEnabled }
+        let userProviders = all.filter { $0.isEnabled && !isCatalog($0) }
         guard userProviders.count > Self.freeProviderLimit else { return [] }
 
         let excess = userProviders.count - Self.freeProviderLimit
@@ -377,10 +401,10 @@ public final class TokenhubManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var all = loadAll()
-        // Free-tier limit check (cloud-managed providers bypass this via tags)
+        // Free-tier limit check (managed + catalog providers bypass via tags)
         let isManaged = provider.tags.contains("managed")
-        if !isManaged {
-            let userCount = all.filter { !$0.tags.contains("managed") }.count
+        if !isManaged && !isCatalog(provider) {
+            let userCount = all.filter { !$0.tags.contains("managed") && !isCatalog($0) }.count
             if !hasValidTknetKey() && userCount >= Self.freeProviderLimit {
                 throw TokenhubError.limitReached
             }

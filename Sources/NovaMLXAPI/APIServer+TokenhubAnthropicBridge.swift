@@ -442,8 +442,7 @@ extension NovaMLXAPIServer {
     // MARK: - Auth Helper (mirrors handleTokenhubPassthrough)
 
     private static func effectiveApiKey(_ p: TokenhubProvider) -> String {
-        if p.tags.contains("managed") { return AuthCache.loadSession() ?? "" }
-        return p.apiKey
+        TokenhubManager.shared.effectiveApiKey(for: p)
     }
 
     // MARK: - Cache-Control Drop Detection

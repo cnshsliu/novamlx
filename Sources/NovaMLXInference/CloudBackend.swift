@@ -64,14 +64,15 @@ public actor CloudBackend {
 
     public func proxy(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
         let remoteModel = provider.remoteModel
+        let apiKey = TokenhubManager.shared.effectiveApiKey(for: provider)
         let startTime = Date()
         let url = try Self.requestURL(provider.endpoint, suffix: "chat/completions")
 
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !provider.apiKey.isEmpty {
-            urlRequest.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         urlRequest.timeoutInterval = 120
 
@@ -93,7 +94,7 @@ public actor CloudBackend {
     public func proxyStream(_ request: InferenceRequest, provider: TokenhubProvider) -> AsyncThrowingStream<Token, Error> {
         let remoteModel = provider.remoteModel
         let endpoint = provider.endpoint
-        let apiKey = provider.apiKey
+        let apiKey = TokenhubManager.shared.effectiveApiKey(for: provider)
 
         return AsyncThrowingStream { continuation in
             Task {
@@ -137,6 +138,7 @@ public actor CloudBackend {
 
     public func proxyAnthropic(_ request: InferenceRequest, provider: TokenhubProvider) async throws -> InferenceResult {
         let remoteModel = provider.remoteModel
+        let apiKey = TokenhubManager.shared.effectiveApiKey(for: provider)
         let startTime = Date()
         let url = try Self.requestURL(provider.endpoint, suffix: "messages")
 
@@ -144,8 +146,8 @@ public actor CloudBackend {
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        if !provider.apiKey.isEmpty {
-            urlRequest.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         urlRequest.timeoutInterval = 120
 
@@ -167,7 +169,7 @@ public actor CloudBackend {
     public func proxyAnthropicStream(_ request: InferenceRequest, provider: TokenhubProvider) -> AsyncThrowingStream<Token, Error> {
         let remoteModel = provider.remoteModel
         let endpoint = provider.endpoint
-        let apiKey = provider.apiKey
+        let apiKey = TokenhubManager.shared.effectiveApiKey(for: provider)
 
         return AsyncThrowingStream { continuation in
             Task {
@@ -213,8 +215,9 @@ public actor CloudBackend {
         guard let url = EndpointNormalizer.url(endpoint: provider.endpoint, suffix: "models") else { return false }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        if !provider.apiKey.isEmpty {
-            request.setValue("Bearer \(provider.apiKey)", forHTTPHeaderField: "Authorization")
+        let apiKey = TokenhubManager.shared.effectiveApiKey(for: provider)
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         do {
             let (_, response) = try await URLSession.shared.data(for: request)

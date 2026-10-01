@@ -88,11 +88,11 @@ extension NovaMLXAPIServer {
 
         NovaMLXLog.info("[Tokenhub] -> \(provider.name) (\(provider.endpoint)/\(path)) remoteModel=\(provider.remoteModel) managed=\(provider.tags.contains("managed"))")
 
-        // Resolve effective API key: cloud-managed providers (tagged "managed")
-        // inherit the user's session token; all others use their own API key.
+        // Resolve effective API key via the manager: managed providers
+        // inherit the session token; catalog providers may share the key
+        // of a keyed provider on the same endpoint.
         func effectiveApiKey(_ p: TokenhubProvider) -> String {
-            if p.tags.contains("managed") { return AuthCache.loadSession() ?? "" }
-            return p.apiKey
+            TokenhubManager.shared.effectiveApiKey(for: p)
         }
 
         let bodyData = try JSONSerialization.data(withJSONObject: bodyDict)
