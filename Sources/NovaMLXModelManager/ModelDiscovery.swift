@@ -201,6 +201,10 @@ public final class ModelDiscovery: Sendable {
                 if let model = registerLaya(at: subdir, id: subdir.lastPathComponent) {
                     models.append(model)
                 }
+            } else if Self.isQwen21TurboDirectory(subdir) {
+                if let model = registerQwen21Turbo(at: subdir, id: subdir.lastPathComponent) {
+                    models.append(model)
+                }
             } else if configPath.fileExists || hasGGUFWeights(in: subdir) {
                 let adapterConfigPath = subdir.appendingPathComponent("adapter_config.json")
                 let adapterWeightsPath = subdir.appendingPathComponent("adapters.safetensors")
@@ -224,6 +228,13 @@ public final class ModelDiscovery: Sendable {
                         let orgPrefix = subdir.lastPathComponent
                         let modelId = "\(orgPrefix)/\(child.lastPathComponent)"
                         if let model = registerLaya(at: child, id: modelId) {
+                            models.append(model)
+                        }
+                        continue
+                    }
+                    if Self.isQwen21TurboDirectory(child) {
+                        let modelId = "\(subdir.lastPathComponent)/\(child.lastPathComponent)"
+                        if let model = registerQwen21Turbo(at: child, id: modelId) {
                             models.append(model)
                         }
                         continue
@@ -364,6 +375,53 @@ public final class ModelDiscovery: Sendable {
             estimatedSizeBytes: size,
             architectures: [],
             configModelType: "",
+            isAdapter: false,
+            isComplete: complete
+        )
+    }
+
+    /// Viggle ships a LoRA file and no text encoder or VAE. The v0.1 `transformer/`
+    /// folder in that repo is a different student, so it must not register as a base.
+    private static func isQwen21TurboDirectory(_ path: URL) -> Bool {
+        guard qwen21TurboLoRA(in: path) != nil else { return false }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path.appendingPathComponent("vae/config.json").path) { return false }
+        if fm.fileExists(atPath: path.appendingPathComponent("text_encoder/config.json").path) { return false }
+        return true
+    }
+
+    private static func qwen21TurboLoRA(in path: URL) -> URL? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: path, includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return nil }
+        let matches = files.filter { url in
+            let name = url.lastPathComponent.lowercased()
+            return name.hasSuffix(".safetensors")
+                && name.contains("lora")
+                && name.contains("qwen-image-2.1")
+        }
+        return matches.max { lhs, rhs in
+            let left = (try? lhs.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let right = (try? rhs.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if left == right { return lhs.lastPathComponent < rhs.lastPathComponent }
+            return left < right
+        }
+    }
+
+    private func registerQwen21Turbo(at path: URL, id: String) -> DiscoveredModel? {
+        guard let lora = Self.qwen21TurboLoRA(in: path) else { return nil }
+        let fm = FileManager.default
+        let size = fm.fileSize(at: lora) ?? 0
+        let aria = URL(fileURLWithPath: lora.path + ".aria2")
+        let complete = size > 0 && !fm.fileExists(atPath: aria.path)
+        return DiscoveredModel(
+            modelId: id,
+            modelPath: path,
+            modelType: .image,
+            family: .qwenImage21,
+            estimatedSizeBytes: estimateSize(at: path),
+            architectures: ["QwenImage21Pipeline"],
+            configModelType: "qwen_image_21",
             isAdapter: false,
             isComplete: complete
         )

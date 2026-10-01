@@ -226,7 +226,7 @@
     </div>
     <button id="go" type="submit">Generate</button>
     <div class="meter" aria-hidden="true"><div id="meter"></div></div>
-    <p class="hint">40 steps is the official sampler. 20 is the faster preview. A reference image uses image-to-image; higher keep stays closer to that image. A negative prompt turns guidance on.</p>
+    <p class="hint">Qwen-Image 2.1 uses 40 steps; 20 is the faster preview on that model. Viggle turbo uses its own 6-step schedule and does not use a negative prompt. Z-Image-Turbo uses 9. A reference image uses image-to-image; higher keep stays closer to that image.</p>
     <div class="err" id="err"></div>
   </form>
   <section class="stage">
@@ -358,7 +358,20 @@ async function loadModels() {
       extra.selected = true;
       modelSelect.prepend(extra);
     }
+    applySamplerDefaults();
   } catch (_) {}
+}
+
+let stepsEdited = false;
+document.getElementById("steps").addEventListener("input", () => { stepsEdited = true; });
+
+function applySamplerDefaults() {
+  if (stepsEdited) return;
+  const name = model.toLowerCase();
+  const steps = document.getElementById("steps");
+  if (name.includes("viggle")) steps.value = "6";
+  else if (name.includes("z-image") || name.includes("zimage")) steps.value = "9";
+  else steps.value = "20";
 }
 
 function showImage(b64) {
@@ -382,7 +395,11 @@ async function readError(res) {
   }
 }
 
-modelSelect.addEventListener("change", () => { model = modelSelect.value; });
+modelSelect.addEventListener("change", () => {
+  model = modelSelect.value;
+  applySamplerDefaults();
+});
+applySamplerDefaults();
 document.getElementById("keep10").addEventListener("click", () => {
   saveHistory(loadHistory().slice(0, 10));
   renderHistory();

@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Logging
 import MLX
 import MLXNN
 import NovaMLXCore
@@ -27,7 +28,7 @@ final class Qwen21Engine: @unchecked Sendable {
         cancelLock.unlock()
     }
 
-    func load(quantBits: Int?) async throws {
+    func load(quantBits: Int?, loraFile: URL? = nil) async throws {
         let stats = try Qwen21Weights.latentStats(directory: directory)
         latentMean = MLXArray(stats.mean).reshaped([1, 64, 1, 1])
         latentStd = MLXArray(stats.std).reshaped([1, 64, 1, 1])
@@ -46,6 +47,10 @@ final class Qwen21Engine: @unchecked Sendable {
             }
             quantizeArrayLinears(bits: quantBits)
         }
+        if let loraFile {
+            let layers = try Qwen21LoRA.install(file: loraFile, on: transformer)
+            Logger(label: "NovaMLX.QwenImage21").info("Qwen-Image 2.1 turbo LoRA on \(layers) layers")
+        }
         eval(latentMean!, latentStd!)
     }
 
@@ -58,7 +63,8 @@ final class Qwen21Engine: @unchecked Sendable {
         height: Int,
         guidance: Float,
         reference: CGImage?,
-        imageStrength: Float?
+        imageStrength: Float?,
+        schedule: Qwen21Schedule.Kind = .base
     ) async throws -> CGImage {
         guard width % 16 == 0, height % 16 == 0 else {
             throw NovaMLXError.inferenceFailed("Qwen-Image 2.1 width and height must be multiples of 16")
@@ -75,7 +81,7 @@ final class Qwen21Engine: @unchecked Sendable {
         } else {
             negative = nil
         }
-        let sigmas = Qwen21Schedule.sigmas(steps: steps, width: width, height: height)
+        let sigmas = Qwen21Schedule.sigmas(steps: steps, width: width, height: height, kind: schedule)
         let start = Qwen21Schedule.initStep(steps: steps, imageStrength: reference == nil ? nil : imageStrength)
         var latents = noise(seed: seed, height: height, width: width)
         if let reference {

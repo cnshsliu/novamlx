@@ -81,6 +81,68 @@ struct Qwen21ScheduleTests {
         #expect(quantizedEmbed?.biases?.shape == [64, 64])
     }
 
+    @Test("viggle nodes keep the trained low-noise steps")
+    func viggleNodes() {
+        #expect(Qwen21Schedule.viggleNodes(steps: 6) == [1, 0.9375, 0.875, 0.75, 0.5, 0.25])
+        #expect(Qwen21Schedule.viggleNodes(steps: 5) == [1, 0.875, 0.75, 0.5, 0.25])
+        #expect(Qwen21Schedule.viggleNodes(steps: 4) == [1, 0.75, 0.5, 0.25])
+        #expect(Qwen21Schedule.viggleNodes(steps: 8) == [1, 0.9375, 0.875, 0.75, 0.625, 0.5, 0.25, 0.125])
+        let seven = Qwen21Schedule.viggleNodes(steps: 7)
+        #expect(seven.count == 7)
+        #expect(seven[0] == 1)
+        #expect(abs(seven[1] - 0.9583333) < 1e-4)
+        #expect(seven[3] == 0.875)
+        #expect(seven[6] == 0.25)
+    }
+
+    @Test("viggle 1024 schedule shifts and does not pin the last sigma at 0.02")
+    func viggleSigmas1024() {
+        let sigmas = Qwen21Schedule.sigmas(steps: 6, width: 1024, height: 1024, kind: .viggle)
+        #expect(sigmas.count == 7)
+        #expect(abs(sigmas[0] - 1) < 1e-5)
+        #expect(sigmas[5] > 0.3)
+        #expect(sigmas[5] < 0.5)
+        #expect(sigmas[6] == 0)
+    }
+
+    @Test("turbo LoRA keys land on the Swift modules and the scale is alpha over rank")
+    func loraKeysAndScale() {
+        #expect(Qwen21LoRA.normalizedPath(for: "transformer.modulation.1.lora_A.weight") == "modulation.layers.1")
+        #expect(
+            Qwen21LoRA.normalizedPath(for: "transformer.transformer_blocks.3.attn.to_out.0.lora_B.weight")
+                == "transformer_blocks.3.attn.to_out.0"
+        )
+        #expect(
+            Qwen21LoRA.normalizedPath(for: "transformer.time_text_embed.timestep_embedder.linear_1.lora_A.weight")
+                == "time_text_embed.timestep_embedder.linear_1"
+        )
+        #expect(
+            Qwen21LoRA.normalizedPath(for: "transformer.transformer_blocks.0.img_mlp.gate_layer.lora_A.weight")
+                == "transformer_blocks.0.img_mlp.gate_layer"
+        )
+        #expect(Qwen21LoRA.normalizedPath(for: "transformer.img_in.weight") == nil)
+        let meta = #"{"transformer.lora_alpha":256,"transformer.r":256,"transformer.use_rslora":false}"#
+        #expect(abs(Qwen21LoRA.scale(metadataJSON: meta, strength: 1) - 1) < 1e-6)
+        #expect(abs(Qwen21LoRA.scale(metadataJSON: meta, strength: 0.5) - 0.5) < 1e-6)
+        let rs = #"{"transformer.lora_alpha":256,"transformer.r":256,"transformer.use_rslora":true}"#
+        #expect(abs(Qwen21LoRA.scale(metadataJSON: rs, strength: 1) - 16) < 1e-4)
+        #expect(Qwen21LoRA.scale(metadataJSON: nil, strength: 1) == 1)
+    }
+
+    @Test("unmerged LoRA adds B A x beside the base linear")
+    func loraResidual() {
+        let base = Linear(weight: MLXArray.zeros([2, 3]), bias: nil)
+        let a = MLXArray([Float]([1, 0, 0, 0, 1, 0])).reshaped([2, 3])
+        let b = MLXArray([Float]([1, 0, 0, 1])).reshaped([2, 2])
+        let layer = Qwen21LoRALinear(base: base, a: a, b: b, scale: 1)
+        let y = layer(MLXArray([Float]([1, 2, 3])).reshaped([1, 3]))
+        eval(y)
+        let values = y.asArray(Float.self)
+        #expect(values.count == 2)
+        #expect(abs(values[0] - 1) < 1e-5)
+        #expect(abs(values[1] - 2) < 1e-5)
+    }
+
     @Test("1024 schedule matches the shifted flow-match sigmas")
     func sigmas1024() {
         let sigmas = Qwen21Schedule.sigmas(steps: 40, width: 1024, height: 1024)

@@ -83,6 +83,30 @@ struct QwenImage21DiscoveryTests {
         #expect(found[0].isComplete == false)
     }
 
+    @Test("Viggle LoRA folder is qwenImage21 and an aria2 sidecar is incomplete")
+    func viggleLoRAFolder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("Viggle/Qwen-Image-2.1-viggle-turbo")
+        try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
+        let lora = model.appendingPathComponent(
+            "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors"
+        )
+        try Data(repeating: 1, count: 1024).write(to: lora)
+        try Data(repeating: 1, count: 8).write(to: URL(fileURLWithPath: lora.path + ".aria2"))
+
+        let found = ModelDiscovery().discover(in: root)
+        #expect(found.count == 1)
+        #expect(found[0].modelId == "Viggle/Qwen-Image-2.1-viggle-turbo")
+        #expect(found[0].family == .qwenImage21)
+        #expect(found[0].modelType == .image)
+        #expect(found[0].isComplete == false)
+
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: lora.path + ".aria2"))
+        let ready = ModelDiscovery().discover(in: root)
+        #expect(ready[0].isComplete == true)
+    }
+
     @Test("4-bit repo id is the same image family, not a different model kind")
     func fourBitRepoIsSameFamily() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

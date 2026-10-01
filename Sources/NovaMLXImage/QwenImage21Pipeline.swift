@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Logging
 import NovaMLXCore
 
 /// Qwen-Image-2.1 text-to-image and image-to-image.
@@ -8,6 +9,8 @@ import NovaMLXCore
 /// It is not the Qwen-Image 1.x pipeline.
 public final class QwenImage21Pipeline: @unchecked Sendable {
     private let directoryURL: URL
+    private let loraFile: URL?
+    private let viggle: Bool
     private let engine: Qwen21Engine
 
     public var onStep: ((Int, Int) -> Void)? {
@@ -20,12 +23,30 @@ public final class QwenImage21Pipeline: @unchecked Sendable {
     }
 
     public init(directoryURL: URL) {
-        self.directoryURL = directoryURL
-        self.engine = Qwen21Engine(directory: directoryURL)
+        let weights: URL
+        if Qwen21Turbo.isAdapter(directoryURL), let lora = Qwen21Turbo.loraFile(in: directoryURL) {
+            self.loraFile = lora
+            self.viggle = true
+            weights = Qwen21Turbo.baseDirectory() ?? directoryURL
+        } else {
+            self.loraFile = nil
+            self.viggle = false
+            weights = directoryURL
+        }
+        self.directoryURL = weights
+        self.engine = Qwen21Engine(directory: weights)
     }
 
     public func load() async throws {
-        try await engine.load(quantBits: Self.quantBits(for: directoryURL))
+        if viggle {
+            guard loraFile != nil, Qwen21Turbo.hasTransformer(directoryURL) else {
+                throw NovaMLXError.inferenceFailed(
+                    "Qwen-Image 2.1 turbo needs the base weights. Install Qwen/Qwen-Image-2.1 or mlx-community/Qwen-Image-2.1-MLX-4bit, then load the turbo adapter again."
+                )
+            }
+            Logger(label: "NovaMLX.QwenImage21").info("Qwen-Image 2.1 turbo base \(directoryURL.path)")
+        }
+        try await engine.load(quantBits: Self.quantBits(for: directoryURL), loraFile: loraFile)
     }
 
     public func generate(
@@ -40,7 +61,7 @@ public final class QwenImage21Pipeline: @unchecked Sendable {
         let image = try await render(
             prompt: prompt,
             negativePrompt: negativePrompt,
-            steps: steps ?? 40,
+            steps: steps ?? (viggle ? 6 : 40),
             seed: resolved,
             width: width,
             height: height,
@@ -64,7 +85,7 @@ public final class QwenImage21Pipeline: @unchecked Sendable {
         let output = try await render(
             prompt: prompt,
             negativePrompt: negativePrompt,
-            steps: steps ?? 40,
+            steps: steps ?? (viggle ? 6 : 40),
             seed: seed,
             width: width,
             height: height,
@@ -95,9 +116,10 @@ public final class QwenImage21Pipeline: @unchecked Sendable {
             seed: seed,
             width: canvasWidth,
             height: canvasHeight,
-            guidance: negativePrompt.isEmpty ? 1 : 4,
+            guidance: viggle || negativePrompt.isEmpty ? 1 : 4,
             reference: reference,
-            imageStrength: imageStrength
+            imageStrength: imageStrength,
+            schedule: viggle ? .viggle : .base
         )
         return Self.cropCenter(image, width: width, height: height)
     }
