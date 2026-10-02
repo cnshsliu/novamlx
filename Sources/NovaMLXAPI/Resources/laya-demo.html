@@ -832,9 +832,16 @@ function paintSoko() {
 }
 
 function huaStart() {
+  // 横刀立马 — the classic, famously HARD opening: full 10-piece board,
+  // Cao Cao boxed in by all five generals, only two free cells bottom-center.
+  // Optimal solution is 81 moves.
   return [
-    ["曹操", 1, 0, 2, 2], ["张飞", 0, 0, 1, 2], ["赵云", 3, 0, 1, 2],
-    ["兵甲", 1, 2, 1, 1], ["兵乙", 2, 2, 1, 1]
+    ["曹操", 1, 0, 2, 2],
+    ["张飞", 0, 0, 1, 2], ["赵云", 3, 0, 1, 2],
+    ["马超", 0, 2, 1, 2], ["黄忠", 3, 2, 1, 2],
+    ["关羽", 1, 2, 2, 1],
+    ["兵甲", 1, 3, 1, 1], ["兵乙", 2, 3, 1, 1],
+    ["兵丙", 0, 4, 1, 1], ["兵丁", 3, 4, 1, 1]
   ].map(([id, x, y, w, h]) => ({ id, x, y, w, h }));
 }
 let huaPieces = huaStart();
@@ -872,7 +879,19 @@ function huaWon(pieces) {
 }
 
 function huaKey(pieces) {
-  return pieces.map(piece => piece.id + ":" + piece.x + "," + piece.y).join("|");
+  // Canonical key: same-shape pieces are interchangeable for SOLVING (the
+  // four vertical generals, the four soldiers), so the visited set collapses
+  // symmetric states. Without this the 10-piece board's BFS explores
+  // millions of states and never finishes. C=Cao 2x2, H=horizontal 2x1,
+  // V=vertical 1x2, S=soldier 1x1.
+  const grid = Array.from({ length: 5 }, () => Array(4).fill("."));
+  const cls = (p) => p.id === "曹操" ? "C" : p.id === "关羽" ? "H" : (p.h === 2 ? "V" : "S");
+  for (const p of pieces) {
+    for (let dy = 0; dy < p.h; dy++) for (let dx = 0; dx < p.w; dx++) {
+      grid[p.y + dy][p.x + dx] = cls(p);
+    }
+  }
+  return grid.map(row => row.join("")).join("|");
 }
 
 function huaClone(pieces) {
@@ -923,7 +942,7 @@ function huaBest() { return huaPath[huaAt] || ""; }
 function huaShuffle() {
   let pieces = huaStart();
   let previous = "";
-  for (let step = 0; step < 10; step++) {
+  for (let step = 0; step < 80; step++) {
     const labels = huaLegal(pieces).filter(label => label !== previous);
     if (!labels.length) break;
     const label = labels[Math.floor(Math.random() * labels.length)];

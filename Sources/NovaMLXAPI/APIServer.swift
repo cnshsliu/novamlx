@@ -1967,7 +1967,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             Get("/demo/audio") { _, _ in Self.demoResponse("audio-demo") }
             Get("/demo/decision") { _, _ in Self.demoResponse("laya-demo") }
             Get("/demo/embed") { _, _ in Self.demoResponse("embed-demo") }
-            Get("/demo/laya") { _, _ in Self.demoResponse("laya-demo") }
+            Get("/demo/laya") { request, _ in
+                var loc = "/demo/decision"
+                if let q = request.uri.query, !q.isEmpty { loc += "?" + q }
+                return Response(status: .found, headers: [.location: loc])
+            }
             Get("/demo/qwen-image") { _, _ in Self.demoResponse("qwen-image-demo") }
             Get("/demo/playground") { _, _ in Self.demoResponse("playground") }
             /// Auto-provision the key for LOCAL demo pages: they should
