@@ -237,6 +237,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
+        // Rehydrate the local UI's Bearer key before any UI→server call —
+        // without it, demo pages and internal requests 401 after a restart
+        // whenever the server has keys configured.
+        appState.restoreLocalUIKey()
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleOpenMainWindow),

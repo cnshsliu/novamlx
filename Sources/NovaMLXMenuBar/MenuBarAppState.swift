@@ -1,6 +1,7 @@
 import SwiftUI
 import NovaMLXAPI
 import NovaMLXCore
+import NovaMLXDB
 import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
@@ -91,6 +92,32 @@ public final class MenuBarAppState: ObservableObject {
     private let maxRealisticTps: Double = 500
 
     public init() {}
+
+    /// Restore the local UI's Bearer key after a restart. The server
+    /// enforces key auth once ANY key exists, and demo pages / internal
+    /// UI→server calls carry this key. It used to live only in memory, so
+    /// every app restart left the UI keyless — demo pages 401'd on
+    /// /v1/decisions until the user re-ran the bootstrap. Now the key is
+    /// rehydrated from the store (the raw key is persisted).
+    /// No-op in open mode (zero keys configured — nothing to auth against;
+    /// creating one would flip the server into enforced-auth mode).
+    public func restoreLocalUIKey() {
+        guard apiKey == nil else { return }
+        do {
+            let keys = try NovaDB.shared.apiKeyStore.list()
+            guard !keys.isEmpty else { return } // open mode
+            if let local = keys.first(where: { $0.name == "Local UI (auto-created)" }) {
+                let raw = (try? NovaDB.shared.apiKeyStore.getRawKey(id: local.id)) ?? local.rawKey
+                if !raw.isEmpty { apiKey = raw; return }
+            }
+            // Auth is enforced but the UI key is missing (deleted) — make one.
+            let (_, raw) = try NovaDB.shared.apiKeyStore.create(name: "Local UI (auto-created)")
+            apiKey = raw
+        } catch {
+            // Key store unavailable — stay keyless; the bootstrap prompt
+            // in Downloads will offer to create one when the store is back.
+        }
+    }
 
     /// Jump to Playground and request that this model be pre-selected.
     /// Used by play.circle buttons in Models / Tokenhub / LoadBalancers pages.
