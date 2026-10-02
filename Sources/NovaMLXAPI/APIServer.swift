@@ -212,7 +212,7 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
 
     private static let publicPaths: Set<String> = [
         "/health", "/v1/models", "/v1/stats",
-        "/demo/laya", "/demo/qwen-image", "/demo/playground", "/demo/logo.png",
+        "/demo/laya", "/demo/qwen-image", "/demo/playground", "/demo/session", "/demo/logo.png",
     ]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
@@ -1981,6 +1981,38 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     headers: [.contentType: "text/html; charset=utf-8"],
                     body: .init(byteBuffer: ByteBuffer(string: html))
                 )
+            }
+            /// Auto-provision the key for LOCAL demo pages: they should
+            /// never ask the user to paste one. Loopback only — the key
+            /// unlocks the whole API, so LAN clients keep using ?key=.
+            /// Zero keys configured = open mode; the page needs no key.
+            Get("/demo/session") { _, context in
+                func json(_ body: [String: Any]) throws -> Response {
+                    let data = try JSONSerialization.data(withJSONObject: body)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                // Loopback only — the issued key unlocks the whole local API,
+                // so LAN clients keep using ?key=.
+                let addr = context.clientAddress ?? ""
+                let loopback = addr == "127.0.0.1" || addr == "::1" || addr.hasPrefix("fe80::1")
+                guard loopback else {
+                    return try json(["key": NSNull(), "remote": true])
+                }
+                do {
+                    guard let store = NovaDB.shared.apiKeyStore else { return Response(status: .serviceUnavailable) }
+                    let keys = try store.list()
+                    if keys.isEmpty {
+                        return try json(["open": true, "key": NSNull()])  // open mode — no auth
+                    }
+                    if let demo = keys.first(where: { $0.name == "Web demo (auto-created)" }),
+                       let raw = try? store.getRawKey(id: demo.id), !raw.isEmpty {
+                        return try json(["key": raw])
+                    }
+                    let (_, raw) = try store.create(name: "Web demo (auto-created)")
+                    return try json(["key": raw])
+                } catch {
+                    return Response(status: .serviceUnavailable)
+                }
             }
             Get("/health") { _, _ in
                 let stats = inference.stats

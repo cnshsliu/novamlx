@@ -244,7 +244,7 @@
 <script>
 const params = new URLSearchParams(location.search);
 let model = params.get("model") || "Qwen/Qwen-Image-2.1";
-const key = params.get("key") || "";
+let key = params.get("key") || "";
 const historyKey = "novamlx.imageDemo.history";
 const form = document.getElementById("form");
 const statusEl = document.getElementById("status");
@@ -260,6 +260,14 @@ const refRow = document.getElementById("refRow");
 const strength = document.getElementById("strength");
 const strengthValue = document.getElementById("strengthValue");
 let timer = 0;
+
+// Auto-provision the key: local pages never ask the user to paste one.
+if (!key) {
+  fetch("/demo/session").then(r => r.json()).then(d => {
+    if (d.key) key = d.key;
+    else if (!d.open) errEl.textContent = "需要 API Key —— 打开 NovaMLX app（自动生成），或在 URL 加 ?key=";
+  }).catch(() => { errEl.textContent = "需要 API Key —— 打开 NovaMLX app（自动生成），或在 URL 加 ?key="; });
+}
 
 strength.addEventListener("input", () => {
   strengthValue.textContent = Number(strength.value).toFixed(2);

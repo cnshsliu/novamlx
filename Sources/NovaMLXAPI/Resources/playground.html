@@ -49,7 +49,7 @@
 <script>
 "use strict";
 const params = new URLSearchParams(location.search);
-const key = params.get("key") || "";
+let key = params.get("key") || "";
 let model = params.get("model") || "";
 let attached = null;   // data URL for VLM messages
 let busy = false, ctrl = null;
@@ -187,6 +187,16 @@ $("f").onsubmit = (e) => { e.preventDefault(); send(); };
 $("q").onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 };
+// Auto-provision the key: local pages never ask the user to paste one.
+if (!key) {
+  fetch("/demo/session").then(r => r.json()).then(d => {
+    if (d.key) key = d.key;
+    else if (!d.open) keyHint();
+  }).catch(keyHint);
+}
+function keyHint() {
+  add("error", "需要 API Key —— 打开 NovaMLX app（自动生成），或在 URL 加 ?key=");
+}
 routeSpecial(model);
 loadModels();
 </script>

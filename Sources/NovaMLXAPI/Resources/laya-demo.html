@@ -313,7 +313,7 @@
 <script>
 const params = new URLSearchParams(location.search);
 const model = params.get("model") || "aac6fef/laya-multilingual-mlx";
-const key = params.get("key") || "";
+let key = params.get("key") || "";
 const N = 16;
 const DIRS = ["UP", "DOWN", "LEFT", "RIGHT"];
 const DELTA = { UP: [0, -1], DOWN: [0, 1], LEFT: [-1, 0], RIGHT: [1, 0] };
@@ -1270,6 +1270,14 @@ setInterval(sokoTick, 450);
 setInterval(huaTick, 450);
 setInterval(cubeTick, 450);
 resetBoards();
+
+// Auto-provision the key: local pages never ask the user to paste one.
+if (!key) {
+  fetch("/demo/session").then(r => r.json()).then(d => {
+    if (d.key) key = d.key;
+    else if (!d.open) document.title = "需要 API Key —— 打开 NovaMLX app 或在 URL 加 ?key=" ;
+  }).catch(() => {});
+}
 </script>
 </body>
 </html>
