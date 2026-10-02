@@ -314,6 +314,7 @@
 const params = new URLSearchParams(location.search);
 let model = params.get("model") || "aac6fef/laya-multilingual-mlx";
 let key = params.get("key") || "";
+if (!key) { const saved = localStorage.getItem("novamlx.demoKey"); if (saved) key = saved; }
 const N = 16;
 const DIRS = ["UP", "DOWN", "LEFT", "RIGHT"];
 const DELTA = { UP: [0, -1], DOWN: [0, 1], LEFT: [-1, 0], RIGHT: [1, 0] };

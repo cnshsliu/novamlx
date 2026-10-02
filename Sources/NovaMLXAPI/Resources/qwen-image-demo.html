@@ -245,6 +245,7 @@
 const params = new URLSearchParams(location.search);
 let model = params.get("model") || "Qwen/Qwen-Image-2.1";
 let key = params.get("key") || "";
+if (!key) { const saved = localStorage.getItem("novamlx.demoKey"); if (saved) key = saved; }
 const historyKey = "novamlx.imageDemo.history";
 const form = document.getElementById("form");
 const statusEl = document.getElementById("status");

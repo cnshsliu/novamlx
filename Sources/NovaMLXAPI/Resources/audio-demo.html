@@ -56,6 +56,7 @@
 "use strict";
 const params = new URLSearchParams(location.search);
 let key = params.get("key") || "";
+if (!key) { const saved = localStorage.getItem("novamlx.demoKey"); if (saved) key = saved; }
 const presetModel = params.get("model") || "";
 const $ = (id) => document.getElementById(id);
 const headers = (json) => {

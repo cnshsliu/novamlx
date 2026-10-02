@@ -50,6 +50,7 @@
 "use strict";
 const params = new URLSearchParams(location.search);
 let key = params.get("key") || "";
+if (!key) { const saved = localStorage.getItem("novamlx.demoKey"); if (saved) key = saved; }
 let model = params.get("model") || "";
 // One page per model type: /demo/vlm keeps the image attach, /demo/chat is text-only.
 const VLM = location.pathname.endsWith("/vlm");

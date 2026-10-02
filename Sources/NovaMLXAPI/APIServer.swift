@@ -213,7 +213,7 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
     private static let publicPaths: Set<String> = [
         "/health", "/v1/models", "/v1/stats",
         "/demo/laya", "/demo/qwen-image", "/demo/playground", "/demo/session", "/demo/logo.png",
-        "/demo/chat", "/demo/vlm", "/demo/image", "/demo/audio", "/demo/decision", "/demo/embed",
+        "/demo/chat", "/demo/vlm", "/demo/image", "/demo/audio", "/demo/decision", "/demo/embed", "/demo/keys",
     ]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
@@ -1961,6 +1961,32 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             }
             // One demo per model type, each with an in-page model switcher.
             // Legacy paths keep serving their pages.
+            Get("/demo") { _, _ in Self.demoResponse("demo-index") }
+            Get("/demo/") { _, _ in Self.demoResponse("demo-index") }
+            Get("/demo/keys") { _, context in
+                // Loopback only (same rule as /demo/session): raw keys unlock
+                // the whole API — LAN clients keep using ?key=.
+                let addr = context.clientAddress ?? ""
+                let loopback = addr == "127.0.0.1" || addr == "::1" || addr.hasPrefix("fe80::1")
+                guard loopback else {
+                    let data = try JSONSerialization.data(withJSONObject: ["keys": [], "remote": true])
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                do {
+                    guard let store = NovaDB.shared.apiKeyStore else { return Response(status: .serviceUnavailable) }
+                    let keys = try store.list()
+                    let rows: [[String: Any]] = keys.compactMap { record in
+                        guard record.isEnabled else { return nil }
+                        let raw = (try? store.getRawKey(id: record.id)) ?? record.rawKey
+                        guard !raw.isEmpty else { return nil }
+                        return ["name": record.name, "raw": raw, "prefix": record.keyPrefix, "suffix": record.keySuffix]
+                    }
+                    let data = try JSONSerialization.data(withJSONObject: ["keys": rows])
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                } catch {
+                    return Response(status: .serviceUnavailable)
+                }
+            }
             Get("/demo/chat") { _, _ in Self.demoResponse("playground") }
             Get("/demo/vlm") { _, _ in Self.demoResponse("playground") }
             Get("/demo/image") { _, _ in Self.demoResponse("qwen-image-demo") }

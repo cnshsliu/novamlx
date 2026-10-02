@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NovaMLX · Demo</title>
+<style>
+  :root { --bg:#0b0d12; --panel:#11141b; --border:#1e2330; --text:#e5e9f0; --dim:#8b93a3; --accent:#4f8cff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,"SF Pro Text","PingFang SC",sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:48px 24px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:28px; }
+  h1 { font-size:20px; }
+  header a { color:var(--dim); text-decoration:none; font-size:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); gap:14px; width:100%; max-width:860px; }
+  a.card { display:block; background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px; text-decoration:none; color:var(--text); transition:border-color .15s; }
+  a.card:hover { border-color:var(--accent); }
+  .card .icon { font-size:22px; }
+  .card h2 { font-size:15px; margin:8px 0 4px; }
+  .card p { color:var(--dim); font-size:12px; }
+  .card code { color:var(--dim); font-size:11px; }
+  .keybar { display:flex; align-items:center; gap:10px; width:100%; max-width:860px; margin-bottom:22px; background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:10px 16px; }
+  .keybar label { color:var(--dim); font-size:12px; white-space:nowrap; }
+  .keybar select { flex:1; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 8px; font:12px ui-monospace,monospace; }
+  .keybar .state { color:var(--dim); font-size:11px; white-space:nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Demo</h1>
+  <a href="https://github.com/cnshsliu/novamlx">novamlx</a>
+</header>
+<div class="keybar">
+  <label for="keySel">API KEY</label>
+  <select id="keySel"><option value="">加载中…</option></select>
+  <span class="state" id="keyState"></span>
+</div>
+<div class="grid">
+  <a class="card" href="/demo/chat"><div class="icon">💬</div><h2>Chat</h2><p>LLM 流式对话 · 同类型模型切换</p><code>/demo/chat</code></a>
+  <a class="card" href="/demo/vlm"><div class="icon">👁</div><h2>VLM</h2><p>视觉模型 · 贴图问答</p><code>/demo/vlm</code></a>
+  <a class="card" href="/demo/image"><div class="icon">🎨</div><h2>Image</h2><p>文生图 · 历史记录</p><code>/demo/image</code></a>
+  <a class="card" href="/demo/audio"><div class="icon">🎙</div><h2>Audio</h2><p>TTS 合成 · ASR 录音转写</p><code>/demo/audio</code></a>
+  <a class="card" href="/demo/decision"><div class="icon">🧠</div><h2>Decision</h2><p>贪吃蛇 · 推箱子 · 华容道 · 魔方</p><code>/demo/decision</code></a>
+  <a class="card" href="/demo/embed"><div class="icon">📐</div><h2>Embedding</h2><p>文本相似度对比</p><code>/demo/embed</code></a>
+</div>
+<script>
+"use strict";
+const LS_KEY = "novamlx.demoKey";
+const sel = document.getElementById("keySel");
+const state = document.getElementById("keyState");
+(async () => {
+  let rows = [];
+  try {
+    const r = await fetch("/demo/keys");
+    const d = await r.json();
+    rows = d.keys || [];
+  } catch {}
+  const chosen = localStorage.getItem(LS_KEY) || "";
+  sel.innerHTML = "";
+  const auto = document.createElement("option");
+  auto.value = ""; auto.textContent = "自动（默认）";
+  sel.appendChild(auto);
+  for (const k of rows) {
+    const o = document.createElement("option");
+    o.value = k.raw;
+    o.textContent = k.name + "  (" + (k.prefix || "") + "…" + (k.suffix || "") + ")";
+    if (k.raw === chosen) o.selected = true;
+    sel.appendChild(o);
+  }
+  if (!rows.length) {
+    sel.innerHTML = "<option>远程访问 —— 自动模式</option>";
+  }
+  state.textContent = chosen ? "已选择，所有 demo 使用此 key" : "未选择 —— 自动";
+  sel.onchange = () => {
+    if (sel.value) { localStorage.setItem(LS_KEY, sel.value); state.textContent = "已选择，所有 demo 使用此 key"; }
+    else { localStorage.removeItem(LS_KEY); state.textContent = "未选择 —— 自动"; }
+  };
+})();
+</script>
+</body>
+</html>
