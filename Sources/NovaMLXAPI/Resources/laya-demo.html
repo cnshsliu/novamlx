@@ -312,7 +312,7 @@
 </section>
 <script>
 const params = new URLSearchParams(location.search);
-const model = params.get("model") || "aac6fef/laya-multilingual-mlx";
+let model = params.get("model") || "aac6fef/laya-multilingual-mlx";
 let key = params.get("key") || "";
 const N = 16;
 const DIRS = ["UP", "DOWN", "LEFT", "RIGHT"];
@@ -1278,6 +1278,42 @@ if (!key) {
     else if (!d.open) document.title = "需要 API Key —— 打开 NovaMLX app 或在 URL 加 ?key=" ;
   }).catch(() => {});
 }
+
+// Model switcher: list decision models, keep ?model= preselected.
+(function () {
+  fetch("/v1/models", { headers: key ? { Authorization: "Bearer " + key } : {} })
+    .then(r => r.json()).then(d => {
+      const rows = (d.data || []).filter(m => (m.nova && m.nova.type) === "decision");
+      if (!rows.length) return;
+      let sel = document.getElementById("demoModelSelect");
+      if (!sel) {
+        sel = document.createElement("select");
+        sel.id = "demoModelSelect";
+        sel.style.cssText = "background:#11141b;color:#e5e9f0;border:1px solid #1e2330;border-radius:6px;padding:4px 8px;font:12px ui-monospace,monospace;max-width:420px";
+        const brand = document.querySelector(".brand");
+        (brand ? brand.parentElement : document.body).appendChild(sel);
+      }
+      sel.innerHTML = "";
+      for (const m of rows) {
+        const o = document.createElement("option");
+        o.value = m.id; o.textContent = m.id;
+        if (m.id === model) o.selected = true;
+        sel.appendChild(o);
+      }
+      if (![...sel.options].some(o => o.value === model)) {
+        const o = document.createElement("option");
+        o.value = model; o.textContent = model; o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.onchange = () => {
+        model = sel.value;
+        const u = new URL(location);
+        u.searchParams.set("model", model);
+        history.replaceState(null, "", u);
+        location.reload();
+      };
+    }).catch(() => {});
+})();
 </script>
 </body>
 </html>

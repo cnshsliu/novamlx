@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NovaMLX · Embedding</title>
+<style>
+  :root { --bg:#0b0d12; --panel:#11141b; --border:#1e2330; --text:#e5e9f0; --dim:#8b93a3; --accent:#4f8cff; --err:#ff6b6b; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,"SF Pro Text","PingFang SC",sans-serif; min-height:100vh; padding:24px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:20px; }
+  h1 { font-size:17px; }
+  header a { color:var(--dim); text-decoration:none; font-size:12px; margin-left:auto; }
+  #model { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 8px; font:12px ui-monospace,monospace; max-width:50vw; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:960px; }
+  @media (max-width:760px){ .grid{grid-template-columns:1fr;} }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  textarea { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:9px 12px; font:14px/1.5 inherit; height:110px; resize:vertical; }
+  textarea:focus { outline:none; border-color:var(--accent); }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 16px; font:600 13px inherit; cursor:pointer; margin-top:10px; }
+  button:disabled { opacity:.4; }
+  #score { margin-top:16px; font-size:22px; font-weight:700; text-align:center; }
+  #score small { display:block; font-size:11px; color:var(--dim); font-weight:400; }
+  .err { color:var(--err); font-size:12px; margin-top:8px; min-height:16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Embedding</h1>
+  <select id="model"></select>
+  <a href="https://github.com/cnshsliu/novamlx">novamlx</a>
+</header>
+<div class="grid">
+  <section class="card"><textarea id="a">苹果是一种水果。</textarea></section>
+  <section class="card"><textarea id="b">Apple is a fruit.</textarea></section>
+</div>
+<div style="max-width:960px;text-align:center">
+  <button id="go">对比相似度</button>
+  <div class="err" id="err"></div>
+  <div id="score"></div>
+</div>
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+let key = params.get("key") || "";
+const $ = (id) => document.getElementById(id);
+const headers = (json) => {
+  const h = {};
+  if (json) h["Content-Type"] = "application/json";
+  if (key) h["Authorization"] = "Bearer " + key;
+  return h;
+};
+if (!key) fetch("/demo/session").then(r => r.json()).then(d => { if (d.key) key = d.key; }).catch(() => {});
+
+async function loadModels() {
+  try {
+    const res = await fetch("/v1/models", { headers: headers(false) });
+    const data = (await res.json()).data || [];
+    const embed = data.filter(m => m.nova?.type === "embedding");
+    const sel = $("model");
+    for (const m of embed.length ? embed : data) {
+      const o = document.createElement("option");
+      o.value = m.id; o.textContent = m.id;
+      sel.appendChild(o);
+    }
+    if (params.get("model")) sel.value = params.get("model");
+  } catch {}
+}
+
+async function embed(text) {
+  const res = await fetch("/v1/embeddings", {
+    method: "POST", headers: headers(true),
+    body: JSON.stringify({ model: $("model").value, input: text }),
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status + " " + (await res.text()).slice(0, 120));
+  const j = await res.json();
+  return j.data[0].embedding;
+}
+
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+$("go").onclick = async () => {
+  $("err").textContent = ""; $("score").textContent = "";
+  $("go").disabled = true;
+  try {
+    const [va, vb] = await Promise.all([embed($("a").value), embed($("b").value)]);
+    const s = cosine(va, vb);
+    $("score").innerHTML = s.toFixed(4) + "<small>余弦相似度（1 = 同向，0 = 无关）</small>";
+  } catch (e) { $("err").textContent = String(e.message || e); }
+  $("go").disabled = false;
+};
+
+loadModels();
+</script>
+</body>
+</html>

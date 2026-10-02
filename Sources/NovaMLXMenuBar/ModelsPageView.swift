@@ -493,57 +493,30 @@ struct ModelsPageView: View {
     private func playButton(modelId: String) -> some View {
         if !ResourceLimits.isCompanionDraftModelId(modelId) {
             Button {
-                if isDecisionModel(modelId) {
-                    openDecisionDemo(modelId)
-                } else if isImageModel(modelId) {
-                    openImageDemo(modelId)
-                } else {
-                    appState.openWebPlayground(modelId)
-                }
+                openTypedDemo(modelId)
             } label: {
                 Label("Play", systemImage: "play.fill")
                     .font(.system(size: 14, weight: .semibold))
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
-            .help(playHelp(modelId))
+            .help("Open web demo")
         }
     }
 
-    private func isDecisionModel(_ modelId: String) -> Bool {
-        if modelManager.getRecord(modelId)?.modelType == .decision { return true }
-        return modelId.lowercased().contains("laya")
-    }
-
-    private func isImageModel(_ modelId: String) -> Bool {
-        if let record = modelManager.getRecord(modelId) {
-            if record.modelType == .image { return true }
-            switch record.family {
-            case .stableDiffusion, .flux, .flux2, .zImage, .qwenImage, .qwenImage21:
-                return true
-            default:
-                break
-            }
+    /// One demo page per model type; the page itself switches same-type
+    /// models. Unknown ids (tknet:*, lb:*) land on the chat demo.
+    private func openTypedDemo(_ modelId: String) {
+        let path: String
+        switch modelManager.getRecord(modelId)?.modelType {
+        case .image: path = "/demo/image"
+        case .decision: path = "/demo/decision"
+        case .audio: path = "/demo/audio"
+        case .embedding: path = "/demo/embed"
+        case .vlm: path = "/demo/vlm"
+        default: path = "/demo/chat"
         }
-        if QwenImage21Support.matches(id: modelId) { return true }
-        let lower = modelId.lowercased()
-        return lower.contains("qwen-image") || lower.contains("qwen_image")
-            || lower.contains("flux") || lower.contains("z-image") || lower.contains("zimage")
-            || lower.contains("stable-diffusion") || lower.contains("sdxl")
-    }
-
-    private func openImageDemo(_ modelId: String) {
-        openDemo(path: "/demo/qwen-image", modelId: modelId)
-    }
-
-    private func playHelp(_ modelId: String) -> String {
-        if isDecisionModel(modelId) { return "Open decision demo" }
-        if isImageModel(modelId) { return "Open image demo" }
-        return "Open in Playground"
-    }
-
-    private func openDecisionDemo(_ modelId: String) {
-        openDemo(path: "/demo/laya", modelId: modelId)
+        openDemo(path: path, modelId: modelId)
     }
 
     private func openDemo(path: String, modelId: String) {

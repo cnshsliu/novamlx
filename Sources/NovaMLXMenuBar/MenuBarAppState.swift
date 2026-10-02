@@ -119,7 +119,7 @@ public final class MenuBarAppState: ObservableObject {
     /// DFlash / MTP companions are draft-only and cannot be opened as chat models.
     public func openWebPlayground(_ modelId: String) {
         guard !ResourceLimits.isCompanionDraftModelId(modelId) else { return }
-        var components = URLComponents(string: "http://127.0.0.1:\(serverPort)/demo/playground")
+        var components = URLComponents(string: "http://127.0.0.1:\(serverPort)/demo/chat")
         var items = [URLQueryItem(name: "model", value: modelId)]
         if let key = apiKey, !key.isEmpty {
             items.append(URLQueryItem(name: "key", value: key))

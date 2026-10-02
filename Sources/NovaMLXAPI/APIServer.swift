@@ -213,6 +213,7 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
     private static let publicPaths: Set<String> = [
         "/health", "/v1/models", "/v1/stats",
         "/demo/laya", "/demo/qwen-image", "/demo/playground", "/demo/session", "/demo/logo.png",
+        "/demo/chat", "/demo/vlm", "/demo/image", "/demo/audio", "/demo/decision", "/demo/embed",
     ]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
@@ -793,7 +794,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         )
                         return OpenAIModel(
                             id: record.id,
-                            nova: OpenAIModelNova(capabilities: caps)
+                            nova: OpenAIModelNova(capabilities: caps, type: record.modelType.rawValue)
                         )
                     }
 
@@ -812,7 +813,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     modelType: record.modelType,
                     localURL: record.localURL
                 )
-                let model = OpenAIModel(id: record.id, nova: OpenAIModelNova(capabilities: caps))
+                let model = OpenAIModel(id: record.id, nova: OpenAIModelNova(capabilities: caps, type: record.modelType.rawValue))
                 return try Self.jsonResponse(model)
             }
             Post("/v1/chat/completions") { request, context in
@@ -1958,30 +1959,17 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     body: .init(byteBuffer: ByteBuffer(data: data))
                 )
             }
-            Get("/demo/laya") { _, _ in
-                let html = LayaDemoPage.html
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "text/html; charset=utf-8"],
-                    body: .init(byteBuffer: ByteBuffer(string: html))
-                )
-            }
-            Get("/demo/qwen-image") { _, _ in
-                let html = QwenImageDemoPage.html
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "text/html; charset=utf-8"],
-                    body: .init(byteBuffer: ByteBuffer(string: html))
-                )
-            }
-            Get("/demo/playground") { _, _ in
-                let html = PlaygroundPage.html
-                return Response(
-                    status: .ok,
-                    headers: [.contentType: "text/html; charset=utf-8"],
-                    body: .init(byteBuffer: ByteBuffer(string: html))
-                )
-            }
+            // One demo per model type, each with an in-page model switcher.
+            // Legacy paths keep serving their pages.
+            Get("/demo/chat") { _, _ in Self.demoResponse("playground") }
+            Get("/demo/vlm") { _, _ in Self.demoResponse("playground") }
+            Get("/demo/image") { _, _ in Self.demoResponse("qwen-image-demo") }
+            Get("/demo/audio") { _, _ in Self.demoResponse("audio-demo") }
+            Get("/demo/decision") { _, _ in Self.demoResponse("laya-demo") }
+            Get("/demo/embed") { _, _ in Self.demoResponse("embed-demo") }
+            Get("/demo/laya") { _, _ in Self.demoResponse("laya-demo") }
+            Get("/demo/qwen-image") { _, _ in Self.demoResponse("qwen-image-demo") }
+            Get("/demo/playground") { _, _ in Self.demoResponse("playground") }
             /// Auto-provision the key for LOCAL demo pages: they should
             /// never ask the user to paste one. Loopback only — the key
             /// unlocks the whole API, so LAN clients keep using ?key=.

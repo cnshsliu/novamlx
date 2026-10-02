@@ -690,9 +690,13 @@ public struct OpenAIModelsResponse: Codable, Sendable {
 /// NovaMLX-specific extension for /v1/models entries.
 public struct OpenAIModelNova: Codable, Sendable, Equatable {
     public let capabilities: ModelCapabilities
+    /// Model type ("llm" | "vlm" | "embedding" | "audio" | "image" |
+    /// "decision") — drives the typed demo pages' model switchers.
+    public let type: String?
 
-    public init(capabilities: ModelCapabilities) {
+    public init(capabilities: ModelCapabilities, type: String? = nil) {
         self.capabilities = capabilities
+        self.type = type
     }
 }
 

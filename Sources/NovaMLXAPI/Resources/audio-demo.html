@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NovaMLX · Audio</title>
+<style>
+  :root { --bg:#0b0d12; --panel:#11141b; --border:#1e2330; --text:#e5e9f0; --dim:#8b93a3; --accent:#4f8cff; --err:#ff6b6b; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,"SF Pro Text","PingFang SC",sans-serif; min-height:100vh; padding:24px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:20px; }
+  h1 { font-size:17px; }
+  header a { color:var(--dim); text-decoration:none; font-size:12px; margin-left:auto; }
+  #model { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:5px 8px; font:12px ui-monospace,monospace; max-width:50vw; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:960px; }
+  @media (max-width:760px){ .grid{grid-template-columns:1fr;} }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; }
+  .card h2 { font-size:13px; color:var(--dim); margin-bottom:10px; text-transform:uppercase; letter-spacing:.06em; }
+  textarea, input[type=text] { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:9px 12px; font:14px/1.5 inherit; }
+  textarea:focus, input:focus { outline:none; border-color:var(--accent); }
+  textarea { height:90px; resize:vertical; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 16px; font:600 13px inherit; cursor:pointer; margin-top:10px; }
+  button:disabled { opacity:.4; cursor:default; }
+  button.ghost { background:var(--bg); border:1px solid var(--border); color:var(--dim); }
+  .err { color:var(--err); font-size:12px; margin-top:8px; min-height:16px; }
+  audio { width:100%; margin-top:12px; }
+  #asrOut { margin-top:10px; white-space:pre-wrap; color:var(--text); font-size:13px; }
+  .hint { color:var(--dim); font-size:11px; margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Audio</h1>
+  <select id="model"></select>
+  <a href="https://github.com/cnshsliu/novamlx">novamlx</a>
+</header>
+<div class="grid">
+  <section class="card">
+    <h2>语音合成 TTS</h2>
+    <textarea id="ttsText" placeholder="输入要朗读的文字">今天天气不错，适合出门走走。</textarea>
+    <div class="hint">voice：Tingting 等已安装的音色</div>
+    <input type="text" id="voice" placeholder="voice（可空）">
+    <button id="ttsGo">合成</button>
+    <div class="err" id="ttsErr"></div>
+    <audio id="player" controls></audio>
+  </section>
+  <section class="card">
+    <h2>语音识别 ASR</h2>
+    <button class="ghost" id="recBtn">录音</button>
+    <input type="file" id="asrFile" accept="audio/*" style="margin-top:10px;color:var(--dim)">
+    <div class="err" id="asrErr"></div>
+    <div id="asrOut"></div>
+  </section>
+</div>
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+let key = params.get("key") || "";
+const presetModel = params.get("model") || "";
+const $ = (id) => document.getElementById(id);
+const headers = (json) => {
+  const h = {};
+  if (json) h["Content-Type"] = "application/json";
+  if (key) h["Authorization"] = "Bearer " + key;
+  return h;
+};
+
+if (!key) {
+  fetch("/demo/session").then(r => r.json()).then(d => {
+    if (d.key) key = d.key;
+  }).catch(() => {});
+}
+
+async function loadModels() {
+  try {
+    const res = await fetch("/v1/models", { headers: headers(false) });
+    const data = (await res.json()).data || [];
+    const audio = data.filter(m => m.nova?.type === "audio" || m.nova?.capabilities?.audio);
+    const sel = $("model");
+    sel.innerHTML = "";
+    for (const m of audio.length ? audio : data) {
+      const o = document.createElement("option");
+      o.value = m.id; o.textContent = m.id;
+      sel.appendChild(o);
+    }
+    if (presetModel) sel.value = presetModel;
+  } catch {}
+}
+
+$("ttsGo").onclick = async () => {
+  const input = $("ttsText").value.trim();
+  if (!input) return;
+  $("ttsErr").textContent = "";
+  $("ttsGo").disabled = true;
+  try {
+    const res = await fetch("/v1/audio/speech", {
+      method: "POST", headers: headers(true),
+      body: JSON.stringify({ model: $("model").value, input, voice: $("voice").value.trim() || undefined }),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status + " " + (await res.text()).slice(0, 120));
+    const blob = await res.blob();
+    $("player").src = URL.createObjectURL(blob);
+    $("player").play();
+  } catch (e) { $("ttsErr").textContent = String(e.message || e); }
+  $("ttsGo").disabled = false;
+};
+
+async function transcribe(file) {
+  $("asrErr").textContent = "";
+  const fd = new FormData();
+  fd.append("file", file, file.name || "audio.wav");
+  fd.append("model", $("model").value);
+  try {
+    const res = await fetch("/v1/audio/transcriptions", {
+      method: "POST",
+      headers: key ? { "Authorization": "Bearer " + key } : {},
+      body: fd,
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status + " " + (await res.text()).slice(0, 120));
+    const j = await res.json();
+    $("asrOut").textContent = j.text || JSON.stringify(j);
+  } catch (e) { $("asrErr").textContent = String(e.message || e); }
+}
+
+$("asrFile").onchange = () => {
+  const f = $("asrFile").files[0];
+  if (f) transcribe(f);
+};
+
+// 录音 → 直接识别
+let rec = null, chunks = [];
+$("recBtn").onclick = async () => {
+  if (rec && rec.state === "recording") { rec.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    rec = new MediaRecorder(stream);
+    chunks = [];
+    rec.ondataavailable = (e) => chunks.push(e.data);
+    rec.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      $("recBtn").textContent = "录音";
+      transcribe(new Blob(chunks, { type: rec.mimeType }));
+    };
+    rec.start();
+    $("recBtn").textContent = "停止";
+  } catch (e) { $("asrErr").textContent = "无法访问麦克风: " + e.message; }
+};
+
+loadModels();
+</script>
+</body>
+</html>

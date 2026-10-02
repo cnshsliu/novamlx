@@ -34,7 +34,7 @@
 <body>
 <header>
   <select id="model"></select>
-  <label class="ghost" style="display:flex;align-items:center;gap:4px;color:var(--dim);font-size:12px;cursor:pointer">
+  <label class="ghost" id="attachRow" style="display:none;align-items:center;gap:4px;color:var(--dim);font-size:12px;cursor:pointer">
     <input type="file" id="img" accept="image/*" hidden><button class="ghost" type="button" onclick="document.getElementById('img').click()">图片</button>
   </label>
   <span id="attach"></span>
@@ -51,6 +51,9 @@
 const params = new URLSearchParams(location.search);
 let key = params.get("key") || "";
 let model = params.get("model") || "";
+// One page per model type: /demo/vlm keeps the image attach, /demo/chat is text-only.
+const VLM = location.pathname.endsWith("/vlm");
+if (VLM) document.getElementById("attachRow").style.display = "flex";
 let attached = null;   // data URL for VLM messages
 let busy = false, ctrl = null;
 
@@ -77,18 +80,19 @@ function routeSpecial(m) {
   const lm = m.toLowerCase();
   const keep = "model=" + encodeURIComponent(m) + (key ? "&key=" + encodeURIComponent(key) : "");
   if (/image|flux|sdxl|stable-diffusion|z-image|zimage/.test(lm) && !lm.includes("vl")) {
-    location.replace("/demo/qwen-image?" + keep); return;
+    location.replace("/demo/image?" + keep); return;
   }
-  if (lm.includes("laya")) { location.replace("/demo/laya?" + keep); return; }
+  if (lm.includes("laya")) { location.replace("/demo/decision?" + keep); return; }
 }
 
 async function loadModels() {
   try {
     const res = await fetch("/v1/models", { headers: headers(false) });
-    const data = (await res.json()).data || [];
+    const all = (await res.json()).data || [];
+    const data = all.filter(m => m.nova?.type === (VLM ? "vlm" : "llm"));
     const sel = $("model");
     sel.innerHTML = "";
-    for (const m of data) {
+    for (const m of data.length ? data : all) {
       const o = document.createElement("option");
       o.value = m.id; o.textContent = m.id;
       sel.appendChild(o);
