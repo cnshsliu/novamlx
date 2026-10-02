@@ -462,7 +462,7 @@ struct TokenhubPageView: View {
                     }
                     .buttonStyle(.plain)
                     Button {
-                        appState.pickInPlayground("tknet:" + provider.id)
+                        appState.openWebPlayground("tknet:" + provider.id)
                     } label: {
                         Image(systemName: "play.circle")
                             .font(.system(size: 9))

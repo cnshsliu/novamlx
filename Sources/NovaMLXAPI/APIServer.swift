@@ -212,7 +212,7 @@ private struct APIKeyAuthMiddleware: RouterMiddleware {
 
     private static let publicPaths: Set<String> = [
         "/health", "/v1/models", "/v1/stats",
-        "/demo/laya", "/demo/qwen-image", "/demo/logo.png",
+        "/demo/laya", "/demo/qwen-image", "/demo/playground", "/demo/logo.png",
     ]
     private static let publicPrefixes: Set<String> = ["/v1/chat/history", "/admin/"]
 
@@ -1968,6 +1968,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             }
             Get("/demo/qwen-image") { _, _ in
                 let html = QwenImageDemoPage.html
+                return Response(
+                    status: .ok,
+                    headers: [.contentType: "text/html; charset=utf-8"],
+                    body: .init(byteBuffer: ByteBuffer(string: html))
+                )
+            }
+            Get("/demo/playground") { _, _ in
+                let html = PlaygroundPage.html
                 return Response(
                     status: .ok,
                     headers: [.contentType: "text/html; charset=utf-8"],

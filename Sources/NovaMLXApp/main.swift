@@ -50,9 +50,6 @@ struct NovaMLXApp: App {
             Button { appDelegate.openMainWindow(to: .tokenhub) } label: {
                 Label(l10n.tr("app.tokenhub"), systemImage: "server.rack")
             }
-            Button { appDelegate.openMainWindow(to: .chat) } label: {
-                Label(l10n.tr("app.chat"), systemImage: "cpu")
-            }
             Button { appDelegate.openMainWindow(to: .voiceClone) } label: {
                 Label(l10n.tr("app.voiceClone"), systemImage: "waveform.badge.mic")
             }

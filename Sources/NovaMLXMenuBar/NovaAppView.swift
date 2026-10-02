@@ -11,7 +11,6 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case downloads = "Downloads"
     case tokenhub = "Tokenhub"
     case loadBalancers = "Load Balancers"     // NEW — placeholder until Task 10
-    case chat = "Playground"
     case voiceClone = "Voice Clone"
     case videoSlice = "Video Slice"
     case cluster = "Cluster"
@@ -30,7 +29,6 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .downloads: return "arrow.down.circle"
         case .tokenhub: return "server.rack"
         case .loadBalancers: return "scalemass"
-        case .chat: return "cpu"
         case .voiceClone: return "waveform.badge.mic"
         case .videoSlice: return "film"
         case .cluster: return "xserve"
@@ -289,10 +287,6 @@ public struct NovaAppView: View {
             LoadBalancersPageView(appState: appState)
                 .opacity(selectedPage == .loadBalancers ? 1 : 0)
                 .allowsHitTesting(selectedPage == .loadBalancers)
-            ChatPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
-                .environmentObject(l10n)
-                .opacity(selectedPage == .chat ? 1 : 0)
-                .allowsHitTesting(selectedPage == .chat)
             VoiceClonePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
                 .environmentObject(l10n)
                 .opacity(selectedPage == .voiceClone ? 1 : 0)
@@ -331,7 +325,6 @@ public struct NovaAppView: View {
         case .downloads: return l10n.tr("app.downloads")
         case .tokenhub: return l10n.tr("app.tokenhub")
         case .loadBalancers: return l10n.tr("app.load_balancers")
-        case .chat: return l10n.tr("app.chat")
         case .voiceClone: return l10n.tr("app.voiceClone")
         case .videoSlice: return l10n.tr("app.videoSlice")
         case .requests: return l10n.tr("app.requests")

@@ -47,11 +47,6 @@ public final class MenuBarAppState: ObservableObject {
     /// slower request from the previous source cannot win.
     private var downloadGeneration: [String: Int] = [:]
     @Published public var requestedPage: AppPage? = nil
-    /// When non-nil, ChatPageView should pre-select this model on its next
-    /// appear / onReceive. Cleared after consumption. Drives the
-    /// "Pick to Playground" buttons in Active Models, Tokenhub API models,
-    /// and Load Balancers.
-    @Published public var requestedPlaygroundModel: String? = nil
     @Published public var tpsHistory: [TPSHistoryPoint] = []
     @Published public var peakTokensPerSecond: Double = 0
     @Published public var currentInferenceModel: String? = nil
@@ -119,13 +114,18 @@ public final class MenuBarAppState: ObservableObject {
         }
     }
 
-    /// Jump to Playground and request that this model be pre-selected.
-    /// Used by play.circle buttons in Models / Tokenhub / LoadBalancers pages.
+    /// Open the WEB playground in the browser with this model pre-selected.
+    /// The in-app Playground page is gone — everything plays in the browser.
     /// DFlash / MTP companions are draft-only and cannot be opened as chat models.
-    public func pickInPlayground(_ modelId: String) {
+    public func openWebPlayground(_ modelId: String) {
         guard !ResourceLimits.isCompanionDraftModelId(modelId) else { return }
-        requestedPlaygroundModel = modelId
-        requestedPage = .chat
+        var components = URLComponents(string: "http://127.0.0.1:\(serverPort)/demo/playground")
+        var items = [URLQueryItem(name: "model", value: modelId)]
+        if let key = apiKey, !key.isEmpty {
+            items.append(URLQueryItem(name: "key", value: key))
+        }
+        components?.queryItems = items
+        if let url = components?.url { NSWorkspace.shared.open(url) }
     }
 
     /// Loaded models that can be selected in Playground (excludes DFlash / MTP drafts).

@@ -198,7 +198,6 @@ struct ModelsPageView: View {
                         isLoaded: true,
                         actions: {
                             playButton(modelId: modelId)
-                            webDemoButton(modelId: modelId)
                             specCompanionToggle(for: modelId)
                             specBoostBadge(for: modelId)
                             tieBadge(for: modelId)
@@ -496,11 +495,10 @@ struct ModelsPageView: View {
             Button {
                 if isDecisionModel(modelId) {
                     openDecisionDemo(modelId)
+                } else if isImageModel(modelId) {
+                    openImageDemo(modelId)
                 } else {
-                    // Image models included — the Playground's image mode
-                    // loads the model and generates; the web demo stays as
-                    // the secondary globe action.
-                    appState.pickInPlayground(modelId)
+                    appState.openWebPlayground(modelId)
                 }
             } label: {
                 Label("Play", systemImage: "play.fill")
@@ -540,24 +538,8 @@ struct ModelsPageView: View {
 
     private func playHelp(_ modelId: String) -> String {
         if isDecisionModel(modelId) { return "Open decision demo" }
+        if isImageModel(modelId) { return "Open image demo" }
         return "Open in Playground"
-    }
-
-    /// Secondary action for image models: the browser demo (remote-friendly,
-    /// curl recipes). Play itself goes to the in-app Playground.
-    @ViewBuilder
-    private func webDemoButton(modelId: String) -> some View {
-        if isImageModel(modelId) {
-            Button {
-                openImageDemo(modelId)
-            } label: {
-                Image(systemName: "safari")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Open web demo")
-        }
     }
 
     private func openDecisionDemo(_ modelId: String) {

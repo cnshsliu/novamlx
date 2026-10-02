@@ -56,7 +56,7 @@ struct LoadBalancersPageView: View {
                         expandedId = isExpanded ? nil : lb.id
                     }
                 },
-                onPlay: { appState.pickInPlayground("lb:" + lb.slug) }
+                onPlay: { appState.openWebPlayground("lb:" + lb.slug) }
             )
             if isExpanded {
                 LBMembersPreviewPanel(lbId: lb.id)
