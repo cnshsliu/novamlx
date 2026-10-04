@@ -23,6 +23,9 @@ enum ChatTemplateProcessorRegistry {
         // GPT-OSS: uses <|start|>role<|channel|>type<|message|> format (OpenAI Harmony)
         case (.gptOss, _):          return HarmonyProcessor()
 
+        // HunYuan (Hy-MT2 translation models): ｜hy_User｜ / ｜hy_Assistant｜
+        case (.hunyuan, _):         return HunyuanProcessor()
+
         // Unknown families (llama, mistral, phi, starcoder, claude, other):
         // format-based fallback. Future family-specific processors go here.
         default:                    return DefaultProcessor(format: format)

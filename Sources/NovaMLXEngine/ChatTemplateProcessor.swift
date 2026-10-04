@@ -10,6 +10,7 @@ public enum ChatTemplateFormat: Sendable, Equatable {
     case imStartEnd    // <|im_start|>role\n / <|im_end|>  (Qwen2/3/3.5, Llama)
     case startOfTurn   // <start_of_turn> / <end_of_turn>  (Gemma)
     case deepSeek      // ｜User｜ / ｜Assistant｜  (DeepSeek V4+)
+    case hunyuan       // ｜hy_User｜ / ｜hy_Assistant｜  (HunYuan / Hy-MT2)
     case harmony       // <|start|>role<|channel|>type<|message|>  (GPT-OSS / OpenAI Harmony)
     case unknown
 
@@ -20,6 +21,7 @@ public enum ChatTemplateFormat: Sendable, Equatable {
         case .imStartEnd:  return "imStartEnd (ChatML)"
         case .startOfTurn: return "startOfTurn (Gemma)"
         case .deepSeek:    return "deepSeek"
+        case .hunyuan:     return "hunyuan (Hy)"
         case .harmony:     return "harmony (GPT-OSS)"
         case .unknown:     return "unknown"
         }
@@ -61,6 +63,8 @@ public enum ChatTemplateFormat: Sendable, Equatable {
             // DeepSeek uses fullwidth pipe ｜ (U+FF5C); we anchor on its role markers
             // so generic CJK content doesn't false-positive.
             (.deepSeek, ["｜User｜", "｜Assistant｜", "｜begin▁of▁sentence｜", "｜end▁of▁sentence｜"]),
+            // HunYuan / Hy-MT2: fullwidth-pipe markers with the hy_ prefix.
+            (.hunyuan, ["｜hy_User｜", "｜hy_Assistant｜", "｜hy_begin▁of▁sentence｜", "｜hy_place▁holder▁no▁3｜"]),
         ]
 
         for (format, markers) in probes {

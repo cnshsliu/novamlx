@@ -1345,8 +1345,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // Yield all accepted tokens.
                 var sequenceFinished = false
                 for (tokenIdx, tokenId) in result.acceptedTokens.enumerated() {
+                    // EOS FIRST, before any decode or yield: some tokenizers
+                    // (Hy-MT2's TokenizersBackend) decode the eos token as its
+                    // literal text (<｜hy_place▁holder▁no▁2｜>) instead of
+                    // skipping it — yielding before the check leaked the
+                    // stop marker into every streamed reply.
+                    let isEOSNow = (eosId == tokenId)
                     seq.lastTokenId = tokenId
-                    seq.completionTokens += 1
+                    if !isEOSNow { seq.completionTokens += 1 }
 
                     // Update N-gram context buffer.
                     seq.recentTokenIds.append(tokenId)
@@ -1358,7 +1364,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     specDecoder.recordToken(tokenId)
 
                     let decoded: String
-                    if let tok = container.tokenizer, let delta = seq.decodeNextToken(tokenId, tokenizer: tok) {
+                    if isEOSNow {
+                        // EOS decodes to nothing (some tokenizers would emit its
+                        // literal text) — handled entirely by the stop path below.
+                        decoded = ""
+                        seq.previousTokenWasControl = true
+                    } else if let tok = container.tokenizer, let delta = seq.decodeNextToken(tokenId, tokenizer: tok) {
                         // Inspect the RAW delta (before scrubbing) for Harmony
                         // channel-type residue words. `MLXEngine.scrubControlTokens`
                         // scrubs `analysis` / `final` / `commentary` to "" via its
@@ -1368,7 +1379,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         // a channel-type residue word" vs "this empty scrubbed
                         // result is a control token".
                         let rawTrimmed = delta.trimmingCharacters(in: .whitespaces)
-                        let scrubbed = MLXEngine.scrubControlTokens(delta)
+                        // Static scrub first (Gemma/Harmony normalization), then
+                        // the FAMILY processor's scrub — it knows the family's
+                        // own control markers (e.g. Hy's ｜hy_*｜ tokens) that
+                        // the family-blind static pass doesn't.
+                        var scrubbed = MLXEngine.scrubControlTokens(delta)
+                        if let familyScrub = container.chatTemplateProcessor?.scrubControlTokens(scrubbed) {
+                            scrubbed = familyScrub
+                        }
 
                         // Harmony streaming flow (3-token boundary, split across deltas):
                         //   <|channel|>  → scrubbed=""  delta="<|channel|>"   (control token)
