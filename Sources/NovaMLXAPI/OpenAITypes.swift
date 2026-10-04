@@ -520,17 +520,22 @@ public struct OpenAIUsage: Codable, Sendable {
     public let promptTokens: Int
     public let completionTokens: Int
     public let totalTokens: Int
+    /// Prefix-cache hits, nested as prompt_tokens_details.cached_tokens
+    /// (OpenAI-standard shape). Nil = not measured (old clients see no key).
+    public let promptTokensDetails: PromptTokensDetails?
 
     private enum CodingKeys: String, CodingKey {
         case promptTokens = "prompt_tokens"
         case completionTokens = "completion_tokens"
         case totalTokens = "total_tokens"
+        case promptTokensDetails = "prompt_tokens_details"
     }
 
-    public init(promptTokens: Int, completionTokens: Int) {
+    public init(promptTokens: Int, completionTokens: Int, cachedTokens: Int? = nil) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.totalTokens = promptTokens + completionTokens
+        self.promptTokensDetails = cachedTokens.map { PromptTokensDetails(cachedTokens: $0) }
     }
 }
 
@@ -1152,3 +1157,18 @@ public struct OpenAICompletionStreamChoice: Codable, Sendable {
 
 // Responses API types moved to ResponsesAPITypes.swift
 
+
+
+/// OpenAI-standard nested usage detail — the field peers and billing read
+/// for prefix-cache hits (prompt_tokens_details.cached_tokens).
+public struct PromptTokensDetails: Codable, Sendable {
+    public let cachedTokens: Int
+
+    public init(cachedTokens: Int) {
+        self.cachedTokens = cachedTokens
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case cachedTokens = "cached_tokens"
+    }
+}

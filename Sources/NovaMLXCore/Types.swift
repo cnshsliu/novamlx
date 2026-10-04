@@ -425,6 +425,10 @@ public struct InferenceResult: Codable, Sendable {
     public let tokensPerSecond: Double
     public let promptTokens: Int
     public let completionTokens: Int
+    /// Prefix-cache hit length for this generation (worker-measured — the
+    /// ONLY trusted source for cached-token billing; never parsed from the
+    /// model body). 0 when no cache hit.
+    public let cachedTokens: Int
     public let finishReason: FinishReason
     public let tokenLogprobs: [Token]?
 
@@ -437,7 +441,8 @@ public struct InferenceResult: Codable, Sendable {
         promptTokens: Int,
         completionTokens: Int,
         finishReason: FinishReason,
-        tokenLogprobs: [Token]? = nil
+        tokenLogprobs: [Token]? = nil,
+        cachedTokens: Int = 0
     ) {
         self.id = id
         self.model = model
@@ -446,6 +451,7 @@ public struct InferenceResult: Codable, Sendable {
         self.tokensPerSecond = tokensPerSecond
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
+        self.cachedTokens = cachedTokens
         self.finishReason = finishReason
         self.tokenLogprobs = tokenLogprobs
     }

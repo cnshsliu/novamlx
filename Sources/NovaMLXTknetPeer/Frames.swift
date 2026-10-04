@@ -67,15 +67,21 @@ public struct RequestResult: Codable, Equatable, Sendable {
     public var totalMs: Double
     public var promptTokens: Int
     public var completionTokens: Int
+    /// Prefix-cache hit length (worker-measured, prompt_tokens_details of
+    /// the LOCAL source). Absent/0 for old peers and non-local sources —
+    /// the gateway treats missing as 0, never "assume all cached".
+    public var cachedTokens: Int?
     public var upstreamStatus: Int
     public var errorMessage: String?
 
     public init(status: RelayStatus, ttftMs: Double, totalMs: Double,
                 promptTokens: Int, completionTokens: Int,
-                upstreamStatus: Int, errorMessage: String?) {
+                upstreamStatus: Int, errorMessage: String?,
+                cachedTokens: Int? = nil) {
         self.status = status; self.ttftMs = ttftMs; self.totalMs = totalMs
         self.promptTokens = promptTokens; self.completionTokens = completionTokens
         self.upstreamStatus = upstreamStatus; self.errorMessage = errorMessage
+        self.cachedTokens = cachedTokens
     }
 }
 

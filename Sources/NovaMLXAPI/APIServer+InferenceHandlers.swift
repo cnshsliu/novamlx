@@ -165,7 +165,7 @@ extension NovaMLXAPIServer {
                 let ctxWin = inference.getContextWindow(for: openAIReq.model) ?? 0
                 let p = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.promptTokens, modelContextWindow: ctxWin) : result.promptTokens
                 let c = clientType.shouldScaleContext ? cfg.scaleTokenCount(result.completionTokens, modelContextWindow: ctxWin) : result.completionTokens
-                return OpenAIUsage(promptTokens: p, completionTokens: c)
+                return OpenAIUsage(promptTokens: p, completionTokens: c, cachedTokens: result.cachedTokens > 0 ? result.cachedTokens : nil)
             }()
         )
         let ctxWin = inference.getContextWindow(for: openAIReq.model) ?? 0

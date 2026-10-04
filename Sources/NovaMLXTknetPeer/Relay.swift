@@ -123,7 +123,7 @@ public final class Relay: Sendable {
         var upstreamStatus = 0
         var ttftMs = 0.0
         var sawFirstByte = false
-        var usage: (prompt: Int, completion: Int)?
+        var usage: Relay.UsageAgg?
         do {
             let timeoutSeconds = max(1, Int64(config.requestTimeoutSeconds.rounded()))
             let response = try await client.execute(headRequest, timeout: .seconds(timeoutSeconds))
@@ -174,11 +174,12 @@ public final class Relay: Sendable {
                 let tail = Relay.consumeUsage(incoming: Data(), remainder: usageRemainder + "\n", previous: usage)
                 usage = tail.usage
             }
-            let tokens = usage ?? (prompt: 0, completion: 0)
+            let tokens = usage ?? Relay.UsageAgg()
             emit(.responseEnd(reqId: request.reqId, result: RequestResult(
                 status: .completed, ttftMs: ttftMs, totalMs: elapsedMs(),
                 promptTokens: tokens.prompt, completionTokens: tokens.completion,
-                upstreamStatus: upstreamStatus, errorMessage: nil)))
+                upstreamStatus: upstreamStatus, errorMessage: nil,
+                cachedTokens: Relay.cachedTokens(from: usage))))
         } catch is CancellationError {
             emit(.responseEnd(reqId: request.reqId, result: RequestResult(
                 status: .cancelled, ttftMs: ttftMs, totalMs: elapsedMs(),
@@ -205,10 +206,9 @@ public final class Relay: Sendable {
     /// keeping the last-seen values. Non-JSON bodies (SSE comments, [DONE])
     /// leave the previous usage untouched.
     static func parseUsage(
-        from data: Data, previous: (prompt: Int, completion: Int)?
-    ) -> (prompt: Int, completion: Int)? {
-        let consumed = Relay.consumeUsage(incoming: data, remainder: "", previous: previous)
-        return consumed.usage
+        from data: Data, previous: Relay.UsageAgg?
+    ) -> Relay.UsageAgg? {
+        Relay.consumeUsage(incoming: data, remainder: "", previous: previous).usage
     }
 
     /// Line-buffered usage extraction (P1.4): a `usage` object split across two
@@ -218,13 +218,13 @@ public final class Relay: Sendable {
     static func consumeUsage(
         incoming: Data,
         remainder: String,
-        previous: (prompt: Int, completion: Int)?
-    ) -> (usage: (prompt: Int, completion: Int)?, remainder: String) {
+        previous: UsageAgg?
+    ) -> (usage: UsageAgg?, remainder: String) {
         guard let incomingText = String(data: incoming, encoding: .utf8) else {
             return (previous, remainder)
         }
         let text = remainder + incomingText
-        var result = previous ?? (0, 0)
+        var result = previous ?? UsageAgg()
         var found = false
         var trailing = ""
         var lines: [Substring] = text.split(separator: "\n", omittingEmptySubsequences: true)
@@ -244,8 +244,26 @@ public final class Relay: Sendable {
                   let usage = json["usage"] as? [String: Any] else { continue }
             result.prompt = usage["prompt_tokens"] as? Int ?? result.prompt
             result.completion = usage["completion_tokens"] as? Int ?? result.completion
+            if let details = usage["prompt_tokens_details"] as? [String: Any],
+               let cached = details["cached_tokens"] as? Int {
+                result.cached = cached
+            }
             found = true
         }
         return (found ? result : previous, trailing)
+    }
+
+    /// Streamed-usage aggregate including the LOCAL source's prefix-cache hit
+    /// count (prompt_tokens_details.cached_tokens — worker-measured, the only
+    /// trusted source; absent for third-party sources → nil → bills as 0).
+    struct UsageAgg {
+        var prompt: Int = 0
+        var completion: Int = 0
+        var cached: Int?
+    }
+
+    static func cachedTokens(from agg: UsageAgg?) -> Int? {
+        guard let agg, let cached = agg.cached, cached > 0 else { return nil }
+        return min(cached, agg.prompt) // can never exceed the prompt itself
     }
 }
