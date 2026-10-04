@@ -1277,12 +1277,23 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         let logits = context.model(input, cache: caches)
                         eval(logits)
 
-                        // Verify each draft position against the main model's greedy argmax.
+                        // Speculative verify (correct semantics). logits[pos] is the
+                        // next-token distribution AFTER [lastReal, d0..d_{pos-1}]:
+                        //   - draft d_pos is ACCEPTED iff argmax(logits[pos]) == d_pos
+                        //     (the main model, at the true position, would pick it)
+                        //   - on rejection, emit argmax(logits[pos]) as the bonus and stop
+                        //   - all accepted → final bonus = argmax(logits[nDraft])
+                        // The old loop compared logits[pos] (conditioned on d_{pos-1}
+                        // already being right) against d_{pos-1} and ALWAYS appended
+                        // mainToken — the KV cache advanced through the draft while the
+                        // text emitted the main model's token, desyncing text/state from
+                        // the first speculated step (garbled + doubled long outputs).
                         var accepted = 0
                         var allAccepted: [Int] = []
-                        for pos in 0..<(1 + nDraft) {
+                        for pos in 0...nDraft {
                             var posLogits = logits[0..., pos, 0...]
-                            // Apply frequency penalty at position 0 (real decode position)
+                            // Frequency penalty at REAL positions only (pos 0 is the
+                            // true distribution; later positions assume draft prefix).
                             if pos == 0, freqPen > 0, !recentIds.isEmpty {
                                 let vocabSize = posLogits.dim(-1)
                                 let ids = MLXArray(recentIds.map { Int32($0) })
@@ -1292,25 +1303,23 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                                 posLogits = posLogits - (histogram * freqPen).reshaped(1, -1)
                             }
                             let mainToken = argMax(posLogits, axis: -1).item(Int.self)
-                            if pos == 0 {
-                                // Position 0: this is the "free" bonus token from the real last token.
-                                allAccepted.append(mainToken)
-                            } else {
-                                // Compare main's greedy output vs the draft at this position.
-                                if mainToken == draftTokens[pos - 1] {
+                            if pos < nDraft {
+                                if mainToken == draftTokens[pos] {
                                     accepted += 1
-                                    allAccepted.append(mainToken)
+                                    allAccepted.append(draftTokens[pos])
                                 } else {
-                                    // Rejection — keep the main model's token as bonus, stop here.
                                     allAccepted.append(mainToken)
                                     break
                                 }
+                            } else {
+                                // All drafts accepted — final bonus from the last position.
+                                allAccepted.append(mainToken)
                             }
                         }
 
-                        // If all drafts accepted, the bonus token is already the last in allAccepted.
-                        // Trim KV cache to remove rejected positions.
-                        let excessDraft = nDraft - accepted
+                        // Trim KV to exactly the emitted tokens: the forward pass
+                        // processed 1 + nDraft positions; we keep allAccepted.count.
+                        let excessDraft = (1 + nDraft) - allAccepted.count
                         if excessDraft > 0 {
                             for cache in caches {
                                 let trimmed = cache.trim(excessDraft)
