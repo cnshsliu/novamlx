@@ -1216,7 +1216,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // Logprobs require per-step logits — bypass spec decoding when requested
                 // so every accepted token has logprob data (avoids silent gaps in the API).
                 let wantLogprobs = seq.request.includeLogprobs
-                let draftTokens = wantLogprobs
+                let draftTokens = (wantLogprobs || !specDecoder.shouldSpeculate())
                     ? []
                     : specDecoder.speculate(context: seq.recentTokenIds)
 
@@ -1341,6 +1341,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             }
 
             // Apply spec decode results: yield accepted tokens per sequence.
+            // Adaptive gate bookkeeping (one outcome per step, not per token).
+            specDecoder.recordStepOutcome()
             var updatedActive = active
             for (i, var seq) in updatedActive.enumerated() {
                 guard i < specResults.count else { break }

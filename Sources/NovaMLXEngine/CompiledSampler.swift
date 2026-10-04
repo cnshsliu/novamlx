@@ -219,6 +219,55 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         speculator.speculate(context: context)
     }
 
+    // MARK: - Adaptive gating
+    //
+    // Speculation is a NET LOSS when acceptance is poor: each step pays
+    // 1 + maxDraft forward positions to (mostly) emit one token — up to 6x
+    // compute for nothing. Translation-style workloads (diverse output,
+    // n-gram cache polluted by earlier texts) measured 3.7-5.4 tok/s vs
+    // ~36 tok/s with speculation off. Gate on trailing acceptance: below
+    // 30% (with a real sample), stop proposing; re-probe every 200 real
+    // decode steps so a genuinely repetitive phase can re-enable it.
+
+    private var specEnabled = true
+    private var acceptedAtEval: UInt64 = 0
+    private var speculatedAtEval: UInt64 = 0
+    private var realStepsSinceProbe: UInt64 = 0
+    private static let probeInterval: UInt64 = 200
+    private static let minSample: UInt64 = 40
+    private static let disableThreshold = 0.3
+
+    public func shouldSpeculate() -> Bool {
+        lock.withLock {
+            if specEnabled { return true }
+            realStepsSinceProbe += 1
+            if realStepsSinceProbe >= Self.probeInterval {
+                realStepsSinceProbe = 0
+                acceptedAtEval = totalAccepted
+                speculatedAtEval = totalSpeculated
+                specEnabled = true  // probe window
+            }
+            return specEnabled
+        }
+    }
+
+    /// Called after each speculative step to update the gate.
+    public func recordStepOutcome() {
+        lock.withLock {
+            guard specEnabled else { return }
+            let speculated = totalSpeculated - speculatedAtEval
+            guard speculated >= Self.minSample else { return }
+            let accepted = totalAccepted - acceptedAtEval
+            if Double(accepted) / Double(speculated) < Self.disableThreshold {
+                specEnabled = false
+                realStepsSinceProbe = 0
+            }
+            // Eval window consumed — re-arm for the next evaluation.
+            acceptedAtEval = totalAccepted
+            speculatedAtEval = totalSpeculated
+        }
+    }
+
     public func recordAccepted(tokens: [Int], accepted: Int) {
         speculator.record(tokens: tokens)
         lock.withLock {
