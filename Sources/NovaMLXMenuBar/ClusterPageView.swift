@@ -1426,7 +1426,12 @@ struct ClusterPageView: View {
         if clusterRole == "coordinator" || appState.clusterEnabled {
             scanAvailableModelsForActivation()
         }
-        scanNetwork()
+        // (grok review) the one-shot scan must live under the SAME gate as
+        // the repeating timer — opening the Cluster page must not spawn arp
+        // on a node that doesn't participate in a cluster.
+        if clusterRole == "coordinator" || clusterRole == "worker" || appState.clusterEnabled {
+            scanNetwork()
+        }
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
             DispatchQueue.main.async { self.poll() }
         }
@@ -1686,7 +1691,20 @@ struct ClusterPageView: View {
         drainQueue.async { drainBox.set(pipe.fileHandleForReading.readDataToEndOfFile()) }
         do {
             try process.run()
-            process.waitUntilExit()
+            // (grok review) waitUntilExit is UNBOUNDED: a child that never
+            // exits still wedges the parent even with the drain running.
+            // Wait on a queue with a deadline; terminate the child on expiry
+            // — the scan degrades to an empty result, never a hang.
+            let exitBox = ArpOutputBox() // reused as a simple signaled box
+            let waitQueue = DispatchQueue(label: "nova.arp.wait", qos: .utility)
+            waitQueue.async {
+                process.waitUntilExit()
+                exitBox.set(Data([1]))
+            }
+            if exitBox.take(timeout: 10.0) == nil {
+                process.terminate()
+                NovaMLXLog.warning("[ClusterPage] ARP scan: child did not exit in 10s — terminated")
+            }
             // Drain has EOF'd by now (child exited); grab it with a bounded
             // wait so a pathological child can never wedge us again.
             let data = drainBox.take(timeout: 5.0)
