@@ -108,18 +108,12 @@ public final class TTSService: @unchecked Sendable {
     }
 
     public static func listMacOSVoices() -> [MacOSVoice] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        process.arguments = ["-v", "?"]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-
+        // SafeProcess (2026-10-05): the installed-voices list can exceed the
+        // pipe buffer — the old wait-then-read shape deadlocked there.
+        guard let output = SafeProcess.runForText("/usr/bin/say", arguments: ["-v", "?"], deadline: 15) else {
+            return []
+        }
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
             let localePattern = try NSRegularExpression(pattern: "\\s+([a-z]{2}_[A-Z]{2})\\s+#")
             return output.split(separator: "\n").compactMap { line in
                 let lineStr = String(line)
@@ -240,19 +234,20 @@ public final class TTSService: @unchecked Sendable {
         let tempFile = "/tmp/tts_\(UUID().uuidString).aiff"
         let url = URL(fileURLWithPath: tempFile)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        process.arguments = ["-v", voice, "-r", String(rate), "-o", tempFile, text]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            throw NovaMLXError.apiError("TTS synthesis failed with exit code \(process.terminationStatus)")
+        // SafeProcess (2026-10-05): bounded + drained; say emits progress on
+        // the merged stream.
+        let r: SafeProcess.Result
+        do {
+            r = try SafeProcess.run(
+                "/usr/bin/say",
+                arguments: ["-v", voice, "-r", String(rate), "-o", tempFile, text],
+                mergeStderrIntoStdout: true,
+                deadline: 300, allowTimeout: true)
+        } catch {
+            throw NovaMLXError.apiError("TTS synthesis failed: \(error.localizedDescription)")
+        }
+        guard r.succeeded && !r.timedOut else {
+            throw NovaMLXError.apiError("TTS synthesis failed with exit code \(r.status)\(r.timedOut ? " (timed out)" : "")")
         }
         guard FileManager.default.fileExists(atPath: tempFile) else {
             throw NovaMLXError.apiError("TTS failed to generate audio file")

@@ -1,5 +1,6 @@
 import SwiftUI
 import NovaMLXCore
+import NovaMLXUtils
 
 struct AgentInfo: Identifiable {
     let id: String
@@ -275,21 +276,11 @@ struct AgentsPageView: View {
     }
 
     private func findBinary(named name: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [name]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let path, !path.isEmpty { return path }
-            }
-        } catch {}
+        // SafeProcess (2026-10-05): bounded + drained.
+        if let path = SafeProcess.runForText("/usr/bin/which", arguments: [name])?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            return path
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let fallbacks = ["/usr/local/bin/\(name)", "/opt/homebrew/bin/\(name)", "\(home)/.local/bin/\(name)"]
         return fallbacks.first { FileManager.default.isExecutableFile(atPath: $0) }

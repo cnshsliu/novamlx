@@ -2963,21 +2963,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         for (binary, name, installUrl) in agentsToCheck {
                             var found = false
                             var foundPath: String? = nil
-                            // Try which
-                            let task = Process()
-                            task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-                            task.arguments = [binary]
-                            let pipe = Pipe()
-                            task.standardOutput = pipe
-                            task.standardError = FileHandle.nullDevice
-                            try? task.run()
-                            task.waitUntilExit()
-                            if task.terminationStatus == 0 {
-                                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-                                    found = true
-                                    foundPath = path
-                                }
+                            // Try which (SafeProcess: bounded + drained, 2026-10-05)
+                            if let path = SafeProcess.runForText("/usr/bin/which", arguments: [binary])?
+                                .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+                                found = true
+                                foundPath = path
                             }
                             if !found {
                                 for dir in searchPaths {
@@ -3089,16 +3079,34 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         guard fm.fileExists(atPath: modelDir) else {
                             return Response(status: .notFound)
                         }
-                        // Stream the entire model directory as a tar.gz
+                        // Stream the model directory as tar.gz (2026-10-05): the old
+                        // shape buffered the WHOLE archive in RAM and — worse —
+                        // deadlocked at the 64KB pipe buffer (wait-then-read
+                        // before any drain). Now the child streams chunk by
+                        // chunk into the response body; nothing accumulates.
                         let process = Process()
                         let pipe = Pipe()
                         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
                         process.arguments = ["-czf", "-", "-C", modelDir, "."]
                         process.standardOutput = pipe
-                        try process.run()
-                        process.waitUntilExit()
-                        guard let data = try pipe.fileHandleForReading.readToEnd() else {
+                        process.standardError = FileHandle.nullDevice
+                        do { try process.run() } catch {
                             return Response(status: .internalServerError)
+                        }
+                        let fh = pipe.fileHandleForReading
+                        fh.readabilityHandler = nil
+                        let body = ResponseBody { writer in
+                            // Drain as data arrives — this is the deadlock fix.
+                            let readHandle = pipe.fileHandleForReading
+                            while true {
+                                let chunk = readHandle.availableData
+                                if chunk.isEmpty { break } // EOF: child exited
+                                do { try await writer.write(ByteBuffer(data: chunk)) }
+                                catch { break } // client went away
+                            }
+                            try? readHandle.close()
+                            process.waitUntilExit()
+                            try await writer.finish(nil)
                         }
                         return Response(
                             status: .ok,
@@ -3106,7 +3114,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 .contentType: "application/gzip",
                                 .contentDisposition: "attachment; filename=\"\(modelId.replacingOccurrences(of:"/",with:"-")).tar.gz\"",
                             ],
-                            body: .init(byteBuffer: ByteBuffer(data: data))
+                            body: body
                         )
                     }
                     Post("/activate-model") { request, _ in

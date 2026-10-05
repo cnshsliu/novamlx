@@ -655,10 +655,6 @@ public final class WorkerDeployer: @unchecked Sendable {
     ) async throws -> (output: String, exitCode: Int32) {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = arguments
-
                 // Merge with clean environment
                 var env = [
                     "HOME": NSHomeDirectory(),
@@ -666,37 +662,21 @@ public final class WorkerDeployer: @unchecked Sendable {
                     "USER": NSUserName(),
                 ]
                 env.merge(environment) { _, new in new }
-                process.environment = env
 
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = errPipe
-
+                // SafeProcess (2026-10-05): the old shape had a terminate timer
+                // but still read AFTER waitUntilExit — output over the 64KB
+                // pipe buffer blocked the child mid-write and silently waited
+                // out the whole timeout. Concurrent drain + bounded wait.
                 do {
-                    try process.run()
+                    let r = try SafeProcess.run(
+                        executable, arguments: arguments,
+                        environment: env,
+                        deadline: Double(timeout),
+                        allowTimeout: true)
+                    continuation.resume(returning: (r.stdoutText + r.stderrText, r.status))
                 } catch {
                     continuation.resume(returning: ("", -1))
-                    return
                 }
-
-                // Timeout handling
-                let timer = DispatchSource.makeTimerSource(queue: .global())
-                timer.schedule(deadline: .now() + .seconds(timeout))
-                timer.setEventHandler {
-                    if process.isRunning { process.terminate() }
-                }
-                timer.resume()
-
-                process.waitUntilExit()
-                timer.cancel()
-
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                let errOutput = String(data: errData, encoding: .utf8) ?? ""
-
-                continuation.resume(returning: (output + errOutput, process.terminationStatus))
             }
         }
     }

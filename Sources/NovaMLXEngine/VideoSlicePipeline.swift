@@ -943,31 +943,24 @@ public enum VideoSlicePipeline {
     }
 
     public static func run(_ launchPath: String, _ args: [String]) throws {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: launchPath)
-        proc.arguments = args
-        let err = Pipe()
-        proc.standardError = err
-        proc.standardOutput = Pipe()
-        try proc.run()
-        proc.waitUntilExit()
-        if proc.terminationStatus != 0 {
-            let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw NovaMLXError.apiError("ffmpeg failed (\(proc.terminationStatus)): \(msg.suffix(400))")
+        // SafeProcess (2026-10-05): ffmpeg writes progress to stderr which can
+        // exceed the pipe buffer — wait-then-read deadlocked there.
+        let r: SafeProcess.Result
+        do {
+            r = try SafeProcess.run(launchPath, arguments: args, deadline: 600, allowTimeout: true)
+        } catch {
+            throw NovaMLXError.apiError("ffmpeg failed: \(error.localizedDescription)")
+        }
+        if !r.succeeded || r.timedOut {
+            throw NovaMLXError.apiError("ffmpeg failed (\(r.status)\(r.timedOut ? ", timed out" : "")): \(r.stderrText.suffix(400))")
         }
     }
 
     public static func probeDuration(_ url: URL) throws -> Double {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: ffprobePath())
-        proc.arguments = ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", url.path]
-        let out = Pipe()
-        proc.standardOutput = out
-        proc.standardError = Pipe()
-        try proc.run()
-        proc.waitUntilExit()
-        let s = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+        let s = SafeProcess.runForText(
+            ffprobePath(),
+            arguments: ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", url.path],
+            deadline: 30)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
         return Double(s) ?? 0
     }
 

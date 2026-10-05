@@ -432,16 +432,12 @@ final class TCPConnection: @unchecked Sendable {
             }
         }
         // Fallback: use system hostname command for mDNS .local resolution
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["bash", "-c", "getent hosts \(host) 2>/dev/null | head -1 | cut -d' ' -f1"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        guard (try? proc.run()) != nil else { return nil }
-        proc.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let ip = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // SafeProcess: bounded + drained (2026-10-05 deadlock class fix).
+        guard let out = SafeProcess.runForText(
+            "/usr/bin/env",
+            arguments: ["bash", "-c", "getent hosts \(host) 2>/dev/null | head -1 | cut -d' ' -f1"],
+            deadline: 10) else { return nil }
+        let ip = out.trimmingCharacters(in: .whitespacesAndNewlines)
         return ip.contains(".") ? ip : nil
     }
 

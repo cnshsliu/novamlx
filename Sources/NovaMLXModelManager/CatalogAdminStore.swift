@@ -122,19 +122,21 @@ public struct CatalogAdminStore: Sendable {
 
     @discardableResult
     private func git(_ args: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = args
-        process.currentDirectoryURL = repoRoot
-        process.environment = ProcessInfo.processInfo.environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let text = String(data: data, encoding: .utf8) ?? ""
-        if process.terminationStatus != 0 {
+        // SafeProcess: git output can exceed the 64KB pipe buffer — the old
+        // wait-then-read shape deadlocked exactly there (2026-10-05).
+        let result: SafeProcess.Result
+        do {
+            result = try SafeProcess.run(
+                "/usr/bin/git", arguments: args,
+                currentDirectory: repoRoot,
+                environment: ProcessInfo.processInfo.environment,
+                mergeStderrIntoStdout: true,
+                deadline: 30)
+        } catch {
+            throw CatalogAdminError.gitFailed(String(describing: error))
+        }
+        let text = result.stdoutText
+        if !result.succeeded || result.timedOut {
             throw CatalogAdminError.gitFailed(text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return text

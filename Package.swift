@@ -238,6 +238,7 @@ let package = Package(
             name: "NovaMLXCLI",
             dependencies: [
                 "NovaMLXCore",
+                "NovaMLXUtils",
             ],
             swiftSettings: concurrencySettings
         ),

@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXUtils
 
 struct AgentDescriptor {
     let name: String
@@ -47,21 +48,12 @@ struct AgentDescriptor {
     }
 
     private func which(_ binary: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [binary]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let path, !path.isEmpty { return path }
-            }
-        } catch {}
+        // SafeProcess: bounded wait + concurrent drain — the old
+        // wait-then-read shape deadlocks on large output (2026-10-05).
+        if let path = SafeProcess.runForText("/usr/bin/which", arguments: [binary])?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            return path
+        }
         return nil
     }
 }
