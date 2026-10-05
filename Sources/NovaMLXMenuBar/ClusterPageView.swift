@@ -1430,8 +1430,13 @@ struct ClusterPageView: View {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
             DispatchQueue.main.async { self.poll() }
         }
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { _ in
-            DispatchQueue.main.async { self.scanNetwork() }
+        // CADENCE FIX: the 10s ARP scan ran whenever the page was open, even
+        // with clustering off — 5.3M log lines / ~13h of idle-burning CPU.
+        // Scan only when this node actually participates in a cluster.
+        if clusterRole == "coordinator" || clusterRole == "worker" || appState.clusterEnabled {
+            scanTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { _ in
+                DispatchQueue.main.async { self.scanNetwork() }
+            }
         }
     }
 
@@ -1670,11 +1675,23 @@ struct ClusterPageView: View {
         process.arguments = ["-a"]
         let pipe = Pipe()
         process.standardOutput = pipe
+        // DEADLOCK FIX (2026-10-05): the old shape ran waitUntilExit() BEFORE
+        // readDataToEndOfFile() — when the ARP table exceeds the 64KB pipe
+        // buffer the child blocks writing (stuck in exit's __sflush forever)
+        // while the parent blocks waiting for exit. Sixteen zombie `arp -a`
+        // processes and ~13h of ~97% CPU were exactly this. Drain the pipe on
+        // a side queue concurrently with the child's lifetime.
+        let drainBox = ArpOutputBox()
+        let drainQueue = DispatchQueue(label: "nova.arp.drain", qos: .utility)
+        drainQueue.async { drainBox.set(pipe.fileHandleForReading.readDataToEndOfFile()) }
         do {
             try process.run()
             process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else {
+            // Drain has EOF'd by now (child exited); grab it with a bounded
+            // wait so a pathological child can never wedge us again.
+            let data = drainBox.take(timeout: 5.0)
+            try? pipe.fileHandleForReading.close()
+            guard let output = data.flatMap({ String(data: $0, encoding: .utf8) }) else {
                 NovaMLXLog.warning("[ClusterPage] ARP scan: no UTF8 output")
                 return []
             }
@@ -1684,6 +1701,22 @@ struct ClusterPageView: View {
         } catch {
             NovaMLXLog.warning("[ClusterPage] ARP scan Process() failed: \(error)")
             return []
+        }
+    }
+
+    /// Mailbox for the concurrently-drained pipe output: the drain queue
+    /// publishes, the waiter takes with a timeout so neither side can wedge.
+    private final class ArpOutputBox: @unchecked Sendable {
+        private let cond = NSCondition()
+        private var value: Data?
+        private var published = false
+        func set(_ v: Data) {
+            cond.lock(); value = v; published = true; cond.broadcast(); cond.unlock()
+        }
+        func take(timeout: TimeInterval) -> Data? {
+            cond.lock(); defer { cond.unlock() }
+            if !published { _ = cond.wait(until: Date().addingTimeInterval(timeout)) }
+            return value
         }
     }
 
