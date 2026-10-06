@@ -231,6 +231,29 @@ final class TknetPeerState: ObservableObject {
         }
     }
 
+    /// Switch the server this peer talks to. The peer ID + key were issued
+    /// by the OLD server — they do not exist on the new one — so switching
+    /// clears the identity and the UI returns to the register state.
+    /// (Lucas 2026-10-06: default tknet.ai, editable, 官方 one-click back.)
+    func setServer(_ restBase: URL) async {
+        guard let scheme = restBase.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", restBase.host != nil else {
+            lastError = "Invalid server URL (expected http/https)"
+            return
+        }
+        var config = self.config
+        config.serverURL = Self.tunnelURL(fromREST: restBase)
+        config.peerId = nil
+        config.sources = []
+        config.capabilities = []
+        try? FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? ConfigStore.save(config, to: configURL)
+        self.config = config
+        lastError = nil
+        await stop()
+    }
+
     // MARK: - URL scheme helpers (mirror TknetPeerCLI)
 
     /// REST base (`https://…`) → tunnel base (`wss://…`).
@@ -246,7 +269,7 @@ final class TknetPeerState: ObservableObject {
     }
 
     /// Tunnel base (`wss://…`) → REST base (`https://…`).
-    private static func restURL(fromTunnel base: URL) -> URL? {
+    public static func restURL(fromTunnel base: URL) -> URL? {
         guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased() else { return nil }
         switch scheme {

@@ -22,6 +22,7 @@ struct TknetPeerPageView: View {
                     upgradeBanner
                 }
                 statusRow
+                serverSection
                 if peer.config.peerId == nil {
                     registrationSection
                 } else {
@@ -36,6 +37,50 @@ struct TknetPeerPageView: View {
         }
         .navigationTitle("Tknet Peer")
         .task { if peer.config.peerId != nil { await peer.fetchDemand() } }
+    }
+
+    // MARK: Server (Lucas: default tknet.ai, editable, 官方 one-click)
+
+    private var officialServer: URL { URL(string: "https://tknet.ai")! }
+
+    private var serverSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("服务器").font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 8) {
+                TextField("https://tknet.ai", text: $serverText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .onSubmit { switchServer() }
+                Button("官方") {
+                    serverText = "https://tknet.ai"
+                    switchServer()
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                Button("切换") { switchServer() }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .disabled(serverText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            if peer.config.peerId == nil {
+                Text("未注册 —— 在下方 Register，或先切换服务器")
+                    .font(.system(size: 10.5)).foregroundColor(.secondary)
+            } else {
+                Text("切换服务器会清除本机上的 peer 身份（每台服务器独立发号），需要重新注册")
+                    .font(.system(size: 10.5)).foregroundColor(.orange)
+            }
+        }
+        .padding(12)
+        .background(NovaTheme.Colors.cardBackground)
+        .cornerRadius(10)
+        .onAppear {
+            serverText = TknetPeerState.restURL(fromTunnel: peer.config.serverURL)?.absoluteString
+                ?? peer.config.serverURL.absoluteString
+        }
+    }
+
+    private func switchServer() {
+        guard let url = URL(string: serverText.trimmingCharacters(in: .whitespaces)) else { return }
+        guard url != peer.config.serverURL else { return }
+        Task { await peer.setServer(url) }
     }
 
     // MARK: Claim credentials (绑机器要用)
