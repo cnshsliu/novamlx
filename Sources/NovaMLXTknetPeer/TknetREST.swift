@@ -44,11 +44,20 @@ public struct TknetREST: Sendable {
         let response = try await client.execute(request, timeout: .seconds(30))
         // The server answers 201 Created on success — accept any 2xx, not just 200.
         guard (200..<300).contains(response.status.code) else {
-            throw RESTError.badStatus(Int(response.status.code))
+            throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
         }
         let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
         let payload = try JSONDecoder().decode(Payload.self, from: data)
         return (peerId: payload.peerId, token: payload.token)
+    }
+
+    /// Best-effort extraction of {"error": "..."} from a failed response.
+    private static func errorMessage(_ response: HTTPClientResponse) async -> String? {
+        guard let body = try? await response.body.collect(upTo: 1 << 16) else { return nil }
+        let data = Data(body.readableBytesView)
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let msg = json["error"] as? String ?? json["message"] as? String else { return nil }
+        return msg
     }
 
     /// Fetches the current demand list; requires the registration token.
@@ -61,7 +70,7 @@ public struct TknetREST: Sendable {
 
         let response = try await client.execute(request, timeout: .seconds(30))
         guard (200..<300).contains(response.status.code) else {
-            throw RESTError.badStatus(Int(response.status.code))
+            throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
         }
         let data = Data(try await response.body.collect(upTo: 16 << 20).readableBytesView)
         return try JSONDecoder().decode(Payload.self, from: data).entries
@@ -77,7 +86,7 @@ public struct TknetREST: Sendable {
 
         let response = try await client.execute(request, timeout: .seconds(30))
         guard (200..<300).contains(response.status.code) else {
-            throw RESTError.badStatus(Int(response.status.code))
+            throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
         }
         let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
         return try JSONDecoder().decode(PeerEarningsSummary.self, from: data)
@@ -116,6 +125,21 @@ public struct PeerEarningsSummary: Decodable, Sendable {
 }
 
 public enum RESTError: Error, Equatable {
-    /// Server answered with a non-2xx status; carries the numeric code.
-    case badStatus(Int)
+    /// Server answered with a non-2xx status; carries the numeric code and
+    /// the server's human message when the body is our JSON error shape.
+    case badStatus(Int, message: String? = nil)
+}
+
+extension RESTError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .badStatus(let code, let message):
+            if let message, !message.isEmpty { return message }
+            switch code {
+            case 409: return "名字已被占用（409）"
+            case 429: return "注册太频繁（429）—— 每台地址每小时限 10 次，稍后再试"
+            default: return "服务器返回 HTTP \(code)"
+            }
+        }
+    }
 }
