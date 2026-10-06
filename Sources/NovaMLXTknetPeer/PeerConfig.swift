@@ -22,6 +22,10 @@ public struct SourceConfig: Codable, Equatable, Sendable, Identifiable {
 public struct PeerConfig: Codable, Equatable, Sendable {
     public var peerId: String?
     public var serverURL: URL
+    /// Per-server identity registry (Lucas 2026-10-06): a machine holds ONE
+    /// identity PER SERVER. Switching servers keeps every identity; switching
+    /// back restores it instead of forcing a re-register.
+    public var registrations: [String: String]
     public var sources: [SourceConfig]
     public var capabilities: [Capability]
     public var concurrencyLimit: Int
@@ -31,18 +35,18 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     /// nothing is deleted. Persisted so retirement survives restarts.
     private var retiredDemandIds: Set<String> = []
 
-    public init(peerId: String? = nil, serverURL: URL,
+    public init(peerId: String? = nil, serverURL: URL, registrations: [String: String] = [:],
                 sources: [SourceConfig] = [], capabilities: [Capability] = [],
                 concurrencyLimit: Int = 1, requestTimeoutSeconds: Double = 300,
                 idleMinutesBeforeSlowPoll: Double = 5) {
-        self.peerId = peerId; self.serverURL = serverURL; self.sources = sources
+        self.peerId = peerId; self.serverURL = serverURL; self.registrations = registrations; self.sources = sources
         self.capabilities = capabilities; self.concurrencyLimit = concurrencyLimit
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.idleMinutesBeforeSlowPoll = idleMinutesBeforeSlowPoll
     }
 
     private enum CodingKeys: String, CodingKey {
-        case peerId, serverURL, sources, capabilities, concurrencyLimit
+        case peerId, serverURL, sources, capabilities, concurrencyLimit, registrations
         case requestTimeoutSeconds, idleMinutesBeforeSlowPoll, retiredDemandIds
     }
 
@@ -52,6 +56,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         peerId = try c.decodeIfPresent(String.self, forKey: .peerId)
         serverURL = try c.decode(URL.self, forKey: .serverURL)
+        registrations = (try? c.decode([String: String].self, forKey: .registrations)) ?? [:]
         sources = try c.decodeIfPresent([SourceConfig].self, forKey: .sources) ?? []
         capabilities = try c.decodeIfPresent([Capability].self, forKey: .capabilities) ?? []
         concurrencyLimit = try c.decodeIfPresent(Int.self, forKey: .concurrencyLimit) ?? 1

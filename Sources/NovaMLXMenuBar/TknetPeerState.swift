@@ -12,13 +12,20 @@ import NovaMLXUtils
 final class TknetPeerState: ObservableObject {
     @Published private(set) var config: PeerConfig
 
+    /// Per-server token storage key — one identity per server.
+    private func tokenKey(forTunnel tunnel: URL) -> String {
+        let host = tunnel.host ?? "default"
+        let port = tunnel.port.map { ":\($0)" } ?? ""
+        return "peer/token/\(host)\(port)"
+    }
+
     /// The peer's connection key, for the "claim this machine" flow on
     /// tknet.ai (paste Peer ID + key into the dashboard). Named 连接密钥 /
     /// connection key in the UI — NEVER "token", which collides with the
     /// LLM token billing everywhere else in the product (Lucas 2026-10-06).
     public var machineKey: String? {
         guard config.peerId != nil else { return nil }
-        let v = secrets.load("peer/token") ?? ""
+        let v = secrets.load(tokenKey(forTunnel: config.serverURL)) ?? secrets.load("peer/token") ?? ""
         return v.isEmpty ? nil : v
     }
     @Published private(set) var status: PeerStatus?
@@ -76,10 +83,18 @@ final class TknetPeerState: ObservableObject {
         }
         do {
             var config = self.config
-            let (peerId, token) = try await rest.register(server: server, peerName: peerName)
+            let tunnel = Self.tunnelURL(fromREST: server)
+            // Previous identity on THIS server (rotation, not garbage): the
+            // server rotates the token in place when name+creds match.
+            let prevId = config.registrations[tunnel.absoluteString]
+            let prevToken = prevId != nil ? (secrets.load(tokenKey(forTunnel: tunnel)) ?? "") : ""
+            let (peerId, token) = try await rest.register(server: server, peerName: peerName,
+                                                          previousPeerId: prevId, previousToken: prevToken.isEmpty ? nil : prevToken)
             config.peerId = peerId
-            config.serverURL = Self.tunnelURL(fromREST: server)
-            secrets.save(token, for: "peer/token")
+            config.serverURL = tunnel
+            config.registrations[tunnel.absoluteString] = peerId
+            secrets.save(token, for: tokenKey(forTunnel: tunnel))
+            secrets.save(token, for: "peer/token") // active server's key (tunnel + UI)
             try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
             try ConfigStore.save(config, to: configURL)
@@ -242,8 +257,12 @@ final class TknetPeerState: ObservableObject {
             return
         }
         var config = self.config
-        config.serverURL = Self.tunnelURL(fromREST: restBase)
-        config.peerId = nil
+        let tunnel = Self.tunnelURL(fromREST: restBase)
+        config.serverURL = tunnel
+        // Restore the identity registered on THIS server (if any) —
+        // switching back and forth must not lose either identity.
+        let saved = config.registrations[tunnel.absoluteString]
+        config.peerId = saved
         config.sources = []
         config.capabilities = []
         try? FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),

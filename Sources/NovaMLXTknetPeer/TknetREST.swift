@@ -20,15 +20,26 @@ public struct TknetREST: Sendable {
 
     /// Registers this peer with tknet.ai and returns the assigned peer id
     /// plus the secret token used for all later authenticated calls.
-    public func register(server: URL, peerName: String) async throws -> (peerId: String, token: String) {
-        struct RegisterRequest: Encodable { let name: String }
+    public func register(server: URL, peerName: String,
+                         previousPeerId: String? = nil, previousToken: String? = nil) async throws -> (peerId: String, token: String) {
+        struct RegisterRequest: Encodable {
+            let name: String
+            var previousPeerId: String? { nil }
+            var previousToken: String? { nil }
+        }
+        struct Wire: Encodable {
+            let name: String
+            let previousPeerId: String?
+            let previousToken: String?
+        }
         struct Payload: Decodable { let peerId: String; let token: String }
 
         var request = HTTPClientRequest(
             url: server.appendingPathComponent("api/peer/register").absoluteString)
         request.method = .POST
         request.headers.add(name: "content-type", value: "application/json")
-        request.body = .bytes(try JSONEncoder().encode(RegisterRequest(name: peerName)))
+        request.body = .bytes(try JSONEncoder().encode(
+            Wire(name: peerName, previousPeerId: previousPeerId, previousToken: previousToken)))
 
         let response = try await client.execute(request, timeout: .seconds(30))
         // The server answers 201 Created on success — accept any 2xx, not just 200.
