@@ -263,6 +263,15 @@ final class TknetPeerState: ObservableObject {
         // switching back and forth must not lose either identity.
         let saved = config.registrations[tunnel.absoluteString]
         config.peerId = saved
+        // Restore the ACTIVE token too: the tunnel always reads "peer/token".
+        // Without this, switching back to A had A's peerId but B-era (or
+        // stale) token in the active slot — auth failure on reconnect.
+        if saved != nil {
+            let perServer = secrets.load(tokenKey(forTunnel: tunnel)) ?? ""
+            if !perServer.isEmpty {
+                secrets.save(perServer, for: "peer/token")
+            }
+        }
         config.sources = []
         config.capabilities = []
         try? FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),
