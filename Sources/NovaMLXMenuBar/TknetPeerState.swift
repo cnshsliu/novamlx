@@ -12,6 +12,15 @@ import NovaMLXUtils
 final class TknetPeerState: ObservableObject {
     @Published private(set) var config: PeerConfig
 
+    /// Canonical registry key: trailing slashes differ between what the
+    /// user typed ("http://host:port/" vs no slash) and would split one
+    /// server into two identities. Normalize before every lookup/save.
+    private static func serverKey(_ tunnel: URL) -> String {
+        var k = tunnel.absoluteString
+        while k.count > 1 && k.hasSuffix("/") { k.removeLast() }
+        return k
+    }
+
     /// Per-server token storage key — one identity per server.
     private func tokenKey(forTunnel tunnel: URL) -> String {
         let host = tunnel.host ?? "default"
@@ -86,13 +95,13 @@ final class TknetPeerState: ObservableObject {
             let tunnel = Self.tunnelURL(fromREST: server)
             // Previous identity on THIS server (rotation, not garbage): the
             // server rotates the token in place when name+creds match.
-            let prevId = config.registrations[tunnel.absoluteString]
+            let prevId = config.registrations[Self.serverKey(tunnel)]
             let prevToken = prevId != nil ? (secrets.load(tokenKey(forTunnel: tunnel)) ?? "") : ""
             let (peerId, token) = try await rest.register(server: server, peerName: peerName,
                                                           previousPeerId: prevId, previousToken: prevToken.isEmpty ? nil : prevToken)
             config.peerId = peerId
             config.serverURL = tunnel
-            config.registrations[tunnel.absoluteString] = peerId
+            config.registrations[Self.serverKey(tunnel)] = peerId
             secrets.save(token, for: tokenKey(forTunnel: tunnel))
             secrets.save(token, for: "peer/token") // active server's key (tunnel + UI)
             try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),
@@ -261,7 +270,7 @@ final class TknetPeerState: ObservableObject {
         config.serverURL = tunnel
         // Restore the identity registered on THIS server (if any) —
         // switching back and forth must not lose either identity.
-        let saved = config.registrations[tunnel.absoluteString]
+        let saved = config.registrations[Self.serverKey(tunnel)]
         config.peerId = saved
         // Restore the ACTIVE token too: the tunnel always reads "peer/token".
         // Without this, switching back to A had A's peerId but B-era (or
