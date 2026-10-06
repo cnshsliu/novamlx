@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import NovaMLXCore
 import NovaMLXDB
@@ -24,6 +25,7 @@ struct TknetPeerPageView: View {
                 if peer.config.peerId == nil {
                     registrationSection
                 } else {
+                    credentialsSection
                     demandSection
                     if !peer.config.capabilities.isEmpty {
                         capabilitiesSection
@@ -34,6 +36,65 @@ struct TknetPeerPageView: View {
         }
         .navigationTitle("Tknet Peer")
         .task { if peer.config.peerId != nil { await peer.fetchDemand() } }
+    }
+
+    // MARK: Claim credentials (绑机器要用)
+
+    @State private var revealKey = false
+
+    private var credentialsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("认领这台机器（Claim this machine）")
+                .font(.system(size: 13, weight: .semibold))
+            Text("在 tknet.ai 的 Market 页粘贴下面两个值，把这台机器绑到你的账号")
+                .font(.system(size: 11)).foregroundColor(.secondary)
+
+            credentialRow(label: "Peer ID", value: peer.config.peerId ?? "")
+
+            HStack(spacing: 8) {
+                Text("连接密钥").font(.system(size: 11)).foregroundColor(.secondary).frame(width: 64, alignment: .leading)
+                if revealKey, let key = peer.machineKey {
+                    Text(key)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text("••••••••••••••••")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Button(revealKey ? "Hide" : "Show") { revealKey.toggle() }
+                    .buttonStyle(.bordered).controlSize(.mini)
+                if let key = peer.machineKey {
+                    Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key, forType: .string) }
+                        .buttonStyle(.bordered).controlSize(.mini)
+                }
+            }
+            .padding(8)
+            .background(NovaTheme.Colors.rowBackground)
+            .cornerRadius(6)
+        }
+        .padding(12)
+        .background(NovaTheme.Colors.cardBackground)
+        .cornerRadius(10)
+    }
+
+    private func credentialRow(label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label).font(.system(size: 11)).foregroundColor(.secondary).frame(width: 64, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(value, forType: .string) }
+                .buttonStyle(.bordered).controlSize(.mini)
+        }
+        .padding(8)
+        .background(NovaTheme.Colors.rowBackground)
+        .cornerRadius(6)
     }
 
     // MARK: Header + status

@@ -11,6 +11,16 @@ import NovaMLXUtils
 @MainActor
 final class TknetPeerState: ObservableObject {
     @Published private(set) var config: PeerConfig
+
+    /// The peer's connection key, for the "claim this machine" flow on
+    /// tknet.ai (paste Peer ID + key into the dashboard). Named 连接密钥 /
+    /// connection key in the UI — NEVER "token", which collides with the
+    /// LLM token billing everywhere else in the product (Lucas 2026-10-06).
+    public var machineKey: String? {
+        guard config.peerId != nil else { return nil }
+        let v = secrets.load("peer/token") ?? ""
+        return v.isEmpty ? nil : v
+    }
     @Published private(set) var status: PeerStatus?
     @Published private(set) var demand: [DemandEntry] = []
     @Published private(set) var running = false
