@@ -1,6 +1,6 @@
 # Tknet Peer Gateway — Segment 1 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Give `NovaMLXTknetPeer` a member table, named pools, and the five NovaMLX selection strategies; expose an OpenAI-compatible local gateway on `127.0.0.1:6600` (even with no tunnel); extend `tknet-peer` so operators can CRUD members/pools and `serve` without dialing tknet. Stay inside this repo — do not split packages, do not touch NovaMLX LB/Tokenhub UI (Segment 2), menu-bar Peer app (Segment 3), or cross-platform packaging (Segment 4).
 
@@ -60,7 +60,7 @@ Wire `Capability.sourceId` keeps its JSON name (tknet hello frames unchanged) bu
 **Interfaces:**
 - Produces: `MemberConfig` (evolved `SourceConfig`), `PoolConfig`, `PoolStrategy` (raw values match `LBStrategy`: `tiered`, `round_robin`, `weighted`, `lowest_latency`, `random`), `PeerConfig.members` / `PeerConfig.pools`, load-time migration from legacy `sources`-only files, `ConfigStore` encode/decode of the new fields.
 
-- [ ] **Step 1: Write failing migration + codec tests**
+- [x] **Step 1: Write failing migration + codec tests**
 
 ```swift
 import Foundation
@@ -119,7 +119,7 @@ struct PoolConfigMigrationTests {
 }
 ```
 
-- [ ] **Step 2: Add `PoolTypes.swift`**
+- [x] **Step 2: Add `PoolTypes.swift`**
 
 Port enum names/raw values from `LoadBalancerTypes.swift`:
 
@@ -168,7 +168,7 @@ public enum MemberAddress {
 
 Keep `public typealias SourceConfig = MemberConfig` **or** rename call sites in Peer + tests in the same commit. Prefer keeping the `SourceConfig` name as a typealias so existing test helpers compile during the transition, then delete the alias once call sites are updated (same Task).
 
-- [ ] **Step 3: Extend `PeerConfig`**
+- [x] **Step 3: Extend `PeerConfig`**
 
 - Replace `sources: [SourceConfig]` storage with `members: [MemberConfig]`.
 - Add `pools: [PoolConfig]`.
@@ -177,7 +177,7 @@ Keep `public typealias SourceConfig = MemberConfig` **or** rename call sites in 
 - Helpers: `member(id:)`, `pool(id:)`, `pool(named:)` (match by `name` for local gateway model lookup), `upsertMember`, `removeMember` (also strip id from all pools), `upsertPool`, `removePool`.
 - `ServerMemory` currently embeds `sources` — migrate that field the same way (`members` + `pools` per saved server), with decode defaults so old memory rows still load.
 
-- [ ] **Step 4: Update existing PeerConfig / Relay / CLI tests that construct `SourceConfig`**
+- [x] **Step 4: Update existing PeerConfig / Relay / CLI tests that construct `SourceConfig`**
 
 Rename call sites through the typealias (or drop the alias once renamed). Run:
 
@@ -185,7 +185,7 @@ Rename call sites through the typealias (or drop the alias once renamed). Run:
 
 Expected: new migration tests pass; existing PeerConfig tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Sources/NovaMLXTknetPeer/PoolTypes.swift Sources/NovaMLXTknetPeer/PeerConfig.swift \
@@ -216,20 +216,20 @@ git commit -m "feat(peer): member + pool config types with legacy source migrati
 | Stats keyed by `UUID` | Stats keyed by `member.id: String` |
 | Unloaded local skipped | Loopback still planned; fail-fast at forward time |
 
-- [ ] **Step 1: Write failing router tests** (mirror `LBRouterTests` cases that still apply)
+- [x] **Step 1: Write failing router tests** (mirror `LBRouterTests` cases that still apply)
 
 Cover at least: empty → empty; disabled skipped; tiered local > free > paid; round_robin rotates by `requestCount`; weighted expands nil→1 / 0→1; lowest_latency cold-start = 0 preferred; random deterministic by id hash; snake_case raw values.
 
-- [ ] **Step 2: Implement `PoolRouter`**
+- [x] **Step 2: Implement `PoolRouter`**
 
 Copy structure from `LBRouter.swift` (`applyTiered` / `applyRoundRobin` / `applyWeighted` / `applyLowestLatency` / `applyRandom` + `Array.rotated(by:)`). Keep comments citing the NovaMLX original so Segment 2 reviewers see the intentional port.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 `./build.sh test --filter PoolRouterTests`  
 Expected: all pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Sources/NovaMLXTknetPeer/PoolRouter.swift Tests/NovaMLXTknetPeerTests/PoolRouterTests.swift
@@ -248,13 +248,13 @@ git commit -m "feat(peer): PoolRouter ports NovaMLX LB selection strategies"
 - Produces: `MemberStats` (fields aligned with `LBMemberStats`: request/success/failure/count5xx, totalLatencyMs, lastUsedAt, lastError, avgLatencyMs, successRate) and `MemberStatsStore` (actor or lock-backed map `String -> MemberStats`) with `record(memberId:succeeded:latencyMs:httpStatus:errorMessage:)` and `snapshot() -> [String: MemberStats]`.
 - Stats are **process-local** for Segment 1 (not persisted). Persisting can wait; `lowest_latency` only needs live data.
 
-- [ ] **Step 1: Failing tests** — record success updates avg; 5xx bumps `count5xx`; 4xx counts as request but `succeeded` per LBProxy rule (`status < 500` → treat as non-failover success for stats, matching `LBProxy.recordOutcome`).
+- [x] **Step 1: Failing tests** — record success updates avg; 5xx bumps `count5xx`; 4xx counts as request but `succeeded` per LBProxy rule (`status < 500` → treat as non-failover success for stats, matching `LBProxy.recordOutcome`).
 
-- [ ] **Step 2: Implement store**
+- [x] **Step 2: Implement store**
 
-- [ ] **Step 3: `./build.sh test --filter MemberStatsTests`**
+- [x] **Step 3: `./build.sh test --filter MemberStatsTests`**
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "feat(peer): in-memory member stats for lowest_latency selection"
@@ -269,7 +269,7 @@ git commit -m "feat(peer): in-memory member stats for lowest_latency selection"
 
 **Why now:** `LocalGateway` and possibly shared response helpers need Hummingbird types. Tests already depend on Hummingbird; the library currently only links `HummingbirdWebSocket`.
 
-- [ ] **Step 1: Add products to the Peer target**
+- [x] **Step 1: Add products to the Peer target**
 
 ```swift
 .target(
@@ -286,7 +286,7 @@ git commit -m "feat(peer): in-memory member stats for lowest_latency selection"
 ),
 ```
 
-- [ ] **Step 2: Build Peer product and confirm MLX-free graph**
+- [x] **Step 2: Build Peer product and confirm MLX-free graph**
 
 ```bash
 ./build.sh -c debug --product tknet-peer 2>&1 | tee /tmp/peer-build.txt
@@ -301,7 +301,7 @@ import json,sys
 
 Expected: build succeeds; dependency list has no `mlx-swift` / `MLX` / `NovaMLXEngine`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add Package.swift Package.resolved
@@ -344,7 +344,7 @@ return allMembersFailed
 
 Do **not** stitch partial SSE from attempt N into attempt N+1 (design: 挑下一台时不把上一家的半截输出拼进去).
 
-- [ ] **Step 1: Failing acceptance-shaped test (Segment 1 gate)**
+- [x] **Step 1: Failing acceptance-shaped test (Segment 1 gate)**
 
 ```swift
 @Test("two upstreams in one pool; first 500 falls through to second")
@@ -361,19 +361,19 @@ func failoverOn5xx() async throws {
 
 Also test: 4xx from first member is returned, second never hit; unknown pool → unknownPool; disabled pool → poolDisabled; timeout retries; loopback gets `X-No-Autoload`, non-loopback does not.
 
-- [ ] **Step 2: Implement `PoolForwarder`**
+- [x] **Step 2: Implement `PoolForwarder`**
 
 Share one `HTTPClient(eventLoopGroupProvider: .singleton)` lifecycle with `shutdown()` — same trap as today's `Relay`.
 
-- [ ] **Step 3: Rewire `Relay.run`**
+- [x] **Step 3: Rewire `Relay.run`**
 
 Resolve `request.model` → capability → **pool** (`capability.sourceId` as pool id) → `PoolForwarder`. Map forward outcomes to existing `responseChunk` / `responseEnd` frames (failed/timeout/cancelled unchanged for tunnel). Preserve Anthropic rejection. Update `RelayTests.noAutoloadAndNestedError` to use a loopback endpoint (already is `127.0.0.1`) so header still expected; add a non-loopback case expecting nil header.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 `./build.sh test --filter 'PoolForwarderTests|RelayTests|RelayUsageSplitTests'`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git commit -m "feat(peer): PoolForwarder with LB-style retry; Relay uses pools"
@@ -401,17 +401,17 @@ git commit -m "feat(peer): PoolForwarder with LB-style retry; Relay uses pools"
 
 Default listen: `127.0.0.1:6600` (configurable via PeerConfig field `gatewayHost` / `gatewayPort` with decode defaults — add in this task).
 
-- [ ] **Step 1: Failing gateway tests**
+- [x] **Step 1: Failing gateway tests**
 
 Use two `MockSourceServer`s + `LocalGateway` on port 0 + `URLSession`/`AsyncHTTPClient` client hitting `http://127.0.0.1:<gw>/v1/chat/completions`. Assert failover 500→second, `/v1/models` lists pool names, unknown model → 404.
 
-- [ ] **Step 2: Implement Hummingbird router**
+- [x] **Step 2: Implement Hummingbird router**
 
 Pattern after `MockSourceServer` (Application + `onServerRunning` for port) and NovaMLXAPI's JSON error shape (`error.message` / `error.type`).
 
-- [ ] **Step 3: `./build.sh test --filter LocalGatewayTests`**
+- [x] **Step 3: `./build.sh test --filter LocalGatewayTests`**
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "feat(peer): LocalGateway OpenAI port with pool dispatch"
@@ -434,17 +434,17 @@ git commit -m "feat(peer): LocalGateway OpenAI port with pool dispatch"
 - `applyConfig` updates forwarder + gateway's view of pools without restart when possible.
 - Status: extend `PeerStatus` with `gatewayListening: Bool` / `gatewayPort: Int?` (optional but useful for CLI prints).
 
-- [ ] **Step 1: Failing tests** — start without peerId → gateway up, connection stays `.idle`; start with peerId + mock tunnel → both paths work; stop is idempotent.
+- [x] **Step 1: Failing tests** — start without peerId → gateway up, connection stays `.idle`; start with peerId + mock tunnel → both paths work; stop is idempotent.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Share one `PoolForwarder` between gateway and relay. `Relay` may wrap the same forwarder instance.
 
-- [ ] **Step 3: `./build.sh test --filter 'PeerServiceTests|TunnelClientTests|EndToEndTests'`**
+- [x] **Step 3: `./build.sh test --filter 'PeerServiceTests|TunnelClientTests|EndToEndTests'`**
 
 Expected: existing tunnel suites still pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "feat(peer): PeerService serves local gateway without requiring tunnel"
@@ -487,11 +487,11 @@ tknet-peer serve [--config PATH] [--listen-host 127.0.0.1] [--listen-port 6600] 
 - Remove the hard `Not registered — run setup first` failure when `--no-tunnel` (or when no peerId); still require registration when dialing the tunnel.
 - Print `gateway listening on http://127.0.0.1:6600` and existing status lines.
 
-- [ ] **Step 1: Implement member/pool commands** writing through `ConfigStore.save` (0600).
+- [x] **Step 1: Implement member/pool commands** writing through `ConfigStore.save` (0600).
 
-- [ ] **Step 2: Wire `Serve` to `PeerService` gateway + optional tunnel.**
+- [x] **Step 2: Wire `Serve` to `PeerService` gateway + optional tunnel.**
 
-- [ ] **Step 3: Manual smoke (document in commit body; optional script)**
+- [x] **Step 3: Manual smoke (document in commit body; optional script)**
 
 ```bash
 ./build.sh --product tknet-peer
@@ -503,7 +503,7 @@ tknet-peer serve --no-tunnel --config ...
 curl -s localhost:6600/v1/models
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "feat(peer): CLI member/pool CRUD; serve local gateway without tunnel"
@@ -523,22 +523,22 @@ git commit -m "feat(peer): CLI member/pool CRUD; serve local gateway without tun
 2. **MLX-free:** document + scriptable check that `tknet-peer` dependency graph has no MLX (run in Step 3).
 3. **Tunnel regression:** `./build.sh test --filter NovaMLXTknetPeerTests` — all existing suites green.
 
-- [ ] **Step 1: Write `GatewayAcceptanceTests`** end-to-end through `LocalGateway` (not only PoolForwarder unit).
+- [x] **Step 1: Write `GatewayAcceptanceTests`** end-to-end through `LocalGateway` (not only PoolForwarder unit).
 
-- [ ] **Step 2: Full Peer suite**
+- [x] **Step 2: Full Peer suite**
 
 ```bash
 ./build.sh test --filter NovaMLXTknetPeerTests
 ```
 
-- [ ] **Step 3: MLX-free product build**
+- [x] **Step 3: MLX-free product build**
 
 ```bash
 swift build -c release --product tknet-peer
 # Confirm Package.swift NovaMLXTknetPeer / tknet-peer deps list contains no MLX* / NovaMLXEngine / NovaMLXCore
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "test(peer): Segment 1 gateway acceptance — failover, models list, suite green"
@@ -550,21 +550,21 @@ git commit -m "test(peer): Segment 1 gateway acceptance — failover, models lis
 
 **Files:** none required (checklist only). Optionally one-line note in `docs/superpowers/plans/2026-10-11-tknet-peer-gateway.md` that Segment 1 plan lives at this file — **only if Lucas wants**; default leave the overview untouched.
 
-- [ ] **Step 1: Zero-warning debug build**
+- [x] **Step 1: Zero-warning debug build**
 
 `./build.sh -c debug` → no `warning:` lines from Peer changes.
 
-- [ ] **Step 2: Peer tests**
+- [x] **Step 2: Peer tests**
 
 `./build.sh test --filter NovaMLXTknetPeerTests`
 
-- [ ] **Step 3: Product MLX-free**
+- [x] **Step 3: Product MLX-free**
 
 `swift build -c release --product tknet-peer`
 
-- [ ] **Step 4: Manual failover demo** (two MockSourceServer ports or `nc`/`python -m http.server` fakes) via `tknet-peer serve --no-tunnel`.
+- [x] **Step 4: Manual failover demo** (two MockSourceServer ports or `nc`/`python -m http.server` fakes) via `tknet-peer serve --no-tunnel`.
 
-- [ ] **Step 5: Stop** — do not start Segment 2 (NovaMLX LB page removal) in this branch of work.
+- [x] **Step 5: Stop** — do not start Segment 2 (NovaMLX LB page removal) in this branch of work.
 
 ---
 

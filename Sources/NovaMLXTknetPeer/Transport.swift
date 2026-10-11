@@ -1,6 +1,4 @@
 import Foundation
-import os
-
 /// One tunnel connection carrying frames. WS in production (Task 10),
 /// slow-poll in Phase 2, in-memory in tests. FrameCodec stays transport-agnostic.
 public protocol TunnelTransport: Sendable {
@@ -30,7 +28,7 @@ public final class InMemoryTransportPair: @unchecked Sendable {
         let inbound: AsyncStream<Frame>
         private let continuation: AsyncStream<Frame>.Continuation
         private let otherContinuation: AsyncStream<Frame>.Continuation
-        private let closed = OSAllocatedUnfairLock(initialState: false)
+        private let closed = PeerLock(initialState: false)
 
         init(mine: AsyncStream<Frame>, mineCont: AsyncStream<Frame>.Continuation,
              otherCont: AsyncStream<Frame>.Continuation) {

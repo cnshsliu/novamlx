@@ -1,7 +1,6 @@
 import Foundation
 import Hummingbird
 import HummingbirdWebSocket
-import os
 @testable import NovaMLXTknetPeer
 
 /// Real local tknet.ai tunnel stand-in over a real WebSocket upgrade.
@@ -18,7 +17,7 @@ final class MockTunnelServer: @unchecked Sendable {
         var lastAuthorization: String?
     }
 
-    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let state = PeerLock(initialState: State())
 
     let receivedFrames = FrameRecorder()
 
@@ -122,9 +121,17 @@ final class MockTunnelServer: @unchecked Sendable {
     }
 
     /// Writes a server-originated frame to the live tunnel connection.
-    /// No-op if no connection is currently open (Task 12 drives relays with it).
+    /// Waits briefly for the upgrade handler to publish its writer: the
+    /// client dial can return before this server has stored `outbound`.
+    /// No-op if no connection is open after that wait.
     func push(_ frame: Frame) async {
-        let outbound = state.withLock { $0.outbound }
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        var outbound: WebSocketOutboundWriter?
+        while ContinuousClock.now < deadline {
+            outbound = state.withLock { $0.outbound }
+            if outbound != nil { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
         try? await outbound?.writeTextMessage(FrameCodec.encode(frame))
     }
 

@@ -2,8 +2,6 @@ import Foundation
 import HummingbirdWSClient
 import Logging
 import NIOWebSocket
-import os
-
 public enum WSTransportError: Error, Equatable {
     case invalidServerURL
     /// send() after close(); TunnelClient reconnects on thrown errors, so a
@@ -42,7 +40,7 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
     }
 
     private let continuation: AsyncStream<Frame>.Continuation
-    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let state = PeerLock(initialState: State())
 
     private init() {
         var continuation: AsyncStream<Frame>.Continuation!

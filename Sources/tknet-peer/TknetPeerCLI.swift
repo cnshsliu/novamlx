@@ -1,6 +1,9 @@
 import ArgumentParser
 import Foundation
 import NovaMLXTknetPeer
+#if canImport(Glibc)
+import Glibc
+#endif
 
 @main
 struct TknetPeerCLI: AsyncParsableCommand {
@@ -8,7 +11,7 @@ struct TknetPeerCLI: AsyncParsableCommand {
         commandName: "tknet-peer",
         abstract: "Tknet inference supply peer",
         version: TknetPeer.version,
-        subcommands: [Setup.self, Serve.self, Earnings.self]
+        subcommands: [Setup.self, Serve.self, Earnings.self, Member.self, Pool.self]
     )
 }
 
@@ -98,6 +101,16 @@ extension TknetPeerCLI {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try ConfigStore.save(config, to: url)
+    }
+
+    static func terminate(_ code: Int32) -> Never {
+        #if canImport(Darwin)
+        Darwin.exit(code)
+        #elseif canImport(Glibc)
+        Glibc.exit(code)
+        #else
+        fatalError("no process exit")
+        #endif
     }
 
     /// Secrets live next to the config file, in a 0700 directory.
@@ -220,11 +233,12 @@ extension TknetPeerCLI {
                     .compactMap { Double($0) }
 
                 let sourceId = "src-\(entry.demandId)"
-                peerConfig.sources.removeAll { $0.id == sourceId }
-                peerConfig.sources.append(SourceConfig(
+                peerConfig.upsertMember(MemberConfig(
                     id: sourceId, name: entry.model, type: .openaiCompatible,
                     endpoint: endpointURL, apiKeyRef: "src/\(sourceId)",
                     upstreamModel: upstream))
+                peerConfig.upsertPool(PoolConfig(
+                    id: sourceId, name: entry.model, memberIds: [sourceId]))
                 secrets.save(key, for: "src/\(sourceId)")
                 peerConfig.capabilities.removeAll { $0.demandId == entry.demandId }
                 peerConfig.capabilities.append(Capability(
@@ -249,26 +263,52 @@ extension TknetPeerCLI {
 
 extension TknetPeerCLI {
     struct Serve: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(abstract: "Run the peer")
+        static let configuration = CommandConfiguration(abstract: "Run the local gateway and, when registered, the tunnel")
 
         @Option(help: "Config file path")
         var config: String = CLIConfig.defaultConfigPath
 
+        @Option(name: .customLong("listen-host"), help: "Gateway bind host (default 127.0.0.1, or the config file)")
+        var listenHost: String?
+
+        @Option(name: .customLong("listen-port"), help: "Gateway bind port (default 6600, or the config file)")
+        var listenPort: Int?
+
+        @Flag(name: .customLong("tunnel"), help: "Dial the tknet tunnel")
+        var tunnel: Bool = false
+
+        @Flag(name: .customLong("no-tunnel"), help: "Serve the local gateway without dialing tknet")
+        var noTunnel: Bool = false
+
         func run() async throws {
-            let configURL = TknetPeerCLI.configURL(config)
-            let peerConfig = try TknetPeerCLI.loadConfig(config)
-            guard peerConfig.peerId != nil else {
-                throw ValidationError("Not registered — run `tknet-peer setup` first.")
+            if tunnel && noTunnel {
+                throw ValidationError("Pass only one of --tunnel and --no-tunnel.")
             }
+            let configURL = TknetPeerCLI.configURL(config)
+            var peerConfig = try TknetPeerCLI.loadConfig(config)
+            if let listenHost { peerConfig.gatewayHost = listenHost }
+            if let listenPort { peerConfig.gatewayPort = listenPort }
+            let dial = tunnel || (!noTunnel && peerConfig.peerId != nil)
             let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
-            guard let token = secrets.load("peer/token"), !token.isEmpty else {
-                throw ValidationError("Missing peer token — re-run `tknet-peer setup`.")
+            if dial {
+                guard peerConfig.peerId != nil else {
+                    throw ValidationError("Not registered — run `tknet-peer setup` first.")
+                }
+                guard let token = secrets.load("peer/token"), !token.isEmpty else {
+                    throw ValidationError("Missing peer token — re-run `tknet-peer setup`.")
+                }
+                _ = token
+            }
+            let factory: TransportFactory
+            if dial {
+                factory = WSTransport.factory(server: peerConfig.serverURL, tokenRef: "peer/token", secrets: secrets)
+            } else {
+                factory = { @Sendable in throw TunnelError.notRegistered }
             }
             let service = PeerService(
                 config: peerConfig,
                 secrets: secrets,
-                transportFactory: WSTransport.factory(
-                    server: peerConfig.serverURL, tokenRef: "peer/token", secrets: secrets),
+                transportFactory: factory,
                 onConfigChange: { updated in
                     // Demand reconciliations (retire/revive) must survive restarts.
                     try? ConfigStore.save(updated, to: configURL)
@@ -284,7 +324,7 @@ extension TknetPeerCLI {
                         // the server's bcrypt forever.
                         print("Upgrade required: this build's peer protocol is below the server minimum. Download the latest tknet-peer / NovaMLX from \(TknetPeer.downloadURL)")
                         await service.stop()
-                        Darwin.exit(2)
+                        TknetPeerCLI.terminate(2)
                     }
                 }
             }
@@ -294,15 +334,216 @@ extension TknetPeerCLI {
             // debug builds otherwise.
             let stopSignal = ShutdownSignal()
             do {
-                try await service.start()
+                try await service.start(tunnel: dial)
             } catch {
                 statusTask.cancel()
                 throw error
+            }
+            if let port = service.gatewayListenPort {
+                print("gateway listening on http://\(peerConfig.gatewayHost):\(port)")
             }
             await stopSignal.wait()
             print("\nShutting down …")
             statusTask.cancel()
             await service.stop()
+        }
+    }
+}
+
+// MARK: - member / pool
+
+extension TknetPeerCLI {
+    struct Member: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Add, remove, list, and update upstream members",
+            subcommands: [Add.self, Remove.self, List.self, Update.self])
+
+        struct Add: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Add or replace a member")
+            @Option var config: String = CLIConfig.defaultConfigPath
+            @Option var id: String
+            @Option var name: String?
+            @Option var endpoint: String
+            @Option(name: .customLong("upstream-model")) var upstreamModel: String
+            @Option(name: .customLong("api-key")) var apiKey: String?
+            @Option var weight: Int?
+            @Flag var free: Bool = false
+            @Flag var paid: Bool = false
+            @Option var type: String = "openaiCompatible"
+
+            func run() async throws {
+                if free && paid { throw ValidationError("Pass only one of --free and --paid.") }
+                guard let endpointURL = URL(string: endpoint) else {
+                    throw ValidationError("Invalid endpoint: \(endpoint)")
+                }
+                var peerConfig = try TknetPeerCLI.loadConfig(config)
+                let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
+                do {
+                    try PeerAdmin.addMember(
+                        &peerConfig, secrets: secrets, id: id, name: name ?? id,
+                        endpoint: endpointURL, upstreamModel: upstreamModel, apiKey: apiKey,
+                        weight: weight, isFree: free, type: try PeerAdmin.sourceType(type))
+                } catch let error as PeerAdminError {
+                    throw ValidationError(error.message)
+                }
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
+                print("member \(id)")
+            }
+        }
+
+        struct Remove: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Remove a member")
+            @Option var config: String = CLIConfig.defaultConfigPath
+            @Option var id: String
+
+            func run() throws {
+                var peerConfig = try TknetPeerCLI.loadConfig(config)
+                do { try PeerAdmin.removeMember(&peerConfig, id: id) }
+                catch let error as PeerAdminError { throw ValidationError(error.message) }
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
+                print("removed \(id)")
+            }
+        }
+
+        struct List: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "List members")
+            @Option var config: String = CLIConfig.defaultConfigPath
+
+            func run() throws {
+                let peerConfig = try TknetPeerCLI.loadConfig(config)
+                print(PeerAdmin.memberList(peerConfig))
+            }
+        }
+
+        struct Update: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Update a member")
+            @Option var config: String = CLIConfig.defaultConfigPath
+            @Option var id: String
+            @Option var name: String?
+            @Option var endpoint: String?
+            @Option(name: .customLong("upstream-model")) var upstreamModel: String?
+            @Option(name: .customLong("api-key")) var apiKey: String?
+            @Option var weight: Int?
+            @Flag var free: Bool = false
+            @Flag var paid: Bool = false
+            @Option var type: String?
+            @Flag var enable: Bool = false
+            @Flag var disable: Bool = false
+
+            func run() throws {
+                if free && paid { throw ValidationError("Pass only one of --free and --paid.") }
+                if enable && disable { throw ValidationError("Pass only one of --enable and --disable.") }
+                var peerConfig = try TknetPeerCLI.loadConfig(config)
+                let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
+                let endpointURL = try endpoint.map { raw -> URL in
+                    guard let url = URL(string: raw) else { throw ValidationError("Invalid endpoint: \(raw)") }
+                    return url
+                }
+                let memberType = try type.map { raw -> SourceType in
+                    do { return try PeerAdmin.sourceType(raw) }
+                    catch let error as PeerAdminError { throw ValidationError(error.message) }
+                }
+                let isFree: Bool? = free ? true : (paid ? false : nil)
+                let isEnabled: Bool? = enable ? true : (disable ? false : nil)
+                do {
+                    try PeerAdmin.updateMember(
+                        &peerConfig, secrets: secrets, id: id, name: name, endpoint: endpointURL,
+                        upstreamModel: upstreamModel, apiKey: apiKey, weight: weight,
+                        isFree: isFree, type: memberType, isEnabled: isEnabled)
+                } catch let error as PeerAdminError {
+                    throw ValidationError(error.message)
+                }
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
+                print("member \(id)")
+            }
+        }
+    }
+
+    struct Pool: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Add, remove, list, and update pools",
+            subcommands: [Add.self, Remove.self, List.self, Update.self])
+
+        struct Add: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Add or replace a pool")
+            @Option var config: String = CLIConfig.defaultConfigPath
+            @Option var id: String?
+            @Option var name: String
+            @Option var strategy: String = "tiered"
+            @Option(name: .customLong("max-retries")) var maxRetries: Int = 3
+            @Option(name: .customLong("member")) var member: [String] = []
+
+            func run() throws {
+                var peerConfig = try TknetPeerCLI.loadConfig(config)
+                do {
+                    try PeerAdmin.addPool(
+                        &peerConfig, id: id, name: name,
+                        strategy: try PeerAdmin.strategy(strategy),
+                        maxRetries: maxRetries, memberIds: member)
+                } catch let error as PeerAdminError {
+                    throw ValidationError(error.message)
+                }
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
+                print("pool \(id ?? name)")
+            }
+        }
+
+        struct Remove: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Remove a pool")
+            @Option var config: String = CLIConfig.defaultConfigPath
+            @Option var id: String
+
+            func run() throws {
+                var peerConfig = try TknetPeerCLI.loadConfig(config)
+                do { try PeerAdmin.removePool(&peerConfig, id: id) }
+                catch let error as PeerAdminError { throw ValidationError(error.message) }
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
+                print("removed \(id)")
+            }
+        }
+
+        struct List: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "List pools")
+            @Option var config: String = CLIConfig.defaultConfigPath
+
+            func run() throws {
+                print(PeerAdmin.poolList(try TknetPeerCLI.loadConfig(config)))
+            }
+        }
+
+        struct Update: ParsableCommand {
+            static let configuration = CommandConfiguration(abstract: "Update a pool")
+            @Option var config: String = CLIConfig.defaultConfigPath
+            @Option var id: String
+            @Option var name: String?
+            @Option var strategy: String?
+            @Option(name: .customLong("max-retries")) var maxRetries: Int?
+            @Option(name: .customLong("add-member")) var addMember: [String] = []
+            @Option(name: .customLong("remove-member")) var removeMember: [String] = []
+            @Flag var enable: Bool = false
+            @Flag var disable: Bool = false
+
+            func run() throws {
+                if enable && disable { throw ValidationError("Pass only one of --enable and --disable.") }
+                var peerConfig = try TknetPeerCLI.loadConfig(config)
+                let parsed: PoolStrategy?
+                if let strategy {
+                    do { parsed = try PeerAdmin.strategy(strategy) }
+                    catch let error as PeerAdminError { throw ValidationError(error.message) }
+                } else {
+                    parsed = nil
+                }
+                let isEnabled: Bool? = enable ? true : (disable ? false : nil)
+                do {
+                    try PeerAdmin.updatePool(
+                        &peerConfig, id: id, name: name, strategy: parsed, maxRetries: maxRetries,
+                        addMembers: addMember, removeMembers: removeMember, isEnabled: isEnabled)
+                } catch let error as PeerAdminError {
+                    throw ValidationError(error.message)
+                }
+                try TknetPeerCLI.saveConfig(peerConfig, path: config)
+                print("pool \(id)")
+            }
         }
     }
 }

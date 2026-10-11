@@ -1,6 +1,5 @@
 import Foundation
 import Logging
-import os
 
 /// Aggregated snapshot the CLI and the Mac page render. `capabilities` is the
 /// live serving set (`PeerConfig.activeCapabilities` — declarations whose
@@ -15,13 +14,17 @@ public struct PeerStatus: Equatable, Sendable {
     public var lastError: String?
     public var demand: [DemandEntry]
     public var capabilities: [Capability]
+    public var gatewayListening: Bool
+    public var gatewayPort: Int?
 
     public init(connection: TunnelStatus, activeRequests: Int = 0, totalRequests: Int = 0,
                 totalCompletionTokens: Int = 0, lastError: String? = nil,
-                demand: [DemandEntry] = [], capabilities: [Capability] = []) {
+                demand: [DemandEntry] = [], capabilities: [Capability] = [],
+                gatewayListening: Bool = false, gatewayPort: Int? = nil) {
         self.connection = connection; self.activeRequests = activeRequests
         self.totalRequests = totalRequests; self.totalCompletionTokens = totalCompletionTokens
         self.lastError = lastError; self.demand = demand; self.capabilities = capabilities
+        self.gatewayListening = gatewayListening; self.gatewayPort = gatewayPort
     }
 }
 
@@ -41,6 +44,9 @@ public final class PeerService: @unchecked Sendable {
         var config: PeerConfig
         var client: TunnelClient?
         var relay: Relay?
+        var forwarder: PoolForwarder?
+        var gateway: LocalGateway?
+        var started = false
         var runTask: Task<Void, Never>?
         var statusTask: Task<Void, Never>?
         var demandTask: Task<Void, Never>?
@@ -55,9 +61,11 @@ public final class PeerService: @unchecked Sendable {
         var totalCompletionTokens = 0
         var lastError: String?
         var demand: [DemandEntry] = []
+        var gatewayListening = false
+        var gatewayPort: Int?
     }
 
-    private let state: OSAllocatedUnfairLock<State>
+    private let state: PeerLock<State>
 
     private let secrets: any SecretStore
     private let transportFactory: TransportFactory
@@ -79,19 +87,47 @@ public final class PeerService: @unchecked Sendable {
         self.transportFactory = transportFactory
         self.delay = delay
         self.onConfigChange = onConfigChange
-        self.state = OSAllocatedUnfairLock(initialState: State(config: config))
+        self.state = PeerLock(initialState: State(config: config))
         (statusStream, statusContinuation) = AsyncStream.makeStream()
     }
 
-    /// Connects the tunnel and keeps it alive until `stop()`. Throws
-    /// `TunnelError.notRegistered` when the peer has no id yet (register
-    /// first, then start).
-    public func start() async throws {
-        guard let initialConfig = takeStartConfig() else {
-            throw TunnelError.notRegistered
+    /// Starts the local gateway, then dials the tunnel when `tunnel` is true
+    /// and this peer already has an id. Missing registration skips the tunnel
+    /// and still serves the gateway — a token factory does not need tknet to
+    /// balance local upstreams.
+    public func start(tunnel: Bool = true) async throws {
+        guard let initialConfig = claimStart() else {
+            logger.warning("start() called twice; ignoring the second start")
+            return
         }
 
-        let relay = Relay(config: initialConfig, secrets: secrets)
+        let forwarder = PoolForwarder(config: initialConfig, secrets: secrets)
+        let gateway = LocalGateway()
+        do {
+            try await gateway.start(
+                host: initialConfig.gatewayHost,
+                port: initialConfig.gatewayPort,
+                forwarder: forwarder)
+        } catch {
+            state.withLock { $0.started = false }
+            try? await forwarder.shutdown()
+            throw error
+        }
+        guard noteGateway(up: true, port: gateway.port, forwarder: forwarder, gateway: gateway) else {
+            await gateway.stop()
+            try? await forwarder.shutdown()
+            return
+        }
+
+        let dial = tunnel && initialConfig.peerId != nil
+        if !dial {
+            if tunnel {
+                logger.info("no peer id; serving the local gateway without a tunnel")
+            }
+            return
+        }
+
+        let relay = Relay(forwarder: forwarder)
         let client = TunnelClient(
             config: initialConfig, relay: relay,
             transportFactory: observingFactory(),
@@ -110,8 +146,16 @@ public final class PeerService: @unchecked Sendable {
         }
 
         guard install(client: client, relay: relay) else {
-            try? await relay.shutdown()  // double start(): keep the first one
-            logger.warning("start() called twice; ignoring the second start")
+            await gateway.stop()
+            try? await forwarder.shutdown()
+            state.withLock { state in
+                state.started = false
+                state.gateway = nil
+                state.forwarder = nil
+                state.aggregates.gatewayListening = false
+                state.aggregates.gatewayPort = nil
+            }
+            logger.warning("start() lost the race; shutting the second gateway down")
             return
         }
 
@@ -148,7 +192,8 @@ public final class PeerService: @unchecked Sendable {
             runTask.cancel()
             client.stop()
             _ = await runTask.value
-            try? await relay.shutdown()
+            await gateway.stop()
+            try? await forwarder.shutdown()
         }
     }
 
@@ -157,7 +202,7 @@ public final class PeerService: @unchecked Sendable {
     /// dispatches), then shut the relay down — AsyncHTTPClient has a debug
     /// deinit precondition that traps otherwise. Publishes a final `.idle`.
     public func stop() async {
-        let (client, relay, run, statusTask, demandTask) = detach()
+        let (client, gateway, forwarder, run, statusTask, demandTask) = detach()
         run?.cancel()
         statusTask?.cancel()
         demandTask?.cancel()
@@ -165,10 +210,14 @@ public final class PeerService: @unchecked Sendable {
         if let run {
             _ = await run.value
         }
-        try? await relay?.shutdown()
+        await gateway?.stop()
+        try? await forwarder?.shutdown()
         state.withLock { state in
             state.aggregates.connection = .idle
             state.aggregates.activeRequests = 0
+            state.aggregates.gatewayListening = false
+            state.aggregates.gatewayPort = nil
+            state.started = false
         }
         publish()
     }
@@ -180,8 +229,11 @@ public final class PeerService: @unchecked Sendable {
     /// reconnects). `concurrencyLimit` and the hello identity stay bound to
     /// the config `start()` saw — restart to change those.
     public func applyConfig(_ newConfig: PeerConfig) async {
+        var newConfig = newConfig
+        newConfig.migrateLegacyPoolsIfNeeded()
         let client = state.withLock { state -> TunnelClient? in
             state.config = newConfig
+            state.forwarder?.updateConfig(newConfig)
             return state.client
         }
         client?.updateRelay(newConfig)
@@ -192,6 +244,11 @@ public final class PeerService: @unchecked Sendable {
 
     public var currentConfig: PeerConfig {
         state.withLock { $0.config }
+    }
+
+    /// Bound gateway port after `start`, if the listener came up.
+    public var gatewayListenPort: Int? {
+        state.withLock { $0.aggregates.gatewayPort }
     }
 
     /// The last demand list the server pushed (empty before the first
@@ -244,25 +301,46 @@ public final class PeerService: @unchecked Sendable {
                 totalCompletionTokens: state.aggregates.totalCompletionTokens,
                 lastError: state.aggregates.lastError,
                 demand: state.aggregates.demand,
-                capabilities: state.config.activeCapabilities)
+                capabilities: state.config.activeCapabilities,
+                gatewayListening: state.aggregates.gatewayListening,
+                gatewayPort: state.aggregates.gatewayPort)
         }
         statusContinuation.yield(status)
     }
 
     // MARK: - State helpers (non-async so the unfair lock is legal there)
 
-    /// Config snapshot if the peer is registered and not yet started.
-    private func takeStartConfig() -> PeerConfig? {
+    /// Marks the service started and returns the migrated config. Nil when
+    /// `start` is already in progress or running.
+    private func claimStart() -> PeerConfig? {
         state.withLock { state in
-            guard state.config.peerId != nil else { return nil }
-            return state.config
+            guard !state.started else { return nil }
+            state.started = true
+            var config = state.config
+            config.migrateLegacyPoolsIfNeeded()
+            state.config = config
+            return config
         }
     }
 
-    /// Installs the freshly built client/relay; false when already started.
+    /// Records the live gateway. False when `stop` already won the race.
+    private func noteGateway(up: Bool, port: Int, forwarder: PoolForwarder, gateway: LocalGateway) -> Bool {
+        let accepted = state.withLock { state -> Bool in
+            guard state.started else { return false }
+            state.forwarder = forwarder
+            state.gateway = gateway
+            state.aggregates.gatewayListening = up
+            state.aggregates.gatewayPort = port
+            return true
+        }
+        if accepted { publish() }
+        return accepted
+    }
+
+    /// Installs the freshly built client/relay; false when stop already ran.
     private func install(client: TunnelClient, relay: Relay) -> Bool {
         state.withLock { state in
-            guard state.client == nil else { return false }
+            guard state.started, state.client == nil else { return false }
             state.client = client
             state.relay = relay
             return true
@@ -270,16 +348,19 @@ public final class PeerService: @unchecked Sendable {
     }
 
     /// Pulls every task handle for teardown and clears the started state.
-    private func detach() -> (TunnelClient?, Relay?,
+    private func detach() -> (TunnelClient?, LocalGateway?, PoolForwarder?,
                               Task<Void, Never>?, Task<Void, Never>?, Task<Void, Never>?) {
         state.withLock { state in
-            let out = (state.client, state.relay, state.runTask,
+            let out = (state.client, state.gateway, state.forwarder, state.runTask,
                        state.statusTask, state.demandTask)
             state.client = nil
             state.relay = nil
+            state.gateway = nil
+            state.forwarder = nil
             state.runTask = nil
             state.statusTask = nil
             state.demandTask = nil
+            state.started = false
             return out
         }
     }
@@ -309,7 +390,7 @@ private final class ObservingTransport: TunnelTransport, @unchecked Sendable {
     private let inboundContinuation: AsyncStream<Frame>.Continuation
     private let underlying: any TunnelTransport
     private let onTerminal: @Sendable () -> Void
-    private let closed = OSAllocatedUnfairLock(initialState: false)
+    private let closed = PeerLock(initialState: false)
 
     init(underlying: any TunnelTransport,
          onRequest: @escaping @Sendable () -> Void,

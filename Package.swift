@@ -261,6 +261,8 @@ let package = Package(
         .target(
             name: "NovaMLXTknetPeer",
             dependencies: [
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "HummingbirdRouter", package: "hummingbird"),
                 .product(name: "HummingbirdWebSocket", package: "hummingbird-websocket"),
                 .product(name: "HummingbirdWSClient", package: "hummingbird-websocket"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),

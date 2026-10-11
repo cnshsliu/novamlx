@@ -1,5 +1,4 @@
 import Foundation
-import os
 import Testing
 @testable import NovaMLXTknetPeer
 
@@ -9,7 +8,7 @@ struct TunnelClientTests {
     /// sleeps a small fixed slice so heartbeat loops don't spin hot. Recorded
     /// values (not wall time) are what assertions inspect.
     private final class DelayRecorder: @unchecked Sendable {
-        private let state = OSAllocatedUnfairLock(initialState: [Double]())
+        private let state = PeerLock(initialState: [Double]())
         private let paceSeconds: Double
         init(paceSeconds: Double = 0.02) { self.paceSeconds = paceSeconds }
 
@@ -77,7 +76,7 @@ struct TunnelClientTests {
         config.capabilities = [Capability(
             demandId: "d1", model: "m", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
-        config.sources = [SourceConfig(
+        config.members = [MemberConfig(
             id: "s1", name: "x", type: .openaiCompatible,
             endpoint: sourceEndpoint, apiKeyRef: "s1", upstreamModel: "u")]
         let relay = Relay(config: config, secrets: FileSecretStore(
@@ -229,7 +228,8 @@ struct TunnelClientTests {
         let factory = SequentialFactory([pair1.peerSide, pair2.peerSide])
         var config = PeerConfig.defaultConfig()
         config.peerId = "peer-1"
-        config.sources = [SourceConfig(
+        config.gatewayPort = 0
+        config.members = [MemberConfig(
             id: "s1", name: "x", type: .openaiCompatible,
             endpoint: URL(string: "http://127.0.0.1:1/v1")!, apiKeyRef: "s1",
             upstreamModel: "u")]
@@ -290,7 +290,7 @@ struct TunnelClientTests {
         // Decorator: peerSide of a pair, but reporting the server's close code.
         final class CodedTransport: TunnelTransport, @unchecked Sendable {
             let wrapped: TunnelTransport
-            private let code = OSAllocatedUnfairLock(initialState: UInt16?.none)
+            private let code = PeerLock(initialState: UInt16?.none)
 
             init(_ wrapped: TunnelTransport) { self.wrapped = wrapped }
 
@@ -340,7 +340,7 @@ struct TunnelClientTests {
             #expect(delayLog.backoffValues.isEmpty)
             observe.cancel()
             runLoop.cancel()
-            await client.stop()
+            client.stop()
         }
     }
 
@@ -399,9 +399,9 @@ struct TunnelClientTests {
     }
 }
 
-/// Thread-safe TunnelStatus collector (OSAllocatedUnfairLock: async-safe).
+/// Thread-safe TunnelStatus collector (PeerLock: async-safe).
 private final class LockedStatusLog: @unchecked Sendable {
-    private let items = OSAllocatedUnfairLock(initialState: [TunnelStatus]())
+    private let items = PeerLock(initialState: [TunnelStatus]())
     func add(_ s: TunnelStatus) { items.withLock { $0.append(s) } }
     func contains(_ s: TunnelStatus) -> Bool { items.withLock { $0.contains(s) } }
 }
