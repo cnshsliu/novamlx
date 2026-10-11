@@ -92,6 +92,51 @@ public final class DraftModelRegistry: Sendable {
         return nil
     }
 
+    /// OPT-IN DSpark drafter ids for a backbone — no disk check, so this stays
+    /// testable. These never enter `dsparkCandidate(forMainId:)` / auto-inject; only
+    /// an explicit `draft_model` request parameter picks them up.
+    public func dsparkOptInCandidateIds(forMainId mainId: String) -> [String] {
+        let name = (mainId.split(separator: "/").last.map(String.init) ?? mainId).lowercased()
+        if name.contains("dspark") || name.contains("dflash") || name.contains("-mtp") {
+            return []
+        }
+        if name.contains("qwen3.8-27b") || name.contains("qwen3_8-27b") {
+            return ["RedHatAI/Qwen3.8-27B-speculator.dspark"]
+        }
+        // DeepSpec-native heads for the dense Qwen3 line (block-7, bidirectional).
+        if name.contains("qwen3-14b") || name.contains("qwen3_14b") {
+            return ["deepseek-ai/dspark_qwen3_14b_block7"]
+        }
+        if name.contains("qwen3-8b") || name.contains("qwen3_8b") {
+            return ["deepseek-ai/dspark_qwen3_8b_block7"]
+        }
+        return []
+    }
+
+    /// OPT-IN DSpark drafter for this backbone, gated on the checkpoint being on disk
+    /// and parseable by the DSpark loader. Not part of `boostStatus` / auto-inject.
+    public func dsparkOptInCandidate(forMainId mainId: String) -> DraftModelCandidate? {
+        for id in dsparkOptInCandidateIds(forMainId: mainId) {
+            let dir = NovaMLXPaths.directory(forModelId: id)
+            let cfg = dir.appendingPathComponent("config.json")
+            guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
+            guard DSparkConfig.isDSparkDraftConfig(at: dir) else { continue }
+            let sizeMB =
+                id.contains("speculator.dspark") ? 3800
+                : id.contains("14b") ? 6300
+                : 4600
+            return DraftModelCandidate(
+                draftModelId: id,
+                displayName: id.split(separator: "/").last.map(String.init) ?? id,
+                expectedVocabSize: 0,
+                family: .qwen,
+                downloadRepo: id,
+                estimatedSizeMB: sizeMB
+            )
+        }
+        return nil
+    }
+
     /// DFlash2 block-diffusion drafter for this backbone (preferred over MTP).
     public func dflashCandidate(forMainId mainId: String) -> DraftModelCandidate? {
         for id in dflashDraftCandidates(forMainId: mainId) {

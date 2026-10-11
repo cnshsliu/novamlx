@@ -192,6 +192,8 @@ public final class TTSService: @unchecked Sendable {
             }
 
             let params = DotsTTSPipeline.Params()
+            await Qwen3TTSCloneService.acquireSpeechTurn()
+            defer { Qwen3TTSCloneService.releaseSpeechTurn() }
             let audio = pipe.generate(
                 targetText: text,
                 refAudio48k: refAudio,

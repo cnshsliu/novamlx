@@ -32,4 +32,30 @@ struct TknetRESTTests {
                 server: URL(string: "http://127.0.0.1:\(server.port)")!, token: "wrong")
         }
     }
+
+    @Test("session cookie is the token after the session name")
+    func sessionCookie() {
+        let header = "session=sess-42; Path=/; HttpOnly; SameSite=Lax"
+        #expect(TknetREST.sessionToken(setCookie: [header]) == "sess-42")
+        #expect(TknetREST.sessionToken(setCookie: ["other=1"]) == nil)
+    }
+
+    @Test("login keeps the session and claim uses it")
+    func loginAndClaim() async throws {
+        let server = MockTknetServer()
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let rest = TknetREST()
+        defer { Task { try? await rest.shutdown() } }
+        let base = URL(string: "http://127.0.0.1:\(server.port)")!
+        let login = try await rest.login(server: base, email: "lucas@example.com", password: "secret")
+        #expect(login.session == "sess-42")
+        #expect(login.account.email == "lucas@example.com")
+        let user = try await rest.currentUser(server: base, session: login.session)
+        #expect(user.name == "Lucas")
+        let name = try await rest.claimPeer(
+            server: base, session: login.session, peerId: "peer-42", connectionKey: "tok-42")
+        #expect(name == "lucas-mac")
+        try await rest.logout(server: base, session: login.session)
+    }
 }

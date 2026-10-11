@@ -154,6 +154,7 @@ enum WorkerSortOrder: String, CaseIterable {
 
 struct ClusterPageView: View {
     @ObservedObject var appState: MenuBarAppState
+    let memory: ClusterPageMemory
     @EnvironmentObject var l10n: L10n
 
     @State private var isRunning: Bool = false
@@ -422,8 +423,28 @@ struct ClusterPageView: View {
             }
             .padding(24)
         }
-        .onAppear { startPolling() }
-        .onDisappear { stopPolling() }
+        .onAppear {
+            expandedNodeId = memory.expandedNodeId
+            workerSort = memory.workerSort
+            if !memory.selectedActivationModel.isEmpty {
+                selectedActivationModel = memory.selectedActivationModel
+            }
+            showCredentialDialog = memory.showCredentialDialog
+            credentialHost = memory.credentialHost
+            credentialUsername = memory.credentialUsername
+            credentialPassword = memory.credentialPassword
+            startPolling()
+        }
+        .onDisappear {
+            memory.expandedNodeId = expandedNodeId
+            memory.workerSort = workerSort
+            memory.selectedActivationModel = selectedActivationModel
+            memory.showCredentialDialog = showCredentialDialog
+            memory.credentialHost = credentialHost
+            memory.credentialUsername = credentialUsername
+            memory.credentialPassword = credentialPassword
+            stopPolling()
+        }
         .sheet(isPresented: $showCredentialDialog) {
             credentialDialogSheet
         }

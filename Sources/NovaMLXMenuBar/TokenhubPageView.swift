@@ -40,6 +40,7 @@ struct ProviderCatalogEntry: Identifiable {
 struct TokenhubPageView: View {
     @ObservedObject var appState: MenuBarAppState
     @EnvironmentObject var l10n: L10n
+    let memory: TokenhubPageMemory
 
     @State private var providers: [TokenhubProvider] = []
     @State private var editingProvider: TokenhubProvider?
@@ -123,6 +124,35 @@ struct TokenhubPageView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             reloadProviders()
+            guard memory.keep else { return }
+            isCreatingNew = memory.isCreatingNew
+            rightPanelMode = memory.panel
+            formName = memory.formName
+            formEndpoint = memory.formEndpoint
+            formApiKey = memory.formApiKey
+            formRemoteModel = memory.formRemoteModel
+            formEnabled = memory.formEnabled
+            formIsFree = memory.formIsFree
+            formSupportsResponses = memory.formSupportsResponses
+            formTags = memory.formTags
+            if let id = memory.selectedId {
+                selectedProvider = providers.first { $0.id == id }
+                editingProvider = isCreatingNew ? nil : selectedProvider
+            }
+        }
+        .onDisappear {
+            memory.keep = true
+            memory.selectedId = selectedProvider?.id
+            memory.isCreatingNew = isCreatingNew
+            memory.panel = rightPanelMode
+            memory.formName = formName
+            memory.formEndpoint = formEndpoint
+            memory.formApiKey = formApiKey
+            memory.formRemoteModel = formRemoteModel
+            memory.formEnabled = formEnabled
+            memory.formIsFree = formIsFree
+            memory.formSupportsResponses = formSupportsResponses
+            memory.formTags = formTags
         }
         .onChange(of: formName) { resetVerification() }
         .onChange(of: formEndpoint) { resetVerification() }

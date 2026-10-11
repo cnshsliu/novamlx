@@ -61,5 +61,112 @@ struct PeerConfigTests {
         #expect(c.requestTimeoutSeconds == 300)
         #expect(c.idleMinutesBeforeSlowPoll == 5)
         #expect(c.serverURL == URL(string: "wss://tknet.ai")!)
+        #expect(c.serverMemory.isEmpty)
+    }
+
+    @Test("https and wss are the same saved server")
+    func sameSavedServer() {
+        let https = PeerConfig.normalizedREST(URL(string: "https://tknet.ai/")!)
+        let wss = PeerConfig.normalizedREST(URL(string: "wss://tknet.ai")!)
+        #expect(https == "https://tknet.ai")
+        #expect(https == wss)
+    }
+
+    @Test("old config without server memory still loads")
+    func legacyDecodes() throws {
+        let json = #"{"serverURL":"wss://tknet.ai","peerId":"p","registrations":{"wss://tknet.ai":"p"}}"#
+        let config = try JSONDecoder().decode(PeerConfig.self, from: Data(json.utf8))
+        #expect(config.serverMemory.isEmpty)
+        #expect(config.peerId == "p")
+        #expect(config.registrations["wss://tknet.ai"] == "p")
+    }
+
+    @Test("adopt keeps the peer id and leaves the name empty")
+    func adoptKeepsPeerId() {
+        var config = PeerConfig.defaultConfig()
+        config.peerId = "p"
+        config.registrations["wss://tknet.ai"] = "p"
+        let adopted = config.adoptRegistrationsIntoMemory()
+        #expect(adopted)
+        #expect(config.serverMemory.first?.server == "https://tknet.ai")
+        #expect(config.serverMemory.first?.peerName == "")
+        #expect(config.peerId == "p")
+        let again = config.adoptRegistrationsIntoMemory()
+        #expect(!again)
+    }
+
+    @Test("activate restores each peer id and keeps each name")
+    func activateRestoresIdentity() {
+        var config = PeerConfig.defaultConfig()
+        config.registrations["wss://tknet.ai"] = "peer-a"
+        config.registrations["wss://other.example:8443"] = "peer-b"
+        config.peerId = "peer-a"
+        let source = SourceConfig(
+            id: "s1", name: "Local", type: .localNovaMLX,
+            endpoint: URL(string: "http://127.0.0.1:6590/v1")!,
+            apiKeyRef: "src/s1", upstreamModel: "m")
+        config.serverMemory = [
+            ServerMemory(server: "https://tknet.ai", peerName: "alpha", sources: [source]),
+            ServerMemory(server: "https://other.example:8443", peerName: "beta"),
+        ]
+        config.sources = [source]
+        let toOther = config.activateServer(URL(string: "https://other.example:8443")!)
+        #expect(toOther)
+        #expect(config.peerId == "peer-b")
+        #expect(config.sources.isEmpty)
+        #expect(config.serverMemory.first { $0.server == "https://tknet.ai" }?.peerName == "alpha")
+        let back = config.activateServer(URL(string: "https://tknet.ai")!)
+        #expect(back)
+        #expect(config.peerId == "peer-a")
+        #expect(config.sources.map(\.id) == ["s1"])
+        #expect(config.serverMemory.first { $0.server == "https://other.example:8443" }?.peerName == "beta")
+    }
+
+    @Test("forget drops that server and keeps the other peer id")
+    func forgetKeepsTheOther() {
+        var config = PeerConfig.defaultConfig()
+        config.registrations["wss://tknet.ai"] = "peer-a"
+        config.registrations["ws://127.0.0.1:9000"] = "peer-b"
+        config.peerId = "peer-a"
+        config.serverMemory = [
+            ServerMemory(server: "https://tknet.ai", peerName: "alpha"),
+            ServerMemory(server: "http://127.0.0.1:9000", peerName: "beta"),
+        ]
+        config.forgetServer("https://tknet.ai")
+        #expect(config.registrations["wss://tknet.ai"] == nil)
+        #expect(config.peerId == "peer-b")
+        #expect(config.serverMemory.map(\.peerName) == ["beta"])
+    }
+
+    @Test("remember name does not change the peer id")
+    func rememberNameLeavesPeerId() {
+        var config = PeerConfig.defaultConfig()
+        config.peerId = "peer-a"
+        config.registrations["wss://tknet.ai"] = "peer-a"
+        config.rememberPeerName("https://tknet.ai", name: "lucas-mac")
+        #expect(config.peerId == "peer-a")
+        #expect(config.serverMemory.first?.peerName == "lucas-mac")
+        #expect(config.registrations["wss://tknet.ai"] == "peer-a")
+    }
+
+    @Test("a demand matches a downloaded model id")
+    func demandMatchesLocalModel() {
+        let downloaded = ["mlx-community/Qwen3-8B-4bit", "org/Other"]
+        #expect(DemandModelMatch.localId(for: "missing", downloadedIds: downloaded, loadedIds: []) == nil)
+        #expect(DemandModelMatch.localId(
+            for: "Qwen3-8B-4bit", downloadedIds: downloaded, loadedIds: []) == "mlx-community/Qwen3-8B-4bit")
+        #expect(DemandModelMatch.localId(
+            for: "mlx-community/Qwen3-8B-4bit", downloadedIds: downloaded, loadedIds: [])
+                == "mlx-community/Qwen3-8B-4bit")
+        #expect(!DemandModelMatch.isLoaded("mlx-community/Qwen3-8B-4bit", loadedIds: []))
+        #expect(DemandModelMatch.isLoaded("mlx-community/Qwen3-8B-4bit", loadedIds: ["mlx-community/Qwen3-8B-4bit"]))
+    }
+
+    @Test("localhost is available only inside a novamlx checkout")
+    func localServerOnlyInCheckout() {
+        #expect(TknetServers.allowsLocalServer(bundlePath: "/Users/lucas/dev/novamlx/dist/NovaMLX.app"))
+        #expect(!TknetServers.allowsLocalServer(bundlePath: "/Applications/NovaMLX.app"))
+        #expect(TknetServers.choices(allowsLocal: false) == [TknetServers.official])
+        #expect(TknetServers.choices(allowsLocal: true) == [TknetServers.official, TknetServers.localDev])
     }
 }

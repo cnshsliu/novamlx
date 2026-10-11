@@ -23,6 +23,20 @@ struct ModelsPageView: View {
     @State private var tieToDelete: String?
     @State private var showTieDeleteConfirm = false
     @State private var typeFilter: ModelTypeFilter = .all
+    @State private var modelQuery = ""
+    @State private var scrollAnchor: String?
+    @State private var downloadedSnapshot: [ModelRecord] = []
+    let memory: ModelsPageMemory
+
+    init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager, memory: ModelsPageMemory) {
+        self.appState = appState
+        self.inferenceService = inferenceService
+        self.modelManager = modelManager
+        self.memory = memory
+        _typeFilter = State(initialValue: memory.typeFilter)
+        _modelQuery = State(initialValue: memory.modelQuery)
+        _scrollAnchor = State(initialValue: memory.scrollAnchor)
+    }
 
     enum ModelTypeFilter: String, CaseIterable {
         case all
@@ -85,6 +99,7 @@ struct ModelsPageView: View {
     var body: some View {
         VStack(spacing: 0) {
             ModelTypeFilterBar(filter: $typeFilter)
+            modelFilterField
 
             Divider().padding(.horizontal, 24)
 
@@ -144,9 +159,19 @@ struct ModelsPageView: View {
         } message: {
             Text(l10n.tr("models.deleteMessage", modelToDelete ?? ""))
         }
+        .onAppear { Task { await refreshDownloaded() } }
+        .onChange(of: modelQuery) { _, value in memory.modelQuery = value }
+        .onChange(of: typeFilter) { _, value in memory.typeFilter = value }
+        .onChange(of: scrollAnchor) { _, value in memory.scrollAnchor = value }
+        .onChange(of: refreshTrigger) { _, _ in Task { await refreshDownloaded() } }
         .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
-            refreshTrigger.toggle()
+            Task { await refreshDownloaded() }
         }
+    }
+
+    private func refreshDownloaded() async {
+        await modelManager.refreshModelCaches()
+        downloadedSnapshot = modelManager.downloadedModels()
     }
 
     private var localModelsContent: some View {
@@ -158,15 +183,51 @@ struct ModelsPageView: View {
                 }
                 .padding(24)
             }
+            .scrollPosition(id: $scrollAnchor)
         }
+    }
+
+    private var modelFilterField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            TextField(l10n.tr("models.filterPlaceholder"), text: $modelQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .accessibilityIdentifier("models-filter")
+            if !modelQuery.isEmpty {
+                Button {
+                    modelQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 24)
+        .padding(.bottom, 8)
+    }
+
+    private func matchesQuery(_ id: String) -> Bool {
+        let query = modelQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return true }
+        return id.localizedCaseInsensitiveContains(query)
     }
 
     private var loadedSection: some View {
         let loaded = appState.loadedModels.filter { id in
+            guard matchesQuery(id) else { return false }
             guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
             return typeFilter.matches(record.modelType)
         }
         let restoring = appState.restoringModels.filter { id in
+            guard matchesQuery(id) else { return false }
             guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
             return typeFilter.matches(record.modelType)
         }
@@ -185,7 +246,11 @@ struct ModelsPageView: View {
             }
 
             if loaded.isEmpty && restoring.isEmpty {
-                emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
+                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
+                } else {
+                    emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
+                }
             } else {
                 // Models currently being restored on startup — show spinner rows
                 ForEach(restoring, id: \.self) { modelId in
@@ -384,14 +449,15 @@ struct ModelsPageView: View {
     }
 
     private var downloadedSection: some View {
-        let allDownloaded = modelManager.downloadedModels()
+        let allDownloaded = downloadedSnapshot
         let loaded = Set(inferenceService.listLoadedModels())
-        let downloaded = allDownloaded.filter { !loaded.contains($0.id) && typeFilter.matches($0.modelType) }
-        NovaMLXLog.info("[ModelsPage] downloadedSection: allDownloaded=\(allDownloaded.count), loaded=\(loaded.count), filtered=\(downloaded.count), typeFilter=\(typeFilter.rawValue)")
+        let downloaded = allDownloaded.filter {
+            !loaded.contains($0.id) && typeFilter.matches($0.modelType) && matchesQuery($0.id)
+        }
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                sectionHeader(l10n.tr("models.noInactiveModels"), icon: "arrow.down.circle", count: downloaded.count)
+                sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
                 Spacer()
                 Button {
                     refreshTrigger.toggle()
@@ -406,7 +472,11 @@ struct ModelsPageView: View {
             }
 
             if downloaded.isEmpty {
-                emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
+                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
+                } else {
+                    emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
+                }
             } else {
                 ForEach(downloaded, id: \.id) { record in
                     modelRow(
@@ -551,6 +621,7 @@ struct ModelsPageView: View {
             Spacer()
             actions()
         }
+        .id(modelId)
         .rowCard()
     }
 

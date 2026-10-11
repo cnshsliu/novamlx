@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import NovaMLXAudio
 import NovaMLXCore
 import NovaMLXUtils
@@ -12,6 +13,68 @@ public enum Qwen3TTSCloneService: Sendable {
         var path: String?
     }
     private static let holder = Holder()
+
+    /// One speech job at a time. Concurrent `synthesize` calls share this
+    /// model and MLX's process-wide eval lock. Overlap stalled the host, and
+    /// a host exit closes the worker stdin.
+    private static let speechTurn = SpeechTurn()
+    private static let speechQueue = DispatchQueue(label: "com.novamlx.tts.speech")
+
+    private final class SpeechTurn: @unchecked Sendable {
+        private let lock = NSLock()
+        private var busy = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func acquire() async {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if !busy {
+                    busy = true
+                    lock.unlock()
+                    cont.resume()
+                } else {
+                    waiters.append(cont)
+                    let ahead = waiters.count
+                    lock.unlock()
+                    NovaMLXLog.info("[TTS] speech synthesis waiting, \(ahead) ahead")
+                }
+            }
+        }
+
+        func release() {
+            lock.lock()
+            if waiters.isEmpty {
+                busy = false
+                lock.unlock()
+            } else {
+                let next = waiters.removeFirst()
+                lock.unlock()
+                next.resume()
+            }
+        }
+    }
+
+    static func acquireSpeechTurn() async {
+        await speechTurn.acquire()
+    }
+
+    static func releaseSpeechTurn() {
+        speechTurn.release()
+    }
+
+    static func performSpeechWork<T: Sendable>(
+        _ body: @escaping @Sendable () throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<T, Error>) in
+            speechQueue.async {
+                do {
+                    cont.resume(returning: try body())
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
+        }
+    }
     public static let defaultModelId = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
     public static let dotsModelId = "smcleod/dots.tts-soar-mlx"
 
@@ -89,11 +152,27 @@ public enum Qwen3TTSCloneService: Sendable {
         modelDir: URL,
         output: URL? = nil
     ) async throws -> Data {
+        await acquireSpeechTurn()
+        defer { releaseSpeechTurn() }
         try await ensureModel(at: modelDir)
+        return try await performSpeechWork {
+            try synthesizeOnSpeechQueue(
+                text: text, refAudio: refAudio, refText: refText, output: output
+            )
+        }
+    }
+
+    private static func synthesizeOnSpeechQueue(
+        text: String,
+        refAudio: URL,
+        refText: String,
+        output: URL?
+    ) throws -> Data {
         let model = lock.withLock { holder.model }
         guard let model else {
             throw NovaMLXError.apiError("Qwen3-TTS clone model is not loaded")
         }
+        defer { MLX.Memory.clearCache() }
         let (_, audio) = try loadAudioArray(from: refAudio, sampleRate: model.sampleRate)
         let samples = try model.synthesize(
             text: text, refAudio: audio, refText: refText, language: nil, temperature: 0.6

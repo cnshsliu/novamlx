@@ -91,6 +91,110 @@ public struct TknetREST: Sendable {
         let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
         return try JSONDecoder().decode(PeerEarningsSummary.self, from: data)
     }
+
+    /// Sign in to the tknet account. The session token is the `session`
+    /// cookie. Callers store it; this method does not.
+    public func login(server: URL, email: String, password: String) async throws -> TknetLogin {
+        struct Body: Encodable { let email: String; let password: String }
+        struct UserWire: Decodable { let userId: String; let email: String; let name: String }
+        struct Payload: Decodable { let user: UserWire }
+
+        var request = HTTPClientRequest(url: endpoint(server, "api/user/auth"))
+        request.method = .POST
+        request.headers.add(name: "content-type", value: "application/json")
+        request.body = .bytes(try JSONEncoder().encode(Body(email: email, password: password)))
+
+        let response = try await client.execute(request, timeout: .seconds(30))
+        guard (200..<300).contains(response.status.code) else {
+            throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
+        }
+        guard let session = Self.sessionToken(setCookie: response.headers["set-cookie"]) else {
+            throw RESTError.badStatus(Int(response.status.code), message: "Server did not return a session")
+        }
+        let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
+        let user = try JSONDecoder().decode(Payload.self, from: data).user
+        return TknetLogin(
+            session: session,
+            account: TknetAccount(userId: user.userId, email: user.email, name: user.name))
+    }
+
+    /// The account for a stored session. 401 means the session is no longer valid.
+    public func currentUser(server: URL, session: String) async throws -> TknetAccount {
+        struct UserWire: Decodable { let userId: String; let email: String; let name: String }
+        struct Payload: Decodable { let user: UserWire }
+
+        var request = HTTPClientRequest(url: endpoint(server, "api/user/auth"))
+        request.method = .GET
+        request.headers.add(name: "cookie", value: "session=\(session)")
+        let response = try await client.execute(request, timeout: .seconds(30))
+        guard (200..<300).contains(response.status.code) else {
+            throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
+        }
+        let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
+        let user = try JSONDecoder().decode(Payload.self, from: data).user
+        return TknetAccount(userId: user.userId, email: user.email, name: user.name)
+    }
+
+    public func logout(server: URL, session: String) async throws {
+        var request = HTTPClientRequest(url: endpoint(server, "api/user/auth"))
+        request.method = .DELETE
+        request.headers.add(name: "cookie", value: "session=\(session)")
+        let response = try await client.execute(request, timeout: .seconds(30))
+        guard (200..<300).contains(response.status.code) else {
+            throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
+        }
+        _ = try await response.body.collect(upTo: 1 << 16)
+    }
+
+    /// Link this Mac's peer to the signed-in account. The connection key
+    /// proves possession. It travels in the request body and is not logged.
+    public func claimPeer(server: URL, session: String, peerId: String, connectionKey: String) async throws -> String {
+        struct Body: Encodable { let peerId: String; let token: String }
+        struct Payload: Decodable { let peerName: String? }
+
+        var request = HTTPClientRequest(url: endpoint(server, "api/user/peers/claim"))
+        request.method = .POST
+        request.headers.add(name: "content-type", value: "application/json")
+        request.headers.add(name: "cookie", value: "session=\(session)")
+        request.body = .bytes(try JSONEncoder().encode(Body(peerId: peerId, token: connectionKey)))
+
+        let response = try await client.execute(request, timeout: .seconds(30))
+        guard (200..<300).contains(response.status.code) else {
+            throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
+        }
+        let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
+        return (try? JSONDecoder().decode(Payload.self, from: data).peerName) ?? ""
+    }
+
+    /// `session=<token>` from one or more Set-Cookie headers.
+    public static func sessionToken(setCookie headers: [String]) -> String? {
+        for header in headers {
+            for part in header.split(separator: ";") {
+                let pair = part.split(separator: "=", maxSplits: 1)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                guard pair.count == 2, pair[0] == "session", !pair[1].isEmpty else { continue }
+                return pair[1]
+            }
+        }
+        return nil
+    }
+
+    private func endpoint(_ server: URL, _ path: String) -> String {
+        server.appendingPathComponent(path).absoluteString
+    }
+}
+
+/// Signed-in tknet account. No session token here.
+public struct TknetAccount: Equatable, Sendable {
+    public let userId: String
+    public let email: String
+    public let name: String
+}
+
+/// Login result. `session` is a secret and must go to the secret store.
+public struct TknetLogin: Equatable, Sendable {
+    public let session: String
+    public let account: TknetAccount
 }
 
 /// GET /api/peer/earnings payload (snake_case keys match the server).

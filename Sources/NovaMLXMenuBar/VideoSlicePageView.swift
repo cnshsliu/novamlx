@@ -29,6 +29,20 @@ struct VideoSlicePageView: View {
     @State private var isLoadingStack = false
     @State private var produced: [URL] = []
     @State private var errorText: String?
+    let memory: VideoSlicePageMemory
+
+    init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager, memory: VideoSlicePageMemory) {
+        self.appState = appState
+        self.inferenceService = inferenceService
+        self.modelManager = modelManager
+        self.memory = memory
+        _referenceURL = State(initialValue: memory.referencePath.isEmpty ? nil : URL(fileURLWithPath: memory.referencePath))
+        _referenceText = State(initialValue: memory.referenceText)
+        _sliceSeconds = State(initialValue: memory.sliceSeconds)
+        _removeFillers = State(initialValue: memory.removeFillers)
+        _titleStyle = State(initialValue: memory.titleStyle)
+        _pointStyle = State(initialValue: memory.pointStyle)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -61,6 +75,12 @@ struct VideoSlicePageView: View {
             restoreVideo()
             refreshSliceLB()
         }
+        .onChange(of: referenceURL) { _, value in memory.referencePath = value?.path ?? "" }
+        .onChange(of: referenceText) { _, value in memory.referenceText = value }
+        .onChange(of: sliceSeconds) { _, value in memory.sliceSeconds = value }
+        .onChange(of: removeFillers) { _, value in memory.removeFillers = value }
+        .onChange(of: titleStyle) { _, value in memory.titleStyle = value }
+        .onChange(of: pointStyle) { _, value in memory.pointStyle = value }
         .onChange(of: outputDirPath) { _, _ in refreshOutputError() }
     }
 

@@ -140,15 +140,27 @@ public final class MenuBarAppState: ObservableObject {
             Task { @MainActor in
                 let currentStats = inferenceService.stats
                 let tps = currentStats.recentTokensPerSecond
-                var systemStats = SystemMonitor.shared.currentStats(
-                    activeRequests: currentStats.activeRequests,
-                    tokensPerSecond: tps
-                )
+                let activeRequests = currentStats.activeRequests
+                let gpuMemory = currentStats.gpuMemoryUsed
+                let workerCpu = currentStats.workerCpuUsage
+                let configPath = NovaMLXPaths.configFile
+                let authDue = self.specBoostPollCounter % 15 == 0
+                let measured = await Task.detached(priority: .utility) {
+                    let stats = SystemMonitor.shared.currentStats(
+                        activeRequests: activeRequests,
+                        tokensPerSecond: tps,
+                        gpuMemoryUsed: gpuMemory
+                    )
+                    let clusterOn = Self.clusterEnabled(in: configPath)
+                    let cache: AuthCache? = authDue ? AuthCache.load() : nil
+                    return (stats, clusterOn, cache)
+                }.value
+                var systemStats = measured.0
                 // In worker mode, override CPU with worker-reported value
                 // (SystemMonitor only measures the lightweight main process)
-                if currentStats.workerCpuUsage > 0 {
+                if workerCpu > 0 {
                     systemStats = SystemStats(
-                        cpuUsage: currentStats.workerCpuUsage,
+                        cpuUsage: workerCpu,
                         memoryUsed: systemStats.memoryUsed,
                         memoryTotal: systemStats.memoryTotal,
                         gpuMemoryUsed: systemStats.gpuMemoryUsed,
@@ -157,13 +169,30 @@ public final class MenuBarAppState: ObservableObject {
                         uptime: systemStats.uptime
                     )
                 }
-                self.systemStats = systemStats
-                self.inferenceStats = currentStats
-                self.liveActivity = currentStats.liveActivity
-                self.currentInferenceModel = CurrentInferenceModel.shared.modelID
-                self.loadedModels = inferenceService.listLoadedModels()
-                self.uptime = SystemMonitor.shared.uptime
-                self.totalTokensGenerated = currentStats.totalTokensGenerated
+                if Self.statsChanged(self.systemStats, systemStats) {
+                    self.systemStats = systemStats
+                }
+                if Self.inferenceChanged(self.inferenceStats, currentStats) {
+                    self.inferenceStats = currentStats
+                }
+                if self.liveActivity != currentStats.liveActivity {
+                    self.liveActivity = currentStats.liveActivity
+                }
+                let modelID = CurrentInferenceModel.shared.modelID
+                if self.currentInferenceModel != modelID {
+                    self.currentInferenceModel = modelID
+                }
+                let loaded = inferenceService.listLoadedModels()
+                if loaded != self.loadedModels { self.loadedModels = loaded }
+                let minute = Int(systemStats.uptime) / 60
+                if Int(self.uptime) / 60 != minute { self.uptime = systemStats.uptime }
+                if self.totalTokensGenerated != currentStats.totalTokensGenerated {
+                    self.totalTokensGenerated = currentStats.totalTokensGenerated
+                }
+                if let clusterOn = measured.1, clusterOn != self.clusterEnabled {
+                    self.clusterEnabled = clusterOn
+                }
+                if authDue { self.applyCloudCache(measured.2) }
                 // Trim consecutive zeros: allow at most 1 zero data point (~2s) between
                 // inference bursts. Long idle stretches produce a flat line that wastes
                 // chart space — only keep the interesting TPS up/down curve.
@@ -189,19 +218,46 @@ public final class MenuBarAppState: ObservableObject {
                     await self.pollSpecBoostStatus()
                 }
                 self.specBoostPollCounter += 1
-                self.refreshCloudAuthState()
-                self.syncClusterEnabled()
             }
         }
     }
 
-    private func syncClusterEnabled() {
-        let configPath = NovaMLXPaths.configFile
+    nonisolated private static func clusterEnabled(in configPath: URL) -> Bool? {
         guard let data = try? Data(contentsOf: configPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let server = json["server"] as? [String: Any] else { return }
-        let enabled = server["cluster"] != nil
-        if enabled != clusterEnabled { clusterEnabled = enabled }
+              let server = json["server"] as? [String: Any] else { return nil }
+        return server["cluster"] != nil
+    }
+
+    private static func statsChanged(_ old: SystemStats, _ new: SystemStats) -> Bool {
+        Int(old.cpuUsage.rounded()) != Int(new.cpuUsage.rounded())
+            || old.memoryUsed != new.memoryUsed
+            || old.memoryTotal != new.memoryTotal
+            || old.gpuMemoryUsed != new.gpuMemoryUsed
+            || old.activeRequests != new.activeRequests
+            || old.tokensPerSecond != new.tokensPerSecond
+    }
+
+    private static func inferenceChanged(_ old: InferenceStats, _ new: InferenceStats) -> Bool {
+        old.loadedModels != new.loadedModels
+            || old.activeRequests != new.activeRequests
+            || old.gpuMemoryUsed != new.gpuMemoryUsed
+            || old.recentTokensPerSecond != new.recentTokensPerSecond
+            || old.liveActivity != new.liveActivity
+            || old.totalTokensGenerated != new.totalTokensGenerated
+            || old.workerCpuUsage != new.workerCpuUsage
+    }
+
+    private func applyCloudCache(_ cache: AuthCache?) {
+        if let cache, !cache.isExpired, cache.valid {
+            if cloudLoggedIn != true { cloudLoggedIn = true }
+            if cloudEmail != cache.userEmail { cloudEmail = cache.userEmail }
+            if cloudPlan != cache.plan { cloudPlan = cache.plan }
+        } else {
+            if cloudLoggedIn != false { cloudLoggedIn = false }
+            if !cloudEmail.isEmpty { cloudEmail = "" }
+            if !cloudPlan.isEmpty { cloudPlan = "" }
+        }
     }
 
     public func stopStatsMonitoring() {
@@ -212,16 +268,7 @@ public final class MenuBarAppState: ObservableObject {
     // MARK: - Cloud Auth
 
     public func refreshCloudAuthState() {
-        if let cache = AuthCache.load(), !cache.isExpired, cache.valid {
-            cloudLoggedIn = true
-            cloudEmail = cache.userEmail
-            cloudPlan = cache.plan
-        } else {
-            // No valid cache — show logged-out state
-            cloudLoggedIn = false
-            cloudEmail = ""
-            cloudPlan = ""
-        }
+        applyCloudCache(AuthCache.load())
     }
 
     // MARK: - Download Management

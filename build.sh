@@ -102,7 +102,14 @@ if [ -f vendors/flux-2-swift-mlx/Package.swift ] && ! grep -q "NOVAMLX_PROFILER_
 fi
 
 # Compile MLX Metal shaders if metallib is missing
+# Two kernel source sets, both needed (mlx-swift 0.32.x layout):
+#   mlx-generated/metal — JIT glue kernels tracked by the mlx-swift tag (9 files)
+#   mlx submodule kernels — the full mlx 0.32.2 kernel sources (28 files, incl.
+#     the stock bf16/GEMV kernels Gemma4 needs)
 METAL_SRC="vendors/mlx-swift/Source/Cmlx/mlx-generated/metal"
+METAL_SRC2="vendors/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal/kernels"
+# METAL_SRC2 sources include "mlx/backend/metal/kernels/..." rooted at Cmlx/mlx.
+METAL_INCLUDE_ROOT="$(cd "$(dirname "$METAL_SRC2")/../../.." && pwd 2>/dev/null || echo .)"
 if [ -d "$METAL_SRC" ]; then
 	for cfg in debug release; do
 		METALLIB=".build/arm64-apple-macosx/${cfg}/mlx.metallib"
@@ -110,12 +117,22 @@ if [ -d "$METAL_SRC" ]; then
 			echo "→ Compiling MLX Metal shaders (${cfg})..."
 			TMPDIR_BUILD=$(mktemp -d)
 			trap "rm -rf $TMPDIR_BUILD" EXIT
-			( cd "$METAL_SRC" && \
-			  find . -name "*.metal" | while read f; do
-				  base=$(basename "$f" .metal)
-				  xcrun -sdk macosx metal -target air64-apple-macos14.0 -fno-fast-math \
-					  -c "$f" -I . -o "$TMPDIR_BUILD/${base}.air" 2>/dev/null
-			  done )
+			for src in "$METAL_SRC" "$METAL_SRC2"; do
+				[ -d "$src" ] || continue
+				( cd "$src" && \
+				  find . -name "*.metal" | while read f; do
+					  base=$(basename "$f" .metal)
+					  # NAX kernels require Metal 4 / macOS 26; the rest build as 3.2
+					  # (fence.metal needs thread_scope, unavailable before 3.2).
+					  if [[ "$base" == *_nax ]]; then
+						  MSTD="-std=metal4.0"; MTARGET="air64-apple-macos26.0"
+					  else
+						  MSTD="-std=metal3.2"; MTARGET="air64-apple-macos14.0"
+					  fi
+					  xcrun -sdk macosx metal $MSTD -target "$MTARGET" -fno-fast-math \
+						  -c "$f" -I . -I "$METAL_INCLUDE_ROOT" -o "$TMPDIR_BUILD/${base}.air" 2>/dev/null
+				  done )
+			done
 			mkdir -p "$(dirname "$METALLIB")"
 			xcrun -sdk macosx metallib "$TMPDIR_BUILD"/*.air -o "$METALLIB" 2>/dev/null
 			echo "→ Built $(ls -lh "$METALLIB" | awk '{print $5}') metallib (${cfg})"

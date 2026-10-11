@@ -76,6 +76,9 @@ struct NovaMLXApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = MenuBarAppState()
+    /// Outlives the main window so a restart can dial the tunnel before the
+    /// window exists, and closing the window does not drop it.
+    let tknetPeer = TknetPeerState()
     // Eagerly constructed, but kicks off NovaDB.shared.setup first so the
     // MetricsStore init buried inside MLXEngine doesn't trap on a nil IUO.
     // NovaDB.setup is idempotent; the explicit call in init() below is a no-op.
@@ -346,6 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             appState.startStatsMonitoring(inferenceService: inferenceService)
+            await tknetPeer.restoreTunnelAfterLaunch()
 
             // Provision managed providers: cloud (if subscribed) + local loaded models
             Task {
@@ -626,7 +630,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = NovaAppView(
             appState: appState,
             inferenceService: inferenceService,
-            modelManager: modelManager
+            modelManager: modelManager,
+            tknetPeer: tknetPeer
         )
 
         let window = NSWindow(

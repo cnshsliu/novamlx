@@ -16,6 +16,7 @@ struct SettingsPageView: View {
     @ObservedObject var appState: MenuBarAppState
     let inferenceService: InferenceService
     let modelManager: ModelManager
+    let memory: SettingsPageMemory
     @EnvironmentObject var l10n: L10n
 
     @State private var turboQuantConfigs: [String: TQConfig] = [:]
@@ -162,7 +163,19 @@ struct SettingsPageView: View {
         }
         .padding(16)
         .sectionCard()
-        .task { loadCurrentConfig(); loadTknetApiKey() }
+        .task {
+            if memory.captured && memory.isEditing {
+                applyCapturedSettings()
+            } else {
+                loadCurrentConfig()
+            }
+            if memory.captured {
+                tknetApiKey = memory.tknetApiKey
+            } else {
+                loadTknetApiKey()
+            }
+        }
+        .onDisappear { captureSettings() }
     }
 
     private var configPathRow: some View {
@@ -450,6 +463,58 @@ struct SettingsPageView: View {
         }
 
         tknetVerifying = false
+    }
+
+    private func captureSettings() {
+        memory.captured = true
+        memory.isEditing = isEditing
+        memory.cfgHost = cfgHost
+        memory.cfgPort = cfgPort
+        memory.cfgAdminPort = cfgAdminPort
+        memory.cfgApiKeys = cfgApiKeys
+        memory.cfgMaxConcurrent = cfgMaxConcurrent
+        memory.cfgTimeout = cfgTimeout
+        memory.cfgMaxBodyMB = cfgMaxBodyMB
+        memory.cfgDefaultModel = cfgDefaultModel
+        memory.cfgMaxProcessMemory = cfgMaxProcessMemory
+        memory.memoryLimitMode = memoryLimitMode
+        memory.memoryLimitPercent = memoryLimitPercent
+        memory.memoryLimitValue = memoryLimitValue
+        memory.memoryLimitUnit = memoryLimitUnit
+        memory.cfgHasUnsavedChanges = cfgHasUnsavedChanges
+        memory.clusterEnabled = clusterEnabled
+        memory.clusterRole = clusterRole
+        memory.clusterHost = clusterHost
+        memory.clusterPort = clusterPort
+        memory.clusterStrategy = clusterStrategy
+        memory.clusterMinLayers = clusterMinLayers
+        memory.clusterTransport = clusterTransport
+        memory.tknetApiKey = tknetApiKey
+    }
+
+    private func applyCapturedSettings() {
+        isEditing = memory.isEditing
+        cfgHost = memory.cfgHost
+        cfgPort = memory.cfgPort
+        cfgAdminPort = memory.cfgAdminPort
+        cfgApiKeys = memory.cfgApiKeys
+        cfgMaxConcurrent = memory.cfgMaxConcurrent
+        cfgTimeout = memory.cfgTimeout
+        cfgMaxBodyMB = memory.cfgMaxBodyMB
+        cfgDefaultModel = memory.cfgDefaultModel
+        cfgMaxProcessMemory = memory.cfgMaxProcessMemory
+        memoryLimitMode = memory.memoryLimitMode
+        memoryLimitPercent = memory.memoryLimitPercent
+        memoryLimitValue = memory.memoryLimitValue
+        memoryLimitUnit = memory.memoryLimitUnit
+        cfgHasUnsavedChanges = memory.cfgHasUnsavedChanges
+        clusterEnabled = memory.clusterEnabled
+        clusterRole = memory.clusterRole
+        clusterHost = memory.clusterHost
+        clusterPort = memory.clusterPort
+        clusterStrategy = memory.clusterStrategy
+        clusterMinLayers = memory.clusterMinLayers
+        clusterTransport = memory.clusterTransport
     }
 
     private func loadTknetApiKey() {

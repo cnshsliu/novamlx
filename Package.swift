@@ -34,6 +34,7 @@ let package = Package(
         .package(path: "vendors/zimage.swift"),
         .package(path: "vendors/qwen.image.swift"),
         .package(path: "vendors/flux-2-swift-mlx"),
+        .package(path: "vendors/ltx2-swift"),
         .package(path: "mlx-swift-lm"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
@@ -128,6 +129,7 @@ let package = Package(
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "DotsTTS", package: "mlx-swift-dots-tts"),
+                .product(name: "LTX2", package: "ltx2-swift"),
             ],
             resources: [.copy("ChatTemplates")],
             swiftSettings: concurrencySettings
@@ -306,6 +308,7 @@ let package = Package(
                 "NovaMLXCore",
                 "NovaMLXUtils",
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "LTX2", package: "ltx2-swift"),
             ],
             swiftSettings: concurrencySettings
         ),

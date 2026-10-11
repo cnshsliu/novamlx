@@ -85,6 +85,10 @@ public final class ModelManager: @unchecked Sendable {
     private var _registry: [String: ModelRecord]
     private var _activeDownloads: Set<String>
     private var _downloadStates: [String: DownloadStatus]
+    private var downloadedCache: [ModelRecord]?
+    private var diskUsageCache: UInt64?
+    private var catalogCacheKey: String?
+    private var catalogCache: [CatalogEntry] = []
     private let lock = NovaMLXLock()
 
     public init(
@@ -101,6 +105,8 @@ public final class ModelManager: @unchecked Sendable {
         self._registry = [:]
         self._activeDownloads = []
         self._downloadStates = [:]
+        self.downloadedCache = nil
+        self.diskUsageCache = nil
         try? FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: hubDownloadBase, withIntermediateDirectories: true)
         loadRegistry()
@@ -133,12 +139,45 @@ public final class ModelManager: @unchecked Sendable {
     }
 
     public func downloadedModels() -> [ModelRecord] {
+        let cached = lock.withLock { downloadedCache }
+        if let cached { return cached }
+        let fresh = computeDownloadedModels()
+        lock.withLock { downloadedCache = fresh }
+        return fresh
+    }
+
+    /// Reachability and directory size, off the caller. Views read the cache.
+    public func refreshModelCaches() async {
+        let records = lock.withLock { Array(_registry.values) }
+        let dir = modelsDirectory
+        let (fresh, size) = await Task.detached(priority: .utility) {
+            let fresh = Self.reachableDownloaded(records)
+            let size = FileManager.default.directorySize(at: dir)
+            return (fresh, size)
+        }.value
         lock.withLock {
-            _registry.values.filter { record in
-                guard record.downloadedAt != nil else { return false }
-                if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) { return true }
-                return (try? record.localURL.checkResourceIsReachable()) == true
-            }
+            downloadedCache = fresh
+            diskUsageCache = size
+        }
+    }
+
+    private func computeDownloadedModels() -> [ModelRecord] {
+        let records = lock.withLock { Array(_registry.values) }
+        return Self.reachableDownloaded(records)
+    }
+
+    private static func reachableDownloaded(_ records: [ModelRecord]) -> [ModelRecord] {
+        records.filter { record in
+            guard record.downloadedAt != nil else { return false }
+            if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) { return true }
+            return (try? record.localURL.checkResourceIsReachable()) == true
+        }
+    }
+
+    private func invalidateListCaches() {
+        lock.withLock {
+            downloadedCache = nil
+            diskUsageCache = nil
         }
     }
 
@@ -171,6 +210,7 @@ public final class ModelManager: @unchecked Sendable {
             localURL: localURL, remoteURL: remoteURL, sizeBytes: sizeBytes, version: version
         )
         lock.withLock { _registry[id] = record }
+        invalidateListCaches()
         saveRegistry()
         NovaMLXLog.info("[ModelManager] Registered model: \(id)")
         return record
@@ -178,6 +218,7 @@ public final class ModelManager: @unchecked Sendable {
 
     public func unregister(_ modelId: String) {
         _ = lock.withLock { _registry.removeValue(forKey: modelId) }
+        invalidateListCaches()
         saveRegistry()
     }
 
@@ -264,6 +305,7 @@ public final class ModelManager: @unchecked Sendable {
                     )
                     _activeDownloads.remove(modelId)
                 }
+                invalidateListCaches()
                 saveRegistry()
                 NovaMLXLog.info("[ModelManager] Download complete: \(modelId)")
             } catch {
@@ -295,11 +337,15 @@ public final class ModelManager: @unchecked Sendable {
             _registry[modelId] = updated
             _downloadStates.removeValue(forKey: modelId)
         }
+        invalidateListCaches()
         saveRegistry()
     }
 
     public func totalDiskUsage() -> UInt64 {
-        FileManager.default.directorySize(at: modelsDirectory)
+        if let cached = lock.withLock({ diskUsageCache }) { return cached }
+        let size = FileManager.default.directorySize(at: modelsDirectory)
+        lock.withLock { diskUsageCache = size }
+        return size
     }
 
     // MARK: - Model Catalog
@@ -309,7 +355,19 @@ public final class ModelManager: @unchecked Sendable {
     }
 
     public func catalogModels(forCategory category: ModelType?) -> [CatalogEntry] {
-        ModelCatalogPolicy.search(catalogStore.models, query: "", category: category)
+        let count = catalogStore.models.count
+        let key = "\(category?.rawValue ?? "*")#\(count)"
+        let hit = lock.withLock { () -> [CatalogEntry]? in
+            guard catalogCacheKey == key else { return nil }
+            return catalogCache
+        }
+        if let hit { return hit }
+        let result = ModelCatalogPolicy.search(catalogStore.models, query: "", category: category)
+        lock.withLock {
+            catalogCacheKey = key
+            catalogCache = result
+        }
+        return result
     }
 
     /// Registers every catalog model into the local registry (idempotent — skips ids
@@ -428,6 +486,7 @@ public final class ModelManager: @unchecked Sendable {
             }
         }
 
+        if registered > 0 || updated > 0 { invalidateListCaches() }
         NovaMLXLog.info("[ModelManager] Model discovery: \(allDiscovered.count) found, \(registered) registered, \(updated) updated")
         return allDiscovered
     }

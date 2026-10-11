@@ -31,12 +31,23 @@ struct APIKeysPageView: View {
     @State private var usageReports: [String: UsageReport] = [:]
 
     private let loadedModelNames: [String]
+    let memory: APIKeysPageMemory
 
-    init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager) {
+    init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager, memory: APIKeysPageMemory) {
         self.appState = appState
         self.inferenceService = inferenceService
         self.modelManager = modelManager
+        self.memory = memory
         self.loadedModelNames = []
+        _showCreateKeySheet = State(initialValue: memory.showCreateKeySheet)
+        _newKeyName = State(initialValue: memory.newKeyName)
+        _newKeyRateLimit = State(initialValue: memory.newKeyRateLimit)
+        _newKeyRateBurst = State(initialValue: memory.newKeyRateBurst)
+        _newKeyMaxTokens = State(initialValue: memory.newKeyMaxTokens)
+        _newKeyMaxRequests = State(initialValue: memory.newKeyMaxRequests)
+        _newKeyResetPeriod = State(initialValue: memory.newKeyResetPeriod)
+        _createdRawKey = State(initialValue: memory.createdRawKey)
+        _expandedKeyId = State(initialValue: memory.expandedKeyId)
     }
 
     var body: some View {
@@ -54,6 +65,15 @@ struct APIKeysPageView: View {
             editKeySheet(key)
         }
         .task { loadManagedKeys() }
+        .onChange(of: showCreateKeySheet) { _, value in memory.showCreateKeySheet = value }
+        .onChange(of: newKeyName) { _, value in memory.newKeyName = value }
+        .onChange(of: newKeyRateLimit) { _, value in memory.newKeyRateLimit = value }
+        .onChange(of: newKeyRateBurst) { _, value in memory.newKeyRateBurst = value }
+        .onChange(of: newKeyMaxTokens) { _, value in memory.newKeyMaxTokens = value }
+        .onChange(of: newKeyMaxRequests) { _, value in memory.newKeyMaxRequests = value }
+        .onChange(of: newKeyResetPeriod) { _, value in memory.newKeyResetPeriod = value }
+        .onChange(of: createdRawKey) { _, value in memory.createdRawKey = value }
+        .onChange(of: expandedKeyId) { _, value in memory.expandedKeyId = value }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("APIKeysChanged"))) { _ in
             loadManagedKeys()
         }

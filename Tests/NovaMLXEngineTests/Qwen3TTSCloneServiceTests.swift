@@ -3,8 +3,50 @@ import Foundation
 import Testing
 @testable import NovaMLXEngine
 
+private final class OverlapBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = 0
+    private var maxSeen = 0
+
+    func enter() {
+        lock.lock()
+        active += 1
+        maxSeen = max(maxSeen, active)
+        lock.unlock()
+    }
+
+    func leave() {
+        lock.lock()
+        active -= 1
+        lock.unlock()
+    }
+
+    var maxActive: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return maxSeen
+    }
+}
+
 @Suite("Qwen3-TTS Base clone")
 struct Qwen3TTSCloneServiceTests {
+    @Test("speech turns do not overlap")
+    func speechTurnsDoNotOverlap() async {
+        let box = OverlapBox()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<6 {
+                group.addTask {
+                    await Qwen3TTSCloneService.acquireSpeechTurn()
+                    defer { Qwen3TTSCloneService.releaseSpeechTurn() }
+                    box.enter()
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    box.leave()
+                }
+            }
+        }
+        #expect(box.maxActive == 1)
+    }
+
     @Test("Base ids are accepted, CustomVoice/VoiceDesign rejected")
     func baseIdFilter() {
         #expect(Qwen3TTSCloneService.isBaseModelId("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"))

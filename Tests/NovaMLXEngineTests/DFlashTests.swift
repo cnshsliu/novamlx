@@ -122,6 +122,102 @@ struct DFlashTests {
         #expect(result.committed == [10, 11, 99])
     }
 
+    @Test("Empty draft commits the target argmax, the dense step")
+    func greedyAcceptEmptyDraft() {
+        let result = DFlashAccept.greedy(drafted: [], targetArgmax: [42, 7])
+        #expect(result.accepted == 0)
+        #expect(result.committed == [42])
+    }
+
+    @Test("Shorter and empty drafts commit the same greedy tokens")
+    func shorterDraftMatchesGreedyChain() {
+        let truth = [1, 2, 3, 4, 5]
+        #expect(greedyChain(draftLens: [0, 0, 0, 0, 0], truth: truth) == truth)
+        #expect(greedyChain(draftLens: [7], truth: truth) == truth)
+        #expect(greedyChain(draftLens: [2, 2, 1], truth: truth) == truth)
+        #expect(greedyChain(draftLens: [4, 0, 0, 0, 0], truth: truth, mismatchFirst: true) == truth)
+    }
+
+    private func greedyChain(draftLens: [Int], truth: [Int], mismatchFirst: Bool = false) -> [Int] {
+        var index = 0
+        var out: [Int] = []
+        var first = true
+        for len in draftLens {
+            if index >= truth.count || out.count >= truth.count { break }
+            let draftEnd = min(index + len, truth.count)
+            var drafted = Array(truth[index..<draftEnd])
+            if mismatchFirst && first && !drafted.isEmpty {
+                drafted[0] = 9
+            }
+            first = false
+            let argmax = Array(truth[index..<min(index + len + 1, truth.count)])
+            let result = DFlashAccept.greedy(drafted: drafted, targetArgmax: argmax)
+            out.append(contentsOf: result.committed.prefix(truth.count - out.count))
+            index += result.committed.count
+        }
+        return out
+    }
+
+    @Test("Low acceptance parks the draft cap, a strong probe leaves the park")
+    func capPolicyParksAndProbes() {
+        var policy = DFlashCapPolicy(
+            maxCap: 7, windowSize: 4, parkBelow: 3, minRoundsBeforePark: 3, probeEvery: 4)
+        #expect(policy.cap == 7)
+        policy.observe(accepted: 0, capUsed: 7)
+        policy.observe(accepted: 1, capUsed: 7)
+        #expect(policy.cap == 7)
+        policy.observe(accepted: 0, capUsed: 7)
+        #expect(policy.cap == 0)
+        policy.observe(accepted: 0, capUsed: 0)
+        policy.observe(accepted: 0, capUsed: 0)
+        policy.observe(accepted: 0, capUsed: 0)
+        policy.observe(accepted: 0, capUsed: 0)
+        #expect(policy.cap == 0)
+        policy.observe(accepted: 6, capUsed: 7)
+        #expect(policy.cap == 7)
+    }
+
+    @Test("A filled cap is not shrunk, a middling mean keeps one token of headroom")
+    func capPolicyHeadroom() {
+        var saturated = DFlashCapPolicy(maxCap: 7, minRoundsBeforePark: 3)
+        for _ in 0 ..< 4 {
+            saturated.observe(accepted: 7, capUsed: 7)
+        }
+        #expect(saturated.cap == 7)
+
+        var middling = DFlashCapPolicy(maxCap: 7, minRoundsBeforePark: 3, probeEvery: 32)
+        for _ in 0 ..< 4 {
+            middling.observe(accepted: 4, capUsed: 7)
+        }
+        #expect(middling.cap == 5)
+
+        middling.observe(accepted: 5, capUsed: 5)
+        #expect(middling.cap == 6)
+    }
+
+    @Test("Context append grows the draft cache offset without a block forward")
+    func appendContextAdvancesOffset() throws {
+        let json = """
+            {
+              "model_type": "qwen3",
+              "hidden_size": 32, "vocab_size": 16, "num_hidden_layers": 1,
+              "intermediate_size": 64, "num_attention_heads": 2, "num_key_value_heads": 1,
+              "head_dim": 16, "rms_norm_eps": 1e-6, "max_position_embeddings": 128,
+              "num_target_layers": 2,
+              "dflash_config": { "block_size": 8, "target_layer_ids": [0, 1] }
+            }
+            """.data(using: .utf8)!
+        let cfg = try DFlashConfig.fromJSON(json)
+        let model = DFlashDraftModel(cfg)
+        let cache = model.makeCache()
+        #expect(cache[0].offset == 0)
+        let hidden = MLXRandom.normal([1, 3, cfg.targetLayerIds.count * cfg.hiddenSize])
+        model.appendContext(hidden, cache: cache)
+        #expect(cache[0].offset == 3)
+        model.appendContext(hidden[0..., ..<1, 0...], cache: cache)
+        #expect(cache[0].offset == 4)
+    }
+
     @Test("GDN spec capture is only for the short DFlash verify window")
     func specRecordOnlyShortVerify() {
         #expect(!DFlashLimits.shouldRecordSpec(sequenceLength: 1))

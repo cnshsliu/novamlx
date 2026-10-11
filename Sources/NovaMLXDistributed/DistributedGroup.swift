@@ -89,19 +89,19 @@ public enum MLXDistributedWrapper {
     /// - Returns: A ``DistributedGroup``. Will be ``DistributedGroup/uninitialized``
     ///   if no backend is available and `strict` is `false`.
     public static func initialize(strict: Bool = false, backend: String? = nil) -> DistributedGroup {
-        let cGroup: mlx_distributed_group
+        // mlx-swift 0.32: out-param + status return (mirrors stock MLX.Distributed).
+        var cGroup = mlx_distributed_group()
+        let status: Int32
         if let bk = backend {
-            cGroup = bk.withCString { ptr in
-                mlx_distributed_init(strict, ptr)
+            status = bk.withCString { ptr in
+                mlx_distributed_init(&cGroup, strict, ptr)
             }
         } else {
-            cGroup = mlx_distributed_init(strict, nil)
+            status = mlx_distributed_init(&cGroup, strict, nil)
         }
-
-        guard cGroup.ctx != nil else {
+        guard status == 0, cGroup.ctx != nil else {
             return .uninitialized
         }
-
         return DistributedGroup(cGroup: cGroup)
     }
 

@@ -28,6 +28,7 @@ struct DownloadsPageView: View {
     // Catalog (verified) listing
     @State private var catalogEpoch = 0
     @State private var catalogSearchQuery = ""
+    @State private var displayedCatalog: [CatalogEntry] = []
     @State private var catalogDidLoad = false
     @State private var hubSearchAttempted = false
     @State private var hubSearchError: String?
@@ -56,6 +57,26 @@ struct DownloadsPageView: View {
     /// Bumped when the user changes the source, so a late settings read
     /// cannot put the picker back on the previous host.
     @State private var mirrorEpoch = 0
+    @State private var scrollAnchor: String?
+    let memory: DownloadsPageMemory
+
+    init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager, memory: DownloadsPageMemory) {
+        self.appState = appState
+        self.inferenceService = inferenceService
+        self.modelManager = modelManager
+        self.memory = memory
+        _typeFilter = State(initialValue: memory.typeFilter)
+        _searchText = State(initialValue: memory.searchText)
+        _searchRegex = State(initialValue: memory.searchRegex)
+        _suffixMlxCommunity = State(initialValue: memory.suffixMlxCommunity)
+        _searchMlxOnly = State(initialValue: memory.searchMlxOnly)
+        _selectedMirrorOption = State(initialValue: memory.selectedMirrorOption)
+        _customMirrorURL = State(initialValue: memory.customMirrorURL)
+        _newApiKey = State(initialValue: memory.newApiKey)
+        _showApiKeyPrompt = State(initialValue: memory.showApiKeyPrompt)
+        _catalogSearchQuery = State(initialValue: memory.searchText.trimmingCharacters(in: .whitespaces))
+        _scrollAnchor = State(initialValue: memory.scrollAnchor)
+    }
 
     var body: some View {
         let activeOrFailed = appState.downloadTasks.values
@@ -106,6 +127,7 @@ struct DownloadsPageView: View {
                 }
                 .padding(24)
             }
+            .scrollPosition(id: $scrollAnchor)
         }
         .alert(alertMessage, isPresented: $showAlert) {
             Button("OK", role: .cancel) {}
@@ -121,7 +143,20 @@ struct DownloadsPageView: View {
                 catalogDidLoad = true
                 catalogEpoch += 1
             }
+            reloadDisplayedCatalog()
         }
+        .onChange(of: searchText) { _, value in memory.searchText = value }
+        .onChange(of: typeFilter) { _, value in memory.typeFilter = value }
+        .onChange(of: searchRegex) { _, value in memory.searchRegex = value }
+        .onChange(of: suffixMlxCommunity) { _, value in memory.suffixMlxCommunity = value }
+        .onChange(of: searchMlxOnly) { _, value in memory.searchMlxOnly = value }
+        .onChange(of: customMirrorURL) { _, value in memory.customMirrorURL = value }
+        .onChange(of: newApiKey) { _, value in memory.newApiKey = value }
+        .onChange(of: showApiKeyPrompt) { _, value in memory.showApiKeyPrompt = value }
+        .onChange(of: scrollAnchor) { _, value in memory.scrollAnchor = value }
+        .onChange(of: catalogSearchQuery) { _, _ in reloadDisplayedCatalog() }
+        .onChange(of: typeFilter) { _, _ in reloadDisplayedCatalog() }
+        .onChange(of: catalogEpoch) { _, _ in reloadDisplayedCatalog() }
         .task {
             await modelManager.fetchCatalog()
             catalogDidLoad = true
@@ -228,6 +263,8 @@ struct DownloadsPageView: View {
                         .pickerStyle(.menu)
                         .accessibilityIdentifier("model-source-picker")
                         .onChange(of: selectedMirrorOption) { _, newOption in
+                            memory.selectedMirrorOption = newOption
+                            memory.mirrorTouched = true
                             guard newOption != appliedMirrorOption else { return }
                             mirrorEpoch += 1
                             appliedMirrorOption = newOption
@@ -272,6 +309,7 @@ struct DownloadsPageView: View {
         }
         .sectionCard()
         .task {
+            if memory.mirrorTouched { return }
             let epochAtStart = mirrorEpoch
             let endpoint = await appState.huggingfaceEndpoint
             guard epochAtStart == mirrorEpoch else { return }
@@ -298,16 +336,18 @@ struct DownloadsPageView: View {
         return "Loading catalog…"
     }
 
-    private var displayedCatalogModels: [CatalogEntry] {
-        _ = catalogEpoch
+    private var displayedCatalogModels: [CatalogEntry] { displayedCatalog }
+
+    private func reloadDisplayedCatalog() {
         if catalogSearchQuery.isEmpty {
-            return modelManager.catalogModels(forCategory: typeFilter.matchType)
+            displayedCatalog = modelManager.catalogModels(forCategory: typeFilter.matchType)
+        } else {
+            displayedCatalog = ModelCatalogPolicy.search(
+                modelManager.catalogStore.models,
+                query: catalogSearchQuery,
+                category: typeFilter.matchType
+            )
         }
-        return ModelCatalogPolicy.search(
-            modelManager.catalogStore.models,
-            query: catalogSearchQuery,
-            category: typeFilter.matchType
-        )
     }
 
     private var catalogModelsSection: some View {
@@ -330,6 +370,7 @@ struct DownloadsPageView: View {
                 ], spacing: 12) {
                     ForEach(models) { model in
                         catalogModelCard(model)
+                            .id(model.id)
                     }
                 }
             }
@@ -477,6 +518,7 @@ struct DownloadsPageView: View {
 
             ForEach(searchResults, id: \.id) { result in
                 searchResultRow(result)
+                    .id(result.id)
             }
         }
         .sectionCard()

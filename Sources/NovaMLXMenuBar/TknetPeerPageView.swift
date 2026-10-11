@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import NovaMLXCore
 import NovaMLXDB
+import NovaMLXModelManager
 import NovaMLXTknetPeer
 
 // MARK: - TknetPeerPageView (Task 11)
@@ -10,9 +11,12 @@ import NovaMLXTknetPeer
 // convention; only the sidebar page title is localized (app.tknetPeer).
 
 struct TknetPeerPageView: View {
-    @StateObject private var peer = TknetPeerState()
-    @State private var serverText = "https://tknet.ai"
-    @State private var peerNameText = "tknet-peer-\(ProcessInfo.processInfo.hostName.prefix(20))"
+    @ObservedObject var appState: MenuBarAppState
+    let modelManager: ModelManager
+    @ObservedObject var peer: TknetPeerState
+    let memory: TknetPageMemory
+    @State private var selectedServer = TknetServers.official
+    @State private var peerNameText = ""
 
     var body: some View {
         ScrollView {
@@ -24,7 +28,7 @@ struct TknetPeerPageView: View {
                 statusRow
                 serverSection
                 if peer.config.peerId == nil {
-                    registrationSection
+                    unregisteredNote
                 } else {
                     credentialsSection
                     demandSection
@@ -37,62 +41,242 @@ struct TknetPeerPageView: View {
         }
         .navigationTitle("Tknet Peer")
         .task { if peer.config.peerId != nil { await peer.fetchDemand() } }
+        .onAppear {
+            alignServer()
+            if memory.keep {
+                selectedServer = memory.selectedServer
+                if memory.nameEdited { peerNameText = memory.peerNameText }
+                revealKey = memory.revealKey
+                loginEmail = memory.loginEmail
+                loginPassword = memory.loginPassword
+            } else if loginEmail.isEmpty {
+                loginEmail = peer.savedLoginEmail
+            }
+            Task {
+                await peer.refreshAccount()
+                await peer.fillMissingAPI(
+                    modelType: { modelRecord($0)?.modelType.rawValue },
+                    family: { modelRecord($0)?.family.rawValue })
+            }
+        }
+        .onDisappear {
+            memory.keep = true
+            memory.selectedServer = selectedServer
+            memory.peerNameText = peerNameText
+            memory.revealKey = revealKey
+            memory.loginEmail = loginEmail
+            memory.loginPassword = loginPassword
+        }
+        .onChange(of: peerNameText) { _, value in
+            memory.peerNameText = value
+            memory.nameEdited = value != peer.peerName(for: selectedServer)
+        }
+        .onChange(of: peer.activeREST) { _, _ in
+            alignServer()
+            loginEmail = peer.savedLoginEmail
+            loginPassword = ""
+            Task { await peer.refreshAccount() }
+        }
     }
 
-    // MARK: Server (Lucas: default tknet.ai, editable, 官方 one-click)
+    // MARK: Server
+    //
+    // One product server: tknet.ai. A checkout build can also use localhost.
+    // Identity stays the peer id plus the connection key for that server.
 
-    private var officialServer: URL { URL(string: "https://tknet.ai")! }
+    private var allowsLocalServer: Bool {
+        TknetServers.allowsLocalServer(bundlePath: Bundle.main.bundlePath)
+    }
+
+    private var knownServers: [String] {
+        TknetServers.choices(allowsLocal: allowsLocalServer)
+    }
+
+    private var savedName: String { peer.peerName(for: selectedServer) }
+
+    private var selectedRegistered: Bool { peer.isRegistered(selectedServer) }
 
     private var serverSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("服务器").font(.system(size: 13, weight: .semibold))
-            HStack(spacing: 8) {
-                TextField("https://tknet.ai", text: $serverText)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .onSubmit { switchServer() }
-                Button("官方") {
-                    serverText = "https://tknet.ai"
-                    switchServer()
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Server").font(.system(size: 13, weight: .semibold))
+            if allowsLocalServer {
+                Picker("Server", selection: $selectedServer) {
+                    Text("tknet.ai").tag(TknetServers.official)
+                    Text("localhost").tag(TknetServers.localDev)
                 }
-                .buttonStyle(.borderedProminent).controlSize(.small)
-                Button("切换") { switchServer() }
-                    .buttonStyle(.bordered).controlSize(.small)
-                    .disabled(serverText.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-            if peer.config.peerId == nil {
-                Text("未注册 —— 在下方 Register，或先切换服务器")
-                    .font(.system(size: 10.5)).foregroundColor(.secondary)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text("localhost is only for development. A released app uses tknet.ai.")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("切换服务器会清除本机上的 peer 身份（每台服务器独立发号），需要重新注册")
-                    .font(.system(size: 10.5)).foregroundColor(.orange)
+                Text("tknet.ai")
+                    .font(.system(size: 13, weight: .medium))
+            }
+
+            if selectedRegistered, let peerId = peer.config.registrations[tunnelKey(selectedServer)] {
+                Text("Registered").font(.system(size: 11, weight: .semibold)).foregroundColor(.green)
+                Text(peerId)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                Text("Not registered on this server").font(.system(size: 11)).foregroundColor(.secondary)
+            }
+
+            Text("Peer name").font(.caption)
+            TextField("Peer name", text: $peerNameText, prompt: Text(defaultPeerName))
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+            Text(nameCaption)
+                .font(.system(size: 10.5))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                if !selectedRegistered {
+                    Button("Register") { registerSelected() }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        .disabled(peerNameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } else if peerNameText.trimmingCharacters(in: .whitespacesAndNewlines) != savedName,
+                          !peerNameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button("Save name") {
+                        let server = selectedServer
+                        let name = peerNameText
+                        Task { await peer.rememberName(server, name: name) }
+                    }
+                    .buttonStyle(.bordered).controlSize(.small)
+                }
+            }
+            if !selectedRegistered {
+                registerErrorText
             }
         }
         .padding(12)
         .background(NovaTheme.Colors.cardBackground)
         .cornerRadius(10)
-        .onAppear {
-            serverText = TknetPeerState.restURL(fromTunnel: peer.config.serverURL)?.absoluteString
-                ?? peer.config.serverURL.absoluteString
+        .onChange(of: selectedServer) { _, newValue in
+            peerNameText = peer.peerName(for: newValue)
+            guard newValue != peer.activeREST, let url = URL(string: newValue) else { return }
+            Task { await peer.selectServer(url) }
         }
     }
 
-    private func switchServer() {
-        guard let url = URL(string: serverText.trimmingCharacters(in: .whitespaces)) else { return }
-        guard url != peer.config.serverURL else { return }
-        Task { await peer.setServer(url) }
+    @ViewBuilder
+    private var registerErrorText: some View {
+        if let error = peer.lastError {
+            Text(error)
+                .font(.system(size: 11))
+                .foregroundColor(.red)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var nameCaption: String {
+        if selectedRegistered && savedName.isEmpty {
+            return "This server is registered. No peer name is saved on this Mac yet. Save name stores the label here. It does not call the server."
+        }
+        if selectedRegistered {
+            return "Saved peer name for this server. The name is a label. The peer ID above is the identity."
+        }
+        return "Register asks this server for a new peer ID. This Mac then remembers that ID and this name."
+    }
+
+    private var defaultPeerName: String {
+        "tknet-peer-\(ProcessInfo.processInfo.hostName.prefix(20))"
+    }
+
+    private func tunnelKey(_ rest: String) -> String {
+        guard let url = URL(string: rest) else { return "" }
+        return PeerConfig.tunnelKey(PeerConfig.tunnelURL(fromREST: url))
+    }
+
+    /// Show tknet.ai or, in a checkout, the active known server.
+    /// A released app that was left on localhost moves back to tknet.ai.
+    private func alignServer() {
+        let rest = peer.activeREST
+        let shown = knownServers.contains(rest) ? rest : TknetServers.official
+        peerNameText = peer.peerName(for: shown)
+        if selectedServer != shown {
+            selectedServer = shown
+        } else if shown != rest, let url = URL(string: shown) {
+            Task { await peer.selectServer(url) }
+        }
+    }
+
+    private func registerSelected() {
+        guard let url = URL(string: selectedServer) else { return }
+        let name = peerNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task { await peer.register(server: url, peerName: name) }
+    }
+
+    private var unregisteredNote: some View {
+        Text("Start stays off until this Mac has a peer ID.")
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
     }
 
     // MARK: Claim credentials (绑机器要用)
 
     @State private var revealKey = false
+    @State private var loginEmail = ""
+    @State private var loginPassword = ""
 
     private var credentialsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("认领这台机器（Claim this machine）")
                 .font(.system(size: 13, weight: .semibold))
-            Text("在 tknet.ai 的 Market 页粘贴下面两个值，把这台机器绑到你的账号")
+            Text("登录你的 tknet 账号，然后点认领。密码不会留在这台 Mac 上。登录会话保存 24 小时。")
                 .font(.system(size: 11)).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if peer.accountEmail != nil {
+                Text(signedInLine)
+                    .font(.system(size: 11))
+                if peer.claimedPeerId == peer.config.peerId {
+                    Text("已认领（Claimed）")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.green)
+                }
+                HStack(spacing: 8) {
+                    Button("认领（Claim）") { Task { await peer.claimThisMac() } }
+                        .buttonStyle(.borderedProminent).controlSize(.small)
+                    Button("退出（Sign out）") { Task { await peer.signOut() } }
+                        .buttonStyle(.bordered).controlSize(.small)
+                }
+            } else {
+                TextField("Email", text: $loginEmail)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                SecureField("Password", text: $loginPassword)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                Button("登录（Sign in）") {
+                    let email = loginEmail
+                    let password = loginPassword
+                    Task {
+                        if await peer.signIn(email: email, password: password) {
+                            loginPassword = ""
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                .disabled(loginEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                          || loginPassword.isEmpty)
+            }
+            if let error = peer.accountError {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundColor(.red)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("也可以把这两个值贴到网页。")
+                .font(.system(size: 10.5)).foregroundColor(.secondary)
 
             credentialRow(label: "Peer ID", value: peer.config.peerId ?? "")
 
@@ -124,6 +308,13 @@ struct TknetPeerPageView: View {
         .padding(12)
         .background(NovaTheme.Colors.cardBackground)
         .cornerRadius(10)
+    }
+
+    private var signedInLine: String {
+        let email = peer.accountEmail ?? ""
+        let name = peer.accountName ?? ""
+        if name.isEmpty { return "已登录 \(email)" }
+        return "已登录 \(name)（\(email)）"
     }
 
     private func credentialRow(label: String, value: String) -> some View {
@@ -213,40 +404,11 @@ struct TknetPeerPageView: View {
                 .font(.caption.monospaced()).foregroundColor(.secondary)
             Text("\(peer.status?.totalCompletionTokens ?? 0) tokens")
                 .font(.caption.monospaced()).foregroundColor(.secondary)
-            if let error = peer.lastError {
-                Text(error).font(.caption).foregroundColor(.red).lineLimit(2)
-            }
             Spacer()
         }
         .padding(8)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    // MARK: Registration
-
-    private var registrationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Register this Mac").font(.headline)
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
-                GridRow {
-                    Text("Server").font(.caption)
-                    TextField("https://tknet.ai", text: $serverText)
-                }
-                GridRow {
-                    Text("Peer name").font(.caption)
-                    TextField("Peer name", text: $peerNameText)
-                }
-            }
-            Button("Register") {
-                guard let url = URL(string: serverText.trimmingCharacters(in: .whitespaces)) else { return }
-                Task { await peer.register(server: url, peerName: peerNameText) }
-            }
-            .buttonStyle(.bordered)
-        }
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: Earnings
@@ -295,17 +457,52 @@ struct TknetPeerPageView: View {
 
     // MARK: Demand list
 
+    private var downloadedIds: [String] {
+        modelManager.downloadedModels().map(\.id)
+    }
+
+    private var matchedDemand: [DemandEntry] {
+        let ids = downloadedIds
+        let loaded = appState.loadedModels
+        return peer.demand.filter {
+            DemandModelMatch.localId(for: $0.model, downloadedIds: ids, loadedIds: loaded) != nil
+        }
+    }
+
+    private func localMatch(for entry: DemandEntry) -> (localId: String?, loaded: Bool) {
+        guard let id = DemandModelMatch.localId(
+            for: entry.model, downloadedIds: downloadedIds, loadedIds: appState.loadedModels)
+        else { return (nil, false) }
+        return (id, DemandModelMatch.isLoaded(id, loadedIds: appState.loadedModels))
+    }
+
     private var demandSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Demand (\(peer.demand.count))").font(.headline)
+                Text("Demand").font(.headline)
                 Spacer()
                 Button("Refresh") { Task { await peer.fetchDemand() } }
             }
+            Text("Matched (\(matchedDemand.count))").font(.subheadline.weight(.semibold))
             if peer.demand.isEmpty {
                 Text("No open demand right now.")
                     .font(.caption).foregroundColor(.secondary)
-                    .padding(.top, 4)
+            } else if matchedDemand.isEmpty {
+                Text("No open demand matches a model on this Mac.")
+                    .font(.caption).foregroundColor(.secondary)
+            } else {
+                LazyVStack(spacing: 8) {
+                    ForEach(matchedDemand, id: \.demandId) { entry in
+                        demandRow(entry)
+                    }
+                }
+            }
+
+            Text("All demands (\(peer.demand.count))").font(.subheadline.weight(.semibold))
+                .padding(.top, 6)
+            if peer.demand.isEmpty {
+                Text("No open demand right now.")
+                    .font(.caption).foregroundColor(.secondary)
             } else {
                 LazyVStack(spacing: 8) {
                     ForEach(peer.demand, id: \.demandId) { entry in
@@ -316,9 +513,16 @@ struct TknetPeerPageView: View {
         }
     }
 
+    private func modelRecord(_ id: String) -> ModelRecord? {
+        modelManager.downloadedModels().first {
+            $0.id.caseInsensitiveCompare(id) == .orderedSame
+        }
+    }
+
     private func demandRow(_ entry: DemandEntry) -> some View {
         let claimed = peer.config.capabilities.first { $0.demandId == entry.demandId }
         let active = claimed.map { peer.config.activeCapabilities.contains($0) } ?? false
+        let match = localMatch(for: entry)
         return HStack {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -333,19 +537,50 @@ struct TknetPeerPageView: View {
                 if let note = entry.note {
                     Text(note).font(.caption).foregroundColor(.secondary)
                 }
+                if let localId = match.localId, localId.caseInsensitiveCompare(entry.model) != .orderedSame {
+                    Text(localId).font(.caption2.monospaced()).foregroundColor(.secondary)
+                }
             }
             Spacer()
             if active {
-                Label("Serving", systemImage: "checkmark.circle.fill")
-                    .font(.caption).foregroundColor(.green)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Label("Serving", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundColor(.green)
+                    if let api = claimed?.api, let op = api.operations.first {
+                        let extra = api.operations.count > 1 ? " +\(api.operations.count - 1)" : ""
+                        Text("\(op.method) \(op.path)\(extra)")
+                            .font(.caption2.monospaced())
+                            .foregroundColor(.secondary)
+                    }
+                }
             } else if claimed != nil {
                 Label("Retired — waiting for demand to return", systemImage: "clock")
                     .font(.caption).foregroundColor(.secondary)
-            } else {
-                Button("Serve via NovaMLX (local)") {
-                    Task { await peer.addLocalSource(for: entry, apiKeyStore: NovaDB.shared.apiKeyStore) }
+            } else if let localId = match.localId {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Button("Serve via NovaMLX (local)") {
+                        guard DemandModelMatch.isLoaded(localId, loadedIds: appState.loadedModels) else { return }
+                        let record = modelRecord(localId)
+                        let api = SupplyAPI.contract(
+                            modelId: localId,
+                            modelType: record?.modelType.rawValue ?? "unknown",
+                            family: record?.family.rawValue ?? "")
+                        Task {
+                            await peer.addLocalSource(
+                                for: entry, upstreamModel: localId,
+                                apiKeyStore: NovaDB.shared.apiKeyStore, api: api)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!match.loaded)
+                    if !match.loaded {
+                        Text("Downloaded. Load it first.")
+                            .font(.caption2).foregroundColor(.secondary)
+                    }
                 }
-                .buttonStyle(.bordered)
+            } else {
+                Text("Not downloaded")
+                    .font(.caption).foregroundColor(.secondary)
             }
         }
         .padding(12)
@@ -409,6 +644,14 @@ private struct CapabilityRow: View {
                 }
                 Text("in \(capability.priceIn) / out \(capability.priceOut) per 1k tokens")
                     .font(.caption).foregroundColor(.secondary)
+                if let api = capability.api {
+                    Text(api.summary).font(.caption2).foregroundColor(.secondary)
+                    ForEach(api.operations, id: \.path) { op in
+                        Text("\(op.method) \(op.path)")
+                            .font(.caption2.monospaced())
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
             Spacer()
             Picker("Upstream model", selection: $upstream) {

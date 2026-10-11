@@ -7,6 +7,7 @@ import NovaMLXUtils
 
 struct LoadBalancersPageView: View {
     @ObservedObject var appState: MenuBarAppState
+    let memory: LoadBalancerPageMemory
     @State private var lbs: [LoadBalancer] = []
     @State private var editing: LoadBalancer?
     @State private var creating = false
@@ -39,7 +40,17 @@ struct LoadBalancersPageView: View {
         .sheet(isPresented: $creating, onDismiss: { Task { await reload() } }) {
             LBEditView(lbId: nil)
         }
-        .task { await reload() }
+        .task {
+            await reload()
+            expandedId = memory.expandedId
+            creating = memory.creating
+            if let id = memory.editingId {
+                editing = lbs.first { $0.id == id }
+            }
+        }
+        .onChange(of: expandedId) { _, value in memory.expandedId = value }
+        .onChange(of: creating) { _, value in memory.creating = value }
+        .onChange(of: editing?.id) { _, value in memory.editingId = value }
     }
 
     /// One accordion card: header row + collapsible read-only members panel.

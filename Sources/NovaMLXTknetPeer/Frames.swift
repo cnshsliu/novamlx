@@ -4,6 +4,35 @@ public enum APIFormat: String, Codable, Sendable, Equatable { case openai, anthr
 
 public enum SourceType: String, Codable, Sendable, Equatable { case openaiCompatible, anthropic, localNovaMLX }
 
+/// One call this supply accepts. Field names match tknet `ApiOperation`.
+public struct APIOperation: Codable, Equatable, Sendable {
+    public var method: String
+    public var path: String
+    public var contentType: String
+    public var summary: String
+
+    public init(method: String, path: String, contentType: String, summary: String) {
+        self.method = method
+        self.path = path
+        self.contentType = contentType
+        self.summary = summary
+    }
+}
+
+/// Interface submitted with a supply. Absent on peers that predate the field.
+/// The twin catalog lives in tknet `src/lib/supply/api-contract.ts`.
+public struct APIContract: Codable, Equatable, Sendable {
+    public var kind: String
+    public var summary: String
+    public var operations: [APIOperation]
+
+    public init(kind: String, summary: String, operations: [APIOperation]) {
+        self.kind = kind
+        self.summary = summary
+        self.operations = operations
+    }
+}
+
 /// Which demand entries this peer serves, at what price. Sent in `hello`
 /// and `capabilities.update`; prices are per 1k tokens.
 public struct Capability: Codable, Equatable, Sendable {
@@ -13,11 +42,15 @@ public struct Capability: Codable, Equatable, Sendable {
     public var sourceType: SourceType
     public var priceIn: Double
     public var priceOut: Double
+    /// How to call this model. Omitted on the wire when nil.
+    public var api: APIContract?
 
     public init(demandId: String, model: String, sourceId: String,
-                sourceType: SourceType, priceIn: Double, priceOut: Double) {
+                sourceType: SourceType, priceIn: Double, priceOut: Double,
+                api: APIContract? = nil) {
         self.demandId = demandId; self.model = model; self.sourceId = sourceId
         self.sourceType = sourceType; self.priceIn = priceIn; self.priceOut = priceOut
+        self.api = api
     }
 }
 
@@ -30,6 +63,38 @@ public struct DemandEntry: Codable, Equatable, Sendable {
 
     public init(demandId: String, model: String, modality: String, note: String?) {
         self.demandId = demandId; self.model = model; self.modality = modality; self.note = note
+    }
+}
+
+/// Which downloaded local model can serve a demand name.
+public enum DemandModelMatch {
+    /// Exact id, or the same final path component (`org/Name` matches `Name`).
+    public static func matches(localId: String, demandModel: String) -> Bool {
+        let demand = demandModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !demand.isEmpty else { return false }
+        if localId.caseInsensitiveCompare(demand) == .orderedSame { return true }
+        let leaf = localId.split(separator: "/").last.map(String.init) ?? localId
+        return leaf.caseInsensitiveCompare(demand) == .orderedSame
+    }
+
+    /// Prefer an exact id. Then a loaded hit. Then the first downloaded hit.
+    public static func localId(for demandModel: String, downloadedIds: [String], loadedIds: [String]) -> String? {
+        let demand = demandModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !demand.isEmpty else { return nil }
+        let hits = downloadedIds.filter { matches(localId: $0, demandModel: demand) }
+        if let exact = hits.first(where: { $0.caseInsensitiveCompare(demand) == .orderedSame }) {
+            return exact
+        }
+        if let ready = hits.filter({ id in
+            loadedIds.contains { $0.caseInsensitiveCompare(id) == .orderedSame }
+        }).sorted().first {
+            return ready
+        }
+        return hits.sorted().first
+    }
+
+    public static func isLoaded(_ localId: String, loadedIds: [String]) -> Bool {
+        loadedIds.contains { $0.caseInsensitiveCompare(localId) == .orderedSame }
     }
 }
 

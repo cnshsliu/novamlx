@@ -19,6 +19,9 @@ final class MockTknetServer: @unchecked Sendable {
     static let demandBody =
         #"{"entries":[{"demandId":"d1","model":"m","modality":"language","note":null}]}"#
     static let validToken = "tok-42"
+    static let session = "sess-42"
+    static let userBody =
+        #"{"user":{"userId":"user-1","email":"lucas@example.com","name":"Lucas","tier":"standard","status":"active","role":"user"}}"#
 
     /// Starts on an OS-assigned ephemeral port (bind 0) and returns once the
     /// listener is up.
@@ -42,6 +45,55 @@ final class MockTknetServer: @unchecked Sendable {
                 status: .ok,
                 headers: [.contentType: "application/json"],
                 body: Self.textBody(Self.demandBody))
+        }
+        router.post("/api/user/auth") { request, _ -> Response in
+            struct LoginBody: Decodable { let email: String; let password: String }
+            let body = try await request.body.collect(upTo: .max)
+            let login = try JSONDecoder().decode(LoginBody.self, from: body)
+            guard login.email == "lucas@example.com", login.password == "secret" else {
+                return Response(status: .unauthorized,
+                                headers: [.contentType: "application/json"],
+                                body: Self.textBody(#"{"error":"Invalid credentials"}"#))
+            }
+            return Response(
+                status: .ok,
+                headers: [
+                    .contentType: "application/json",
+                    .setCookie: "session=\(Self.session); Path=/; HttpOnly; SameSite=Lax"
+                ],
+                body: Self.textBody(Self.userBody))
+        }
+        router.get("/api/user/auth") { request, _ -> Response in
+            guard request.headers[.cookie]?.contains("session=\(Self.session)") == true else {
+                return Response(status: .unauthorized,
+                                headers: [.contentType: "application/json"],
+                                body: Self.textBody(#"{"error":"Session expired"}"#))
+            }
+            return Response(status: .ok,
+                            headers: [.contentType: "application/json"],
+                            body: Self.textBody(Self.userBody))
+        }
+        router.delete("/api/user/auth") { _, _ -> Response in
+            Response(status: .ok, headers: [.contentType: "application/json"],
+                     body: Self.textBody(#"{"ok":true}"#))
+        }
+        router.post("/api/user/peers/claim") { request, _ -> Response in
+            struct ClaimBody: Decodable { let peerId: String; let token: String }
+            guard request.headers[.cookie]?.contains("session=\(Self.session)") == true else {
+                return Response(status: .unauthorized,
+                                headers: [.contentType: "application/json"],
+                                body: Self.textBody(#"{"error":"Not authenticated"}"#))
+            }
+            let body = try await request.body.collect(upTo: .max)
+            let claim = try JSONDecoder().decode(ClaimBody.self, from: body)
+            guard claim.peerId == "peer-42", claim.token == Self.validToken else {
+                return Response(status: .forbidden,
+                                headers: [.contentType: "application/json"],
+                                body: Self.textBody(#"{"error":"Token does not match this peer"}"#))
+            }
+            return Response(status: .ok,
+                            headers: [.contentType: "application/json"],
+                            body: Self.textBody(#"{"ok":true,"peerName":"lucas-mac"}"#))
         }
 
         let port = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in

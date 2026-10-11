@@ -23,6 +23,9 @@ struct StatusPageView: View {
             }
             .padding(24)
         }
+        .onAppear {
+            if deviceInfo == nil { deviceInfo = DeviceInfo.current() }
+        }
     }
 
     private var serverStatusHero: some View {
@@ -244,8 +247,15 @@ struct StatusPageView: View {
     }
 
     private var deviceSection: some View {
-        let info = deviceInfo ?? DeviceInfo.current()
-        return VStack(alignment: .leading, spacing: 12) {
+        Group {
+            if let info = deviceInfo {
+                deviceSectionBody(info)
+            }
+        }
+    }
+
+    private func deviceSectionBody(_ info: DeviceInfo) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
             Text(l10n.tr("status.device"))
                 .font(.headline)
 
@@ -326,6 +336,7 @@ struct StatusPageView: View {
         case .asr: return "waveform"
         case .tts: return "speaker.wave.2"
         case .image: return "photo"
+        case .video: return "video.fill"
         case .vlm: return "eye"
         case .llm: return "bolt.fill"
         case nil: return "bolt.fill"

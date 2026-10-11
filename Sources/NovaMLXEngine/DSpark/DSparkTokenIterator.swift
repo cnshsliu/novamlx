@@ -1,0 +1,324 @@
+import Foundation
+import MLX
+import MLXLMCommon
+import NovaMLXCore
+
+// Speculative decoding driver for DSpark drafters (milestone 3). Mirrors
+// DFlashTokenIterator's control flow — greedy accept, rollback, dense fallback —
+// but feeds the drafter the target's fused hidden-state taps directly: prefill
+// commits every chunk's fused rows, and each verify commits the accepted rows
+// before the next block runs, so `selectBlock` is called with `pendingFused: nil`.
+
+/// One DSpark round. `cap == 0` is a dense target step (no drafted tokens).
+public struct DSparkRoundStats: Sendable {
+    public let proposed: Int
+    public let accepted: Int
+    public let cap: Int
+    public let draftMs: Double
+    public let verifyMs: Double
+    public let acceptMs: Double
+    public let rollbackMs: Double
+
+    public init(
+        proposed: Int, accepted: Int, cap: Int,
+        draftMs: Double, verifyMs: Double, acceptMs: Double, rollbackMs: Double
+    ) {
+        self.proposed = proposed
+        self.accepted = accepted
+        self.cap = cap
+        self.draftMs = draftMs
+        self.verifyMs = verifyMs
+        self.acceptMs = acceptMs
+        self.rollbackMs = rollbackMs
+    }
+}
+
+/// Process-wide store for DSpark drafters. The vLLM-speculators checkpoints ship no
+/// tokenizer files and no chat `model_type`, so they cannot go through
+/// `LLMModelFactory` / the model pool — the MLXEngine dispatch sites lazy-load them
+/// here, keyed by directory path. Weight reads after the load are read-only; each
+/// request carries its own `DSparkCtxCache`.
+public final class DSparkDrafterStore: @unchecked Sendable {
+    public static let shared = DSparkDrafterStore()
+
+    private let lock = NSLock()
+    private var drafters: [String: DSparkDraftModel] = [:]
+
+    private init() {}
+
+    /// True when `modelId` is an on-disk DSpark drafter this store can load (config
+    /// parses into a supported family). Used by `isModelLoaded` so an explicit
+    /// `draft_model` skips the pool auto-load, which cannot load these checkpoints.
+    public static func isLoadableDSparkDraft(modelId: String) -> Bool {
+        let dir = NovaMLXPaths.directory(forModelId: modelId)
+        guard DSparkConfig.isDSparkDraftConfig(at: dir) else { return false }
+        guard let data = try? Data(
+            contentsOf: dir.appendingPathComponent("config.json"))
+        else { return false }
+        return (try? DSparkConfig.fromJSON(data)) != nil
+    }
+
+    /// Load (or fetch) the drafter under `dir`. Config comes from `config.json`;
+    /// weights are the merged contents of every `*.safetensors` in the directory,
+    /// verified 1:1 against the module tree by `DSparkDraftModel.loadWeights`.
+    public func drafter(for dir: URL) throws -> DSparkDraftModel {
+        let key = dir.path
+        lock.lock()
+        if let cached = drafters[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let config = try DSparkConfig.fromJSON(
+            Data(contentsOf: dir.appendingPathComponent("config.json")))
+        let model = DSparkDraftModel(config)
+        var weights: [String: MLXArray] = [:]
+        for file in try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        where file.hasSuffix(".safetensors") {
+            weights.merge(try MLX.loadArrays(url: dir.appendingPathComponent(file))) {
+                _, new in new
+            }
+        }
+        guard !weights.isEmpty else {
+            throw DSparkError.invalidConfig("no .safetensors under \(dir.path)")
+        }
+        try model.loadWeights(weights)
+
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = drafters[key] { return cached }
+        drafters[key] = model
+        return model
+    }
+
+    /// Test hook: drop every cached drafter.
+    public func reset() {
+        lock.lock()
+        drafters.removeAll()
+        lock.unlock()
+    }
+}
+
+/// Greedy speculative decoding with a DSpark block drafter. Fixed cap
+/// (`drafter.kdraft`); acceptance is the DFlash greedy rule — longest matching
+/// prefix of drafts vs target argmax, then the first mismatched (bonus) token.
+public struct DSparkTokenIterator: TokenIteratorProtocol {
+    /// Drafts per verify while staying on Metal vector SDPA for GQA-6 / head-256.
+    /// Verify width is anchor + drafts, and that kernel requires
+    /// `queryLen * (heads / kvHeads) <= 32` with `queryLen <= 8`.
+    static let vectorSDPAMaxDrafts = 4
+
+    let target: any DFlashTarget
+    let drafter: DSparkDraftModel
+    var mainCache: [KVCache]
+    var draftCache: [DSparkCtxCache]
+    var processor: LogitProcessor?
+    public var tokenCount = 0
+    public let maxTokens: Int?
+    public var promptPrefillTime: TimeInterval = 0.0
+    public var totalProposed = 0
+    public var totalAccepted = 0
+    public var onSpeculationRound: (@Sendable (DSparkRoundStats) -> Void)?
+
+    private var pendingTokens = [Int]()
+    private var pendingIndex = 0
+    private var pending: Int = 0
+    /// Committed drafter ctx rows — the rope offset of the next block or ctx append.
+    private var ctxOffset = 0
+    private let blockSize: Int
+    private let maskId: Int
+    private let tap: [Int]
+    private let maxCap: Int
+
+    public init(
+        input: LMInput,
+        target: any DFlashTarget,
+        drafter: DSparkDraftModel,
+        mainCache: [KVCache]? = nil,
+        parameters: GenerateParameters,
+        processor: LogitProcessor? = nil
+    ) throws {
+        self.target = target
+        self.drafter = drafter
+        self.mainCache = try mainCache ?? target.newCache(parameters: parameters)
+        self.draftCache = drafter.makeCtxCache()
+        self.processor = processor ?? parameters.processor()
+        self.maxTokens = parameters.maxTokens
+        self.blockSize = drafter.config.blockSize
+        self.maskId = drafter.config.maskTokenId
+        self.tap = drafter.config.targetLayerIds
+        self.maxCap = Swift.max(1, drafter.kdraft)
+
+        // This head ships no embed_tokens / lm_head — run on the target's raw tables.
+        drafter.bind(
+            embed: { [target] ids in target.dflashEmbed(ids) },
+            lmHead: { [target] h in target.dflashLmHead(h) }
+        )
+
+        let start = Date()
+        try prepare(input: input)
+        self.promptPrefillTime = Date().timeIntervalSince(start)
+    }
+
+    mutating func prepare(input: LMInput) throws {
+        processor?.prompt(input.text.tokens)
+        var prompt = input.text.tokens
+        if prompt.ndim == 1 { prompt = prompt.reshaped(1, -1) }
+        let total = prompt.dim(1)
+        guard total > 0 else { return }
+        let chunk = DFlashLimits.prefillChunkTokens
+        var logits = MLXArray.zeros([1, 1, 1])
+        var start = 0
+        while start < total {
+            let end = Swift.min(start + chunk, total)
+            let slice = prompt[0..., start ..< end]
+            let step = target.dflashVerify(slice, cache: mainCache, tapLayerIds: tap)
+            if start == 0 {
+                // fc expects nTaps × drafter-hidden — a wrong drafter/target pairing
+                // must fail loudly here, not as an MLX shape error mid-forward.
+                let expected = tap.count * drafter.config.hiddenSize
+                guard step.fused.dim(2) == expected else {
+                    throw DSparkError.invalidConfig(
+                        "fused tap width \(step.fused.dim(2)) != \(expected) "
+                            + "(\(tap.count) taps × hidden \(drafter.config.hiddenSize)) "
+                            + "— drafter/target mismatch")
+                }
+            }
+            eval(step.logits, step.fused)
+            drafter.updateContext(step.fused, offset: start, cache: draftCache)
+            logits = step.logits
+            start = end
+        }
+        ctxOffset = total
+        var stepLogits = logits[0..., -1, 0...]
+        stepLogits = processor?.process(logits: stepLogits) ?? stepLogits
+        let token = argMax(stepLogits, axis: -1).item(Int.self)
+        processor?.didSample(token: MLXArray([Int32(token)]))
+        pending = token
+        pendingTokens = [token]
+    }
+
+    mutating func speculateRound() {
+        let budget = maxTokens.map { $0 - tokenCount } ?? (maxCap + 1)
+        guard budget > 0 else { return }
+        // A round commits the accepted drafts plus one bonus token. Leave that
+        // bonus inside the remaining budget so the last token matches dense decode.
+        let thisCap = Swift.min(maxCap, budget - 1)
+        if thisCap <= 0 {
+            denseStep()
+            return
+        }
+
+        let tDraft = Date()
+        let blockIds = [Int32(pending)] + Array(repeating: Int32(maskId), count: blockSize - 1)
+        let block = MLXArray(blockIds, [1, blockSize])
+        // Stay on the vector SDPA kernel decode uses. Head 256 / GQA 6 leaves
+        // that kernel only for query length <= 5; a 9-token verify uses generic
+        // SDPA and its later rows diverge from greedy decode.
+        let verifyCap = Swift.min(thisCap, Self.vectorSDPAMaxDrafts)
+        let draft = drafter.selectBlock(
+            block: block, pendingFused: nil, cache: draftCache,
+            cap: verifyCap, anchorId: pending)
+        let drafted = draft.tokens
+        let draftMs = Date().timeIntervalSince(tDraft) * 1000
+
+        let tVerify = Date()
+        var verifyList = [Int32(pending)]
+        verifyList.append(contentsOf: drafted.map { Int32($0) })
+        let verifyIds = MLXArray(verifyList, [1, verifyList.count])
+        let (vLogits, vFused) = target.dflashVerify(
+            verifyIds, cache: mainCache, tapLayerIds: tap)
+        let argmax = argmaxRows(vLogits)
+        eval(vFused)
+        let verifyMs = Date().timeIntervalSince(tVerify) * 1000
+        finishRound(
+            drafted: drafted, argmax: argmax, fused: vFused,
+            draftMs: draftMs, verifyMs: verifyMs)
+    }
+
+    /// One target token. Still a tapped `dflashVerify` — the anchor's fused row must
+    /// reach the drafter ctx or the next draft attends over a hole.
+    private mutating func denseStep() {
+        let tVerify = Date()
+        let verifyIds = MLXArray([Int32(pending)], [1, 1])
+        let step = target.dflashVerify(verifyIds, cache: mainCache, tapLayerIds: tap)
+        var row = step.logits[0..., -1, 0...]
+        row = processor?.process(logits: row) ?? row
+        let token = argMax(row, axis: -1).item(Int.self)
+        drafter.updateContext(step.fused, offset: ctxOffset, cache: draftCache)
+        ctxOffset += 1
+        asyncEval(mainCache.flatMap { $0.state })
+        let verifyMs = Date().timeIntervalSince(tVerify) * 1000
+
+        pendingTokens.append(token)
+        pending = token
+        processor?.didSample(token: MLXArray([Int32(token)]))
+        onSpeculationRound?(
+            DSparkRoundStats(
+                proposed: 0, accepted: 0, cap: 0,
+                draftMs: 0, verifyMs: verifyMs,
+                acceptMs: 0, rollbackMs: 0))
+    }
+
+    private func argmaxRows(_ logits: MLXArray) -> [Int] {
+        var argmax = [Int]()
+        let seq = logits.dim(1)
+        for i in 0 ..< seq {
+            var row = logits[0..., i, 0...]
+            row = processor?.process(logits: row) ?? row
+            argmax.append(argMax(row, axis: -1).item(Int.self))
+        }
+        return argmax
+    }
+
+    private mutating func finishRound(
+        drafted: [Int], argmax: [Int], fused: MLXArray,
+        draftMs: Double, verifyMs: Double
+    ) {
+        let tAccept = Date()
+        let result = DFlashAccept.greedy(drafted: drafted, targetArgmax: argmax)
+        let acceptMs = Date().timeIntervalSince(tAccept) * 1000
+        let n = result.accepted
+        totalProposed += drafted.count
+        totalAccepted += n
+        let tRoll = Date()
+        target.dflashRollback(
+            cache: mainCache, nRejected: drafted.count - n, specWidth: 1 + drafted.count)
+        let rollbackMs = Date().timeIntervalSince(tRoll) * 1000
+
+        // Commit the fused rows of the anchor plus the accepted drafts — the bonus
+        // token's fused row arrives as next round's anchor row.
+        let keep = Swift.min(n + 1, fused.dim(1))
+        if keep > 0 {
+            drafter.updateContext(fused[0..., ..<keep, 0...], offset: ctxOffset, cache: draftCache)
+            ctxOffset += keep
+        }
+        pendingTokens.append(contentsOf: result.committed)
+        if let last = result.committed.last {
+            pending = last
+            for tid in result.committed {
+                processor?.didSample(token: MLXArray([Int32(tid)]))
+            }
+        }
+        onSpeculationRound?(
+            DSparkRoundStats(
+                proposed: drafted.count, accepted: n, cap: drafted.count,
+                draftMs: draftMs, verifyMs: verifyMs,
+                acceptMs: acceptMs, rollbackMs: rollbackMs))
+    }
+
+    public mutating func next() -> Int? {
+        if let maxTokens, tokenCount >= maxTokens { return nil }
+        if pendingIndex >= pendingTokens.count {
+            pendingTokens.removeAll(keepingCapacity: true)
+            pendingIndex = 0
+            speculateRound()
+            if pendingTokens.isEmpty { return nil }
+        }
+        let t = pendingTokens[pendingIndex]
+        pendingIndex += 1
+        tokenCount += 1
+        return t
+    }
+}

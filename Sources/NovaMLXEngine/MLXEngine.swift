@@ -2320,6 +2320,68 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Try creating iterator with restored cache; fall back to fresh on error
         let iterator: any TokenIteratorProtocol
         if let draftModelId = request.draftModel,
+           DSparkDrafterStore.isLoadableDSparkDraft(modelId: draftModelId)
+        {
+            // DSpark drafters ship no tokenizer, so they never enter the model pool —
+            // DSparkDrafterStore lazy-loads them and DSparkTokenIterator drives them.
+            let tag = String(request.id.uuidString.prefix(8))
+            do {
+                if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
+                   let target = model.value as? any DFlashTarget
+                {
+                    let drafter = try DSparkDrafterStore.shared.drafter(
+                        for: NovaMLXPaths.directory(forModelId: draftModelId))
+                    var dsparkIterator = try DSparkTokenIterator(
+                        input: effectiveInput,
+                        target: target,
+                        drafter: drafter,
+                        mainCache: kvCache,
+                        parameters: parameters,
+                        processor: processor
+                    )
+                    dsparkIterator.onSpeculationRound = { round in
+                        guard round.cap > 0 else { return }
+                        NovaMLXLog.info(
+                            "[DSpark:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
+                        )
+                    }
+                    iterator = dsparkIterator
+                    NovaMLXLog.info(
+                        "[GENERATE:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) cap=fixed<=\(drafter.kdraft)"
+                    )
+                } else {
+                    NovaMLXLog.info(
+                        "[GENERATE:\(tag)] Skipping DSpark — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok or target lacks hidden-state taps"
+                    )
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
+            } catch {
+                NovaMLXLog.warning("[GENERATE:\(tag)] DSparkTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
+                do {
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                } catch {
+                    NovaMLXLog.error("[GENERATE:\(tag)] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                    let freshCache = try model.value.newCache(parameters: parameters)
+                    kvCacheBox.value = freshCache
+                    iterator = try TokenIterator(
+                        input: input, model: model.value,
+                        cache: freshCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
+            }
+        } else if let draftModelId = request.draftModel,
            let draftContainer = getContainer(for: draftModelId),
            let draftMlxContainer = draftContainer.mlxContainer {
             // Speculative decoding with a draft model
@@ -2343,12 +2405,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         parameters: parameters,
                         processor: processor
                     )
-                    dflashIterator.onSpeculationRound = { proposed, accepted in
-                        NovaMLXLog.info("[DFlash:\(tag)] proposed=\(proposed) accepted=\(accepted)")
+                    dflashIterator.onSpeculationRound = { round in
+                        let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
+                        guard round.cap > 0 || profile else { return }
+                        NovaMLXLog.info(
+                            "[DFlash:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
+                        )
                     }
                     iterator = dflashIterator
                     NovaMLXLog.info(
-                        "[GENERATE:\(tag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) cap=\(drafter.config.blockSize - 1)"
+                        "[GENERATE:\(tag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) cap=adaptive<=\(drafter.config.blockSize - 1)"
                     )
                 } else if draftModel.value is DFlashDraftModel {
                     NovaMLXLog.info(
@@ -3040,6 +3106,69 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     // Try creating iterator with restored cache; fall back to fresh on error
                     let iterator: any TokenIteratorProtocol
                     if let draftModelId = request.draftModel,
+                       DSparkDrafterStore.isLoadableDSparkDraft(modelId: draftModelId)
+                    {
+                        // DSpark drafters ship no tokenizer, so they never enter the model
+                        // pool — DSparkDrafterStore lazy-loads them and DSparkTokenIterator
+                        // drives them.
+                        let tag = String(request.id.uuidString.prefix(8))
+                        do {
+                            if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
+                               let target = model.value as? any DFlashTarget
+                            {
+                                let drafter = try DSparkDrafterStore.shared.drafter(
+                                    for: NovaMLXPaths.directory(forModelId: draftModelId))
+                                var dsparkIterator = try DSparkTokenIterator(
+                                    input: effectiveInput,
+                                    target: target,
+                                    drafter: drafter,
+                                    mainCache: kvCache,
+                                    parameters: parameters,
+                                    processor: processor
+                                )
+                                dsparkIterator.onSpeculationRound = { round in
+                                    guard round.cap > 0 else { return }
+                                    NovaMLXLog.info(
+                                        "[STREAM:\(tag)] DSpark proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
+                                    )
+                                }
+                                iterator = dsparkIterator
+                                NovaMLXLog.info(
+                                    "[STREAM:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) cap=fixed<=\(drafter.kdraft)"
+                                )
+                            } else {
+                                NovaMLXLog.info(
+                                    "[STREAM:\(tag)] Skipping DSpark — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok or target lacks hidden-state taps"
+                                )
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
+                        } catch {
+                            NovaMLXLog.warning("[STREAM:\(tag)] DSparkTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
+                            do {
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            } catch {
+                                NovaMLXLog.error("[STREAM:\(tag)] TokenIterator failed: \(error.localizedDescription) — falling back to full prefill")
+                                let freshCache = try model.value.newCache(parameters: parameters)
+                                kvCacheBox.value = freshCache
+                                iterator = try TokenIterator(
+                                    input: input, model: model.value,
+                                    cache: freshCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
+                        }
+                    } else if let draftModelId = request.draftModel,
                        let draftContainer = self.getContainer(for: draftModelId),
                        let draftMlxContainer = draftContainer.mlxContainer {
                         // Speculative decoding with a draft model
@@ -3063,11 +3192,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                     parameters: parameters,
                                     processor: processor
                                 )
-                                dflashIterator.onSpeculationRound = { proposed, accepted in
-                                    NovaMLXLog.info("[DFlash:\(tag)] proposed=\(proposed) accepted=\(accepted)")
+                                dflashIterator.onSpeculationRound = { round in
+                                    let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
+                                    guard round.cap > 0 || profile else { return }
+                                    NovaMLXLog.info(
+                                        "[STREAM:\(tag)] DFlash proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
+                                    )
                                 }
                                 iterator = dflashIterator
-                                NovaMLXLog.info("[STREAM:\(tag)] DFlash2 draft=\(draftModelId)")
+                                NovaMLXLog.info(
+                                    "[STREAM:\(tag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) cap=adaptive<=\(drafter.config.blockSize - 1)"
+                                )
                             } else if draftModel.value is DFlashDraftModel {
                                 NovaMLXLog.info(
                                     "[STREAM:\(tag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"

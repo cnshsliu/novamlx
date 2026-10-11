@@ -18,6 +18,7 @@ struct CatalogAdminPageView: View {
     @State private var isError = false
     @State private var isSaving = false
     @State private var draft: CatalogDraft = .blank
+    let memory: CatalogAdminPageMemory
 
     private var filtered: [CatalogEntry] {
         models.filter { entry in
@@ -45,7 +46,22 @@ struct CatalogAdminPageView: View {
                     .frame(minWidth: 420)
             }
         }
-        .onAppear { loadCatalog() }
+        .onAppear {
+            loadCatalog()
+            if memory.keep {
+                query = memory.query
+                categoryFilter = memory.categoryFilter
+                selectedId = memory.selectedId
+                if let saved = memory.draft { draft = saved }
+            }
+        }
+        .onDisappear {
+            memory.keep = true
+            memory.query = query
+            memory.categoryFilter = categoryFilter
+            memory.selectedId = selectedId
+            memory.draft = draft
+        }
         .onChange(of: appState.pendingCatalogEntry) { _, pending in
             guard let pending else { return }
             ingestPending(pending)

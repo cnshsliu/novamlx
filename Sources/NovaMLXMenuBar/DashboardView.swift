@@ -12,7 +12,6 @@ public struct DashboardView: View {
     @State private var availableModels: [ModelRecord] = []
     @State private var downloadStates: [String: DownloadState] = [:]
     @State private var deviceInfo: DeviceInfo?
-    @State private var refreshTimer: Timer?
 
     public init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager) {
         self.appState = appState
@@ -33,8 +32,10 @@ public struct DashboardView: View {
         }
         .frame(minWidth: 700, minHeight: 500)
         .background(NovaTheme.Colors.background)
-        .onAppear { startRefresh() }
-        .onDisappear { stopRefresh() }
+        .onAppear { reloadLists() }
+        .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
+            reloadLists()
+        }
     }
 
     private var headerSection: some View {
@@ -305,19 +306,11 @@ public struct DashboardView: View {
         return "tok/s"
     }
 
-    private func startRefresh() {
-        availableModels = modelManager.downloadedModels()
-        deviceInfo = DeviceInfo.current()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
-            Task { @MainActor in
-                self.availableModels = modelManager.downloadedModels()
-                self.deviceInfo = DeviceInfo.current()
-            }
+    private func reloadLists() {
+        if deviceInfo == nil { deviceInfo = DeviceInfo.current() }
+        Task {
+            await modelManager.refreshModelCaches()
+            availableModels = modelManager.downloadedModels()
         }
-    }
-
-    private func stopRefresh() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
     }
 }

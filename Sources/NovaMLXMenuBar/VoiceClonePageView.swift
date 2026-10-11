@@ -52,6 +52,20 @@ struct VoiceClonePageView: View {
     @State private var loadProgress: String?
     @State private var renamingId: UUID?
     @State private var renameDraft = ""
+    let memory: VoiceClonePageMemory
+
+    init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager, memory: VoiceClonePageMemory) {
+        self.appState = appState
+        self.inferenceService = inferenceService
+        self.modelManager = modelManager
+        self.memory = memory
+        _selectedId = State(initialValue: memory.selectedId)
+        _profileName = State(initialValue: memory.profileName)
+        _transcript = State(initialValue: memory.transcript)
+        _speakText = State(initialValue: memory.speakText)
+        _renamingId = State(initialValue: memory.renamingId)
+        _renameDraft = State(initialValue: memory.renameDraft)
+    }
     @AppStorage("novamlx.voiceClone.ttsModelId") private var selectedTTSId = Qwen3TTSCloneService.defaultModelId
     @AppStorage("novamlx.voiceClone.scriptLang") private var scriptLangRaw = VoiceCloneLanguage.chinese.rawValue
 
@@ -77,11 +91,35 @@ struct VoiceClonePageView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             reloadProfiles()
-            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let keptTranscript = memory.touched ? memory.transcript : nil
+            let keptName = memory.touched ? memory.profileName : nil
+            if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && keptTranscript == nil {
                 transcript = scriptLang.defaultTranscript
             }
             syncInspector(from: selectedId)
+            if let keptTranscript {
+                transcript = keptTranscript
+                if let keptName { profileName = keptName }
+            }
         }
+        .onChange(of: profileName) { _, value in
+            memory.profileName = value
+            memory.touched = true
+        }
+        .onChange(of: transcript) { _, value in
+            memory.transcript = value
+            memory.touched = true
+        }
+        .onChange(of: speakText) { _, value in
+            memory.speakText = value
+            memory.touched = true
+        }
+        .onChange(of: renameDraft) { _, value in
+            memory.renameDraft = value
+            memory.touched = true
+        }
+        .onChange(of: renamingId) { _, value in memory.renamingId = value }
+        .onChange(of: selectedId) { _, value in memory.selectedId = value }
         .onChange(of: selectedId) { oldId, newId in
             if let oldId {
                 VoiceProfileManager.shared.updateTranscript(oldId, refTranscript: transcript)

@@ -14,13 +14,61 @@ struct RequestLogPageView: View {
     /// mutates on the inference queue; we poll on the main thread).
     @State private var refreshTick: Date = Date()
     @State private var onlyErrors: Bool = false
+    @State private var modelFilter: String = ""
+    @State private var expandedId: String?
+    @State private var scrollAnchor: String?
+    @State private var pollTimer: Timer?
+    let memory: RequestLogPageMemory
+
+    init(appState: MenuBarAppState, inferenceService: InferenceService, memory: RequestLogPageMemory) {
+        self.appState = appState
+        self.inferenceService = inferenceService
+        self.memory = memory
+        _onlyErrors = State(initialValue: memory.onlyErrors)
+        _modelFilter = State(initialValue: memory.modelFilter)
+        _expandedId = State(initialValue: memory.expandedId)
+        _scrollAnchor = State(initialValue: memory.scrollAnchor)
+    }
 
     private let store = RequestLogStore.shared
 
     private var active: [RequestLogEntry] { store.activeRequests }
     private var completed: [RequestLogEntry] {
-        let all = store.completedRequests
-        return onlyErrors ? all.filter { $0.status == .error || $0.status == .cancelled } : all
+        store.completedRequests.filter { entry in
+            if onlyErrors && entry.status != .error && entry.status != .cancelled { return false }
+            if !modelFilter.isEmpty && entry.model != modelFilter { return false }
+            return true
+        }
+    }
+
+    /// Model ids that appear on Recent Requests, plus a filter that no longer has rows.
+    private var modelChoices: [String] {
+        var seen = Set<String>()
+        var names: [String] = []
+        for entry in store.completedRequests {
+            guard let name = entry.model, !name.isEmpty, seen.insert(name).inserted else { continue }
+            names.append(name)
+        }
+        if !modelFilter.isEmpty && seen.insert(modelFilter).inserted {
+            names.append(modelFilter)
+        }
+        names.sort { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return names
+    }
+
+    private func modelMenuLabel(_ id: String) -> String {
+        let tail = id.split(separator: "/").last.map(String.init) ?? id
+        let sameTail = modelChoices.contains { other in
+            other != id && (other.split(separator: "/").last.map(String.init) ?? other) == tail
+        }
+        return sameTail ? id : tail
+    }
+
+    private var historyEmptyMessage: String {
+        if !modelFilter.isEmpty && onlyErrors { return "No errors for this model" }
+        if !modelFilter.isEmpty { return "No requests for this model" }
+        if onlyErrors { return "No errors in recent history" }
+        return "No requests recorded yet"
     }
 
     var body: some View {
@@ -32,6 +80,31 @@ struct RequestLogPageView: View {
             }
             .padding(NovaTheme.Spacing.xxl)
         }
+        .scrollPosition(id: $scrollAnchor)
+        .onChange(of: onlyErrors) { _, value in memory.onlyErrors = value }
+        .onChange(of: modelFilter) { _, value in memory.modelFilter = value }
+        .onChange(of: expandedId) { _, value in memory.expandedId = value }
+        .onChange(of: scrollAnchor) { _, value in memory.scrollAnchor = value }
+        .onAppear { startPolling() }
+        .onDisappear { stopPolling() }
+    }
+
+    private func startPolling() {
+        stopPolling()
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            Task { @MainActor in
+                refreshTick = Date()
+                // Safety net for crashed workers / dropped streams — not a generate
+                // deadline. 120s was labeling queued 27B jobs as timeout.
+                store.cancelStale(olderThan: RequestLogStore.staleAge(requestTimeout: 300))
+            }
+        }
+        pollTimer = timer
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
 
     // MARK: - Header
@@ -67,16 +140,16 @@ struct RequestLogPageView: View {
             } else {
                 VStack(spacing: 6) {
                     ForEach(active) { entry in
-                        ActiveRequestRow(entry: entry, now: refreshTick, inferenceService: inferenceService)
+                        ActiveRequestRow(
+                            entry: entry,
+                            now: refreshTick,
+                            inferenceService: inferenceService,
+                            expandedId: $expandedId
+                        )
+                        .id(entry.id)
                     }
                 }
             }
-        }
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            refreshTick = Date()
-            // Safety net for crashed workers / dropped streams — not a generate
-            // deadline. 120s was labeling queued 27B jobs as timeout.
-            store.cancelStale(olderThan: RequestLogStore.staleAge(requestTimeout: 300))
         }
     }
 
@@ -84,20 +157,31 @@ struct RequestLogPageView: View {
 
     private var historySection: some View {
         VStack(alignment: .leading, spacing: NovaTheme.Spacing.md) {
-            HStack(alignment: .center) {
-                sectionHeader("Recent Requests", count: store.completedRequests.count, systemName: "clock.arrow.circlepath")
-                Spacer()
+            sectionHeader("Recent Requests", count: completed.count, systemName: "clock.arrow.circlepath")
+            HStack(alignment: .center, spacing: NovaTheme.Spacing.md) {
+                Picker("Model", selection: $modelFilter) {
+                    Text("All models").tag("")
+                    ForEach(modelChoices, id: \.self) { name in
+                        Text(modelMenuLabel(name)).tag(name)
+                    }
+                }
+                .pickerStyle(.menu)
+                .font(.system(size: 12))
+                .frame(minWidth: 200, maxWidth: 360, alignment: .leading)
+                .help(modelFilter.isEmpty ? "Show every model" : modelFilter)
+                Spacer(minLength: 8)
                 Toggle("Errors only", isOn: $onlyErrors)
                     .toggleStyle(.switch)
                     .font(.system(size: 11))
             }
 
             if completed.isEmpty {
-                emptyState(onlyErrors ? "No errors in recent history" : "No requests recorded yet")
+                emptyState(historyEmptyMessage)
             } else {
                 VStack(spacing: 6) {
                     ForEach(completed) { entry in
-                        CompletedRequestRow(entry: entry)
+                        CompletedRequestRow(entry: entry, expandedId: $expandedId)
+                            .id(entry.id)
                     }
                 }
             }
@@ -136,7 +220,9 @@ private struct ActiveRequestRow: View {
     let entry: RequestLogEntry
     let now: Date
     let inferenceService: InferenceService
-    @State private var isExpanded: Bool = false
+    @Binding var expandedId: String?
+
+    private var isExpanded: Bool { expandedId == entry.id }
 
     private var elapsed: TimeInterval { now.timeIntervalSince(entry.startedAt) }
 
@@ -202,7 +288,7 @@ private struct ActiveRequestRow: View {
             .padding(.vertical, NovaTheme.Spacing.sm + 1)
             .background(NovaTheme.Colors.rowBackground)
             .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }
+            .onTapGesture { toggleExpanded() }
             .overlay(
                 RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
                     .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
@@ -216,6 +302,12 @@ private struct ActiveRequestRow: View {
         .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.md))
     }
 
+    private func toggleExpanded() {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            expandedId = isExpanded ? nil : entry.id
+        }
+    }
+
     private var chevron: some View {
         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
             .font(.system(size: 9, weight: .semibold))
@@ -227,7 +319,9 @@ private struct ActiveRequestRow: View {
 /// A single completed request row. Click to expand the request body detail.
 private struct CompletedRequestRow: View {
     let entry: RequestLogEntry
-    @State private var isExpanded: Bool = false
+    @Binding var expandedId: String?
+
+    private var isExpanded: Bool { expandedId == entry.id }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -295,7 +389,7 @@ private struct CompletedRequestRow: View {
             .padding(.vertical, NovaTheme.Spacing.sm)
             .background(NovaTheme.Colors.rowBackground)
             .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }
+            .onTapGesture { toggleExpanded() }
             .overlay(
                 RoundedRectangle(cornerRadius: NovaTheme.Radius.md)
                     .stroke(NovaTheme.Colors.cardBorder, lineWidth: 0.5)
@@ -307,6 +401,12 @@ private struct CompletedRequestRow: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: NovaTheme.Radius.md))
+    }
+
+    private func toggleExpanded() {
+        withAnimation(.easeInOut(duration: 0.15)) {
+            expandedId = isExpanded ? nil : entry.id
+        }
     }
 
     private var chevron: some View {
@@ -477,6 +577,7 @@ private func kindBadge(_ kind: InferenceKind?, placeholder: Color? = nil) -> som
         case .asr: return NovaTheme.Colors.statusWarn
         case .tts: return .purple
         case .image: return .pink
+        case .video: return .orange
         case .vlm: return .teal
         case .llm: return NovaTheme.Colors.accent
         case nil: return placeholder ?? NovaTheme.Colors.textTertiary

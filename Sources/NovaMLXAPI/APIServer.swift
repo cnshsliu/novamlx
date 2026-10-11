@@ -638,6 +638,7 @@ private extension String {
             || self.hasPrefix("/v1/audio/transcriptions")
             || self.hasPrefix("/v1/audio/speech")
             || self.hasPrefix("/v1/images/generations")
+            || self.hasPrefix("/v1/video/talking-head")
     }
 }
 
@@ -1802,6 +1803,181 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     model: model
                 )
                 return try Self.jsonResponse(response)
+            }
+
+            // MARK: - Talking-Head Video (audio-to-video)
+
+            Get("/v1/video/progress") { _, _ in
+                if let job = inference.talkingHeadService.inFlight() {
+                    let body: [String: Any] = [
+                        "active": true,
+                        "model": job.modelId,
+                        "segment": job.segment + 1,
+                        "total_segments": job.totalSegments,
+                        "elapsed_s": Date().timeIntervalSince(job.startedAt),
+                    ]
+                    let data = try JSONSerialization.data(withJSONObject: body)
+                    return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                }
+                let idle = try JSONSerialization.data(withJSONObject: ["active": false])
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: idle)))
+            }
+
+            Post("/v1/video/talking-head") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let contentType = request.headers[fields: HTTPField.Name("content-type")!].first?.value ?? ""
+
+                // Inputs come either as a multipart upload (image + audio files)
+                // or as JSON referencing local file paths.
+                let imageURL: URL
+                let audioURL: URL
+                var prompt: String? = nil
+                var width: Int? = nil
+                var height: Int? = nil
+                var frameRate: Int? = nil
+                var seed: UInt64? = nil
+                var distilled: Bool? = nil
+                var responseFormat = "url"
+
+                if contentType.lowercased().contains("multipart/form-data") {
+                    let parts = try MultipartParser.parse(body: Data(body.readableBytesView), contentType: contentType)
+                    let text = { (name: String) -> String? in
+                        parts[name].flatMap { String(data: $0.body, encoding: .utf8) }
+                    }
+                    guard let imagePart = parts["image"], !imagePart.body.isEmpty else {
+                        throw NovaMLXError.apiError("Missing 'image' file part in multipart upload")
+                    }
+                    guard let audioPart = parts["audio"], !audioPart.body.isEmpty else {
+                        throw NovaMLXError.apiError("Missing 'audio' file part in multipart upload")
+                    }
+                    let stamp = Int(Date().timeIntervalSince1970)
+                    let imgExt = imagePart.filename?.split(separator: ".").last.map(String.init) ?? "png"
+                    let audExt = audioPart.filename?.split(separator: ".").last.map(String.init) ?? "wav"
+                    let imgFile = FileManager.default.temporaryDirectory.appendingPathComponent("novamlx_th_img_\(stamp).\(imgExt)")
+                    let audFile = FileManager.default.temporaryDirectory.appendingPathComponent("novamlx_th_aud_\(stamp).\(audExt)")
+                    try imagePart.body.write(to: imgFile)
+                    try audioPart.body.write(to: audFile)
+                    imageURL = imgFile
+                    audioURL = audFile
+
+                    prompt = text("prompt")
+                    width = text("width").flatMap(Int.init)
+                    height = text("height").flatMap(Int.init)
+                    frameRate = text("fps").flatMap(Int.init) ?? text("frame_rate").flatMap(Int.init)
+                    seed = text("seed").flatMap(UInt64.init)
+                    distilled = text("distilled").flatMap { $0 == "true" || $0 == "1" }
+                    responseFormat = text("response_format") ?? "url"
+                } else {
+                    struct TalkingHeadRequest: Codable {
+                        let prompt: String?
+                        let imagePath: String?
+                        let audioPath: String?
+                        let width: Int?
+                        let height: Int?
+                        let fps: Int?
+                        let frameRate: Int?
+                        let seed: UInt64?
+                        let distilled: Bool?
+                        let responseFormat: String?
+
+                        enum CodingKeys: String, CodingKey {
+                            case prompt
+                            case imagePath = "image_path"
+                            case audioPath = "audio_path"
+                            case width, height, fps
+                            case frameRate = "frame_rate"
+                            case seed, distilled
+                            case responseFormat = "response_format"
+                        }
+                    }
+                    let req = try JSONDecoder().decode(TalkingHeadRequest.self, from: body)
+                    guard let img = req.imagePath, !img.isEmpty else {
+                        throw NovaMLXError.apiError("'image_path' is required for JSON requests (or use multipart with an 'image' file part)")
+                    }
+                    guard let aud = req.audioPath, !aud.isEmpty else {
+                        throw NovaMLXError.apiError("'audio_path' is required for JSON requests (or use multipart with an 'audio' file part)")
+                    }
+                    imageURL = URL(fileURLWithPath: NSString(string: img).expandingTildeInPath)
+                    audioURL = URL(fileURLWithPath: NSString(string: aud).expandingTildeInPath)
+                    prompt = req.prompt
+                    width = req.width
+                    height = req.height
+                    frameRate = req.fps ?? req.frameRate
+                    seed = req.seed
+                    distilled = req.distilled
+                    responseFormat = req.responseFormat ?? "url"
+                }
+
+                guard inference.talkingHeadService.isReady else {
+                    throw NovaMLXError.configurationError(
+                        "Talking-head pipeline is not configured: model pack '\(inference.talkingHeadService.config.modelDir)' missing"
+                    )
+                }
+
+                let thStart = Date()
+                let result = try await inference.talkingHeadService.generate(
+                    image: imageURL,
+                    audio: audioURL,
+                    prompt: prompt,
+                    width: width,
+                    height: height,
+                    frameRate: frameRate,
+                    seed: seed,
+                    distilled: distilled
+                )
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    RequestLogStore.shared.finish(
+                        model: result.model, kind: .video, status: .success,
+                        tps: 0, promptTokens: 0,
+                        completionTokens: result.segments.count,
+                        durationMs: Date().timeIntervalSince(thStart) * 1000,
+                        requestId: rid)
+                }
+
+                // The mp4 lives in the temp dir; "url" returns its file URL,
+                // "path" a plain path. Base64 video is not offered — a 10 s
+                // clip is tens of MB.
+                let response: [String: Any]
+                switch responseFormat {
+                case "path":
+                    response = [
+                        "path": result.outputURL.path,
+                        "model": result.model,
+                        "prompt": result.prompt,
+                        "seed": result.seed,
+                        "width": result.width,
+                        "height": result.height,
+                        "frame_rate": result.frameRate,
+                        "audio_seconds": result.audioSeconds,
+                        "elapsed_s": result.elapsed,
+                        "segments": result.segments.map { [
+                            "index": $0.index,
+                            "audio_seconds": $0.audioSeconds,
+                            "frames": $0.frames,
+                            "elapsed_s": $0.elapsed,
+                        ] },
+                    ]
+                default:
+                    response = [
+                        "url": result.outputURL.absoluteString,
+                        "model": result.model,
+                        "prompt": result.prompt,
+                        "seed": result.seed,
+                        "width": result.width,
+                        "height": result.height,
+                        "frame_rate": result.frameRate,
+                        "audio_seconds": result.audioSeconds,
+                        "elapsed_s": result.elapsed,
+                        "segments": result.segments.map { [
+                            "index": $0.index,
+                            "audio_seconds": $0.audioSeconds,
+                            "frames": $0.frames,
+                            "elapsed_s": $0.elapsed,
+                        ] },
+                    ]
+                }
+                let data = try JSONSerialization.data(withJSONObject: response)
+                return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
 
             Post("/v1/responses") { request, context in

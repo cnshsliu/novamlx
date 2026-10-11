@@ -13,6 +13,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case loadBalancers = "Load Balancers"     // NEW — placeholder until Task 10
     case voiceClone = "Voice Clone"
     case videoSlice = "Video Slice"
+    case talkingHead = "Talking Head"
     case cluster = "Cluster"
     case tknetPeer = "Tknet Peer"
     case requests = "Requests"
@@ -31,6 +32,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .loadBalancers: return "scalemass"
         case .voiceClone: return "waveform.badge.mic"
         case .videoSlice: return "film"
+        case .talkingHead: return "person.crop.rectangle.badge.mic"
         case .cluster: return "xserve"
         case .tknetPeer: return "point.3.connected.trianglepath.dotted"
         case .requests: return "list.bullet.rectangle"
@@ -48,11 +50,22 @@ public struct NovaAppView: View {
 
     @EnvironmentObject var l10n: L10n
     @State private var selectedPage: AppPage
+    /// App-owned. The window must not create a second peer or drop the tunnel
+    /// when it closes.
+    @ObservedObject var tknetPeer: TknetPeerState
+    /// Page drafts. Not observed here, so a keystroke does not rebuild the sidebar.
+    @State private var pageMemory = PageMemoryBox()
 
-    public init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager) {
+    public init(
+        appState: MenuBarAppState,
+        inferenceService: InferenceService,
+        modelManager: ModelManager,
+        tknetPeer: TknetPeerState
+    ) {
         self.appState = appState
         self.inferenceService = inferenceService
         self.modelManager = modelManager
+        self.tknetPeer = tknetPeer
         _selectedPage = State(initialValue: appState.requestedPage ?? .status)
     }
 
@@ -69,6 +82,10 @@ public struct NovaAppView: View {
                 selectedPage = page
                 appState.requestedPage = nil
             }
+        }
+        .task { await modelManager.refreshModelCaches() }
+        .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
+            Task { await modelManager.refreshModelCaches() }
         }
     }
 
@@ -259,59 +276,50 @@ public struct NovaAppView: View {
         }
     }
 
+    @ViewBuilder
     private var detailView: some View {
-        ZStack {
+        switch selectedPage {
+        case .status:
             StatusPageView(appState: appState, modelManager: modelManager)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .status ? 1 : 0)
-                .allowsHitTesting(selectedPage == .status)
-            ClusterPageView(appState: appState)
+        case .cluster:
+            ClusterPageView(appState: appState, memory: pageMemory.cluster)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .cluster ? 1 : 0)
-                .allowsHitTesting(selectedPage == .cluster)
-            TknetPeerPageView()
-                .opacity(selectedPage == .tknetPeer ? 1 : 0)
-                .allowsHitTesting(selectedPage == .tknetPeer)
-            ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+        case .tknetPeer:
+            TknetPeerPageView(appState: appState, modelManager: modelManager, peer: tknetPeer, memory: pageMemory.tknet)
+        case .localInference:
+            ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.models)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .localInference ? 1 : 0)
-                .allowsHitTesting(selectedPage == .localInference)
-            DownloadsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+        case .downloads:
+            DownloadsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.downloads)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .downloads ? 1 : 0)
-                .allowsHitTesting(selectedPage == .downloads)
-            TokenhubPageView(appState: appState)
+        case .tokenhub:
+            TokenhubPageView(appState: appState, memory: pageMemory.tokenhub)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .tokenhub ? 1 : 0)
-                .allowsHitTesting(selectedPage == .tokenhub)
-            LoadBalancersPageView(appState: appState)
-                .opacity(selectedPage == .loadBalancers ? 1 : 0)
-                .allowsHitTesting(selectedPage == .loadBalancers)
-            VoiceClonePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+        case .loadBalancers:
+            LoadBalancersPageView(appState: appState, memory: pageMemory.loadBalancers)
+        case .voiceClone:
+            VoiceClonePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.voice)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .voiceClone ? 1 : 0)
-                .allowsHitTesting(selectedPage == .voiceClone)
-            VideoSlicePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+        case .videoSlice:
+            VideoSlicePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.video)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .videoSlice ? 1 : 0)
-                .allowsHitTesting(selectedPage == .videoSlice)
-            RequestLogPageView(appState: appState, inferenceService: inferenceService)
+        case .talkingHead:
+            TalkingHeadPageView(appState: appState, inferenceService: inferenceService, memory: pageMemory.talkingHead)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .requests ? 1 : 0)
-                .allowsHitTesting(selectedPage == .requests)
-            APIKeysPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+        case .requests:
+            RequestLogPageView(appState: appState, inferenceService: inferenceService, memory: pageMemory.requests)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .apiKeys ? 1 : 0)
-                .allowsHitTesting(selectedPage == .apiKeys)
-            SettingsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager)
+        case .apiKeys:
+            APIKeysPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.apiKeys)
                 .environmentObject(l10n)
-                .opacity(selectedPage == .settings ? 1 : 0)
-                .allowsHitTesting(selectedPage == .settings)
+        case .settings:
+            SettingsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.settings)
+                .environmentObject(l10n)
+        case .catalogAdmin:
             if appState.isCatalogAdmin {
-                CatalogAdminPageView(appState: appState, modelManager: modelManager)
+                CatalogAdminPageView(appState: appState, modelManager: modelManager, memory: pageMemory.catalog)
                     .environmentObject(l10n)
-                    .opacity(selectedPage == .catalogAdmin ? 1 : 0)
-                    .allowsHitTesting(selectedPage == .catalogAdmin)
             }
         }
     }
@@ -327,6 +335,7 @@ public struct NovaAppView: View {
         case .loadBalancers: return l10n.tr("app.load_balancers")
         case .voiceClone: return l10n.tr("app.voiceClone")
         case .videoSlice: return l10n.tr("app.videoSlice")
+        case .talkingHead: return l10n.tr("app.talkingHead")
         case .requests: return l10n.tr("app.requests")
         case .apiKeys: return "API Keys"
         case .catalogAdmin: return l10n.tr("app.catalogAdmin")

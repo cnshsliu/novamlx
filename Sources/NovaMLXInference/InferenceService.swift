@@ -42,6 +42,7 @@ public final class InferenceService: @unchecked Sendable {
     public let transcriptionService: TranscriptionService
     public let ttsService: TTSService
     public let imageGenerationService: ImageGenerationService
+    public let talkingHeadService: TalkingHeadService
     public let decisionService: DecisionService
 
     // Worker subprocess mode
@@ -68,12 +69,14 @@ public final class InferenceService: @unchecked Sendable {
         self.transcriptionService = TranscriptionService()
         self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
+        self.talkingHeadService = TalkingHeadService()
         self.decisionService = DecisionService()
         // Share the engine's metrics store with every backend so the status
         // panel's "Realtime Inference Speed" reflects ALL model types, not just LLM.
         self.transcriptionService.metricsStore = engine.metricsStore
         self.ttsService.metricsStore = engine.metricsStore
         self.imageGenerationService.metricsStore = engine.metricsStore
+        self.talkingHeadService.metricsStore = engine.metricsStore
         self.workerMode = workerMode
         self.clusterMode = clusterMode
 
@@ -934,6 +937,11 @@ public final class InferenceService: @unchecked Sendable {
         let resolvedId = settingsManager.resolveModelId(modelId)
         if workerLoadedModels.contains(resolvedId) { return true }
         if !workerMode, engine.getContainer(for: resolvedId)?.isLoaded == true { return true }
+        // DSpark companion drafters ship no tokenizer and never enter the model pool;
+        // the engine's DSpark dispatch lazy-loads them from disk. Report an on-disk,
+        // parseable one as loaded so an explicit `draft_model` skips the pool
+        // auto-load (which cannot load these checkpoints).
+        if DSparkDrafterStore.isLoadableDSparkDraft(modelId: resolvedId) { return true }
         // Decision, ASR, TTS and image models stay on the host. In worker mode
         // they are not in workerLoadedModels; treating that as "not loaded"
         // reloaded the 678 MB Laya checkpoint on every request.

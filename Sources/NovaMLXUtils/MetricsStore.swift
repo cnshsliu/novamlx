@@ -64,6 +64,7 @@ public enum InferenceKind: String, Sendable {
     case asr          // speech-to-text / transcription
     case tts          // text-to-speech / speech synthesis
     case image        // image generation / edit / variation
+    case video        // video generation (talking-head / a2v)
 
     /// Short human label for UI badges.
     public var label: String {
@@ -73,6 +74,7 @@ public enum InferenceKind: String, Sendable {
         case .asr: return "ASR"
         case .tts: return "TTS"
         case .image: return "Image"
+        case .video: return "Video"
         }
     }
 }
