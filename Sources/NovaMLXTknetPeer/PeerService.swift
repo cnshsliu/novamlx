@@ -229,8 +229,9 @@ public final class PeerService: @unchecked Sendable {
     /// reconnects). `concurrencyLimit` and the hello identity stay bound to
     /// the config `start()` saw — restart to change those.
     public func applyConfig(_ newConfig: PeerConfig) async {
-        var newConfig = newConfig
-        newConfig.migrateLegacyPoolsIfNeeded()
+        var migrated = newConfig
+        migrated.migrateLegacyPoolsIfNeeded()
+        let newConfig = migrated
         let client = state.withLock { state -> TunnelClient? in
             state.config = newConfig
             state.forwarder?.updateConfig(newConfig)
