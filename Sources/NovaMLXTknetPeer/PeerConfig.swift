@@ -86,6 +86,9 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     public var gatewayHost: String = "127.0.0.1"
     /// `0` asks the OS for an ephemeral port (tests). Production default is 6600.
     public var gatewayPort: Int = 6600
+    /// Set when `tknet-peer migrate-from-novamlx` wrote this file. A later run
+    /// is a no-op until `--force`.
+    public var migratedFromNovaAt: Date? = nil
     /// DemandIds the server stopped listing. Declarations are kept (UI greying);
     /// nothing is deleted. Persisted so retirement survives restarts.
     private var retiredDemandIds: Set<String> = []
@@ -109,7 +112,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case peerId, serverURL, sources, members, pools, capabilities, concurrencyLimit, registrations
         case requestTimeoutSeconds, idleMinutesBeforeSlowPoll, retiredDemandIds, serverMemory
-        case gatewayHost, gatewayPort
+        case gatewayHost, gatewayPort, migratedFromNovaAt
     }
 
     /// Custom decoding so config files written before retirement tracking
@@ -133,6 +136,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         retiredDemandIds = try c.decodeIfPresent(Set<String>.self, forKey: .retiredDemandIds) ?? []
         gatewayHost = try c.decodeIfPresent(String.self, forKey: .gatewayHost) ?? "127.0.0.1"
         gatewayPort = try c.decodeIfPresent(Int.self, forKey: .gatewayPort) ?? 6600
+        migratedFromNovaAt = Self.decodeMigrationStamp(c)
         migrateLegacyPoolsIfNeeded()
     }
 
@@ -151,6 +155,27 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         try c.encode(retiredDemandIds, forKey: .retiredDemandIds)
         try c.encode(gatewayHost, forKey: .gatewayHost)
         try c.encode(gatewayPort, forKey: .gatewayPort)
+        if let migratedFromNovaAt {
+            try c.encode(Self.migrationStampString(migratedFromNovaAt), forKey: .migratedFromNovaAt)
+        }
+    }
+
+    private static func migrationStampString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    private static func decodeMigrationStamp(_ c: KeyedDecodingContainer<CodingKeys>) -> Date? {
+        if let text = try? c.decodeIfPresent(String.self, forKey: .migratedFromNovaAt) {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter.date(from: text)
+        }
+        if let seconds = try? c.decodeIfPresent(Double.self, forKey: .migratedFromNovaAt) {
+            return Date(timeIntervalSinceReferenceDate: seconds)
+        }
+        return nil
     }
 
     /// When `pools` is missing, derive one pool per published model and point

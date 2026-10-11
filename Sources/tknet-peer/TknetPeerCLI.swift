@@ -11,7 +11,7 @@ struct TknetPeerCLI: AsyncParsableCommand {
         commandName: "tknet-peer",
         abstract: "Tknet inference supply peer",
         version: TknetPeer.version,
-        subcommands: [Setup.self, Serve.self, Earnings.self, Member.self, Pool.self]
+        subcommands: [Setup.self, Serve.self, Earnings.self, Member.self, Pool.self, MigrateFromNova.self]
     )
 }
 
@@ -544,6 +544,103 @@ extension TknetPeerCLI {
                 try TknetPeerCLI.saveConfig(peerConfig, path: config)
                 print("pool \(id)")
             }
+        }
+    }
+}
+
+// MARK: - migrate-from-novamlx
+
+extension TknetPeerCLI {
+    struct MigrateFromNova: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "migrate-from-novamlx",
+            abstract: "Copy NovaMLX load balancers and Tokenhub providers into this peer config")
+
+        @Option(help: "Config file path")
+        var config: String = CLIConfig.defaultConfigPath
+
+        @Option(name: .customLong("nova-db"), help: "Path to nova_config.db (default: ~/.config/novamlx/path)")
+        var novaDB: String?
+
+        @Option(name: .customLong("local-base"), help: "Base URL for local NovaMLX members")
+        var localBase: String = "http://127.0.0.1:6590/v1"
+
+        @Flag(name: .customLong("dry-run"), help: "Print the summary and write nothing")
+        var dryRun: Bool = false
+
+        @Flag(name: .customLong("force"), help: "Overwrite pools and members that already exist, and re-run after a previous migration")
+        var force: Bool = false
+
+        @Flag(name: .customLong("replace-pools"), help: "Drop existing pools before writing migrated ones")
+        var replacePools: Bool = false
+
+        func run() throws {
+            guard let localURL = URL(string: localBase), localURL.host != nil else {
+                throw ValidationError("Invalid --local-base \(localBase)")
+            }
+            let peerConfig = try TknetPeerCLI.loadConfig(config)
+            if peerConfig.migratedFromNovaAt != nil && !force {
+                let stamp = ISO8601DateFormatter().string(from: peerConfig.migratedFromNovaAt!)
+                print("Already migrated at \(stamp). Pass --force to run again.")
+                return
+            }
+            let database = try resolveDatabase()
+            let input: NovaMigrationInput
+            do {
+                input = try NovaDBSnapshotReader.load(database: database)
+            } catch let error as NovaDBReadError {
+                throw ValidationError(error.description)
+            }
+            let result = NovaConfigMigrator.migrate(
+                input, existing: peerConfig,
+                options: NovaMigrationOptions(force: force, replacePools: replacePools, localNovaBaseURL: localURL))
+            print("\(result.members.count) members, \(result.pools.count) pools, \(result.secrets.count) secrets, \(result.warnings.count) warnings")
+            for warning in result.warnings {
+                print("warning: \(warning)")
+            }
+            for pool in result.pools {
+                print("pool \(pool.name) members=\(pool.memberIds.joined(separator: ","))")
+            }
+            if dryRun {
+                print("dry-run: nothing written")
+                return
+            }
+            var updated = result.config
+            updated.migratedFromNovaAt = Date()
+            let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
+            for (ref, value) in result.secrets {
+                secrets.save(value, for: ref)
+            }
+            try TknetPeerCLI.saveConfig(updated, path: config)
+            print("wrote \(TknetPeerCLI.configURL(config).path)")
+        }
+
+        private func resolveDatabase() throws -> URL {
+            if let novaDB {
+                let url = URL(fileURLWithPath: CLIConfig.expandTilde(novaDB))
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    throw ValidationError("nova_config.db not found at \(url.path)")
+                }
+                return url
+            }
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let pathFile = home.appendingPathComponent(".config/novamlx/path")
+            guard let text = try? String(contentsOf: pathFile, encoding: .utf8) else {
+                throw ValidationError(
+                    "No NovaMLX data directory. Write the directory to ~/.config/novamlx/path or pass --nova-db (often ~/.nova/nova_config.db).")
+            }
+            let line = text.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .first { !$0.isEmpty && !$0.hasPrefix("#") }
+            guard let line else {
+                throw ValidationError("~/.config/novamlx/path is empty. Pass --nova-db.")
+            }
+            let expanded = CLIConfig.expandTilde(line)
+            let db = URL(fileURLWithPath: expanded, isDirectory: true).appendingPathComponent("nova_config.db")
+            guard FileManager.default.fileExists(atPath: db.path) else {
+                throw ValidationError("nova_config.db not found at \(db.path). Pass --nova-db if NovaMLX stores it elsewhere.")
+            }
+            return db
         }
     }
 }
