@@ -9,13 +9,10 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case status = "Status"
     case localInference = "Local Inference"   // was: models = "Models"
     case downloads = "Downloads"
-    case tokenhub = "Tokenhub"
-    case loadBalancers = "Load Balancers"     // NEW — placeholder until Task 10
     case voiceClone = "Voice Clone"
     case videoSlice = "Video Slice"
     case talkingHead = "Talking Head"
     case cluster = "Cluster"
-    case tknetPeer = "Tknet Peer"
     case requests = "Requests"
     case apiKeys = "API Keys"
     case catalogAdmin = "Catalog Admin"
@@ -28,13 +25,10 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .status: return "gauge.with.dots.needle.bottom.50percent"
         case .localInference: return "cube.box"
         case .downloads: return "arrow.down.circle"
-        case .tokenhub: return "server.rack"
-        case .loadBalancers: return "scalemass"
         case .voiceClone: return "waveform.badge.mic"
         case .videoSlice: return "film"
         case .talkingHead: return "person.crop.rectangle.badge.mic"
         case .cluster: return "xserve"
-        case .tknetPeer: return "point.3.connected.trianglepath.dotted"
         case .requests: return "list.bullet.rectangle"
         case .apiKeys: return "key.fill"
         case .catalogAdmin: return "checkmark.seal.fill"
@@ -50,22 +44,17 @@ public struct NovaAppView: View {
 
     @EnvironmentObject var l10n: L10n
     @State private var selectedPage: AppPage
-    /// App-owned. The window must not create a second peer or drop the tunnel
-    /// when it closes.
-    @ObservedObject var tknetPeer: TknetPeerState
     /// Page drafts. Not observed here, so a keystroke does not rebuild the sidebar.
     @State private var pageMemory = PageMemoryBox()
 
     public init(
         appState: MenuBarAppState,
         inferenceService: InferenceService,
-        modelManager: ModelManager,
-        tknetPeer: TknetPeerState
+        modelManager: ModelManager
     ) {
         self.appState = appState
         self.inferenceService = inferenceService
         self.modelManager = modelManager
-        self.tknetPeer = tknetPeer
         _selectedPage = State(initialValue: appState.requestedPage ?? .status)
     }
 
@@ -285,19 +274,12 @@ public struct NovaAppView: View {
         case .cluster:
             ClusterPageView(appState: appState, memory: pageMemory.cluster)
                 .environmentObject(l10n)
-        case .tknetPeer:
-            TknetPeerPageView(appState: appState, modelManager: modelManager, peer: tknetPeer, memory: pageMemory.tknet)
         case .localInference:
             ModelsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.models)
                 .environmentObject(l10n)
         case .downloads:
             DownloadsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.downloads)
                 .environmentObject(l10n)
-        case .tokenhub:
-            TokenhubPageView(appState: appState, memory: pageMemory.tokenhub)
-                .environmentObject(l10n)
-        case .loadBalancers:
-            LoadBalancersPageView(appState: appState, memory: pageMemory.loadBalancers)
         case .voiceClone:
             VoiceClonePageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.voice)
                 .environmentObject(l10n)
@@ -328,11 +310,8 @@ public struct NovaAppView: View {
         switch page {
         case .status: return l10n.tr("app.status")
         case .cluster: return l10n.tr("app.cluster")
-        case .tknetPeer: return l10n.tr("app.tknetPeer")
         case .localInference: return l10n.tr("app.local_inference")
         case .downloads: return l10n.tr("app.downloads")
-        case .tokenhub: return l10n.tr("app.tokenhub")
-        case .loadBalancers: return l10n.tr("app.load_balancers")
         case .voiceClone: return l10n.tr("app.voiceClone")
         case .videoSlice: return l10n.tr("app.videoSlice")
         case .talkingHead: return l10n.tr("app.talkingHead")

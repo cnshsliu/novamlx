@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import NovaMLXCore
-import NovaMLXDB
 import NovaMLXEngine
 import NovaMLXInference
 import NovaMLXModelManager
@@ -158,7 +157,7 @@ struct VideoSlicePageView: View {
                 }
             }
             Button {
-                runPipeline()
+                Task { await runPipeline() }
             } label: {
                 if isRunning { ProgressView().controlSize(.small) }
                 Text(l10n.tr("videoSlice.run"))
@@ -343,24 +342,21 @@ struct VideoSlicePageView: View {
         }
     }
 
-    private func runPipeline() {
+    private func runPipeline() async {
         guard let videoURL else { return }
         let asrId = inferenceService.transcriptionService.listLoadedModels().first
         guard let asrId else {
             errorText = l10n.tr("videoSlice.needASR")
             return
         }
-        switch sliceLBReadiness() {
+        switch await peerSlicePoolReady() {
         case .ready:
             break
-        case .createdEmpty:
-            errorText = l10n.tr("videoSlice.lbCreated")
-            return
-        case .noUsableModel:
+        case .missing:
             errorText = l10n.tr("videoSlice.lbEmpty")
             return
-        case .failed(let message):
-            errorText = message
+        case .unreachable:
+            errorText = l10n.tr("videoSlice.needLLM")
             return
         }
         let destStatus = VideoSlicePipeline.inspectOutputDirectory(outputDirPath)
@@ -429,7 +425,7 @@ struct VideoSlicePageView: View {
                 }
 
                 var corrected = chunks.map { VideoSlicePipeline.tidyTranscript($0.text) }
-                await MainActor.run { log("LLM proofread via lb:for-video-slice") }
+                await MainActor.run { log("LLM proofread via Peer pool for-video-slice") }
                 corrected = await proofreadChunks(
                     chunks: corrected, reference: ref, glossary: nameTerms)
                 corrected = corrected.map { VideoSlicePipeline.tidyTranscript($0) }
@@ -525,92 +521,59 @@ struct VideoSlicePageView: View {
 
     private enum SliceLBReadiness {
         case ready
-        case createdEmpty
-        case noUsableModel
-        case failed(String)
+        case missing
+        case unreachable
     }
 
-    private func sliceLBReadiness() -> SliceLBReadiness {
+    /// Peer serves the old `lb:for-video-slice` pool as model `for-video-slice` on :6600.
+    private func peerSlicePoolReady() async -> SliceLBReadiness {
+        guard let url = URL(string: "http://127.0.0.1:6600/v1/models") else { return .unreachable }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
         do {
-            try VideoSlicePipeline.ensureProperNounFile()
-            let slug = "for-video-slice"
-            guard let store = NovaDB.shared.loadBalancerStore,
-                  let memberStore = NovaDB.shared.lbMemberStore
-            else {
-                return .failed(l10n.tr("videoSlice.lbEmpty"))
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return .unreachable }
+            let text = String(data: data, encoding: .utf8) ?? ""
+            if text.contains("\"id\":\"for-video-slice\"") || text.contains("\"id\": \"for-video-slice\"") {
+                return .ready
             }
-            var created = false
-            var lb = try store.getLBBySlug(slug)
-            if lb == nil {
-                let made = LoadBalancer(name: "Video Slice", slug: slug)
-                try store.upsertLB(made)
-                lb = made
-                created = true
-            }
-            guard let lb else { return .createdEmpty }
-            let members = try memberStore.listMembers(lbId: lb.id)
-            let usable = members.contains { member in
-                guard member.isEnabled else { return false }
-                switch member.kind {
-                case .remote:
-                    return true
-                case .local:
-                    return isUsableLocalLLM(member.ref)
-                }
-            }
-            if usable { return .ready }
-            return created ? .createdEmpty : .noUsableModel
+            return .missing
         } catch {
-            return .failed(error.localizedDescription)
+            return .unreachable
         }
-    }
-
-    private func isUsableLocalLLM(_ modelId: String) -> Bool {
-        guard inferenceService.isModelLoaded(modelId) else { return false }
-        if let rec = modelManager.getRecord(modelId) {
-            return rec.modelType == .llm || rec.modelType == .vlm
-        }
-        let lower = modelId.lowercased()
-        if lower.contains("asr") || lower.contains("whisper")
-            || lower.contains("tts") || lower.contains("aligner")
-        {
-            return false
-        }
-        return true
     }
 
     private func refreshSliceLB() {
-        switch sliceLBReadiness() {
-        case .ready:
-            if isSliceLBError { errorText = nil }
-        case .createdEmpty:
-            errorText = l10n.tr("videoSlice.lbCreated")
-        case .noUsableModel:
-            errorText = l10n.tr("videoSlice.lbEmpty")
-        case .failed(let message):
-            errorText = message
+        Task {
+            let readiness = await peerSlicePoolReady()
+            await MainActor.run {
+                switch readiness {
+                case .ready:
+                    if isSliceLBError { errorText = nil }
+                case .missing:
+                    errorText = l10n.tr("videoSlice.lbEmpty")
+                case .unreachable:
+                    errorText = l10n.tr("videoSlice.needLLM")
+                }
+            }
         }
     }
 
     private var isSliceLBError: Bool {
         guard let errorText else { return false }
-        return errorText == l10n.tr("videoSlice.lbCreated")
-            || errorText == l10n.tr("videoSlice.lbEmpty")
+        return errorText == l10n.tr("videoSlice.lbEmpty")
             || errorText == l10n.tr("videoSlice.needLLM")
     }
 
     private func askSliceLB(_ prompt: String, maxTokens: Int, temperature: Double) async throws -> String {
-        guard let url = URL(string: "http://127.0.0.1:\(appState.serverPort)/v1/chat/completions") else {
-            throw NovaMLXError.apiError("Bad local API URL")
+        guard let url = URL(string: "http://127.0.0.1:6600/v1/chat/completions") else {
+            throw NovaMLXError.apiError("Bad Peer gateway URL")
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let key = appState.apiKey, !key.isEmpty {
-            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        }
         let body: [String: Any] = [
-            "model": "lb:for-video-slice",
+            "model": "for-video-slice",
             "temperature": temperature,
             "max_tokens": maxTokens,
             "enable_thinking": false,
@@ -628,7 +591,7 @@ struct VideoSlicePageView: View {
         let message = choices?.first?["message"] as? [String: Any]
         let text = (message?["content"] as? String) ?? ""
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw NovaMLXError.apiError("lb:for-video-slice returned an empty reply")
+            throw NovaMLXError.apiError("for-video-slice returned an empty reply")
         }
         return text
     }
