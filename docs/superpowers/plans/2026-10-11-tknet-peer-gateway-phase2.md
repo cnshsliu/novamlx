@@ -81,7 +81,7 @@ Input (from `nova_config.db` or fixture JSON):
 - `NovaMigrationInput` + `NovaMigrationResult` (`members`, `pools`, `secrets: [String: String]`, `warnings: [String]`)
 - `NovaConfigMigrator.migrate(_:existing:options:) -> NovaMigrationResult` merging into an existing `PeerConfig`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```swift
 @Test("local LB member becomes loopback NovaMLX HTTP member")
@@ -105,7 +105,7 @@ func sharedLocalMember() { /* … */ }
 func mergeRespectsExisting() { /* … */ }
 ```
 
-- [ ] **Step 2: Implement `NovaConfigMigrator`**
+- [x] **Step 2: Implement `NovaConfigMigrator`**
 
 Follow migration rules above. Normalize endpoints:
 - If path already ends with `/v1`, keep as base
@@ -113,9 +113,9 @@ Follow migration rules above. Normalize endpoints:
 - If bare host, append `/v1`
 - Local always `http://127.0.0.1:6590/v1` (override via options `localNovaBaseURL` for tests)
 
-- [ ] **Step 3: `./build.sh test --filter NovaConfigMigratorTests`**
+- [x] **Step 3: `./build.sh test --filter NovaConfigMigratorTests`**
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Sources/NovaMLXTknetPeer/NovaConfigMigrator.swift \
@@ -152,11 +152,11 @@ Behaviour:
 4. Unless `--dry-run`: save secrets via `FileSecretStore`, save Peer config mode 0600
 5. Print summary: `N members, M pools, K secrets, W warnings`
 
-- [ ] **Step 1: Implement reader + command**
+- [x] **Step 1: Implement reader + command**
 
 - [ ] **Step 2: Manual dry-run against Lucas’s machine DB if present** (document output; do not commit secrets)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -m "feat(peer): CLI migrate-from-novamlx reads nova_config.db into peer.json"
@@ -188,15 +188,15 @@ git commit -m "feat(peer): CLI migrate-from-novamlx reads nova_config.db into pe
 
 Apply for: `lb:*`, `tknet`, `tknet:*`. Do **not** 404 ordinary local model ids.
 
-- [ ] **Step 1: Failing API tests** — POST `/v1/chat/completions` with `model: "lb:coding"` → 404; `tknet:foo` → 404; a normal model id still hits local path (may 404 for unknown model — different message)
+- [x] **Step 1: Failing API tests** — POST `/v1/chat/completions` with `model: "lb:coding"` → 404; `tknet:foo` → 404; a normal model id still hits local path (may 404 for unknown model — different message)
 
-- [ ] **Step 2: Replace LB/Tokenhub dispatch branches with the shared 404 helper** in all three surfaces (OpenAI chat, Anthropic messages, Responses)
+- [x] **Step 2: Replace LB/Tokenhub dispatch branches with the shared 404 helper** in all three surfaces (OpenAI chat, Anthropic messages, Responses)
 
-- [ ] **Step 3: Remove or stub `makeLBProxy` call sites** so LBProxy is dead code; delete if easy
+- [x] **Step 3: Remove or stub `makeLBProxy` call sites** so LBProxy is dead code; delete if easy
 
 - [ ] **Step 4: `./build.sh test --filter 'GatewayCutoverTests|APITests'`** (and any Tokenhub-specific tests updated to expect 404)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git commit -m "feat(api): lb: and tknet: models return 404; use Peer :6600"
@@ -212,11 +212,11 @@ git commit -m "feat(api): lb: and tknet: models return 404; use Peer :6600"
 
 **Behaviour:** Remove route groups **or** make every method return **410 Gone** with the same Peer migration message. Prefer **remove** routes (cleaner) and update any UI/tests that called them (Task 5 removes UI).
 
-- [ ] **Step 1: Remove route registration + handler file if unused**
+- [x] **Step 1: Remove route registration + handler file if unused**
 
-- [ ] **Step 2: Fix compile breakages**
+- [x] **Step 2: Fix compile breakages**
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -m "chore(api): remove load-balancer and tokenhub admin routes"
@@ -236,15 +236,15 @@ git commit -m "chore(api): remove load-balancer and tokenhub admin routes"
 
 **Keep for Segment 3 reuse (optional):** `TknetPeerState.swift` may remain in the target but unused, **or** move later. Prefer keep file, remove sidebar + auto-connect, to avoid a large behaviour rewrite in this segment.
 
-- [ ] **Step 1: Remove enum cases and switch arms; fix exhaustiveness**
+- [x] **Step 1: Remove enum cases and switch arms; fix exhaustiveness**
 
-- [ ] **Step 2: Remove page files from the Xcode/SwiftPM target (delete files)**
+- [x] **Step 2: Remove page files from the Xcode/SwiftPM target (delete files)**
 
-- [ ] **Step 3: Disable Peer auto-connect in `main.swift`; drop `TknetPeerPageView` from window**
+- [x] **Step 3: Disable Peer auto-connect in `main.swift`; drop `TknetPeerPageView` from window**
 
 - [ ] **Step 4: `./build.sh -c debug` (app target compiles)**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git commit -m "feat(ui): remove Load Balancers, Tokenhub, and Tknet Peer sidebar pages"
@@ -268,13 +268,13 @@ git commit -m "feat(ui): remove Load Balancers, Tokenhub, and Tknet Peer sidebar
 3. **AgentConfigGenerator:** Point multi-engine users at `http://127.0.0.1:6600/v1` and pool names; local-only snippets may stay on 6590.
 4. **Playground:** Opening `lb:` / `tknet:` demos should either disappear with the pages or open a note string — no NovaMLX proxy.
 
-- [ ] **Step 1: rg audit for `lb:`, `tknet:`, `TokenhubManager`, `LoadBalancer(`, `LoadBalancersPage`, `TknetPeerPage`**
+- [x] **Step 1: rg audit for `lb:`, `tknet:`, `TokenhubManager`, `LoadBalancer(`, `LoadBalancersPage`, `TknetPeerPage`**
 
-- [ ] **Step 2: Patch Video Slice + Settings + generator + any leftovers**
+- [x] **Step 2: Patch Video Slice + Settings + generator + any leftovers**
 
 - [ ] **Step 3: Build + relevant tests**
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "fix(app): retarget video-slice and settings off NovaMLX LB/Tokenhub"
@@ -291,7 +291,7 @@ git commit -m "fix(app): retarget video-slice and settings off NovaMLX LB/Tokenh
 
 - [ ] **Step 1: `./build.sh -c debug` zero warnings from touched targets**
 
-- [ ] **Step 2: Commit only if there are real deletions**
+- [x] **Step 2: Commit only if there are real deletions**
 
 ```bash
 git commit -m "chore: drop dead LB/Tokenhub API wiring left after Peer cutover"
@@ -314,7 +314,7 @@ git commit -m "chore: drop dead LB/Tokenhub API wiring left after Peer cutover"
 4. **UI:** App builds; sidebar has no three pages (smoke by code assertion: `AppPage.allCases` does not contain removed raw values — add a tiny MenuBar test if practical, else checklist).
 5. **Regression:** `./build.sh test --filter NovaMLXTknetPeerTests` green; Peer product MLX-free.
 
-- [ ] **Step 1: Automated tests**
+- [x] **Step 1: Automated tests**
 
 - [ ] **Step 2: Full Peer suite + cutover tests**
 
@@ -323,7 +323,7 @@ git commit -m "chore: drop dead LB/Tokenhub API wiring left after Peer cutover"
 swift build -c release --product tknet-peer
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -m "test: Segment 2 acceptance — migrate, Peer gateway, NovaMLX lb: 404"
@@ -335,7 +335,7 @@ git commit -m "test: Segment 2 acceptance — migrate, Peer gateway, NovaMLX lb:
 
 - [ ] **Step 1:** `./build.sh -c debug` — app + Peer compile; no new `warning:` from Segment 2 files
 - [ ] **Step 2:** Peer tests + cutover tests green
-- [ ] **Step 3:** `swift build -c release --product tknet-peer` — still no MLX/NovaMLXCore/NovaMLXDB in Peer graph
+- [x] **Step 3:** `swift build -c release --product tknet-peer` — still no MLX/NovaMLXCore/NovaMLXDB in Peer graph
 - [ ] **Step 4:** Manual on Lucas’s Mac (when available):
   1. Quit duplicate Peer processes
   2. `tknet-peer migrate-from-novamlx`
@@ -343,7 +343,7 @@ git commit -m "test: Segment 2 acceptance — migrate, Peer gateway, NovaMLX lb:
   4. `tknet-peer serve --no-tunnel`
   5. `curl` Peer pool vs direct NovaMLX model
   6. `curl` NovaMLX with `lb:<slug>` → 404
-- [ ] **Step 5: Stop** — do not start Segment 3 menu-bar app in this plan
+- [x] **Step 5: Stop** — do not start Segment 3 menu-bar app in this plan
 
 ---
 
@@ -386,3 +386,11 @@ git commit -m "test: Segment 2 acceptance — migrate, Peer gateway, NovaMLX lb:
 7. **Orphan DB data.** Leaving LB/Tokenhub rows in `nova_config.db` is intentional for migrate `--force` re-runs; they must not be read by API. OK?
 
 8. **`TknetPeerState.swift` retention.** File may linger unused until Segment 3 moves it into the Peer app target. Prefer unused file over a risky cross-target move in Segment 2.
+
+### Verification on this agent (Linux, no Metal)
+
+- [x] `NovaMLXTknetPeerTests`: 98 tests, 23 suites, passed (Swift 6.3.2, temporary peer-only manifest; `Package.swift` and `Package.resolved` restored).
+- [x] `swift build -c release --product tknet-peer`: link list has no MLX, NovaMLXCore, NovaMLXDB, GRDB, or SwiftUI objects.
+- [ ] `./build.sh` and `GatewayCutoverTests` — not run. `ServerGate` needs a live NovaMLX on :6590, and this host cannot compile the Metal app.
+- [ ] Live `tknet-peer migrate-from-novamlx` against a real `nova_config.db` — no database on this machine.
+
