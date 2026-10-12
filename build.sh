@@ -117,37 +117,70 @@ fi
 # Compile MLX Metal shaders if metallib is missing
 # Two kernel source sets, both needed (mlx-swift 0.32.x layout):
 #   mlx-generated/metal — JIT glue kernels tracked by the mlx-swift tag (9 files)
-#   mlx submodule kernels — the full mlx 0.32.2 kernel sources (28 files, incl.
-#     the stock bf16/GEMV kernels Gemma4 needs)
+#   mlx submodule kernels — the full mlx kernel sources (incl. the stock
+#     bf16/GEMV kernels Gemma4 needs)
+# NAX kernels need Metal 4 and the macOS 26.2 SDK (MetalPerformancePrimitives).
+# Upstream skips them otherwise and builds the C++ library with MLX_METAL_NO_NAX.
+# Every .air in one metallib must share a deployment target; mixing macos14
+# and macos26 makes the link fail. Compiler output is kept so CI can show it.
 METAL_SRC="vendors/mlx-swift/Source/Cmlx/mlx-generated/metal"
 METAL_SRC2="vendors/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal/kernels"
 # METAL_SRC2 sources include "mlx/backend/metal/kernels/..." rooted at Cmlx/mlx.
 METAL_INCLUDE_ROOT="$(cd "$(dirname "$METAL_SRC2")/../../.." && pwd 2>/dev/null || echo .)"
 if [ -d "$METAL_SRC" ]; then
+	SDK_VER="$(xcrun -sdk macosx --show-sdk-version 2>/dev/null || echo 0)"
+	SDK_MAJOR="${SDK_VER%%.*}"
+	SDK_REST="${SDK_VER#*.}"
+	SDK_MINOR="${SDK_REST%%.*}"
+	case "$SDK_MAJOR" in ''|*[!0-9]*) SDK_MAJOR=0 ;; esac
+	case "$SDK_MINOR" in ''|*[!0-9]*) SDK_MINOR=0 ;; esac
+	INCLUDE_NAX=0
+	if [ "$SDK_MAJOR" -gt 26 ] || { [ "$SDK_MAJOR" -eq 26 ] && [ "$SDK_MINOR" -ge 2 ]; }; then
+		INCLUDE_NAX=1
+	fi
+	# Non-empty arrays only: bash 3.2 errors on "${arr[@]}" under set -u when empty.
+	if [ "$INCLUDE_NAX" -eq 1 ]; then
+		METAL_COMPILE_FLAGS=(-fno-fast-math -mmacosx-version-min=26.2)
+		METAL_LINK_FLAGS=(-mmacosx-version-min=26.2)
+	else
+		# fence.metal needs thread_scope, unavailable before Metal 3.2.
+		METAL_COMPILE_FLAGS=(-std=metal3.2 -target air64-apple-macos14.0 -fno-fast-math)
+		METAL_LINK_FLAGS=(-mmacosx-version-min=14.0)
+	fi
+
 	for cfg in debug release; do
 		METALLIB=".build/arm64-apple-macosx/${cfg}/mlx.metallib"
 		if [ ! -f "$METALLIB" ]; then
-			echo "→ Compiling MLX Metal shaders (${cfg})..."
+			echo "→ Compiling MLX Metal shaders (${cfg}), SDK ${SDK_VER}..."
+			if [ "$INCLUDE_NAX" -eq 1 ]; then
+				echo "→ Including NAX kernels (deployment target 26.2)"
+			else
+				echo "→ Skipping NAX kernels (need macOS SDK >= 26.2)"
+			fi
 			TMPDIR_BUILD=$(mktemp -d)
 			trap "rm -rf $TMPDIR_BUILD" EXIT
 			for src in "$METAL_SRC" "$METAL_SRC2"; do
 				[ -d "$src" ] || continue
-				( cd "$src" && \
-				  find . -name "*.metal" | while read f; do
-					  base=$(basename "$f" .metal)
-					  # NAX kernels require Metal 4 / macOS 26; the rest build as 3.2
-					  # (fence.metal needs thread_scope, unavailable before 3.2).
-					  if [[ "$base" == *_nax ]]; then
-						  MSTD="-std=metal4.0"; MTARGET="air64-apple-macos26.0"
-					  else
-						  MSTD="-std=metal3.2"; MTARGET="air64-apple-macos14.0"
-					  fi
-					  xcrun -sdk macosx metal $MSTD -target "$MTARGET" -fno-fast-math \
-						  -c "$f" -I . -I "$METAL_INCLUDE_ROOT" -o "$TMPDIR_BUILD/${base}.air" 2>/dev/null
-				  done )
+				# Not a pipeline: bash 3.2 ignores set -e in `find | while`.
+				while IFS= read -r f; do
+					[ -n "$f" ] || continue
+					base=$(basename "$f" .metal)
+					if [[ "$base" == *_nax ]] && [ "$INCLUDE_NAX" -ne 1 ]; then
+						continue
+					fi
+					if ! xcrun -sdk macosx metal "${METAL_COMPILE_FLAGS[@]}" \
+						-c "$f" -I "$src" -I "$METAL_INCLUDE_ROOT" \
+						-o "$TMPDIR_BUILD/${base}.air"; then
+						echo "error: Metal compile failed: $f" >&2
+						exit 1
+					fi
+				done < <(find "$src" -name "*.metal" -type f)
 			done
 			mkdir -p "$(dirname "$METALLIB")"
-			xcrun -sdk macosx metallib "$TMPDIR_BUILD"/*.air -o "$METALLIB" 2>/dev/null
+			if ! xcrun -sdk macosx metal "${METAL_LINK_FLAGS[@]}" "$TMPDIR_BUILD"/*.air -o "$METALLIB"; then
+				echo "error: metallib link failed (${cfg})" >&2
+				exit 1
+			fi
 			echo "→ Built $(ls -lh "$METALLIB" | awk '{print $5}') metallib (${cfg})"
 		fi
 	done
