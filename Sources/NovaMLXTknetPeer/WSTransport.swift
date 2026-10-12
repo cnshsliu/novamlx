@@ -53,14 +53,24 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
     /// request. `ws`/`wss` schemes pass through; `http`/`https` are converted
     /// to `ws`/`wss`. TLS for `wss` uses the client library's default client
     /// TLS configuration.
-    public static func factory(server: URL, tokenRef: String, secrets: any SecretStore) -> TransportFactory {
+    /// `server` is read on every dial so a registration that switches servers
+    /// takes effect without rebuilding the service (the gateway stays up).
+    public static func factory(
+        server: @escaping @Sendable () -> URL,
+        tokenRef: String,
+        secrets: any SecretStore
+    ) -> TransportFactory {
         {
             // Fresh token each dial: a re-registered token works without restart.
             let token = (try? secrets.load(tokenRef)) ?? ""
             return try await dial(
-                url: server.appendingPathComponent("api/peer/tunnel"),
+                url: server().appendingPathComponent("api/peer/tunnel"),
                 authorization: "Bearer \(token)")
         }
+    }
+
+    public static func factory(server: URL, tokenRef: String, secrets: any SecretStore) -> TransportFactory {
+        factory(server: { server }, tokenRef: tokenRef, secrets: secrets)
     }
 
     /// Dials and returns only after the WebSocket handshake completed and the
@@ -83,39 +93,51 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
         configuration.additionalHeaders[.authorization] = authorization
 
         let transport = WSTransport()
-        return try await withCheckedThrowingContinuation { (dialContinuation: CheckedContinuation<WSTransport, Error>) in
-            let once = Once()
-            let client = WebSocketClient(
-                url: dialURL.absoluteString,
-                configuration: configuration,
-                logger: Logger(label: "tknet.peer.ws-transport")
-            ) { inboundStream, outbound, _ in
-                transport.activate(writer: outbound)
-                once.run { dialContinuation.resume(returning: transport) }
-                // Handler return closes the socket cleanly — the library sends
-                // the close frame itself (WSCore/WebSocketHandler.swift).
-                do {
-                    for try await message in inboundStream.messages(maxSize: Self.maxInboundMessageBytes) {
-                        if case .text(let text) = message,
-                           let frame = try? FrameCodec.decode(text) {
-                            transport.continuation.yield(frame)
+        // Dial must resume on Task cancellation: stopTunnel cancels the client
+        // run task while WebSocketClient.run() may still be hung, and without
+        // this handler stopTunnel never returns (UI stuck on Connecting + grey Stop).
+        let gate = DialGate()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (dialContinuation: CheckedContinuation<WSTransport, Error>) in
+                gate.arm(dialContinuation)
+                let client = WebSocketClient(
+                    url: dialURL.absoluteString,
+                    configuration: configuration,
+                    logger: Logger(label: "tknet.peer.ws-transport")
+                ) { inboundStream, outbound, _ in
+                    transport.activate(writer: outbound)
+                    gate.succeed(transport)
+                    // Handler return closes the socket cleanly — the library sends
+                    // the close frame itself (WSCore/WebSocketHandler.swift).
+                    do {
+                        for try await message in inboundStream.messages(maxSize: Self.maxInboundMessageBytes) {
+                            if case .text(let text) = message,
+                               let frame = try? FrameCodec.decode(text) {
+                                transport.continuation.yield(frame)
+                            }
                         }
+                    } catch {}
+                    transport.continuation.finish()
+                }
+                let task = Task<Void, Never> {
+                    do {
+                        // The close frame (code + reason) is the upgrade-required
+                        // contract: 4005 means stop reconnecting and tell the user.
+                        let closeFrame = try await client.run()
+                        transport.recordClose(code: closeFrame.map { Self.rawCode($0.closeCode) }, reason: closeFrame?.reason)
+                        gate.fail(WSTransportError.connectionClosedDuringDial)
+                    } catch {
+                        gate.fail(error)
                     }
-                } catch {}
-                transport.continuation.finish()
-            }
-            let task = Task<Void, Never> {
-                do {
-                    // The close frame (code + reason) is the upgrade-required
-                    // contract: 4005 means stop reconnecting and tell the user.
-                    let closeFrame = try await client.run()
-                    transport.recordClose(code: closeFrame.map { Self.rawCode($0.closeCode) }, reason: closeFrame?.reason)
-                    once.run { dialContinuation.resume(throwing: WSTransportError.connectionClosedDuringDial) }
-                } catch {
-                    once.run { dialContinuation.resume(throwing: error) }
+                }
+                transport.setRunTask(task)
+                gate.attach(task)
+                if Task.isCancelled {
+                    gate.cancel()
                 }
             }
-            transport.setRunTask(task)
+        } onCancel: {
+            gate.cancel()
         }
     }
 
@@ -170,16 +192,53 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
         state.withLock { $0.runTask = task }
     }
 
-    /// Runs the closure exactly once so the dial continuation is never
-    /// resumed twice (handler-start and run()-completion race).
-    private final class Once: @unchecked Sendable {
+    /// Resumes the dial continuation exactly once. Cancel stops the WS run
+    /// task and fails the dial so stopTunnel does not hang.
+    private final class DialGate: @unchecked Sendable {
         private let lock = NSLock()
-        private var done = false
-        func run(_ body: () -> Void) {
+        private var continuation: CheckedContinuation<WSTransport, Error>?
+        private var task: Task<Void, Never>?
+        private var finished = false
+
+        func arm(_ continuation: CheckedContinuation<WSTransport, Error>) {
             lock.lock(); defer { lock.unlock() }
-            guard !done else { return }
-            done = true
-            body()
+            self.continuation = continuation
+        }
+
+        func attach(_ task: Task<Void, Never>) {
+            lock.lock(); defer { lock.unlock() }
+            self.task = task
+        }
+
+        func succeed(_ transport: WSTransport) {
+            finish { $0.resume(returning: transport) }
+        }
+
+        func fail(_ error: Error) {
+            finish { $0.resume(throwing: error) }
+        }
+
+        func cancel() {
+            let task: Task<Void, Never>? = {
+                lock.lock(); defer { lock.unlock() }
+                let task = self.task
+                if !finished, let continuation {
+                    finished = true
+                    self.continuation = nil
+                    continuation.resume(throwing: CancellationError())
+                }
+                return task
+            }()
+            task?.cancel()
+        }
+
+        private func finish(_ body: (CheckedContinuation<WSTransport, Error>) -> Void) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !finished, let continuation else { return }
+            finished = true
+            self.continuation = nil
+            body(continuation)
         }
     }
 }

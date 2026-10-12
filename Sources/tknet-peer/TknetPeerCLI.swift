@@ -305,6 +305,15 @@ extension TknetPeerCLI {
             } else {
                 factory = { @Sendable in throw TunnelError.notRegistered }
             }
+            let processLock: PeerProcessLock
+            do {
+                processLock = try PeerProcessLock.acquire(
+                    at: PeerProcessLock.url(besideConfig: configURL))
+            } catch let error as PeerProcessLockError {
+                throw ValidationError(error.description)
+            }
+            defer { processLock.unlock() }
+
             let service = PeerService(
                 config: peerConfig,
                 secrets: secrets,

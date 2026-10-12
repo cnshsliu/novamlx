@@ -1102,7 +1102,7 @@ struct SettingsPageView: View {
     private var tknetConfigSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("tknet.ai", icon: "link")
-            Text("Remote members and the token factory tunnel live in Tknet Peer. Run `tknet-peer member add` and `tknet-peer serve`. This app no longer writes Tokenhub providers.")
+            Text("Remote members and the token factory tunnel live in the Tknet Peer menu-bar app. You can also run `tknet-peer serve`. This app no longer writes Tokenhub providers.")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

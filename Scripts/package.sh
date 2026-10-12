@@ -10,7 +10,8 @@ APP_NAME="NovaMLX.app"
 
 echo "→ Packaging NovaMLX v${VERSION}..."
 
-rm -rf "$DIST_DIR"
+# Leave dist/TknetPeer.app in place. Scripts/package-peer.sh owns that bundle.
+rm -rf "$DIST_DIR/NovaMLX.app" "$DIST_DIR"/NovaMLX-*.dmg "$DIST_DIR"/NovaMLX-*.tar.gz "$DIST_DIR/dmg_staging"
 mkdir -p "$DIST_DIR"
 
 APP_CONTENTS="$DIST_DIR/$APP_NAME/Contents"

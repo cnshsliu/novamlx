@@ -1,7 +1,11 @@
 import Foundation
 
-/// Where source API keys live. Mac: Keychain-backed (provided by the app in
-/// Task 11). CLI: FileSecretStore. Implementations MUST NOT log values.
+/// Where source API keys and the peer connection key live.
+///
+/// The Mac app and the CLI share `FileSecretStore` under
+/// `~/.config/tknet-peer/secrets` so one peer identity works in both.
+/// Keychain is a later hardening step — do not split the stores until a
+/// migration exists. Implementations MUST NOT log values.
 public protocol SecretStore: Sendable {
     func save(_ secret: String, for ref: String) throws
     func load(_ ref: String) throws -> String?

@@ -26,6 +26,7 @@ let package = Package(
         .library(name: "NovaMLXDB", targets: ["NovaMLXDB"]),
         .library(name: "NovaMLXTknetPeer", targets: ["NovaMLXTknetPeer"]),
         .executable(name: "tknet-peer", targets: ["tknet-peer"]),
+        .executable(name: "TknetPeerApp", targets: ["TknetPeerApp"]),
     ],
     dependencies: [
         .package(path: "vendors/mlx-swift"),
@@ -195,7 +196,6 @@ let package = Package(
                 "NovaMLXAPI",
                 "NovaMLXDistributed",
                 "NovaMLXDB",
-                "NovaMLXTknetPeer",
             ],
             resources: [.copy("Resources")],
             swiftSettings: concurrencySettings
@@ -275,6 +275,13 @@ let package = Package(
             dependencies: [
                 "NovaMLXTknetPeer",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: concurrencySettings
+        ),
+        .executableTarget(
+            name: "TknetPeerApp",
+            dependencies: [
+                "NovaMLXTknetPeer",
             ],
             swiftSettings: concurrencySettings
         ),
