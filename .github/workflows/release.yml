@@ -311,6 +311,37 @@ jobs:
               mlx_text = mlx_text.replace('        "mlx/build",\n', "", 1)
           mlx_manifest.write_text(mlx_text)
           print("exposed Cmlx product")
+
+          # mlx-swift QuantizedLinear.biases is MLXArray?. flux.swift still
+          # appends it as a non-optional weight.
+          quant = Path("vendors/flux.swift/Sources/Quantization/QuantizationUtils.swift")
+          qtext = quant.read_text()
+          old = (
+              '                    allWeights.append(("\\(path).biases", quantizedLinear.biases))\n'
+              "                    if let bias = quantizedLinear.bias {\n"
+              '                        allWeights.append(("\\(path).bias", bias))\n'
+              "                    }\n"
+              "                    \n"
+              '                    logger.debug("    Weight shape: \\(quantizedLinear.weight.shape)")\n'
+              '                    logger.debug("    Scales shape: \\(quantizedLinear.scales.shape)")\n'
+              '                    logger.debug("    Biases shape: \\(quantizedLinear.biases.shape)")\n'
+          )
+          new = (
+              "                    if let biases = quantizedLinear.biases {\n"
+              '                        allWeights.append(("\\(path).biases", biases))\n'
+              '                        logger.debug("    Biases shape: \\(biases.shape)")\n'
+              "                    }\n"
+              "                    if let bias = quantizedLinear.bias {\n"
+              '                        allWeights.append(("\\(path).bias", bias))\n'
+              "                    }\n"
+              "                    \n"
+              '                    logger.debug("    Weight shape: \\(quantizedLinear.weight.shape)")\n'
+              '                    logger.debug("    Scales shape: \\(quantizedLinear.scales.shape)")\n'
+          )
+          if old not in qtext:
+              raise SystemExit("error: flux.swift QuantizedLinear.biases call site changed")
+          quant.write_text(qtext.replace(old, new, 1))
+          print("patched flux.swift optional biases")
           PY
 
       - name: Patch upstream StrictConcurrency issues
