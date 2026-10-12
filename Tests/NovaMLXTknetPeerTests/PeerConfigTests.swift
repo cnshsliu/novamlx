@@ -15,7 +15,7 @@ struct PeerConfigTests {
         defer { try? FileManager.default.removeItem(at: url) }
         var config = PeerConfig.defaultConfig()
         config.peerId = "peer-9"
-        config.sources = [SourceConfig(
+        config.members = [MemberConfig(
             id: "s1", name: "Local NovaMLX", type: .localNovaMLX,
             endpoint: URL(string: "http://127.0.0.1:6590/v1")!,
             apiKeyRef: "src/s1", upstreamModel: "Qwen/Qwen-Image-2.1"
@@ -24,6 +24,7 @@ struct PeerConfigTests {
             demandId: "d1", model: "qwen", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0
         )]
+        config.migrateLegacyPoolsIfNeeded()
         try ConfigStore.save(config, to: url)
         let loaded = try ConfigStore.load(from: url)
         #expect(loaded == config)
@@ -101,24 +102,24 @@ struct PeerConfigTests {
         config.registrations["wss://tknet.ai"] = "peer-a"
         config.registrations["wss://other.example:8443"] = "peer-b"
         config.peerId = "peer-a"
-        let source = SourceConfig(
+        let source = MemberConfig(
             id: "s1", name: "Local", type: .localNovaMLX,
             endpoint: URL(string: "http://127.0.0.1:6590/v1")!,
             apiKeyRef: "src/s1", upstreamModel: "m")
         config.serverMemory = [
-            ServerMemory(server: "https://tknet.ai", peerName: "alpha", sources: [source]),
+            ServerMemory(server: "https://tknet.ai", peerName: "alpha", members: [source]),
             ServerMemory(server: "https://other.example:8443", peerName: "beta"),
         ]
-        config.sources = [source]
+        config.members = [source]
         let toOther = config.activateServer(URL(string: "https://other.example:8443")!)
         #expect(toOther)
         #expect(config.peerId == "peer-b")
-        #expect(config.sources.isEmpty)
+        #expect(config.members.isEmpty)
         #expect(config.serverMemory.first { $0.server == "https://tknet.ai" }?.peerName == "alpha")
         let back = config.activateServer(URL(string: "https://tknet.ai")!)
         #expect(back)
         #expect(config.peerId == "peer-a")
-        #expect(config.sources.map(\.id) == ["s1"])
+        #expect(config.members.map(\.id) == ["s1"])
         #expect(config.serverMemory.first { $0.server == "https://other.example:8443" }?.peerName == "beta")
     }
 

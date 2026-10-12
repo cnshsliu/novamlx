@@ -41,7 +41,7 @@ public enum AgentConfigGenerator {
     public static func generateConfig(
         agent: AgentSpec,
         providers: [TokenhubProvider],
-        port: Int = 6590,
+        port: Int = 6600,
         apiKey: String? = nil,
         modelName: String? = nil
     ) -> String? {
@@ -64,7 +64,7 @@ public enum AgentConfigGenerator {
     @discardableResult
     public static func generateCodexConfig(
         providers: [TokenhubProvider],
-        port: Int = 6590,
+        port: Int = 6600,
         apiKey: String? = nil,
         modelName: String = "tknet"
     ) -> String? {
@@ -105,19 +105,19 @@ public enum AgentConfigGenerator {
             models.append(codexModelEntry(
                 slug: "tknet",
                 displayName: "TKNet (Load Balanced)",
-                description: "NovaMLX TokenHub load-balanced model",
+                description: "Tknet Peer pool. Use the pool name on http://127.0.0.1:6600/v1.",
                 contextWindow: lbCtx
             ))
         }
 
         // Per-provider profiles
         for provider in enabledProviders {
-            let slug = "tknet:" + provider.id
+            let slug = provider.name
             let ctx = provider.effectiveContextWindow
             models.append(codexModelEntry(
                 slug: slug,
                 displayName: provider.name,
-                description: "\(provider.name) via NovaMLX TokenHub",
+                description: "\(provider.name) via Tknet Peer",
                 contextWindow: ctx
             ))
         }
@@ -135,7 +135,7 @@ public enum AgentConfigGenerator {
 
         // Update config.toml
         do {
-            try updateCodexTOML(configPath: configPath, catalogPath: catalogPath.path, modelName: modelName)
+            try updateCodexTOML(configPath: configPath, catalogPath: catalogPath.path, modelName: modelName, port: port)
         } catch {
             log.error("[AgentConfig] Failed to update config.toml: \(error)")
             return "Failed to update config.toml"
@@ -186,7 +186,7 @@ public enum AgentConfigGenerator {
         ]
     }
 
-    private static func updateCodexTOML(configPath: URL, catalogPath: String, modelName: String = "tknet") throws {
+    private static func updateCodexTOML(configPath: URL, catalogPath: String, modelName: String = "tknet", port: Int = 6600) throws {
         var lines: [String] = []
         if FileManager.default.fileExists(atPath: configPath.path) {
             let content = try String(contentsOf: configPath, encoding: .utf8)
@@ -271,10 +271,10 @@ public enum AgentConfigGenerator {
         // Ensure blank line before the provider section
         if lines.last?.isEmpty == false { lines.append("") }
         lines.append("")
-        lines.append("# NovaMLX TokenHub provider — routes tknet:xxx through local NovaMLX proxy")
+        lines.append("# Tknet Peer — pool names on :6600, without an lb: or tknet: prefix")
         lines.append("[model_providers.novamlx]")
-        lines.append("name = \"NovaMLX TokenHub\"")
-        lines.append("base_url = \"http://127.0.0.1:6590/v1\"")
+        lines.append("name = \"Tknet Peer\"")
+        lines.append("base_url = \"http://127.0.0.1:\(port)/v1\"")
         lines.append("env_key = \"NOVA_API_KEY\"")
         lines.append("wire_api = \"responses\"")
 

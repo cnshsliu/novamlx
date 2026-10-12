@@ -877,46 +877,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     messages = OCROptimizer.applyPrompt(messages: messages, modelName: openAIReq.model)
                 }
 
-                // LB routing: model name is "lb:<slug>"
-                if Self.isLBModel(openAIReq.model), let slug = Self.lbSlug(from: openAIReq.model) {
-                    let proxy = Self.makeLBProxy(inference: inference)
-                    // Snapshot Sendable values for capture by the @Sendable closure.
-                    let lbTag = openAIReq.tag
-                    let lbRequest = request
-                    let outcome = await proxy.handle(
-                        slug: slug, rawBody: Data(buffer: body), path: "chat/completions"
-                    ) { member, memberBody, memberPath in
-                        switch member.kind {
-                        case .local:
-                            // Rewrite model field and re-dispatch via local chat handler.
-                            let rewritten = Self.rewriteModel(in: memberBody, to: member.ref)
-                            return try await Self.dispatchLocalChat(
-                                rawBody: rewritten, path: memberPath,
-                                inference: inference, cfg: cfg,
-                                clientType: ClientDetector.detect(request: lbRequest),
-                                coordinator: coordinator
-                            )
-                        case .remote:
-                            return try await Self.handleTokenhubPassthrough(
-                                modelName: "tknet:" + member.ref,
-                                rawBody: memberBody, path: memberPath,
-                                inference: inference, tag: lbTag
-                            )
-                        }
-                    }
-                    if case .success(let resp) = outcome { return resp }
-                    if let errResp = try Self.lbOutcomeToResponse(outcome, slug: slug) {
-                        return errResp
-                    }
-                }
-
-                // Tokenhub routing: model name is "tknet" or "tknet:<provider>"
-                if TokenhubManager.shared.isTokenhubModel(openAIReq.model) {
-                    return try await Self.handleTokenhubPassthrough(
-                        modelName: openAIReq.model, rawBody: Data(buffer: body),
-                        path: "chat/completions", inference: inference,
-                        tag: openAIReq.tag
-                    )
+                if Self.isMovedToPeerGateway(openAIReq.model) {
+                    return try Self.peerGatewayMovedResponse()
                 }
 
                 let loadOutcome = try await Self.ensureModelReady(
@@ -1001,51 +963,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.apiError(String(describing: err))
                 }
 
-                // LB routing for Anthropic requests: model name is "lb:<slug>"
-                if Self.isLBModel(anthropicReq.model), let slug = Self.lbSlug(from: anthropicReq.model) {
-                    let proxy = Self.makeLBProxy(inference: inference)
-                    let lbRequest = request
-                    let outcome = await proxy.handle(
-                        slug: slug, rawBody: Data(buffer: body), path: "messages"
-                    ) { member, memberBody, memberPath in
-                        switch member.kind {
-                        case .local:
-                            let rewritten = Self.rewriteModel(in: memberBody, to: member.ref)
-                            return try await Self.dispatchLocalMessages(
-                                rawBody: rewritten, path: memberPath,
-                                inference: inference, cfg: cfg,
-                                clientType: ClientDetector.detect(request: lbRequest),
-                                coordinator: coordinator
-                            )
-                        case .remote:
-                            let rawDict = try JSONSerialization.jsonObject(with: memberBody) as? [String: Any]
-                            let tag = rawDict?["tag"] as? String
-                            let (aVer, aBeta) = Self.extractAnthropicForwardHeaders(lbRequest)
-                            return try await Self.handleTokenhubPassthrough(
-                                modelName: "tknet:" + member.ref,
-                                rawBody: memberBody, path: memberPath,
-                                inference: inference, tag: tag,
-                                anthropicVersion: aVer, anthropicBeta: aBeta
-                            )
-                        }
-                    }
-                    if case .success(let resp) = outcome { return resp }
-                    if let errResp = try Self.lbOutcomeToResponse(outcome, slug: slug) {
-                        return errResp
-                    }
-                }
-
-                // Tokenhub routing for Anthropic requests
-                if TokenhubManager.shared.isTokenhubModel(anthropicReq.model) {
-                    let rawDict = try JSONSerialization.jsonObject(with: Data(buffer: body)) as? [String: Any]
-                    let tag = rawDict?["tag"] as? String
-                    let (aVer, aBeta) = Self.extractAnthropicForwardHeaders(request)
-                    return try await Self.handleTokenhubPassthrough(
-                        modelName: anthropicReq.model, rawBody: Data(buffer: body),
-                        path: "messages", inference: inference,
-                        tag: tag,
-                        anthropicVersion: aVer, anthropicBeta: aBeta
-                    )
+                if Self.isMovedToPeerGateway(anthropicReq.model) {
+                    return try Self.peerGatewayMovedResponse()
                 }
 
                 let anthropicLoadOutcome = try await Self.ensureModelReady(
@@ -1996,46 +1915,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw error
                 }
 
-                // LB routing: model name is "lb:<slug>"
-                if Self.isLBModel(req.model), let slug = Self.lbSlug(from: req.model) {
-                    let proxy = Self.makeLBProxy(inference: inference)
-                    let lbRequest = request
-                    let outcome = await proxy.handle(
-                        slug: slug, rawBody: rawBody, path: "responses"
-                    ) { member, memberBody, memberPath in
-                        switch member.kind {
-                        case .local:
-                            let rewritten = Self.rewriteModel(in: memberBody, to: member.ref)
-                            return try await Self.dispatchLocalResponses(
-                                rawBody: rewritten, path: memberPath,
-                                inference: inference, cfg: cfg,
-                                clientType: ClientDetector.detect(request: lbRequest),
-                                coordinator: coordinator
-                            )
-                        case .remote:
-                            // Rewrite model to "tknet:<ref>" so the Responses
-                            // passthrough's provider resolver can find it.
-                            // (Matches the chat/messages LB dispatcher pattern
-                            // above. Without this prefix, the resolver errors
-                            // with "Unknown tokenhub provider: <ref>".)
-                            let rewrittenMemberBody = Self.rewriteModel(in: memberBody, to: "tknet:" + member.ref)
-                            let memberReq = try JSONDecoder().decode(OpenAIResponseRequest.self, from: rewrittenMemberBody)
-                            return try await Self.handleTokenhubResponsesPassthrough(
-                                req: memberReq, rawBody: rewrittenMemberBody, inference: inference
-                            )
-                        }
-                    }
-                    if case .success(let resp) = outcome { return resp }
-                    if let errResp = try Self.lbOutcomeToResponse(outcome, slug: slug) {
-                        return errResp
-                    }
-                }
-
-                // Tokenhub passthrough: convert Responses API → Chat Completions, forward, convert back
-                if TokenhubManager.shared.isTokenhubModel(req.model) {
-                    return try await Self.handleTokenhubResponsesPassthrough(
-                        req: req, rawBody: rawBody, inference: inference
-                    )
+                if Self.isMovedToPeerGateway(req.model) {
+                    return try Self.peerGatewayMovedResponse()
                 }
 
                 let isStreaming = req.stream ?? false
@@ -2447,14 +2328,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             requestSizeLimit
             NovaMLXErrorMiddleware()
             // MARK: - Speed Boost (Draft Model)
-            // MARK: - Load Balancers
-            // CRUD + member management for multi-provider routing. Handler
-            // logic lives in APIServer+LoadBalancerAdmin.swift.
+            // Load-balancer and Tokenhub admin routes moved to Tknet Peer (:6600).
 
             // MARK: - Modelfiles
 
-            // MARK: - Tokenhub Provider CRUD
-            let tokenhubMgr = TokenhubManager.shared
             // Agent binary detection
 
             // MARK: - API Key Management
@@ -2885,59 +2762,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     }
 
                     return try Self.jsonResponse(AdminModelSettingsResponse(modelId: modelId, settings: settings))
-                }
-            }
-            RouteGroup("admin/load-balancers") {
-                Get("") { _, _ in
-                    let dtos = try Self.lbAdminList()
-                    return try Self.jsonResponse(dtos)
-                }
-                Post("") { request, _ in
-                    let body = try await request.body.collect(upTo: .max)
-                    let input = try JSONDecoder().decode(CreateLBInput.self, from: body)
-                    let dto = try Self.lbAdminCreate(input: input)
-                    return try Self.jsonResponse(dto, httpStatus: .created)
-                }
-                Get("/{id}") { _, context in
-                    let id = try context.parameters.require("id", as: UUID.self)
-                    let dto = try Self.lbAdminDetail(id: id)
-                    return try Self.jsonResponse(dto)
-                }
-                Patch("/{id}") { request, context in
-                    let id = try context.parameters.require("id", as: UUID.self)
-                    let body = try await request.body.collect(upTo: .max)
-                    let patch = try JSONDecoder().decode(PatchLBInput.self, from: body)
-                    let dto = try Self.lbAdminUpdate(id: id, patch: patch)
-                    return try Self.jsonResponse(dto)
-                }
-                Delete("/{id}") { _, context in
-                    let id = try context.parameters.require("id", as: UUID.self)
-                    try Self.lbAdminDelete(id: id)
-                    return try Self.jsonResponse(["ok": true])
-                }
-                Post("/{id}/members") { request, context in
-                    let id = try context.parameters.require("id", as: UUID.self)
-                    let body = try await request.body.collect(upTo: .max)
-                    let input = try JSONDecoder().decode(AddMemberInput.self, from: body)
-                    let dto = try Self.lbAdminAddMember(lbId: id, input: input)
-                    return try Self.jsonResponse(dto, httpStatus: .created)
-                }
-                Patch("/{id}/members/{memberId}") { request, context in
-                    let memberId = try context.parameters.require("memberId", as: UUID.self)
-                    let body = try await request.body.collect(upTo: .max)
-                    let patch = try JSONDecoder().decode(PatchMemberInput.self, from: body)
-                    let dto = try Self.lbAdminUpdateMember(memberId: memberId, patch: patch)
-                    return try Self.jsonResponse(dto)
-                }
-                Delete("/{id}/members/{memberId}") { _, context in
-                    let memberId = try context.parameters.require("memberId", as: UUID.self)
-                    try Self.lbAdminDeleteMember(memberId: memberId)
-                    return try Self.jsonResponse(["ok": true])
-                }
-                Post("/{id}/test") { _, context in
-                    let id = try context.parameters.require("id", as: UUID.self)
-                    let trace = try Self.lbAdminTest(id: id, inference: inference)
-                    return try Self.jsonResponse(trace)
                 }
             }
             RouteGroup("admin/sessions") {
@@ -3745,79 +3569,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let name = try context.parameters.require("name")
                     try modelfileMgr.delete(name)
                     return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
-                }
-            }
-            RouteGroup("admin/tokenhub") {
-                Get("/providers") { _, _ in
-                    let providers = tokenhubMgr.list()
-                    return try Self.jsonResponse(providers)
-                }
-                Post("/providers") { request, _ in
-                    let body = try await request.body.collect(upTo: .max)
-                    var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
-                    // Ensure id is derived from name
-                    provider = TokenhubProvider(
-                        name: provider.name,
-                        endpoint: provider.endpoint,
-                        apiKey: provider.apiKey,
-                        remoteModel: provider.remoteModel,
-                        isEnabled: provider.isEnabled,
-                        tags: provider.tags,
-                        isFree: provider.isFree
-                    )
-                    try tokenhubMgr.create(provider)
-                    return try Self.jsonResponse(provider, httpStatus: .created)
-                }
-                Put("/providers/{name}") { request, context in
-                    let name = try context.parameters.require("name")
-                    let body = try await request.body.collect(upTo: .max)
-                    var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
-                    provider = TokenhubProvider(
-                        name: name,
-                        endpoint: provider.endpoint,
-                        apiKey: provider.apiKey,
-                        remoteModel: provider.remoteModel,
-                        isEnabled: provider.isEnabled,
-                        tags: provider.tags,
-                        isFree: provider.isFree
-                    )
-                    try tokenhubMgr.update(provider)
-                    return try Self.jsonResponse(provider)
-                }
-                Delete("/providers/{name}") { request, context in
-                    let name = try context.parameters.require("name")
-                    try tokenhubMgr.delete(name)
-                    return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "{\"status\":\"deleted\"}")))
-                }
-                Post("/test") { request, _ in
-                    let body = try await request.body.collect(upTo: .max)
-                    var provider = try JSONDecoder().decode(TokenhubProvider.self, from: Data(buffer: body))
-                    let backend = CloudBackend.shared
-                    let ok = await backend.healthCheck(provider: provider)
-                    if ok {
-                        provider.lastTestedAt = Date()
-                        provider.lastStatus = "ok"
-                        if let existing = tokenhubMgr.get(provider.name) {
-                            var updated = provider
-                            updated = TokenhubProvider(
-                                name: existing.name,
-                                endpoint: updated.endpoint,
-                                apiKey: updated.apiKey,
-                                remoteModel: updated.remoteModel,
-                                isEnabled: updated.isEnabled
-                            )
-                            // Preserve test result timestamps
-                            _ = try? tokenhubMgr.update(updated)
-                        }
-                    }
-                    struct TestResult: Encodable {
-                        let success: Bool
-                        let provider: String
-                        let endpoint: String
-                    }
-                    return try Self.jsonResponse(TestResult(
-                        success: ok, provider: provider.name, endpoint: provider.endpoint
-                    ))
                 }
             }
             RouteGroup("admin/keys") {

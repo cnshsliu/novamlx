@@ -29,9 +29,14 @@ final class MockSourceServer: @unchecked Sendable {
         set { lock.lock(); defer { lock.unlock() }; _failNextBody = newValue }
     }
     private var _lastNoAutoloadHeader: String?
+    private var _hitCount = 0
     /// Last X-No-Autoload header value the server saw (nil when absent).
     var lastNoAutoloadHeader: String? {
         lock.lock(); defer { lock.unlock() }; return _lastNoAutoloadHeader
+    }
+    /// How many chat-completion requests this server has accepted.
+    var hitCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _hitCount
     }
     /// Test hook: when non-zero, the next request sleeps this many seconds in
     /// its handler before producing any response (drives client deadline
@@ -127,6 +132,7 @@ final class MockSourceServer: @unchecked Sendable {
         _lastAuthorizationHeader = authorization
         _lastBodyModel = model
         _lastNoAutoloadHeader = noAutoload
+        _hitCount += 1
     }
 
     private func setPort(_ port: Int) {

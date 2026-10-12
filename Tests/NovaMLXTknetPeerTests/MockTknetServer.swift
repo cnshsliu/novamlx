@@ -49,7 +49,7 @@ final class MockTknetServer: @unchecked Sendable {
         router.post("/api/user/auth") { request, _ -> Response in
             struct LoginBody: Decodable { let email: String; let password: String }
             let body = try await request.body.collect(upTo: .max)
-            let login = try JSONDecoder().decode(LoginBody.self, from: body)
+            let login = try JSONDecoder().decode(LoginBody.self, from: Data(body.readableBytesView))
             guard login.email == "lucas@example.com", login.password == "secret" else {
                 return Response(status: .unauthorized,
                                 headers: [.contentType: "application/json"],
@@ -85,7 +85,7 @@ final class MockTknetServer: @unchecked Sendable {
                                 body: Self.textBody(#"{"error":"Not authenticated"}"#))
             }
             let body = try await request.body.collect(upTo: .max)
-            let claim = try JSONDecoder().decode(ClaimBody.self, from: body)
+            let claim = try JSONDecoder().decode(ClaimBody.self, from: Data(body.readableBytesView))
             guard claim.peerId == "peer-42", claim.token == Self.validToken else {
                 return Response(status: .forbidden,
                                 headers: [.contentType: "application/json"],

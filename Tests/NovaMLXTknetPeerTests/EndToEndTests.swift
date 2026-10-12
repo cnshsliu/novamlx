@@ -1,5 +1,4 @@
 import Foundation
-import os
 import Testing
 @testable import NovaMLXTknetPeer
 
@@ -24,7 +23,7 @@ struct EndToEndTests {
     /// Consumers advance a cursor index and poll for the next non-heartbeat
     /// frame — generous timeouts, no tight spins.
     private final class FrameCollector: @unchecked Sendable {
-        private let state = OSAllocatedUnfairLock(initialState: [Frame]())
+        private let state = PeerLock(initialState: [Frame]())
         private var task: Task<Void, Never>?
 
         func collect(_ stream: AsyncStream<Frame>) {
@@ -74,8 +73,9 @@ struct EndToEndTests {
 
         var config = PeerConfig.defaultConfig()
         config.peerId = "peer-1"
+        config.gatewayPort = 0
         config.serverURL = URL(string: "ws://127.0.0.1:\(tunnel.port)")!
-        config.sources = [SourceConfig(
+        config.members = [MemberConfig(
             id: "s1", name: "mock", type: .openaiCompatible,
             endpoint: URL(string: "http://127.0.0.1:\(source.port)/v1")!,
             apiKeyRef: "s1", upstreamModel: "u")]
@@ -93,7 +93,7 @@ struct EndToEndTests {
         try await service.start()
 
         // The peer identified itself over the real tunnel.
-        guard case .hello(let peerId, let caps, let proto, _)? = await collector.nextSignificant(after: 0)?.frame
+        guard case .hello(let peerId, let caps, _, _)? = await collector.nextSignificant(after: 0)?.frame
         else {
             Issue.record("expected hello as the first significant tunnel frame")
             await service.stop(); await source.stop(); await tunnel.stop()

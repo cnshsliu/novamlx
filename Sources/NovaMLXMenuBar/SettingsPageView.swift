@@ -25,13 +25,6 @@ struct SettingsPageView: View {
     @State private var cliInstalled: Bool = false
     @State private var cliInstallMessage: String? = nil
 
-    // tknet.ai
-    @State private var tknetApiKey: String = ""
-    @State private var tknetApiKeyVerified: Bool = false
-    @State private var tknetVerifyMessage: String? = nil
-    @State private var tknetVerifying: Bool = false
-    @State private var tknetApiKeyVisible: Bool = false
-
     // Config editor state
     @State private var isEditing = false
     @State private var cfgHost = "127.0.0.1"
@@ -168,11 +161,6 @@ struct SettingsPageView: View {
                 applyCapturedSettings()
             } else {
                 loadCurrentConfig()
-            }
-            if memory.captured {
-                tknetApiKey = memory.tknetApiKey
-            } else {
-                loadTknetApiKey()
             }
         }
         .onDisappear { captureSettings() }
@@ -428,43 +416,6 @@ struct SettingsPageView: View {
         exit(0)
     }
 
-    // MARK: - tknet.ai
-
-    private func verifyAndFetchTknetModels() async {
-        tknetVerifying = true
-        tknetVerifyMessage = nil
-        tknetApiKeyVerified = false
-
-        do {
-            let trimmedApiKey = tknetApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: trimmedApiKey)
-            if !isValid {
-                tknetVerifyMessage = l10n.tr("settings.tknet.invalidKey")
-                tknetVerifying = false
-                return
-            }
-
-            let models = await CloudBackend.shared.fetchTknetModels(apiKey: trimmedApiKey)
-
-            if models.isEmpty {
-                tknetVerifyMessage = l10n.tr("settings.tknet.noModels")
-                tknetVerifying = false
-                return
-            }
-
-            try TokenhubManager.shared.provisionTknetProviders(remoteModels: models)
-            try TokenhubManager.shared.saveTknetApiKey(trimmedApiKey)
-
-            tknetApiKeyVerified = true
-            tknetVerifyMessage = l10n.tr("settings.tknet.success", models.count)
-        } catch {
-            tknetVerifyMessage = "Error: \(error.localizedDescription)"
-        }
-
-        tknetVerifying = false
-    }
-
     private func captureSettings() {
         memory.captured = true
         memory.isEditing = isEditing
@@ -489,7 +440,6 @@ struct SettingsPageView: View {
         memory.clusterStrategy = clusterStrategy
         memory.clusterMinLayers = clusterMinLayers
         memory.clusterTransport = clusterTransport
-        memory.tknetApiKey = tknetApiKey
     }
 
     private func applyCapturedSettings() {
@@ -515,16 +465,6 @@ struct SettingsPageView: View {
         clusterStrategy = memory.clusterStrategy
         clusterMinLayers = memory.clusterMinLayers
         clusterTransport = memory.clusterTransport
-    }
-
-    private func loadTknetApiKey() {
-        Task {
-            let apiKey = TokenhubManager.shared.loadTknetApiKeyFromSettings()
-            await MainActor.run {
-                tknetApiKey = apiKey ?? ""
-                tknetApiKeyVerified = (apiKey != nil && !apiKey!.isEmpty)
-            }
-        }
     }
 
     private func loadCurrentConfig() {
@@ -1160,54 +1100,12 @@ struct SettingsPageView: View {
     // MARK: - tknet.ai
 
     private var tknetConfigSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             sectionHeader("tknet.ai", icon: "link")
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(l10n.tr("settings.tknet.apiKey"))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-
-                HStack(spacing: 8) {
-                    ZStack(alignment: .trailing) {
-                        if tknetApiKeyVisible {
-                            TextField(l10n.tr("settings.tknet.apiKeyPlaceholder"), text: $tknetApiKey)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 12, design: .monospaced))
-                        } else {
-                            SecureField(l10n.tr("settings.tknet.apiKeyPlaceholder"), text: $tknetApiKey)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 12, design: .monospaced))
-                        }
-
-                        Button(action: { tknetApiKeyVisible.toggle() }) {
-                            Image(systemName: tknetApiKeyVisible ? "eye.slash.fill" : "eye.fill")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.trailing, 8)
-                    }
-
-                    Button(l10n.tr("settings.tknet.verifyButton")) {
-                        Task { await verifyAndFetchTknetModels() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(tknetApiKey.isEmpty || tknetVerifying)
-                }
-
-                if tknetVerifying {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                if let message = tknetVerifyMessage {
-                    Text(message)
-                        .font(.system(size: 11))
-                        .foregroundColor(tknetApiKeyVerified ? NovaTheme.Colors.statusOK : NovaTheme.Colors.statusError)
-                }
-            }
+            Text("Remote members and the token factory tunnel live in Tknet Peer. Run `tknet-peer member add` and `tknet-peer serve`. This app no longer writes Tokenhub providers.")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .sectionCard()

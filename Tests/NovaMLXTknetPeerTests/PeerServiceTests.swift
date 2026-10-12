@@ -1,5 +1,4 @@
 import Foundation
-import os
 import Testing
 @testable import NovaMLXTknetPeer
 
@@ -14,7 +13,7 @@ struct PeerServiceTests {
 
     /// Thread-safe append-only log of published statuses.
     private final class StatusRecorder: @unchecked Sendable {
-        private let state = OSAllocatedUnfairLock(initialState: [PeerStatus]())
+        private let state = PeerLock(initialState: [PeerStatus]())
         private var task: Task<Void, Never>?
 
         func record(_ stream: AsyncStream<PeerStatus>) {
@@ -42,7 +41,7 @@ struct PeerServiceTests {
 
     /// Thread-safe box for the last config the persist hook received.
     private final class ConfigBox: @unchecked Sendable {
-        private let state = OSAllocatedUnfairLock(initialState: nil as PeerConfig?)
+        private let state = PeerLock(initialState: nil as PeerConfig?)
         func store(_ config: PeerConfig) { state.withLock { $0 = config } }
         var last: PeerConfig? { state.withLock { $0 } }
     }
@@ -55,7 +54,8 @@ struct PeerServiceTests {
     ) -> PeerService {
         var config = PeerConfig.defaultConfig()
         config.peerId = peerId
-        config.sources = [SourceConfig(
+        config.gatewayPort = 0
+        config.members = [MemberConfig(
             id: "s1", name: "mock", type: .openaiCompatible,
             endpoint: sourceEndpoint, apiKeyRef: "s1", upstreamModel: "u")]
         config.capabilities = [Capability(
@@ -95,6 +95,7 @@ struct PeerServiceTests {
             sourceEndpoint: URL(string: "http://127.0.0.1:\(source.port)/v1")!)
         recorder.record(service.statusStream)
         try await service.start()
+        #expect(await recorder.wait { $0.gatewayListening })
         let server = pair.serverSide
 
         guard case .hello(let peerId, let caps, _, _)? = await nextSignificant(from: server.inbound)
@@ -136,17 +137,21 @@ struct PeerServiceTests {
         await service.stop()  // idempotent
     }
 
-    @Test("start() refuses an unregistered peer")
-    func startRequiresRegistration() async throws {
+    @Test("start() serves the gateway when the peer is not registered")
+    func startWithoutRegistrationServesGateway() async throws {
         let pair = InMemoryTransportPair()
         let service = makeService(
             pair: pair,
             sourceEndpoint: URL(string: "http://127.0.0.1:1/v1")!,
             peerId: nil)
-        await #expect(throws: TunnelError.notRegistered) {
-            try await service.start()
-        }
-        await service.stop()  // teardown with nothing running must not trap
+        try await service.start()
+        #expect(service.gatewayListenPort != nil)
+        #expect(service.gatewayListenPort != 0)
+        // No hello: an unregistered peer does not dial the tunnel.
+        let hello = await nextSignificant(from: pair.serverSide.inbound, timeout: 0.2)
+        #expect(hello == nil)
+        await service.stop()
+        await service.stop()
     }
 
     @Test("demand lifecycle: absent demand retires capability, returning demand revives it")
@@ -218,6 +223,29 @@ struct PeerServiceTests {
         #expect(service.currentConfig == edited)
         #expect(persisted.last == edited)
 
+        await service.stop()
+    }
+
+    @Test("gateway stays up without a peer id and stop is idempotent")
+    func gatewayWithoutTunnel() async throws {
+        var config = PeerConfig.defaultConfig()
+        config.gatewayPort = 0
+        config.peerId = nil
+        let recorder = StatusRecorder()
+        let service = PeerService(
+            config: config,
+            secrets: FileSecretStore(directory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("tknet-gw-\(UUID().uuidString)")),
+            transportFactory: { throw TunnelError.connectionClosed },
+            delay: Self.quickDelay)
+        recorder.record(service.statusStream)
+        try await service.start()
+        #expect(await recorder.wait { $0.gatewayListening && $0.connection == .idle })
+        let port = recorder.all.last(where: \.gatewayListening)?.gatewayPort
+        #expect(port != nil)
+        #expect(port != 0)
+        await service.stop()
+        #expect(await recorder.wait { !$0.gatewayListening && $0.connection == .idle })
         await service.stop()
     }
 

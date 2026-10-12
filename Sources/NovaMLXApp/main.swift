@@ -47,9 +47,6 @@ struct NovaMLXApp: App {
                     Label(l10n.tr("app.catalogAdmin"), systemImage: "checkmark.seal.fill")
                 }
             }
-            Button { appDelegate.openMainWindow(to: .tokenhub) } label: {
-                Label(l10n.tr("app.tokenhub"), systemImage: "server.rack")
-            }
             Button { appDelegate.openMainWindow(to: .voiceClone) } label: {
                 Label(l10n.tr("app.voiceClone"), systemImage: "waveform.badge.mic")
             }
@@ -76,9 +73,6 @@ struct NovaMLXApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = MenuBarAppState()
-    /// Outlives the main window so a restart can dial the tunnel before the
-    /// window exists, and closing the window does not drop it.
-    let tknetPeer = TknetPeerState()
     // Eagerly constructed, but kicks off NovaDB.shared.setup first so the
     // MetricsStore init buried inside MLXEngine doesn't trap on a nil IUO.
     // NovaDB.setup is idempotent; the explicit call in init() below is a no-op.
@@ -349,35 +343,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             appState.startStatsMonitoring(inferenceService: inferenceService)
-            await tknetPeer.restoreTunnelAfterLaunch()
-
-            // Provision managed providers: cloud (if subscribed) + local loaded models
-            Task {
-                // Cloud providers — validate subscription with network check
-                do {
-                    _ = try await CloudAuth.validate()
-
-                    // Verify tknet.ai API Key and provision nova providers
-                    if let apiKey = TokenhubManager.shared.loadTknetApiKeyFromSettings(), !apiKey.isEmpty {
-                        let isValid = await CloudBackend.shared.verifySettingsApiKey(apiKey: apiKey)
-                        if isValid {
-                            let models = await CloudBackend.shared.fetchTknetModels(apiKey: apiKey)
-                            if !models.isEmpty {
-                                try? TokenhubManager.shared.provisionTknetProviders(remoteModels: models)
-                                NovaMLXLog.info("tknet.ai nova providers provisioned: \(models.count) models")
-                            } else {
-                                NovaMLXLog.info("tknet.ai API key valid but no nova models found")
-                            }
-                        } else {
-                            NovaMLXLog.info("tknet.ai API key invalid, skipping nova provider provisioning")
-                        }
-                    } else {
-                        NovaMLXLog.info("No tknet.ai API key configured")
-                    }
-                } catch {
-                    NovaMLXLog.info("Not subscribed, skipping cloud provisioning")
-                }
-            }
 
             let memHandler = MemoryPressureHandler(engine: engine, settingsManager: settingsManager)
             memHandler.start()
@@ -630,8 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = NovaAppView(
             appState: appState,
             inferenceService: inferenceService,
-            modelManager: modelManager,
-            tknetPeer: tknetPeer
+            modelManager: modelManager
         )
 
         let window = NSWindow(

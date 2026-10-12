@@ -1,42 +1,68 @@
 import Foundation
 
-/// An upstream the peer can forward to. `localNovaMLX` is a loopback preset
-/// over the app's own OpenAI-compatible API (spec Phase-1 deviation).
-public struct SourceConfig: Codable, Equatable, Sendable, Identifiable {
-    public var id: String
-    public var name: String
-    public var type: SourceType
-    public var endpoint: URL
-    /// Reference into the SecretStore — the key itself never lives here.
-    public var apiKeyRef: String
-    /// Model name the source expects for capabilities bound to this source.
-    public var upstreamModel: String
-
-    public init(id: String, name: String, type: SourceType, endpoint: URL,
-                apiKeyRef: String, upstreamModel: String) {
-        self.id = id; self.name = name; self.type = type
-        self.endpoint = endpoint; self.apiKeyRef = apiKeyRef; self.upstreamModel = upstreamModel
-    }
-}
-
 /// One server this Mac has registered with. The identity is `peerId` in
 /// `PeerConfig.registrations` plus the local connection key. `peerName` is
 /// only the label last typed for that server.
 public struct ServerMemory: Codable, Equatable, Sendable, Identifiable {
     public var server: String
     public var peerName: String
-    public var sources: [SourceConfig]
+    public var members: [MemberConfig]
+    public var pools: [PoolConfig]
     public var capabilities: [Capability]
     public var retiredDemandIds: [String]
     public var id: String { server }
 
-    public init(server: String, peerName: String, sources: [SourceConfig] = [],
-                capabilities: [Capability] = [], retiredDemandIds: [String] = []) {
+    public init(server: String, peerName: String, members: [MemberConfig] = [],
+                pools: [PoolConfig] = [], capabilities: [Capability] = [],
+                retiredDemandIds: [String] = []) {
         self.server = server
         self.peerName = peerName
-        self.sources = sources
+        self.members = members
+        self.pools = pools
         self.capabilities = capabilities
         self.retiredDemandIds = retiredDemandIds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case server, peerName, sources, members, pools, capabilities, retiredDemandIds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        server = try c.decode(String.self, forKey: .server)
+        peerName = try c.decodeIfPresent(String.self, forKey: .peerName) ?? ""
+        if let members = try c.decodeIfPresent([MemberConfig].self, forKey: .members) {
+            self.members = members
+        } else {
+            self.members = try c.decodeIfPresent([MemberConfig].self, forKey: .sources) ?? []
+        }
+        capabilities = try c.decodeIfPresent([Capability].self, forKey: .capabilities) ?? []
+        retiredDemandIds = try c.decodeIfPresent([String].self, forKey: .retiredDemandIds) ?? []
+        pools = try c.decodeIfPresent([PoolConfig].self, forKey: .pools) ?? []
+        migrateLegacyPoolsIfNeeded()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(server, forKey: .server)
+        try c.encode(peerName, forKey: .peerName)
+        try c.encode(members, forKey: .members)
+        try c.encode(pools, forKey: .pools)
+        try c.encode(capabilities, forKey: .capabilities)
+        try c.encode(retiredDemandIds, forKey: .retiredDemandIds)
+    }
+
+    /// Fill `pools` from capabilities when a row still has only members.
+    /// Rewrites `capability.sourceId` to the pool id (unchanged when the
+    /// published model had the source to itself).
+    public mutating func migrateLegacyPoolsIfNeeded() {
+        guard pools.isEmpty, !members.isEmpty else { return }
+        let built = PoolMigration.build(capabilities)
+        pools = built.pools
+        for index in capabilities.indices where built.poolIds.indices.contains(index) {
+            let poolId = built.poolIds[index]
+            if !poolId.isEmpty { capabilities[index].sourceId = poolId }
+        }
     }
 }
 
@@ -50,28 +76,43 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     /// Saved servers for the picker. A row exists after a successful
     /// registration, or after migrating an older registrations map.
     public var serverMemory: [ServerMemory] = []
-    public var sources: [SourceConfig]
+    public var members: [MemberConfig]
+    public var pools: [PoolConfig]
     public var capabilities: [Capability]
     public var concurrencyLimit: Int
     public var requestTimeoutSeconds: Double
     public var idleMinutesBeforeSlowPoll: Double
+    /// OpenAI-compatible bind address for the local gateway.
+    public var gatewayHost: String = "127.0.0.1"
+    /// `0` asks the OS for an ephemeral port (tests). Production default is 6600.
+    public var gatewayPort: Int = 6600
+    /// Set when `tknet-peer migrate-from-novamlx` wrote this file. A later run
+    /// is a no-op until `--force`.
+    public var migratedFromNovaAt: Date? = nil
     /// DemandIds the server stopped listing. Declarations are kept (UI greying);
     /// nothing is deleted. Persisted so retirement survives restarts.
     private var retiredDemandIds: Set<String> = []
 
     public init(peerId: String? = nil, serverURL: URL, registrations: [String: String] = [:],
-                sources: [SourceConfig] = [], capabilities: [Capability] = [],
+                members: [MemberConfig] = [], pools: [PoolConfig] = [],
+                capabilities: [Capability] = [],
                 concurrencyLimit: Int = 1, requestTimeoutSeconds: Double = 300,
                 idleMinutesBeforeSlowPoll: Double = 5) {
-        self.peerId = peerId; self.serverURL = serverURL; self.registrations = registrations; self.sources = sources
-        self.capabilities = capabilities; self.concurrencyLimit = concurrencyLimit
+        self.peerId = peerId
+        self.serverURL = serverURL
+        self.registrations = registrations
+        self.members = members
+        self.pools = pools
+        self.capabilities = capabilities
+        self.concurrencyLimit = concurrencyLimit
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.idleMinutesBeforeSlowPoll = idleMinutesBeforeSlowPoll
     }
 
     private enum CodingKeys: String, CodingKey {
-        case peerId, serverURL, sources, capabilities, concurrencyLimit, registrations
+        case peerId, serverURL, sources, members, pools, capabilities, concurrencyLimit, registrations
         case requestTimeoutSeconds, idleMinutesBeforeSlowPoll, retiredDemandIds, serverMemory
+        case gatewayHost, gatewayPort, migratedFromNovaAt
     }
 
     /// Custom decoding so config files written before retirement tracking
@@ -82,12 +123,75 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         serverURL = try c.decode(URL.self, forKey: .serverURL)
         registrations = (try? c.decode([String: String].self, forKey: .registrations)) ?? [:]
         serverMemory = (try? c.decode([ServerMemory].self, forKey: .serverMemory)) ?? []
-        sources = try c.decodeIfPresent([SourceConfig].self, forKey: .sources) ?? []
+        if let members = try c.decodeIfPresent([MemberConfig].self, forKey: .members) {
+            self.members = members
+        } else {
+            members = try c.decodeIfPresent([MemberConfig].self, forKey: .sources) ?? []
+        }
         capabilities = try c.decodeIfPresent([Capability].self, forKey: .capabilities) ?? []
+        pools = try c.decodeIfPresent([PoolConfig].self, forKey: .pools) ?? []
         concurrencyLimit = try c.decodeIfPresent(Int.self, forKey: .concurrencyLimit) ?? 1
         requestTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .requestTimeoutSeconds) ?? 300
         idleMinutesBeforeSlowPoll = try c.decodeIfPresent(Double.self, forKey: .idleMinutesBeforeSlowPoll) ?? 5
         retiredDemandIds = try c.decodeIfPresent(Set<String>.self, forKey: .retiredDemandIds) ?? []
+        gatewayHost = try c.decodeIfPresent(String.self, forKey: .gatewayHost) ?? "127.0.0.1"
+        gatewayPort = try c.decodeIfPresent(Int.self, forKey: .gatewayPort) ?? 6600
+        migratedFromNovaAt = Self.decodeMigrationStamp(c)
+        migrateLegacyPoolsIfNeeded()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(peerId, forKey: .peerId)
+        try c.encode(serverURL, forKey: .serverURL)
+        try c.encode(registrations, forKey: .registrations)
+        try c.encode(serverMemory, forKey: .serverMemory)
+        try c.encode(members, forKey: .members)
+        try c.encode(pools, forKey: .pools)
+        try c.encode(capabilities, forKey: .capabilities)
+        try c.encode(concurrencyLimit, forKey: .concurrencyLimit)
+        try c.encode(requestTimeoutSeconds, forKey: .requestTimeoutSeconds)
+        try c.encode(idleMinutesBeforeSlowPoll, forKey: .idleMinutesBeforeSlowPoll)
+        try c.encode(retiredDemandIds, forKey: .retiredDemandIds)
+        try c.encode(gatewayHost, forKey: .gatewayHost)
+        try c.encode(gatewayPort, forKey: .gatewayPort)
+        if let migratedFromNovaAt {
+            try c.encode(Self.migrationStampString(migratedFromNovaAt), forKey: .migratedFromNovaAt)
+        }
+    }
+
+    private static func migrationStampString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    private static func decodeMigrationStamp(_ c: KeyedDecodingContainer<CodingKeys>) -> Date? {
+        if let text = try? c.decodeIfPresent(String.self, forKey: .migratedFromNovaAt) {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter.date(from: text)
+        }
+        if let seconds = try? c.decodeIfPresent(Double.self, forKey: .migratedFromNovaAt) {
+            return Date(timeIntervalSinceReferenceDate: seconds)
+        }
+        return nil
+    }
+
+    /// When `pools` is missing, derive one pool per published model and point
+    /// each capability's `sourceId` at that pool. No-op once pools exist.
+    public mutating func migrateLegacyPoolsIfNeeded() {
+        if pools.isEmpty, !members.isEmpty {
+            let built = PoolMigration.build(capabilities)
+            pools = built.pools
+            for index in capabilities.indices where built.poolIds.indices.contains(index) {
+                let poolId = built.poolIds[index]
+                if !poolId.isEmpty { capabilities[index].sourceId = poolId }
+            }
+        }
+        for index in serverMemory.indices {
+            serverMemory[index].migrateLegacyPoolsIfNeeded()
+        }
     }
 
     public static func defaultConfig() -> PeerConfig {
@@ -127,11 +231,57 @@ public struct PeerConfig: Codable, Equatable, Sendable {
 
     public func retiredDemandIdList() -> [String] { retiredDemandIds.sorted() }
 
-    public mutating func setBindings(sources: [SourceConfig], capabilities: [Capability],
-                                     retiredDemandIds: [String]) {
-        self.sources = sources
+    public mutating func setBindings(members: [MemberConfig], pools: [PoolConfig] = [],
+                                     capabilities: [Capability], retiredDemandIds: [String]) {
+        self.members = members
+        self.pools = pools
         self.capabilities = capabilities
         self.retiredDemandIds = Set(retiredDemandIds)
+    }
+
+    public func member(id: String) -> MemberConfig? {
+        members.first { $0.id == id }
+    }
+
+    public func pool(id: String) -> PoolConfig? {
+        pools.first { $0.id == id }
+    }
+
+    /// First pool whose published name matches. Local gateway model lookup.
+    public func pool(named name: String) -> PoolConfig? {
+        pools.first { $0.name == name }
+    }
+
+    public func members(in pool: PoolConfig) -> [MemberConfig] {
+        pool.memberIds.compactMap { memberId in members.first { $0.id == memberId } }
+    }
+
+    public mutating func upsertMember(_ member: MemberConfig) {
+        if let index = members.firstIndex(where: { $0.id == member.id }) {
+            members[index] = member
+        } else {
+            members.append(member)
+        }
+    }
+
+    /// Drops the member and strips its id from every pool.
+    public mutating func removeMember(id: String) {
+        members.removeAll { $0.id == id }
+        for index in pools.indices {
+            pools[index].memberIds.removeAll { $0 == id }
+        }
+    }
+
+    public mutating func upsertPool(_ pool: PoolConfig) {
+        if let index = pools.firstIndex(where: { $0.id == pool.id }) {
+            pools[index] = pool
+        } else {
+            pools.append(pool)
+        }
+    }
+
+    public mutating func removePool(id: String) {
+        pools.removeAll { $0.id == id }
     }
 
     public mutating func upsertServerMemory(_ memory: ServerMemory) {
@@ -153,7 +303,8 @@ public struct PeerConfig: Codable, Equatable, Sendable {
             let active = Self.normalizedREST(serverURL) == rest
             upsertServerMemory(ServerMemory(
                 server: rest, peerName: "",
-                sources: active ? sources : [],
+                members: active ? members : [],
+                pools: active ? pools : [],
                 capabilities: active ? capabilities : [],
                 retiredDemandIds: active ? retiredDemandIdList() : []
             ))
@@ -174,10 +325,11 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         serverURL = tunnel
         peerId = registrations[Self.tunnelKey(tunnel)]
         if let saved = serverMemory.first(where: { $0.server == rest }) {
-            setBindings(sources: saved.sources, capabilities: saved.capabilities,
+            setBindings(members: saved.members, pools: saved.pools,
+                        capabilities: saved.capabilities,
                         retiredDemandIds: saved.retiredDemandIds)
         } else {
-            setBindings(sources: [], capabilities: [], retiredDemandIds: [])
+            setBindings(members: [], pools: [], capabilities: [], retiredDemandIds: [])
         }
         return true
     }
@@ -196,12 +348,13 @@ public struct PeerConfig: Codable, Equatable, Sendable {
             let tunnel = Self.tunnelURL(fromREST: nextURL)
             serverURL = tunnel
             peerId = registrations[Self.tunnelKey(tunnel)]
-            setBindings(sources: next.sources, capabilities: next.capabilities,
+            setBindings(members: next.members, pools: next.pools,
+                        capabilities: next.capabilities,
                         retiredDemandIds: next.retiredDemandIds)
         } else {
             peerId = nil
             serverURL = URL(string: "wss://tknet.ai")!
-            setBindings(sources: [], capabilities: [], retiredDemandIds: [])
+            setBindings(members: [], pools: [], capabilities: [], retiredDemandIds: [])
         }
     }
 
@@ -212,7 +365,8 @@ public struct PeerConfig: Codable, Equatable, Sendable {
             ?? ServerMemory(server: canonical, peerName: name)
         row.peerName = name
         if Self.normalizedREST(serverURL) == canonical {
-            row.sources = sources
+            row.members = members
+            row.pools = pools
             row.capabilities = capabilities
             row.retiredDemandIds = retiredDemandIdList()
         }
@@ -222,7 +376,8 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     private mutating func snapshotActiveBindings() {
         guard let current = Self.normalizedREST(serverURL),
               var row = serverMemory.first(where: { $0.server == current }) else { return }
-        row.sources = sources
+        row.members = members
+        row.pools = pools
         row.capabilities = capabilities
         row.retiredDemandIds = retiredDemandIdList()
         upsertServerMemory(row)
@@ -303,6 +458,8 @@ public enum ConfigStore {
     /// volumes that don't support FileVault-style protection (e.g. $TMPDIR),
     /// and the POSIX 0600 chmod is the binding spec requirement.
     public static func save(_ config: PeerConfig, to url: URL) throws {
+        var config = config
+        config.migrateLegacyPoolsIfNeeded()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(config)

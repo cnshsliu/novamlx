@@ -1,7 +1,6 @@
 import Foundation
 import NovaMLXCore
 import NovaMLXEngine
-import NovaMLXTknetPeer
 
 /// Window-owned page drafts. Plain classes on purpose: NovaAppView holds the
 /// box in `@State` and does not observe it, so typing on one page does not
@@ -14,9 +13,6 @@ final class PageMemoryBox {
     let talkingHead = TalkingHeadPageMemory()
     let requests = RequestLogPageMemory()
     let catalog = CatalogAdminPageMemory()
-    let tknet = TknetPageMemory()
-    let tokenhub = TokenhubPageMemory()
-    let loadBalancers = LoadBalancerPageMemory()
     let apiKeys = APIKeysPageMemory()
     let cluster = ClusterPageMemory()
     let settings = SettingsPageMemory()
@@ -78,37 +74,6 @@ final class CatalogAdminPageMemory {
     var draft: CatalogDraft?
 }
 
-final class TknetPageMemory {
-    var keep = false
-    var selectedServer = TknetServers.official
-    var peerNameText = ""
-    var nameEdited = false
-    var revealKey = false
-    var loginEmail = ""
-    var loginPassword = ""
-}
-
-final class TokenhubPageMemory {
-    var keep = false
-    var selectedId: String?
-    var isCreatingNew = false
-    var panel: TokenhubPageView.RightPanelMode = .empty
-    var formName = ""
-    var formEndpoint = ""
-    var formApiKey = ""
-    var formRemoteModel = ""
-    var formEnabled = false
-    var formIsFree = false
-    var formSupportsResponses = false
-    var formTags = ""
-}
-
-final class LoadBalancerPageMemory {
-    var expandedId: UUID?
-    var creating = false
-    var editingId: UUID?
-}
-
 final class APIKeysPageMemory {
     var showCreateKeySheet = false
     var newKeyName = ""
@@ -155,5 +120,4 @@ final class SettingsPageMemory {
     var clusterStrategy = "minNodes"
     var clusterMinLayers = 32
     var clusterTransport = "tcp"
-    var tknetApiKey = ""
 }

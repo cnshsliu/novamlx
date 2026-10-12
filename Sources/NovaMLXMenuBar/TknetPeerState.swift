@@ -437,11 +437,12 @@ public final class TknetPeerState: ObservableObject {
         }
         var config = self.config
         let sourceId = "src-\(entry.demandId)"
-        config.sources.removeAll { $0.id == sourceId }
-        config.sources.append(SourceConfig(
+        config.upsertMember(MemberConfig(
             id: sourceId, name: "NovaMLX (local)", type: .localNovaMLX,
             endpoint: URL(string: "http://127.0.0.1:6590/v1")!,
             apiKeyRef: "src/\(sourceId)", upstreamModel: upstream))
+        config.upsertPool(PoolConfig(
+            id: sourceId, name: entry.model, memberIds: [sourceId]))
         secrets.save(primaryKey, for: "src/\(sourceId)")
         config.capabilities.removeAll { $0.demandId == entry.demandId }
         config.capabilities.append(Capability(
@@ -456,7 +457,7 @@ public final class TknetPeerState: ObservableObject {
         var config = self.config
         var changed = false
         for index in config.capabilities.indices where config.capabilities[index].api == nil {
-            let upstream = config.sources.first { $0.id == config.capabilities[index].sourceId }?.upstreamModel
+            let upstream = config.member(id: config.capabilities[index].sourceId)?.upstreamModel
                 ?? config.capabilities[index].model
             let type = modelType(upstream) ?? "unknown"
             let fam = family(upstream) ?? ""
@@ -469,7 +470,8 @@ public final class TknetPeerState: ObservableObject {
 
     /// Upstream model name the bound source expects for this capability.
     func upstreamModel(for capability: Capability) -> String {
-        config.sources.first { $0.id == capability.sourceId }?.upstreamModel
+        config.member(id: capability.sourceId)?.upstreamModel
+            ?? config.pool(id: capability.sourceId).flatMap { config.members(in: $0).first?.upstreamModel }
             ?? capability.model
     }
 
@@ -477,8 +479,14 @@ public final class TknetPeerState: ObservableObject {
         guard !model.isEmpty,
               let cap = config.capabilities.first(where: { $0.demandId == demandId }) else { return }
         var config = self.config
-        guard let index = config.sources.firstIndex(where: { $0.id == cap.sourceId }) else { return }
-        config.sources[index].upstreamModel = model
+        if let pool = config.pool(id: cap.sourceId), let memberId = pool.memberIds.first,
+           let index = config.members.firstIndex(where: { $0.id == memberId }) {
+            config.members[index].upstreamModel = model
+        } else if let index = config.members.firstIndex(where: { $0.id == cap.sourceId }) {
+            config.members[index].upstreamModel = model
+        } else {
+            return
+        }
         await commit(config)
     }
 

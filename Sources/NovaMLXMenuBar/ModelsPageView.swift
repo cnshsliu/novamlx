@@ -575,7 +575,7 @@ struct ModelsPageView: View {
     }
 
     /// One demo page per model type; the page itself switches same-type
-    /// models. Unknown ids (tknet:*, lb:*) land on the chat demo.
+    /// models. Local model ids open the matching demo on NovaMLX.
     private func openTypedDemo(_ modelId: String) {
         let path: String
         switch modelManager.getRecord(modelId)?.modelType {

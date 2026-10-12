@@ -1,6 +1,4 @@
 import Foundation
-import os
-
 public enum TunnelStatus: Equatable, Sendable {
     case idle, connecting, connected, backingOff(seconds: Double), stopping
     /// Server closed the tunnel with 4005: this build's protocol is below the
@@ -28,7 +26,7 @@ public final class TunnelClient: @unchecked Sendable {
         /// advertises these capabilities; falls back to the init config.
         var config: PeerConfig?
     }
-    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let state = PeerLock(initialState: State())
 
     private let statusContinuation: AsyncStream<TunnelStatus>.Continuation
     public let statusStream: AsyncStream<TunnelStatus>
@@ -49,7 +47,7 @@ public final class TunnelClient: @unchecked Sendable {
     /// instantly can never race the concurrency accounting; the identity
     /// check on removal keeps a resurrected slot impossible.
     private final class RequestSlot: @unchecked Sendable {
-        private let slotLock = OSAllocatedUnfairLock(initialState: nil as Task<Void, Never>?)
+        private let slotLock = PeerLock(initialState: nil as Task<Void, Never>?)
         var task: Task<Void, Never>? { slotLock.withLock { $0 } }
         func setTask(_ task: Task<Void, Never>) { slotLock.withLock { $0 = task } }
     }
@@ -302,11 +300,11 @@ public final class AsyncSemaphore: @unchecked Sendable {
         var permits: Int
         var waiters: [CheckedContinuation<Void, Never>] = []
     }
-    private let state: OSAllocatedUnfairLock<State>
+    private let state: PeerLock<State>
 
     public init(permits: Int) {
         precondition(permits >= 0, "AsyncSemaphore permits must be non-negative")
-        self.state = OSAllocatedUnfairLock(initialState: State(permits: permits))
+        self.state = PeerLock(initialState: State(permits: permits))
     }
 
     /// Suspends until a permit is available.

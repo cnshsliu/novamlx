@@ -20,7 +20,7 @@ struct RelayTests {
         secrets.save("sk-source-key", for: "s1")
         var config = PeerConfig.defaultConfig()
         config.requestTimeoutSeconds = requestTimeoutSeconds
-        config.sources = [SourceConfig(
+        config.members = [MemberConfig(
             id: "s1", name: "mock", type: sourceType,
             endpoint: URL(string: "http://127.0.0.1:\(server.port)/v1")!,
             apiKeyRef: "s1", upstreamModel: "upstream-model-x"
@@ -157,6 +157,18 @@ struct RelayTests {
             #expect(server.lastBodyModel == nil)
             #expect(server.lastAuthorizationHeader == nil)
         }
+    }
+
+    @Test("non-loopback members do not receive X-No-Autoload")
+    func nonLoopbackOmitsNoAutoload() throws {
+        let member = MemberConfig(
+            id: "remote", name: "remote", type: .openaiCompatible,
+            endpoint: URL(string: "http://10.1.2.3:8080/v1")!,
+            apiKeyRef: "src/remote", upstreamModel: "upstream-model-x")
+        let body = Data(#"{"model":"demand-model","messages":[]}"#.utf8)
+        let request = try PoolForwarder.makeUpstreamRequest(member: member, body: body, apiKey: "sk")
+        #expect(request.headers.first(name: "X-No-Autoload") == nil)
+        #expect(request.headers.first(name: "authorization") == "Bearer sk")
     }
 
     @Test("deadline exceeded becomes a timeout end frame, not a failure")

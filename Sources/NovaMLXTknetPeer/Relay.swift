@@ -1,6 +1,4 @@
-import AsyncHTTPClient
 import Foundation
-import NIOCore
 
 /// Forwards tunnel requests to the configured HTTP source and streams the
 /// reply back as frames. One `handle` call = one request lifecycle = exactly
@@ -21,29 +19,49 @@ public final class Relay: Sendable {
 
         public func update(_ config: PeerConfig) {
             lock.lock(); defer { lock.unlock() }
-            self.config = config
+            var incoming = config
+            incoming.migrateLegacyPoolsIfNeeded()
+            let previous = Dictionary(uniqueKeysWithValues: self.config.pools.map { ($0.id, $0.requestCount) })
+            for index in incoming.pools.indices {
+                let id = incoming.pools[index].id
+                if let kept = previous[id], kept > incoming.pools[index].requestCount {
+                    incoming.pools[index].requestCount = kept
+                }
+            }
+            self.config = incoming
+        }
+
+        /// One bump per accepted request, shared by every strategy's rotation.
+        public func bumpRequestCount(poolId: String) {
+            lock.lock(); defer { lock.unlock() }
+            guard let index = config.pools.firstIndex(where: { $0.id == poolId }) else { return }
+            config.pools[index].requestCount += 1
         }
     }
 
-    private let configHolder: ConfigHolder
-    private let secrets: any SecretStore
-    private let client: HTTPClient
+    private let forwarder: PoolForwarder
+    private let ownsForwarder: Bool
 
     public init(config: PeerConfig, secrets: any SecretStore) {
-        self.configHolder = ConfigHolder(config)
-        self.secrets = secrets
-        // `.singleton` shares one NIO event loop group across all relays in
-        // the process; each HTTPClient still owns its lifecycle and is shut
-        // down in `shutdown()` below.
-        self.client = HTTPClient(eventLoopGroupProvider: .singleton)
+        self.forwarder = PoolForwarder(config: config, secrets: secrets)
+        self.ownsForwarder = true
     }
 
-    public func updateConfig(_ config: PeerConfig) { configHolder.update(config) }
+    /// Gateway and tunnel share one forwarder. The owner shuts it down.
+    public init(forwarder: PoolForwarder) {
+        self.forwarder = forwarder
+        self.ownsForwarder = false
+    }
 
-    /// Stops the upstream HTTP client. AsyncHTTPClient asserts in debug builds
-    /// if it is deallocated without shutdown, so owners must call this before
-    /// dropping the relay.
-    public func shutdown() async throws { try await client.shutdown() }
+    public func updateConfig(_ config: PeerConfig) { forwarder.updateConfig(config) }
+
+    /// Stops the upstream HTTP client when this relay created it.
+    /// AsyncHTTPClient asserts in debug builds if it is deallocated without
+    /// shutdown, so the owner must call this (or `PoolForwarder.shutdown`)
+    /// before dropping the client.
+    public func shutdown() async throws {
+        if ownsForwarder { try await forwarder.shutdown() }
+    }
 
     /// Streams the full reply for one tunnel request: zero or more
     /// `responseChunk` frames followed by exactly one terminal `responseEnd`.
@@ -71,135 +89,117 @@ public final class Relay: Sendable {
                 completionTokens: 0, upstreamStatus: upstreamStatus, errorMessage: message)))
         }
 
-        let config = configHolder.value
+        let config = forwarder.currentConfig
         guard let capability = config.capabilities.first(where: { $0.model == request.model }) else {
             fail("no capability for model \(request.model)")
             return
         }
-        guard let source = config.sources.first(where: { $0.id == capability.sourceId }) else {
-            fail("no source \(capability.sourceId) for model \(request.model)")
+        guard let pool = config.pool(id: capability.sourceId) else {
+            fail("no pool \(capability.sourceId) for model \(request.model)")
             return
         }
-        // Anthropic-source forwarding needs a different wire path (/v1/messages,
-        // x-api-key scheme); it is not implemented in Phase 1. Reject outright
-        // rather than silently mis-forwarding an OpenAI-shaped request.
-        guard source.type != .anthropic else {
+        // Anthropic forwarding needs a different wire path. Reject when every
+        // enabled member is anthropic so an OpenAI-shaped request is not
+        // mis-forwarded. Mixed pools skip anthropic members inside the forwarder.
+        let enabled = config.members(in: pool).filter(\.isEnabled)
+        if !enabled.isEmpty, enabled.allSatisfy({ $0.type == .anthropic }) {
             fail("anthropic source forwarding not yet supported")
             return
         }
-        // Remaining source types (openaiCompatible, localNovaMLX) are
-        // OpenAI-format only.
         guard request.apiFormat == .openai else {
-            fail("api format \(request.apiFormat.rawValue) unsupported by source \(source.id)")
+            fail("api format \(request.apiFormat.rawValue) unsupported by source \(pool.id)")
             return
         }
 
-        // Rewrite the model to the upstream name; the demand-facing name
-        // must never leak upstream. Inject only the source key.
-        guard var json = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any] else {
-            fail("request body is not a JSON object")
-            return
+        let outcome = await forwarder.forward(
+            poolId: pool.id, body: request.body, timeoutSeconds: config.requestTimeoutSeconds)
+        switch outcome {
+        case .cancelled:
+            emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+                status: .cancelled, ttftMs: 0, totalMs: elapsedMs(), promptTokens: 0,
+                completionTokens: 0, upstreamStatus: 0, errorMessage: nil)))
+        case .unknownPool:
+            fail("no pool \(capability.sourceId) for model \(request.model)")
+        case .poolDisabled, .noHealthyMembers:
+            fail("no healthy members for model \(request.model)")
+        case .allMembersFailed(let message, let status, let timedOut):
+            if timedOut {
+                emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+                    status: .timeout, ttftMs: 0, totalMs: elapsedMs(), promptTokens: 0,
+                    completionTokens: 0, upstreamStatus: status, errorMessage: nil)))
+            } else {
+                fail(message, upstreamStatus: status)
+            }
+        case .success(let upstream):
+            await emitHTTP(upstream, request: request, started: start, emit: emit)
         }
-        json["model"] = source.upstreamModel
-        guard let rewritten = try? JSONSerialization.data(withJSONObject: json) else {
-            fail("model rewrite failed")
+    }
+
+    private func emitHTTP(
+        _ upstream: UpstreamBody, request: RequestFrame,
+        started: ContinuousClock.Instant, emit: @escaping @Sendable (Frame) -> Void
+    ) async {
+        func elapsedMs() -> Double {
+            let elapsed = ContinuousClock.now - started
+            return Double(elapsed.components.seconds) * 1_000
+                + Double(elapsed.components.attoseconds) / 1e15
+        }
+        func fail(_ message: String, upstreamStatus: Int) {
+            emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+                status: .failed, ttftMs: 0, totalMs: elapsedMs(), promptTokens: 0,
+                completionTokens: 0, upstreamStatus: upstreamStatus, errorMessage: message)))
+        }
+        if !(200...299).contains(upstream.status) {
+            var collected = Data()
+            for await chunk in upstream.body { collected.append(chunk) }
+            fail(UpstreamErrorText.message(from: collected, status: upstream.status), upstreamStatus: upstream.status)
             return
         }
 
-        var headRequest = HTTPClientRequest(
-            url: source.endpoint.appendingPathComponent("chat/completions").absoluteString)
-        headRequest.method = .POST
-        headRequest.headers.add(name: "content-type", value: "application/json")
-        // Fail fast when the upstream model is not resident instead of
-        // queue-behind-load: NovaMLX answers 503 "model not loaded" before
-        // any SSE byte, and the gateway fails over to another peer.
-        headRequest.headers.add(name: "X-No-Autoload", value: "1")
-        let key = (try? secrets.load(source.apiKeyRef)) ?? nil
-        if let key, !key.isEmpty {
-            headRequest.headers.add(name: "authorization", value: "Bearer \(key)")
-        }
-        headRequest.body = .bytes(rewritten)
-
-        var upstreamStatus = 0
         var ttftMs = 0.0
         var sawFirstByte = false
         var usage: Relay.UsageAgg?
-        do {
-            let timeoutSeconds = max(1, Int64(config.requestTimeoutSeconds.rounded()))
-            let response = try await client.execute(headRequest, timeout: .seconds(timeoutSeconds))
-            upstreamStatus = Int(response.status.code)
-
-            guard (200...299).contains(upstreamStatus) else {
-                var message = "upstream status \(upstreamStatus)"
-                if let buffer = try? await response.body.collect(upTo: 1 << 20) {
-                    let text = String(buffer: buffer)
-                    if let data = text.data(using: .utf8),
-                       let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                       let error = object["error"] {
-                        // Two shapes in the wild: {"error":"<string>"} and
-                        // OpenAI-style {"error":{"message":"..."}}. NovaMLX
-                        // uses the nested one — without this branch the relay
-                        // would report "upstream status 503" and the gateway's
-                        // reputation skip on "model not loaded" would miss.
-                        if let nested = error as? [String: Any],
-                           let nestedMessage = nested["message"] as? String {
-                            message = nestedMessage
-                        } else if let plain = error as? String {
-                            message = plain
-                        }
-                    }
-                }
-                fail(message, upstreamStatus: upstreamStatus)
-                return
+        var usageRemainder = ""
+        for await data in upstream.body {
+            if !sawFirstByte {
+                sawFirstByte = true
+                ttftMs = elapsedMs()
             }
-
-            var usageRemainder = ""
-            for try await buffer in response.body {
-                if !sawFirstByte {
-                    sawFirstByte = true
-                    ttftMs = elapsedMs()
-                }
-                let data = Data(buffer.readableBytesView)
-                // Line-buffered usage parse: usage objects split across body
-                // reads must still count (P1.4). The chunk bytes are forwarded
-                // unchanged.
-                let consumed = Relay.consumeUsage(incoming: data, remainder: usageRemainder, previous: usage)
-                usage = consumed.usage
-                usageRemainder = consumed.remainder
-                emit(.responseChunk(reqId: request.reqId, payload: data))
-            }
-            // A clean end may leave one final usage object without a trailing
-            // newline — parse it too.
-            if !usageRemainder.isEmpty {
-                let tail = Relay.consumeUsage(incoming: Data(), remainder: usageRemainder + "\n", previous: usage)
-                usage = tail.usage
-            }
-            let tokens = usage ?? Relay.UsageAgg()
-            emit(.responseEnd(reqId: request.reqId, result: RequestResult(
-                status: .completed, ttftMs: ttftMs, totalMs: elapsedMs(),
-                promptTokens: tokens.prompt, completionTokens: tokens.completion,
-                upstreamStatus: upstreamStatus, errorMessage: nil,
-                cachedTokens: Relay.cachedTokens(from: usage))))
-        } catch is CancellationError {
-            emit(.responseEnd(reqId: request.reqId, result: RequestResult(
-                status: .cancelled, ttftMs: ttftMs, totalMs: elapsedMs(),
-                promptTokens: 0, completionTokens: 0,
-                upstreamStatus: upstreamStatus, errorMessage: nil)))
-        } catch let error as HTTPClientError where error == .deadlineExceeded {
-            // Whole-request deadline expiry, including mid-body; telemetry
-            // callers expect a distinct timeout status, not a generic failure.
-            emit(.responseEnd(reqId: request.reqId, result: RequestResult(
-                status: .timeout, ttftMs: ttftMs, totalMs: elapsedMs(),
-                promptTokens: 0, completionTokens: 0,
-                upstreamStatus: upstreamStatus, errorMessage: nil)))
-        } catch {
-            // Never include the key in error output; AsyncHTTPClient errors
-            // surface the URL at most, and keys travel only in headers.
-            emit(.responseEnd(reqId: request.reqId, result: RequestResult(
-                status: .failed, ttftMs: ttftMs, totalMs: elapsedMs(),
-                promptTokens: 0, completionTokens: 0,
-                upstreamStatus: upstreamStatus, errorMessage: String(describing: error))))
+            let consumed = Relay.consumeUsage(incoming: data, remainder: usageRemainder, previous: usage)
+            usage = consumed.usage
+            usageRemainder = consumed.remainder
+            emit(.responseChunk(reqId: request.reqId, payload: data))
         }
+        if let terminal = upstream.terminal.current() {
+            switch terminal {
+            case .cancelled:
+                emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+                    status: .cancelled, ttftMs: ttftMs, totalMs: elapsedMs(),
+                    promptTokens: 0, completionTokens: 0,
+                    upstreamStatus: upstream.status, errorMessage: nil)))
+            case .timedOut:
+                emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+                    status: .timeout, ttftMs: ttftMs, totalMs: elapsedMs(),
+                    promptTokens: 0, completionTokens: 0,
+                    upstreamStatus: upstream.status, errorMessage: nil)))
+            case .failed(let message):
+                emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+                    status: .failed, ttftMs: ttftMs, totalMs: elapsedMs(),
+                    promptTokens: 0, completionTokens: 0,
+                    upstreamStatus: upstream.status, errorMessage: message)))
+            }
+            return
+        }
+        if !usageRemainder.isEmpty {
+            let tail = Relay.consumeUsage(incoming: Data(), remainder: usageRemainder + "\n", previous: usage)
+            usage = tail.usage
+        }
+        let tokens = usage ?? Relay.UsageAgg()
+        emit(.responseEnd(reqId: request.reqId, result: RequestResult(
+            status: .completed, ttftMs: ttftMs, totalMs: elapsedMs(),
+            promptTokens: tokens.prompt, completionTokens: tokens.completion,
+            upstreamStatus: upstream.status, errorMessage: nil,
+            cachedTokens: Relay.cachedTokens(from: usage))))
     }
 
     /// Extracts OpenAI-style usage from SSE `data:` lines or a plain JSON body,
