@@ -26,7 +26,8 @@ if [ -d "$DEST/Sources/NovaMLXCore" ] || [ -d "$DEST/vendors" ]; then
 fi
 
 cd "$DEST"
-echo "→ swift build -c release --product tknet-peer"
+echo "→ patch swift-websocket, then swift build -c release --product tknet-peer"
+bash Scripts/prepare-build.sh
 swift build -c release --product tknet-peer
 echo "→ swift test"
 swift test
