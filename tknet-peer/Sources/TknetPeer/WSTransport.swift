@@ -1,6 +1,7 @@
 import Foundation
 import HummingbirdWSClient
 import Logging
+import NIOCore
 import NIOWebSocket
 public enum WSTransportError: Error, Equatable {
     case invalidServerURL
@@ -259,6 +260,31 @@ extension WSTransport {
         case .unexpectedServerError: 1011
         case .unknown(let raw): raw
         @unknown default: 0
+        }
+    }
+}
+
+extension WebSocketOutboundWriter {
+    /// Fragment a text message at the client/server default max frame size.
+    ///
+    /// swift-websocket 1.6's `writeTextMessage` does this, and that release
+    /// does not compile on Linux Swift 6.2 (`string.utf8.span` escapes across
+    /// `await`). 1.5.0's `withTextMessageWriter` emits the same fin/opcode
+    /// sequence when each call is one `maxFrameSize` byte slice: first frame
+    /// is text, the rest are continuations, and only the last has fin.
+    func writeTextMessage(_ text: String) async throws {
+        let maxFrameSize = 1 << 14
+        var buffer = ByteBuffer(string: text)
+        if buffer.readableBytes <= maxFrameSize {
+            try await write(.text(text))
+            return
+        }
+        try await withTextMessageWriter { writer in
+            while buffer.readableBytes > maxFrameSize {
+                let slice = buffer.readSlice(length: maxFrameSize)!
+                try await writer(slice)
+            }
+            try await writer(buffer)
         }
     }
 }

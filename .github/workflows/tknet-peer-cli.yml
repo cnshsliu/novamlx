@@ -1,6 +1,9 @@
 # Linux + Windows CLI for the standalone tknet-peer package.
 # Does not clone MLX or build NovaMLX. The Windows job is allowed to fail
 # until that toolchain is proven (Segment 4: CLI first, GUI later).
+# swift-actions/setup-swift@v2 lists Swift 6.2 for Ubuntu only; its Windows
+# table stops at 5.6.3, so the Windows job installs 6.2.1 (the release that
+# "6.2" resolves to on Linux) with the Swift.org Windows installer.
 name: tknet-peer CLI
 
 on:
@@ -47,9 +50,10 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: swift-actions/setup-swift@v2
+      - uses: compnerd/gha-setup-swift@v0.5.0
         with:
-          swift-version: "6.2"
+          swift-version: swift-6.2.1-release
+          swift-build: 6.2.1-RELEASE
       - name: Build release CLI
         working-directory: tknet-peer
         run: swift build -c release --product tknet-peer
