@@ -71,6 +71,8 @@ cat >"$APP_CONTENTS/Info.plist" <<PLIST
 	<string>${VERSION}</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
+	<!-- Launch as a menu-bar agent. TknetPeerApp promotes to a regular
+	     activation policy only while a Peer window is open. -->
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHighResolutionCapable</key>
