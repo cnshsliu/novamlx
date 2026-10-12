@@ -284,8 +284,43 @@ jobs:
 
       - name: Build
         run: |
+          set -uo pipefail
           chmod +x build.sh
-          ./build.sh -c release
+          log="${RUNNER_TEMP}/novamlx-build.log"
+          report() {
+            {
+              echo "## Build failed"
+              echo '```'
+              tail -n 80 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            tail -n 40 "$log" | while IFS= read -r line; do
+              printf '::error::%s\n' "$line"
+            done
+          }
+          rc=1
+          for attempt in 1 2 3; do
+            : > "$log"
+            set +e
+            ./build.sh -c release 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            # MacMaxPro's link to github.com drops during SwiftPM fetches.
+            # A compile error does not match this and is not retried.
+            if grep -E -q "unable to access|RPC failed|timed out|Failed to clone|Could not resolve|Couldn't connect|expected 'acknowledgments'|Recv failure|early EOF|Connection reset" "$log" \
+              && [ "$attempt" -lt 3 ]; then
+              echo "GitHub fetch failed during build (attempt ${attempt}); retrying"
+              sleep $((attempt * 20))
+              continue
+            fi
+            report
+            exit "$rc"
+          done
+          report
+          exit "$rc"
 
       - name: Run tests
         run: swift test
