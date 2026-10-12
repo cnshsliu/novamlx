@@ -213,6 +213,8 @@ jobs:
           # FluxGemma4VLM is unused and pulls a second mlx-swift-lm.
           flux_text = remove_blocks(flux_text, "gemma-4-swift-mlx")
           flux_text = remove_blocks(flux_text, "FluxGemma4VLM")
+          # Flux2CLI's target depends on FluxGemma4VLM, so it was removed with it.
+          flux_text = remove_blocks(flux_text, "Flux2CLI")
           Path(flux).write_text(flux_text)
 
           ltx = "vendors/ltx2-swift/Package.swift"
