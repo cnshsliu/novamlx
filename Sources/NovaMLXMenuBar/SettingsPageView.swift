@@ -62,7 +62,6 @@ struct SettingsPageView: View {
                     clusterSection
                 }
                 cliSection
-                tknetConfigSection
                 languageSection
                 turboQuantSection
                 sessionsSection
@@ -1092,20 +1091,6 @@ struct SettingsPageView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-        }
-        .padding(16)
-        .sectionCard()
-    }
-
-    // MARK: - tknet.ai
-
-    private var tknetConfigSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            sectionHeader("tknet.ai", icon: "link")
-            Text("Remote members and the token factory tunnel live in the Tknet Peer menu-bar app. You can also run `tknet-peer serve`. This app no longer writes Tokenhub providers.")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .sectionCard()
