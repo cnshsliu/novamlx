@@ -167,14 +167,6 @@ if [ "${NOVAMLX_SKIP_DIST_SYNC:-0}" = "1" ]; then
 	exit 0
 fi
 
-APP_MACOS="dist/NovaMLX.app/Contents/MacOS"
-if [ ! -d "$APP_MACOS" ]; then
-	# No packaged app yet — nothing to sync. First-time users should run
-	# Scripts/package.sh to produce dist/NovaMLX.app.
-	restart_app
-	exit 0
-fi
-
 # Detect configuration. Default matches `swift build` default (debug).
 CONFIG="debug"
 for arg in "$@"; do
@@ -201,6 +193,19 @@ fi
 
 if [ ! -d "$BUILD_BIN_DIR" ]; then
 	echo "→ post-build sync: cannot locate build dir ($BUILD_BIN_DIR), skipping"
+	restart_app
+	exit 0
+fi
+
+# Peer menu-bar app is MLX-free and independent of dist/NovaMLX.app.
+if [ -f "$BUILD_BIN_DIR/TknetPeerApp" ]; then
+	NOVAMLX_PEER_BIN="$BUILD_BIN_DIR/TknetPeerApp" bash Scripts/package-peer.sh || echo "→ Tknet Peer package sync failed"
+fi
+
+APP_MACOS="dist/NovaMLX.app/Contents/MacOS"
+if [ ! -d "$APP_MACOS" ]; then
+	# No packaged NovaMLX app yet — nothing further to sync. First-time users
+	# should run Scripts/package.sh to produce dist/NovaMLX.app.
 	restart_app
 	exit 0
 fi
