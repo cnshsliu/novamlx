@@ -21,16 +21,17 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.config.name }})
-    runs-on: ${{ matrix.config.runner }}
-    # Local Mac builds verify MLX Metal. GitHub-hosted Apple Silicon runners
-    # are known to fail compiling MLX Metal shaders. Keep the job so the
-    # failure stays visible, but do not fail the workflow.
-    continue-on-error: true
+    # GitHub-hosted macOS cannot reliably compile MLX Metal shaders.
+    # Full Metal builds run on a self-hosted Apple Silicon Mac (labels:
+    # self-hosted, macOS, ARM64) or locally with ./build.sh.
+    # Pull requests skip this job. Tag releases and workflow_dispatch wait
+    # for that runner; nothing is published until the build succeeds.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, macOS, ARM64]
     strategy:
       matrix:
         config:
           - name: "Apple Silicon"
-            runner: macos-15
             suffix: "arm64"
 
     steps:
@@ -75,7 +76,9 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Uploads artifacts from the self-hosted Metal build. Does not compile
+    # shaders. A tag with no online self-hosted Mac never reaches this job.
+    if: startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success'
     runs-on: macos-15
 
     steps:
