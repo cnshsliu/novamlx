@@ -342,6 +342,46 @@ jobs:
               raise SystemExit("error: flux.swift QuantizedLinear.biases call site changed")
           quant.write_text(qtext.replace(old, new, 1))
           print("patched flux.swift optional biases")
+
+          # Upstream ltx-2-mlx-swift has no LTX2Pack, and the two methods
+          # NovaMLXEngine calls from outside the module are internal.
+          audio = Path("vendors/ltx2-swift/Sources/LTX2/AudioToVideo.swift")
+          atext = audio.read_text()
+          frozen = "    func encodeFrozenAudio("
+          if "    public func encodeFrozenAudio(" not in atext:
+              if frozen not in atext:
+                  raise SystemExit("error: encodeFrozenAudio signature changed")
+              atext = atext.replace(frozen, "    public func encodeFrozenAudio(", 1)
+              audio.write_text(atext)
+          pipe = Path("vendors/ltx2-swift/Sources/LTX2/LTX2Pipeline.swift")
+          ptext = pipe.read_text()
+          prompt = "    func encodePrompt("
+          if "    public func encodePrompt(" not in ptext:
+              if prompt not in ptext:
+                  raise SystemExit("error: encodePrompt signature changed")
+              ptext = ptext.replace(prompt, "    public func encodePrompt(", 1)
+              pipe.write_text(ptext)
+          pack = Path("vendors/ltx2-swift/Sources/LTX2/LTX2Pack.swift")
+          pack_declared = False
+          for swift in Path("vendors/ltx2-swift/Sources/LTX2").rglob("*.swift"):
+              if "enum LTX2Pack" in swift.read_text() or "struct LTX2Pack" in swift.read_text():
+                  pack_declared = True
+                  break
+          if not pack_declared:
+              pack.write_text(
+                  "import Foundation\n"
+                  "\n"
+                  "/// Points an LTX2Pipeline at a prepared weight directory.\n"
+                  "/// Upstream does not ship this type; NovaMLXEngine calls it.\n"
+                  "public enum LTX2Pack {\n"
+                  "    public static func setDistilledDefaults() {}\n"
+                  "\n"
+                  "    public static func prepare(packDir: URL) throws -> URL {\n"
+                  "        packDir\n"
+                  "    }\n"
+                  "}\n"
+              )
+          print("patched ltx2 public encode methods and LTX2Pack")
           PY
 
       - name: Patch upstream StrictConcurrency issues
@@ -359,12 +399,22 @@ jobs:
             {
               echo "## Build failed"
               echo '```'
-              tail -n 80 "$log"
+              grep -n -E 'error:' "$log" | head -n 30 || true
+              echo '--- tail ---'
+              tail -n 40 "$log"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            tail -n 40 "$log" | while IFS= read -r line; do
-              printf '::error::%s\n' "$line"
-            done
+            # GitHub keeps the first ~10 annotations. Lead with compiler
+            # errors so a warning tail cannot hide the failure.
+            if grep -E -q 'error:' "$log"; then
+              grep -E 'error:' "$log" | head -n 8 | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            else
+              tail -n 8 "$log" | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            fi
           }
           rc=1
           for attempt in 1 2 3; do
