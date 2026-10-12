@@ -274,6 +274,26 @@ jobs:
           ):
               retarget(ltx, url, dest)
           print("retargeted flux-2 and ltx2 transitive packages")
+
+          # mlx-swift main keeps Cmlx as an internal target. NovaMLXDistributed
+          # imports it, which SwiftPM only allows through a product.
+          mlx_manifest = Path("vendors/mlx-swift/Package.swift")
+          mlx_text = mlx_manifest.read_text()
+          mlx_library = '.library(name: "MLX", targets: ["MLX"]),'
+          if '.library(name: "Cmlx"' not in mlx_text:
+              if mlx_library not in mlx_text:
+                  raise SystemExit("mlx-swift products did not contain the MLX library")
+              mlx_text = mlx_text.replace(
+                  mlx_library,
+                  '.library(name: "Cmlx", targets: ["Cmlx"]),\n        ' + mlx_library,
+                  1,
+              )
+          # A clean clone has no cmake output. Excluding it warns
+          # "Invalid Exclude .../mlx/build: File not found."
+          if not Path("vendors/mlx-swift/Source/Cmlx/mlx/build").exists():
+              mlx_text = mlx_text.replace('        "mlx/build",\n', "", 1)
+          mlx_manifest.write_text(mlx_text)
+          print("exposed Cmlx product")
           PY
 
       - name: Patch upstream StrictConcurrency issues
