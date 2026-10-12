@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 
 import PackageDescription
 
@@ -9,7 +9,7 @@ let concurrencySettings: [SwiftSetting] = [
 let package = Package(
     name: "NovaMLX",
     // LTX2 requires macOS 26. That is the deployment target MacMaxPro builds.
-    platforms: [.macOS(.version("26.0"))],
+    platforms: [.macOS(.v26)],
     products: [
         .executable(name: "NovaMLX", targets: ["NovaMLXApp"]),
         .executable(name: "NovaMLXWorker", targets: ["NovaMLXWorker"]),
