@@ -4,6 +4,9 @@
 # swift-actions/setup-swift@v2 lists Swift 6.2 for Ubuntu only; its Windows
 # table stops at 5.6.3, so the Windows job installs 6.2.1 (the release that
 # "6.2" resolves to on Linux) with the Swift.org Windows installer.
+# windows-latest is windows-2025-vs2026. That image's MSVC 14.51 STL rejects
+# Swift 6.2.1's Clang (STL1000 requires Clang 20). windows-2022 still has
+# the VS 2022 toolset 6.2.1 was built against.
 name: tknet-peer CLI
 
 on:
@@ -46,7 +49,7 @@ jobs:
 
   windows:
     name: Windows CLI
-    runs-on: windows-latest
+    runs-on: windows-2022
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
