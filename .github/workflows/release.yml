@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.config.name }})
+    name: Build (Apple Silicon)
     # GitHub-hosted macOS cannot reliably compile MLX Metal shaders.
     # Full Metal builds run on a self-hosted Apple Silicon Mac (labels:
     # self-hosted, macOS, ARM64) or locally with ./build.sh.
@@ -28,11 +28,6 @@ jobs:
     # for that runner; nothing is published until the build succeeds.
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, macOS, ARM64]
-    strategy:
-      matrix:
-        config:
-          - name: "Apple Silicon"
-            suffix: "arm64"
 
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +65,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: NovaMLX-${{ matrix.config.suffix }}
+          name: NovaMLX-arm64
           path: dist/
 
   release:
