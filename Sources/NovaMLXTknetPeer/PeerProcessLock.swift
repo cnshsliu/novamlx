@@ -132,21 +132,22 @@ private enum POSIX {
 
     static func flockExclusive(_ fd: Int32) -> Int32 {
         #if canImport(Darwin)
-        Darwin.flock(fd, LOCK_EX | LOCK_NB)
+        // Darwin.flock is the `struct flock` type; call the C function unqualified.
+        return flock(fd, LOCK_EX | LOCK_NB)
         #elseif canImport(Glibc)
-        Glibc.flock(fd, LOCK_EX | LOCK_NB)
+        return Glibc.flock(fd, LOCK_EX | LOCK_NB)
         #else
-        Musl.flock(fd, LOCK_EX | LOCK_NB)
+        return Musl.flock(fd, LOCK_EX | LOCK_NB)
         #endif
     }
 
     static func flockUnlock(_ fd: Int32) -> Int32 {
         #if canImport(Darwin)
-        Darwin.flock(fd, LOCK_UN)
+        return flock(fd, LOCK_UN)
         #elseif canImport(Glibc)
-        Glibc.flock(fd, LOCK_UN)
+        return Glibc.flock(fd, LOCK_UN)
         #else
-        Musl.flock(fd, LOCK_UN)
+        return Musl.flock(fd, LOCK_UN)
         #endif
     }
 
