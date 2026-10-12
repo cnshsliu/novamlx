@@ -35,135 +35,199 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Clone vendor dependencies
-        env:
-          # Optional. vendors/ and mlx-swift-lm/ are gitignored local forks, so a
-          # clean runner checkout does not contain them. Point this at the Mac's
-          # novamlx vendors directory (the parent of mlx-swift-dots-tts).
-          NOVAMLX_VENDORS_DIR: ${{ vars.NOVAMLX_VENDORS_DIR }}
         run: |
           set -euo pipefail
+          # Path packages in Package.swift. vendors/ is gitignored, so a clean
+          # runner checkout does not contain them.
+          git clone --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
+            https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
+          git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
+            https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
+          git clone --depth 1 \
+            https://github.com/sammcj/mlx-swift-dots-tts.git vendors/mlx-swift-dots-tts
+          git clone --depth 1 \
+            https://github.com/mzbac/flux.swift.git vendors/flux.swift
+          git clone --depth 1 \
+            https://github.com/mzbac/zimage.swift.git vendors/zimage.swift
+          git clone --depth 1 \
+            https://github.com/mzbac/qwen.image.swift.git vendors/qwen.image.swift
+          git clone --depth 1 \
+            https://github.com/VincentGourbin/flux-2-swift-mlx.git vendors/flux-2-swift-mlx
+          git clone --depth 1 \
+            https://github.com/VincentGourbin/swift-mlx-profiler.git vendors/swift-mlx-profiler
+          git clone --depth 1 \
+            https://github.com/xocialize/ltx-2-mlx-swift.git vendors/ltx2-swift
+          git clone --depth 1 \
+            https://github.com/xocialize/mlx-exact-conv-swift.git vendors/mlx-exact-conv-swift
+          git clone --depth 1 \
+            https://github.com/xocialize/mlx-profiling.git vendors/mlx-profiling
+          git clone --depth 1 \
+            https://github.com/xocialize/mlx-block-stream-swift.git vendors/mlx-block-stream-swift
+          git clone --depth 1 \
+            https://github.com/xocialize/mlx-engine-swift.git vendors/mlx-engine-swift
 
-          link_dir() {
-            local dest="$1"
-            local src="$2"
-            if [ -e "$dest" ]; then
-              return 0
-            fi
-            mkdir -p "$(dirname "$dest")"
-            ln -s "$src" "$dest"
-            echo "→ linked $dest -> $src"
-          }
+          # One mlx-swift checkout, and package names that Package.swift imports.
+          python3 - <<'PY'
+          from pathlib import Path
 
-          vendor_ok() {
-            local dir="$1"
-            local name
-            for name in mlx-swift mlx-swift-dots-tts flux.swift zimage.swift \
-              qwen.image.swift flux-2-swift-mlx ltx2-swift; do
-              [ -f "$dir/$name/Package.swift" ] || return 1
-            done
-          }
+          def replace_package(text, url_exact, replacement):
+              key = ".package("
+              i = 0
+              out = []
+              while True:
+                  j = text.find(key, i)
+                  if j < 0:
+                      out.append(text[i:])
+                      break
+                  k = j + len(key)
+                  depth = 1
+                  while k < len(text) and depth:
+                      if text[k] == "(":
+                          depth += 1
+                      elif text[k] == ")":
+                          depth -= 1
+                      k += 1
+                  block = text[j:k]
+                  if url_exact in block:
+                      out.append(text[i:j])
+                      out.append(replacement)
+                  else:
+                      out.append(text[i:k])
+                  i = k
+              return "".join(out)
 
-          VENDORS="${NOVAMLX_VENDORS_DIR:-}"
-          if [ -n "$VENDORS" ] && ! vendor_ok "$VENDORS"; then
-            echo "error: NOVAMLX_VENDORS_DIR=$VENDORS is missing a required package" >&2
-            exit 1
-          fi
+          def remove_blocks(text, needle):
+              keys = (".package(", ".target(", ".library(", ".executableTarget(", ".testTarget(")
+              i = 0
+              out = []
+              while i < len(text):
+                  positions = [(text.find(key, i), key) for key in keys]
+                  positions = [(pos, key) for pos, key in positions if pos >= 0]
+                  if not positions:
+                      out.append(text[i:])
+                      break
+                  j, key = min(positions)
+                  k = j + len(key)
+                  depth = 1
+                  while k < len(text) and depth:
+                      if text[k] == "(":
+                          depth += 1
+                      elif text[k] == ")":
+                          depth -= 1
+                      k += 1
+                  block = text[j:k]
+                  if needle in block:
+                      out.append(text[i:j])
+                      while k < len(text) and text[k] in " \t\r\n":
+                          k += 1
+                      if k < len(text) and text[k] == ",":
+                          k += 1
+                  else:
+                      out.append(text[i:k])
+                  i = k
+              return "".join(out)
 
-          if [ -z "$VENDORS" ]; then
-            for guess in \
-              "$HOME/novamlx/vendors" \
-              "$HOME/src/novamlx/vendors" \
-              "$HOME/source/novamlx/vendors" \
-              "$HOME/code/novamlx/vendors" \
-              "$HOME/Projects/novamlx/vendors" \
-              "$HOME/Developer/novamlx/vendors" \
-              "$HOME/dev/novamlx/vendors" \
-              "$HOME/Documents/novamlx/vendors" \
-              "$HOME/work/novamlx/vendors" \
-              "$HOME/git/novamlx/vendors"
-            do
-              if [ -d "$guess" ] && vendor_ok "$guess"; then
-                VENDORS="$guess"
-                break
-              fi
-            done
-          fi
+          def patch(path, mlx_rel, lm_rel=None, package_name=None):
+              file = Path(path)
+              text = file.read_text()
+              original = text
+              text = replace_package(
+                  text,
+                  'https://github.com/ml-explore/mlx-swift"',
+                  f'.package(path: "{mlx_rel}")',
+              )
+              text = replace_package(
+                  text,
+                  'https://github.com/ml-explore/mlx-swift.git"',
+                  f'.package(path: "{mlx_rel}")',
+              )
+              if lm_rel:
+                  text = replace_package(
+                      text,
+                      'https://github.com/ml-explore/mlx-swift-lm"',
+                      f'.package(path: "{lm_rel}", traits: [])',
+                  )
+                  text = replace_package(
+                      text,
+                      'https://github.com/ml-explore/mlx-swift-lm.git"',
+                      f'.package(path: "{lm_rel}", traits: [])',
+                  )
+              text = replace_package(
+                  text,
+                  'https://github.com/huggingface/swift-transformers"',
+                  '.package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3")',
+              )
+              text = replace_package(
+                  text,
+                  'https://github.com/huggingface/swift-transformers.git"',
+                  '.package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3")',
+              )
+              if package_name:
+                  text = text.replace('name: "Flux2Swift"', f'name: "{package_name}"', 1)
+                  text = text.replace('name: "LTX2"', f'name: "{package_name}"', 1)
+              if text != original:
+                  file.write_text(text)
+                  print(f"patched {path}")
 
-          if [ -z "$VENDORS" ]; then
-            candidates="$(mktemp)"
-            if command -v mdfind >/dev/null 2>&1; then
-              mdfind 'kMDItemFSName == "mlx-swift-dots-tts"' >"$candidates" || true
-            fi
-            if [ ! -s "$candidates" ]; then
-              echo "→ searching \$HOME for the local vendors checkout"
-              find "$HOME" \
-                \( -path "$HOME/Library" -o -path "$HOME/.Trash" \
-                   -o -path "*/actions-runner" -o -path "*/node_modules" \
-                   -o -path "*/.build" -o -path "*/.git" \
-                   -o -path "${GITHUB_WORKSPACE}" \) -prune \
-                -o -type d -name mlx-swift-dots-tts -print \
-                >"$candidates" 2>/dev/null || true
-            fi
-            while IFS= read -r candidate; do
-              [ -n "$candidate" ] || continue
-              case "$candidate" in
-                "${GITHUB_WORKSPACE}"*) continue ;;
-                *"/actions-runner/"*) continue ;;
-              esac
-              parent="$(dirname "$candidate")"
-              if vendor_ok "$parent"; then
-                VENDORS="$parent"
-                break
-              fi
-            done <"$candidates"
-            rm -f "$candidates"
-          fi
+          patch("mlx-swift-lm/Package.swift", "../vendors/mlx-swift")
+          for name in (
+              "mlx-swift-dots-tts",
+              "flux.swift",
+              "zimage.swift",
+              "qwen.image.swift",
+              "flux-2-swift-mlx",
+              "ltx2-swift",
+          ):
+              package_name = None
+              if name == "flux-2-swift-mlx":
+                  package_name = "flux-2-swift-mlx"
+              elif name == "ltx2-swift":
+                  package_name = "ltx2-swift"
+              patch(
+                  f"vendors/{name}/Package.swift",
+                  "../mlx-swift",
+                  "../../mlx-swift-lm",
+                  package_name,
+              )
+          for name in (
+              "swift-mlx-profiler",
+              "mlx-exact-conv-swift",
+              "mlx-profiling",
+              "mlx-block-stream-swift",
+              "mlx-engine-swift",
+          ):
+              patch(f"vendors/{name}/Package.swift", "../mlx-swift")
+          block = Path("vendors/mlx-block-stream-swift/Package.swift")
+          block.write_text(block.read_text().replace('name: "BlockStreamKit"', 'name: "mlx-block-stream-swift"', 1))
 
-          if [ -n "$VENDORS" ]; then
-            echo "→ using local forks in $VENDORS"
-            link_dir vendors/mlx-swift "$VENDORS/mlx-swift"
-            link_dir vendors/mlx-swift-dots-tts "$VENDORS/mlx-swift-dots-tts"
-            link_dir vendors/flux.swift "$VENDORS/flux.swift"
-            link_dir vendors/zimage.swift "$VENDORS/zimage.swift"
-            link_dir vendors/qwen.image.swift "$VENDORS/qwen.image.swift"
-            link_dir vendors/flux-2-swift-mlx "$VENDORS/flux-2-swift-mlx"
-            link_dir vendors/ltx2-swift "$VENDORS/ltx2-swift"
-            repo_root="$(dirname "$VENDORS")"
-            if [ -d "$repo_root/mlx-swift-lm" ]; then
-              link_dir mlx-swift-lm "$repo_root/mlx-swift-lm"
-            fi
-          fi
+          def retarget(path, url, dest):
+              file = Path(path)
+              text = file.read_text()
+              text = replace_package(text, url, f'.package(path: "{dest}")')
+              text = replace_package(text, url[:-1] + '.git"', f'.package(path: "{dest}")')
+              file.write_text(text)
 
-          if [ ! -d vendors/mlx-swift ]; then
-            git clone --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
-              https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
-          fi
-          if [ ! -e mlx-swift-lm ]; then
-            git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
-              https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
-          fi
+          flux = "vendors/flux-2-swift-mlx/Package.swift"
+          retarget(flux, 'https://github.com/VincentGourbin/swift-mlx-profiler"', "../swift-mlx-profiler")
+          flux_text = Path(flux).read_text()
+          # FluxGemma4VLM is unused and pulls a second mlx-swift-lm.
+          flux_text = remove_blocks(flux_text, "gemma-4-swift-mlx")
+          flux_text = remove_blocks(flux_text, "FluxGemma4VLM")
+          Path(flux).write_text(flux_text)
 
-          missing=0
-          for name in mlx-swift-dots-tts flux.swift zimage.swift qwen.image.swift \
-            flux-2-swift-mlx ltx2-swift; do
-            if [ ! -f "vendors/$name/Package.swift" ]; then
-              echo "error: vendors/$name is not on this runner" >&2
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "vendors/ is gitignored. These are local forks, not upstream clones." >&2
-            echo "Set the NOVAMLX_VENDORS_DIR repository variable to the Mac's novamlx vendors directory." >&2
-            exit 1
-          fi
+          ltx = "vendors/ltx2-swift/Package.swift"
+          for url, dest in (
+              ('https://github.com/xocialize/mlx-exact-conv-swift"', "../mlx-exact-conv-swift"),
+              ('https://github.com/xocialize/mlx-profiling"', "../mlx-profiling"),
+              ('https://github.com/xocialize/mlx-block-stream-swift"', "../mlx-block-stream-swift"),
+              ('https://github.com/xocialize/mlx-engine-swift"', "../mlx-engine-swift"),
+          ):
+              retarget(ltx, url, dest)
+          print("retargeted flux-2 and ltx2 transitive packages")
+          PY
 
       - name: Patch upstream StrictConcurrency issues
         run: |
-          # A symlinked mlx-swift-lm is the Mac's working checkout. Do not edit it.
-          if [ -L mlx-swift-lm ]; then
-            echo "→ mlx-swift-lm is the local checkout; leaving it unchanged"
-            exit 0
-          fi
           # mlx-swift-lm MediaProcessing.swift: CIContext is non-Sendable
           sed -i '' 's/^private let context = CIContext()/private nonisolated(unsafe) let context = CIContext()/' \
             mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift

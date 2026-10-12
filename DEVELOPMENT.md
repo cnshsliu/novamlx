@@ -207,7 +207,7 @@ This triggers `.github/workflows/release.yml` which:
 
 Register it on the Mac (MacMaxPro): repository **Settings → Actions → Runners → New self-hosted runner**, choose macOS / ARM64, and keep those default labels. Install the runner as a service so it stays online.
 
-`vendors/` and `mlx-swift-lm/` are gitignored local forks. The job reuses the checkout already on that Mac (it looks next to `mlx-swift-dots-tts`). Set the `NOVAMLX_VENDORS_DIR` repository variable if that tree is not under the runner user's home.
+`vendors/` is gitignored. The job clones `mlx-swift`, `mlx-swift-lm`, and `mlx-swift-dots-tts` (plus the other `Package.swift` path packages) into the runner workspace before `./build.sh`.
 
 Manual DMG:
 
