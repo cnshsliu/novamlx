@@ -61,19 +61,36 @@ jobs:
           set -euo pipefail
           # Path packages in Package.swift. vendors/ is gitignored, so a clean
           # runner checkout does not contain them.
+          log="${RUNNER_TEMP}/vendor-clone.log"
+          exec > >(tee "$log") 2>&1
+          on_exit() {
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              {
+                echo "## Vendor clone failed"
+                echo '```'
+                tail -n 60 "$log" || true
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              tail -n 25 "$log" | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            fi
+          }
+          trap on_exit EXIT
           clone_retry() {
             local dest="$1"
             shift
             local attempt
-            for attempt in 1 2 3; do
+            for attempt in 1 2 3 4 5; do
               rm -rf "$dest"
-              if git clone "$@"; then
+              if git -c http.version=HTTP/1.1 clone "$@"; then
                 return 0
               fi
-              echo "git clone failed for $dest (attempt ${attempt})" >&2
-              sleep $((attempt * 5))
+              echo "error: git clone failed for $dest (attempt ${attempt})" >&2
+              sleep $((attempt * 10))
             done
-            echo "git clone failed for $dest" >&2
+            echo "error: git clone failed for $dest" >&2
             return 1
           }
           clone_retry vendors/mlx-swift --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
@@ -282,7 +299,7 @@ jobs:
           mlx_library = '.library(name: "MLX", targets: ["MLX"]),'
           if '.library(name: "Cmlx"' not in mlx_text:
               if mlx_library not in mlx_text:
-                  raise SystemExit("mlx-swift products did not contain the MLX library")
+                  raise SystemExit("error: mlx-swift products did not contain the MLX library")
               mlx_text = mlx_text.replace(
                   mlx_library,
                   '.library(name: "Cmlx", targets: ["Cmlx"]),\n        ' + mlx_library,
