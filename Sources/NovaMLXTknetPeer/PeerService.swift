@@ -28,10 +28,29 @@ public struct PeerStatus: Equatable, Sendable {
     }
 }
 
-/// The single façade both the CLI and the Mac page talk to. Owns the relay
-/// and the tunnel client, aggregates status, and applies operator config
-/// edits live. Call `start()` once and `stop()` before dropping it — the
-/// relay's AsyncHTTPClient traps in debug builds when dropped un-shutdown.
+public enum PeerServiceError: Error, Equatable, Sendable, CustomStringConvertible, LocalizedError {
+    /// `startTunnel` before `start`, or after `stop` tore the listener down.
+    case gatewayNotRunning
+    /// No `peerId` — register before dialing.
+    case notRegistered
+
+    public var description: String {
+        switch self {
+        case .gatewayNotRunning:
+            return "Local gateway is not running."
+        case .notRegistered:
+            return "No peer id — register before dialing the tunnel."
+        }
+    }
+
+    public var errorDescription: String? { description }
+}
+
+/// The single façade both the CLI and the Peer app talk to. Owns the local
+/// gateway and, separately, the tunnel client. `stopTunnel()` leaves the
+/// gateway listening; `stop()` tears both down. Call `stop()` before
+/// dropping the service — the relay's AsyncHTTPClient traps in debug builds
+/// when dropped un-shutdown.
 public final class PeerService: @unchecked Sendable {
     public let statusStream: AsyncStream<PeerStatus>
     private let statusContinuation: AsyncStream<PeerStatus>.Continuation
@@ -47,6 +66,12 @@ public final class PeerService: @unchecked Sendable {
         var forwarder: PoolForwarder?
         var gateway: LocalGateway?
         var started = false
+        /// True while `startTunnel` is between claim and install, so a second
+        /// caller is a no-op instead of dialing twice.
+        var tunnelStarting = false
+        /// Bumped by `stop` / `stopTunnel` so an in-flight dial cannot install
+        /// after the operator already tore the tunnel down.
+        var tunnelGeneration: UInt64 = 0
         var runTask: Task<Void, Never>?
         var statusTask: Task<Void, Never>?
         var demandTask: Task<Void, Never>?
@@ -126,100 +151,37 @@ public final class PeerService: @unchecked Sendable {
             }
             return
         }
-
-        let relay = Relay(forwarder: forwarder)
-        let client = TunnelClient(
-            config: initialConfig, relay: relay,
-            transportFactory: observingFactory(),
-            delay: delay
-        )
-        client.onResult = { [weak self] result in
-            guard let self else { return }
-            self.state.withLock { state in
-                state.aggregates.totalRequests += 1
-                state.aggregates.totalCompletionTokens += result.completionTokens
-                if case .failed = result.status, let message = result.errorMessage {
-                    state.aggregates.lastError = message
-                }
-            }
-            self.publish()
-        }
-
-        guard install(client: client, relay: relay) else {
-            await gateway.stop()
-            try? await forwarder.shutdown()
-            state.withLock { state in
-                state.started = false
-                state.gateway = nil
-                state.forwarder = nil
-                state.aggregates.gatewayListening = false
-                state.aggregates.gatewayPort = nil
-            }
-            logger.warning("start() lost the race; shutting the second gateway down")
+        do {
+            try await startTunnel()
+        } catch PeerServiceError.gatewayNotRunning, PeerServiceError.notRegistered {
+            // stop() won the race, or the id disappeared. The listener is
+            // already down in the first case; leave it up in the second.
             return
-        }
-
-        // Connection-state mirror: republish on every transition.
-        let statusTask = Task { [weak self] in
-            for await status in client.statusStream {
-                self?.updateConnection(status)
-            }
-        }
-        // Demand lifecycle: reconcile declared capabilities against the live
-        // list (retire absent ids, revive returning ones), persist, publish.
-        let demandTask = Task { [weak self] in
-            for await entries in client.demandStream {
-                self?.updateDemand(entries)
-            }
-        }
-        let runTask = Task { await client.start() }
-
-        // Register the tasks only if a concurrent stop() hasn't already torn
-        // the client out; TunnelClient never finishes its streams, so an
-        // orphaned aggregation task would otherwise loop forever.
-        let orphaned = state.withLock { state -> Bool in
-            if state.client === client {
-                state.statusTask = statusTask
-                state.demandTask = demandTask
-                state.runTask = runTask
-                return false
-            }
-            return true
-        }
-        if orphaned {
-            statusTask.cancel()
-            demandTask.cancel()
-            runTask.cancel()
-            client.stop()
-            _ = await runTask.value
-            await gateway.stop()
-            try? await forwarder.shutdown()
         }
     }
 
-    /// Idempotent teardown. Order matters: cancel the start task (ends the
-    /// session loop), stop the client (marks stopping, cancels in-flight
-    /// dispatches), then shut the relay down — AsyncHTTPClient has a debug
-    /// deinit precondition that traps otherwise. Publishes a final `.idle`.
+    /// Dial the tunnel while the gateway is already listening. Idempotent
+    /// when a tunnel is up or a dial is in progress. Throws when the gateway
+    /// is not running or this peer has no id.
+    public func startTunnel() async throws {
+        guard let claimed = try claimedTunnel() else { return }
+        await runTunnel(config: claimed.config, forwarder: claimed.forwarder, generation: claimed.generation)
+    }
+
+    /// Tear down the tunnel only. The local gateway and forwarder keep
+    /// serving. Publishes `connection: .idle` with `gatewayListening` unchanged.
+    public func stopTunnel() async {
+        let detached = detach(includeGateway: false)
+        await finish(detached, gatewayDown: false)
+    }
+
+    /// Idempotent full teardown (gateway and tunnel). Used on app Quit and
+    /// CLI exit. Order matters: cancel the start task, stop the client, then
+    /// shut the forwarder down — AsyncHTTPClient has a debug deinit
+    /// precondition that traps otherwise. Publishes a final `.idle`.
     public func stop() async {
-        let (client, gateway, forwarder, run, statusTask, demandTask) = detach()
-        run?.cancel()
-        statusTask?.cancel()
-        demandTask?.cancel()
-        client?.stop()
-        if let run {
-            _ = await run.value
-        }
-        await gateway?.stop()
-        try? await forwarder?.shutdown()
-        state.withLock { state in
-            state.aggregates.connection = .idle
-            state.aggregates.activeRequests = 0
-            state.aggregates.gatewayListening = false
-            state.aggregates.gatewayPort = nil
-            state.started = false
-        }
-        publish()
+        let detached = detach(includeGateway: true)
+        await finish(detached, gatewayDown: true)
     }
 
     /// Operator edited config (sources, capabilities, limits, prices).
@@ -260,8 +222,11 @@ public final class PeerService: @unchecked Sendable {
 
     // MARK: - Aggregation
 
-    private func updateConnection(_ status: TunnelStatus) {
+    private func updateConnection(_ status: TunnelStatus, from client: TunnelClient) {
         let changed = state.withLock { state -> Bool in
+            // Ignore a tunnel that stop/stopTunnel already replaced. A late
+            // `.stopping` from the old client must not clobber the new one.
+            guard state.client === client else { return false }
             guard state.aggregates.connection != status else { return false }
             state.aggregates.connection = status
             return true
@@ -269,12 +234,14 @@ public final class PeerService: @unchecked Sendable {
         if changed { publish() }
     }
 
-    private func updateDemand(_ entries: [DemandEntry]) {
-        let (newlyRetired, snapshot): ([String], PeerConfig) = state.withLock { state in
+    private func updateDemand(_ entries: [DemandEntry], from client: TunnelClient) {
+        let reconciled: ([String], PeerConfig)? = state.withLock { state in
+            guard state.client === client else { return nil }
             let newlyRetired = state.config.reconcile(demandIds: Set(entries.map(\.demandId)))
             state.aggregates.demand = entries
             return (newlyRetired, state.config)
         }
+        guard let (newlyRetired, snapshot) = reconciled else { return }
         if !newlyRetired.isEmpty {
             // Demand ids only — never source keys or secrets.
             logger.info("demands retired by server: \(newlyRetired)")
@@ -284,13 +251,21 @@ public final class PeerService: @unchecked Sendable {
     }
 
     private func noteRequestStarted() {
-        state.withLock { $0.aggregates.activeRequests += 1 }
-        publish()
+        let changed = state.withLock { state -> Bool in
+            guard state.client != nil else { return false }
+            state.aggregates.activeRequests += 1
+            return true
+        }
+        if changed { publish() }
     }
 
     private func noteRequestEnded() {
-        state.withLock { $0.aggregates.activeRequests = max(0, $0.aggregates.activeRequests - 1) }
-        publish()
+        let changed = state.withLock { state -> Bool in
+            guard state.client != nil else { return false }
+            state.aggregates.activeRequests = max(0, state.aggregates.activeRequests - 1)
+            return true
+        }
+        if changed { publish() }
     }
 
     private func publish() {
@@ -338,32 +313,173 @@ public final class PeerService: @unchecked Sendable {
         return accepted
     }
 
-    /// Installs the freshly built client/relay; false when stop already ran.
-    private func install(client: TunnelClient, relay: Relay) -> Bool {
+    private struct ClaimedTunnel: Sendable {
+        var config: PeerConfig
+        var forwarder: PoolForwarder
+        var generation: UInt64
+    }
+
+    private enum TunnelClaim {
+        case ready(ClaimedTunnel)
+        case alreadyUp
+        case notRunning
+        case notRegistered
+    }
+
+    /// Nil when a tunnel is already up or a dial is already in progress.
+    private func claimedTunnel() throws -> ClaimedTunnel? {
+        switch claimTunnel() {
+        case .alreadyUp:
+            return nil
+        case .notRunning:
+            throw PeerServiceError.gatewayNotRunning
+        case .notRegistered:
+            throw PeerServiceError.notRegistered
+        case .ready(let claimed):
+            return claimed
+        }
+    }
+
+    /// Marks a dial in progress. Does not increment the generation — only
+    /// stop paths do, so a dial that loses the race fails install.
+    private func claimTunnel() -> TunnelClaim {
         state.withLock { state in
-            guard state.started, state.client == nil else { return false }
+            guard state.started, let forwarder = state.forwarder else { return .notRunning }
+            if state.client != nil || state.tunnelStarting { return .alreadyUp }
+            guard state.config.peerId != nil else { return .notRegistered }
+            state.tunnelStarting = true
+            return .ready(ClaimedTunnel(
+                config: state.config, forwarder: forwarder, generation: state.tunnelGeneration))
+        }
+    }
+
+    private func runTunnel(config: PeerConfig, forwarder: PoolForwarder, generation: UInt64) async {
+        let relay = Relay(forwarder: forwarder)
+        let client = TunnelClient(
+            config: config, relay: relay,
+            transportFactory: observingFactory(),
+            delay: delay
+        )
+        client.onResult = { [weak self, weak client] result in
+            guard let self, let client else { return }
+            let changed = self.state.withLock { state -> Bool in
+                guard state.client === client else { return false }
+                state.aggregates.totalRequests += 1
+                state.aggregates.totalCompletionTokens += result.completionTokens
+                if case .failed = result.status, let message = result.errorMessage {
+                    state.aggregates.lastError = message
+                }
+                return true
+            }
+            if changed { self.publish() }
+        }
+
+        guard install(client: client, relay: relay, generation: generation) else {
+            client.stop()
+            state.withLock { state in
+                if state.tunnelGeneration == generation, state.client == nil {
+                    state.tunnelStarting = false
+                }
+            }
+            logger.warning("startTunnel() lost the race; not installing")
+            return
+        }
+
+        let statusTask = Task { [weak self] in
+            for await status in client.statusStream {
+                self?.updateConnection(status, from: client)
+            }
+        }
+        let demandTask = Task { [weak self] in
+            for await entries in client.demandStream {
+                self?.updateDemand(entries, from: client)
+            }
+        }
+        let runTask = Task { await client.start() }
+
+        let orphaned = state.withLock { state -> Bool in
+            if state.client === client {
+                state.statusTask = statusTask
+                state.demandTask = demandTask
+                state.runTask = runTask
+                return false
+            }
+            return true
+        }
+        if orphaned {
+            statusTask.cancel()
+            demandTask.cancel()
+            runTask.cancel()
+            client.stop()
+            _ = await runTask.value
+        }
+    }
+
+    /// Installs the freshly built client/relay. False when stop already ran
+    /// or the generation moved.
+    private func install(client: TunnelClient, relay: Relay, generation: UInt64) -> Bool {
+        state.withLock { state in
+            guard state.started, state.client == nil, state.tunnelGeneration == generation else {
+                return false
+            }
             state.client = client
             state.relay = relay
+            state.tunnelStarting = false
             return true
         }
     }
 
-    /// Pulls every task handle for teardown and clears the started state.
-    private func detach() -> (TunnelClient?, LocalGateway?, PoolForwarder?,
-                              Task<Void, Never>?, Task<Void, Never>?, Task<Void, Never>?) {
+    /// Pulls tunnel task handles. When `includeGateway` is true, also takes
+    /// the listener and clears `started` (full `stop`).
+    private func detach(includeGateway: Bool) -> (TunnelClient?, LocalGateway?, PoolForwarder?,
+                                                  Task<Void, Never>?, Task<Void, Never>?, Task<Void, Never>?) {
         state.withLock { state in
-            let out = (state.client, state.gateway, state.forwarder, state.runTask,
-                       state.statusTask, state.demandTask)
+            let gateway = includeGateway ? state.gateway : nil
+            let forwarder = includeGateway ? state.forwarder : nil
+            let out = (state.client, gateway, forwarder, state.runTask, state.statusTask, state.demandTask)
             state.client = nil
             state.relay = nil
-            state.gateway = nil
-            state.forwarder = nil
             state.runTask = nil
             state.statusTask = nil
             state.demandTask = nil
-            state.started = false
+            state.tunnelStarting = false
+            state.tunnelGeneration &+= 1
+            if includeGateway {
+                state.gateway = nil
+                state.forwarder = nil
+                state.started = false
+            }
             return out
         }
+    }
+
+    private func finish(
+        _ detached: (TunnelClient?, LocalGateway?, PoolForwarder?,
+                     Task<Void, Never>?, Task<Void, Never>?, Task<Void, Never>?),
+        gatewayDown: Bool
+    ) async {
+        let (client, gateway, forwarder, run, statusTask, demandTask) = detached
+        run?.cancel()
+        statusTask?.cancel()
+        demandTask?.cancel()
+        client?.stop()
+        if let run {
+            _ = await run.value
+        }
+        if gatewayDown {
+            await gateway?.stop()
+            try? await forwarder?.shutdown()
+        }
+        state.withLock { state in
+            state.aggregates.connection = .idle
+            state.aggregates.activeRequests = 0
+            if gatewayDown {
+                state.aggregates.gatewayListening = false
+                state.aggregates.gatewayPort = nil
+                state.started = false
+            }
+        }
+        publish()
     }
 
     /// Wraps the caller's transports so the service can observe protocol
