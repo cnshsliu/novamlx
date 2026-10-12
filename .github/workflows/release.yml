@@ -21,12 +21,14 @@ env:
 jobs:
   build:
     name: Build (Apple Silicon)
-    # GitHub-hosted macOS cannot reliably compile MLX Metal shaders.
-    # Full Metal builds run on a self-hosted Apple Silicon Mac (labels:
-    # self-hosted, macOS, ARM64) or locally with ./build.sh.
-    # Pull requests skip this job. Tag releases and workflow_dispatch wait
-    # for that runner; nothing is published until the build succeeds.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    # Waits for a self-hosted Apple Silicon Mac and verifies Metal locally.
+    # Pull requests, version tags, and workflow_dispatch all queue this job.
+    # It does not skip, and it does not use GitHub-hosted macos-* runners.
+    # Until a runner with these labels is online, the check stays queued.
+    #
+    # Register the runner on the Mac (MacMaxPro):
+    #   Settings → Actions → Runners → New self-hosted runner → macOS / ARM64
+    # Keep GitHub's default labels: self-hosted, macOS, ARM64.
     runs-on: [self-hosted, macOS, ARM64]
 
     steps:
