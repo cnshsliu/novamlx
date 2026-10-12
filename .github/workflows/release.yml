@@ -35,17 +35,135 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Clone vendor dependencies
+        env:
+          # Optional. vendors/ and mlx-swift-lm/ are gitignored local forks, so a
+          # clean runner checkout does not contain them. Point this at the Mac's
+          # novamlx vendors directory (the parent of mlx-swift-dots-tts).
+          NOVAMLX_VENDORS_DIR: ${{ vars.NOVAMLX_VENDORS_DIR }}
         run: |
-          # mlx-swift — Apple's MLX Swift bindings (has mlx C++ submodule)
-          git clone --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
-            https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
+          set -euo pipefail
 
-          # mlx-swift-lm — LM/VLM layer on top of mlx-swift
-          git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
-            https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
+          link_dir() {
+            local dest="$1"
+            local src="$2"
+            if [ -e "$dest" ]; then
+              return 0
+            fi
+            mkdir -p "$(dirname "$dest")"
+            ln -s "$src" "$dest"
+            echo "→ linked $dest -> $src"
+          }
+
+          vendor_ok() {
+            local dir="$1"
+            local name
+            for name in mlx-swift mlx-swift-dots-tts flux.swift zimage.swift \
+              qwen.image.swift flux-2-swift-mlx ltx2-swift; do
+              [ -f "$dir/$name/Package.swift" ] || return 1
+            done
+          }
+
+          VENDORS="${NOVAMLX_VENDORS_DIR:-}"
+          if [ -n "$VENDORS" ] && ! vendor_ok "$VENDORS"; then
+            echo "error: NOVAMLX_VENDORS_DIR=$VENDORS is missing a required package" >&2
+            exit 1
+          fi
+
+          if [ -z "$VENDORS" ]; then
+            for guess in \
+              "$HOME/novamlx/vendors" \
+              "$HOME/src/novamlx/vendors" \
+              "$HOME/source/novamlx/vendors" \
+              "$HOME/code/novamlx/vendors" \
+              "$HOME/Projects/novamlx/vendors" \
+              "$HOME/Developer/novamlx/vendors" \
+              "$HOME/dev/novamlx/vendors" \
+              "$HOME/Documents/novamlx/vendors" \
+              "$HOME/work/novamlx/vendors" \
+              "$HOME/git/novamlx/vendors"
+            do
+              if [ -d "$guess" ] && vendor_ok "$guess"; then
+                VENDORS="$guess"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$VENDORS" ]; then
+            candidates="$(mktemp)"
+            if command -v mdfind >/dev/null 2>&1; then
+              mdfind 'kMDItemFSName == "mlx-swift-dots-tts"' >"$candidates" || true
+            fi
+            if [ ! -s "$candidates" ]; then
+              echo "→ searching \$HOME for the local vendors checkout"
+              find "$HOME" \
+                \( -path "$HOME/Library" -o -path "$HOME/.Trash" \
+                   -o -path "*/actions-runner" -o -path "*/node_modules" \
+                   -o -path "*/.build" -o -path "*/.git" \
+                   -o -path "${GITHUB_WORKSPACE}" \) -prune \
+                -o -type d -name mlx-swift-dots-tts -print \
+                >"$candidates" 2>/dev/null || true
+            fi
+            while IFS= read -r candidate; do
+              [ -n "$candidate" ] || continue
+              case "$candidate" in
+                "${GITHUB_WORKSPACE}"*) continue ;;
+                *"/actions-runner/"*) continue ;;
+              esac
+              parent="$(dirname "$candidate")"
+              if vendor_ok "$parent"; then
+                VENDORS="$parent"
+                break
+              fi
+            done <"$candidates"
+            rm -f "$candidates"
+          fi
+
+          if [ -n "$VENDORS" ]; then
+            echo "→ using local forks in $VENDORS"
+            link_dir vendors/mlx-swift "$VENDORS/mlx-swift"
+            link_dir vendors/mlx-swift-dots-tts "$VENDORS/mlx-swift-dots-tts"
+            link_dir vendors/flux.swift "$VENDORS/flux.swift"
+            link_dir vendors/zimage.swift "$VENDORS/zimage.swift"
+            link_dir vendors/qwen.image.swift "$VENDORS/qwen.image.swift"
+            link_dir vendors/flux-2-swift-mlx "$VENDORS/flux-2-swift-mlx"
+            link_dir vendors/ltx2-swift "$VENDORS/ltx2-swift"
+            repo_root="$(dirname "$VENDORS")"
+            if [ -d "$repo_root/mlx-swift-lm" ]; then
+              link_dir mlx-swift-lm "$repo_root/mlx-swift-lm"
+            fi
+          fi
+
+          if [ ! -d vendors/mlx-swift ]; then
+            git clone --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
+              https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
+          fi
+          if [ ! -e mlx-swift-lm ]; then
+            git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
+              https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
+          fi
+
+          missing=0
+          for name in mlx-swift-dots-tts flux.swift zimage.swift qwen.image.swift \
+            flux-2-swift-mlx ltx2-swift; do
+            if [ ! -f "vendors/$name/Package.swift" ]; then
+              echo "error: vendors/$name is not on this runner" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "vendors/ is gitignored. These are local forks, not upstream clones." >&2
+            echo "Set the NOVAMLX_VENDORS_DIR repository variable to the Mac's novamlx vendors directory." >&2
+            exit 1
+          fi
 
       - name: Patch upstream StrictConcurrency issues
         run: |
+          # A symlinked mlx-swift-lm is the Mac's working checkout. Do not edit it.
+          if [ -L mlx-swift-lm ]; then
+            echo "→ mlx-swift-lm is the local checkout; leaving it unchanged"
+            exit 0
+          fi
           # mlx-swift-lm MediaProcessing.swift: CIContext is non-Sendable
           sed -i '' 's/^private let context = CIContext()/private nonisolated(unsafe) let context = CIContext()/' \
             mlx-swift-lm/Libraries/MLXVLM/MediaProcessing.swift
