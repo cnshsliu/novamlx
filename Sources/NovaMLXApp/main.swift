@@ -48,7 +48,7 @@ struct NovaMLXApp: App {
                 }
             }
             Button { appDelegate.openMainWindow(to: .voiceClone) } label: {
-                Label(l10n.tr("app.voiceClone"), systemImage: "waveform.badge.mic")
+                Label(l10n.tr("app.voiceClone"), systemImage: "waveform.badge.microphone")
             }
             Button { appDelegate.openMainWindow(to: .videoSlice) } label: {
                 Label(l10n.tr("app.videoSlice"), systemImage: "film")
