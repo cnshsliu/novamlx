@@ -220,7 +220,7 @@ public final class PeerProcessLock: @unchecked Sendable {
             return true
         }
         guard shouldRelease else { return }
-        Self.held.withLock { $0.remove(path) }
+        Self.held.withLock { _ = $0.remove(path) }
         #if os(Windows)
         var overlapped = OVERLAPPED()
         _ = UnlockFileEx(windowsHandle, 0, 1, 0, &overlapped)
@@ -259,23 +259,20 @@ private enum POSIX {
     }
 
     static func flockExclusive(_ fd: Int32) -> Int32 {
-        #if canImport(Darwin)
-        // Darwin.flock is the `struct flock` type; call the C function unqualified.
-        return flock(fd, LOCK_EX | LOCK_NB)
-        #elseif canImport(Glibc)
-        return Glibc.flock(fd, LOCK_EX | LOCK_NB)
-        #else
+        #if canImport(Musl)
         return Musl.flock(fd, LOCK_EX | LOCK_NB)
+        #else
+        // Darwin.flock and Glibc.flock name the `struct flock` type.
+        // The C function is the unqualified `flock`.
+        return flock(fd, LOCK_EX | LOCK_NB)
         #endif
     }
 
     static func flockUnlock(_ fd: Int32) -> Int32 {
-        #if canImport(Darwin)
-        return flock(fd, LOCK_UN)
-        #elseif canImport(Glibc)
-        return Glibc.flock(fd, LOCK_UN)
-        #else
+        #if canImport(Musl)
         return Musl.flock(fd, LOCK_UN)
+        #else
+        return flock(fd, LOCK_UN)
         #endif
     }
 

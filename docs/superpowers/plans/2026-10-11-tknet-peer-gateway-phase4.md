@@ -1,6 +1,6 @@
 # Tknet Peer Gateway — Segment 4 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Leave this Mac / this NovaMLX checkout. Publish an **MLX-free** `tknet-peer` CLI whose library, command line, and tests build on a machine that does not have NovaMLX source. Linux and Windows get the **CLI first**. The Mac menu-bar app stays in novamlx and keeps working. No Windows or Linux GUI.
 
@@ -67,11 +67,11 @@ Product rules that already shipped and must survive the move:
 
 **Package products:** library `TknetPeer`, executable `tknet-peer`. Tools version `6.0`. Same Hummingbird / AsyncHTTPClient / swift-log / ArgumentParser lower bounds as the old novamlx targets. `StrictConcurrency` on every target.
 
-- [ ] **Step 1: Move sources and rename the module**
+- [x] **Step 1: Move sources and rename the module**
 
-- [ ] **Step 2: `swift build -c release --package-path tknet-peer --product tknet-peer` resolves and links**
+- [x] **Step 2: `swift build -c release --package-path tknet-peer --product tknet-peer` resolves and links**
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -m "feat(peer): extract TknetPeer library and tknet-peer CLI into a standalone package"
@@ -89,11 +89,11 @@ git commit -m "feat(peer): extract TknetPeer library and tknet-peer CLI into a s
 - Modify: `README.md` Tknet Peer section so it no longer says the CLI is `swift build --product tknet-peer` from the NovaMLX root, and no longer points at a removed in-app Tknet Peer page.
 - Modify: `AGENTS.md` module table so the library lives under `tknet-peer/`.
 
-- [ ] **Step 1: Root manifest no longer lists Peer library/CLI/test targets**
+- [x] **Step 1: Root manifest no longer lists Peer library/CLI/test targets**
 
-- [ ] **Step 2: `TknetPeerApp` imports `TknetPeer`**
+- [x] **Step 2: `TknetPeerApp` imports `TknetPeer`**
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -m "build(peer): novamlx links TknetPeer.app to the standalone package"
@@ -114,11 +114,11 @@ git commit -m "build(peer): novamlx links TknetPeer.app to the standalone packag
 - Modify: `Sources/TknetPeer/PeerProcessLock.swift` — `#if os(Windows)` exclusive lock via `LockFileEx`, same public behaviour (second acquire fails, dead pid replaced, live foreign pid not stolen). POSIX path unchanged.
 - Modify: CLI `terminate` / shutdown signal so the executable target has a Windows exit path (`WinSDK`), plus Musl next to Glibc.
 
-- [ ] **Step 1: Windows lock is behind `os(Windows)` and does not change the Linux/macOS flock path**
+- [x] **Step 1: Windows lock is behind `os(Windows)` and does not change the Linux/macOS flock path**
 
-- [ ] **Step 2: Packaging + acceptance scripts are executable and documented in `tknet-peer/README.md`**
+- [x] **Step 2: Packaging + acceptance scripts are executable and documented in `tknet-peer/README.md`**
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git commit -m "feat(peer): Linux and Windows CLI packaging without MLX"
@@ -150,9 +150,15 @@ That script:
 2. `./build.sh peer -c release` — produces `tknet-peer` with no MLX link.
 3. Quit the app, run the CLI against the same config, confirm the process lock still conflicts if both are up.
 
-- [ ] **Step 1: `verify-standalone.sh` passes on Linux**
+- [x] **Step 1: `verify-standalone.sh` passes on Linux**
 
-- [ ] **Step 2: Stop.** Do not start earnings UI, Keychain, notarization, or a Win/Linux GUI.
+- [x] **Step 2: Stop.** Do not start earnings UI, Keychain, notarization, or a Win/Linux GUI.
+
+### Verification on this agent (Linux, Swift 6.2.3)
+
+- [x] `bash tknet-peer/Scripts/verify-standalone.sh` — copy of only `tknet-peer/` into an empty temp directory. `swift build -c release --product tknet-peer`, 118 tests / 27 suites passed, dependency check has no MLX / NovaMLX / GRDB, LAN acceptance forwarded pool `coding` to `http://172.30.0.2:18771/v1` and the member saw `model: demo-model`.
+- [x] Glibc `flock` is the struct type on this toolchain, same as Darwin. The lock calls the unqualified C `flock`.
+- [ ] `./build.sh` / `TknetPeer.app` — not run. This host has no Metal toolchain. The app target depends only on the `TknetPeer` product.
 
 ---
 
