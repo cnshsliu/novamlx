@@ -53,14 +53,24 @@ public final class WSTransport: TunnelTransport, @unchecked Sendable {
     /// request. `ws`/`wss` schemes pass through; `http`/`https` are converted
     /// to `ws`/`wss`. TLS for `wss` uses the client library's default client
     /// TLS configuration.
-    public static func factory(server: URL, tokenRef: String, secrets: any SecretStore) -> TransportFactory {
+    /// `server` is read on every dial so a registration that switches servers
+    /// takes effect without rebuilding the service (the gateway stays up).
+    public static func factory(
+        server: @escaping @Sendable () -> URL,
+        tokenRef: String,
+        secrets: any SecretStore
+    ) -> TransportFactory {
         {
             // Fresh token each dial: a re-registered token works without restart.
             let token = (try? secrets.load(tokenRef)) ?? ""
             return try await dial(
-                url: server.appendingPathComponent("api/peer/tunnel"),
+                url: server().appendingPathComponent("api/peer/tunnel"),
                 authorization: "Bearer \(token)")
         }
+    }
+
+    public static func factory(server: URL, tokenRef: String, secrets: any SecretStore) -> TransportFactory {
+        factory(server: { server }, tokenRef: tokenRef, secrets: secrets)
     }
 
     /// Dials and returns only after the WebSocket handshake completed and the
