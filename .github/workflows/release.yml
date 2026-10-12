@@ -30,40 +30,77 @@ jobs:
     #   Settings → Actions → Runners → New self-hosted runner → macOS / ARM64
     # Keep GitHub's default labels: self-hosted, macOS, ARM64.
     runs-on: [self-hosted, macOS, ARM64]
+    env:
+      # The Mac's link to github.com drops mid-fetch ("expected acknowledgments",
+      # curl 28, port 443). HTTP/1.1 avoids the HTTP/2 failure mode. Checkout
+      # and the vendor clones below retry the rest.
+      GIT_CONFIG_COUNT: "2"
+      GIT_CONFIG_KEY_0: http.version
+      GIT_CONFIG_VALUE_0: HTTP/1.1
+      GIT_CONFIG_KEY_1: http.postBuffer
+      GIT_CONFIG_VALUE_1: "524288000"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+
+      - name: Checkout (attempt 2)
+        id: checkout2
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+        continue-on-error: true
+
+      - name: Checkout (attempt 3)
+        if: steps.checkout.outcome == 'failure' && steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - name: Clone vendor dependencies
         run: |
           set -euo pipefail
           # Path packages in Package.swift. vendors/ is gitignored, so a clean
           # runner checkout does not contain them.
-          git clone --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
+          clone_retry() {
+            local dest="$1"
+            shift
+            local attempt
+            for attempt in 1 2 3; do
+              rm -rf "$dest"
+              if git clone "$@"; then
+                return 0
+              fi
+              echo "git clone failed for $dest (attempt ${attempt})" >&2
+              sleep $((attempt * 5))
+            done
+            echo "git clone failed for $dest" >&2
+            return 1
+          }
+          clone_retry vendors/mlx-swift --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
             https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
-          git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
+          clone_retry mlx-swift-lm --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
             https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
-          git clone --depth 1 \
+          clone_retry vendors/mlx-swift-dots-tts --depth 1 \
             https://github.com/sammcj/mlx-swift-dots-tts.git vendors/mlx-swift-dots-tts
-          git clone --depth 1 \
+          clone_retry vendors/flux.swift --depth 1 \
             https://github.com/mzbac/flux.swift.git vendors/flux.swift
-          git clone --depth 1 \
+          clone_retry vendors/zimage.swift --depth 1 \
             https://github.com/mzbac/zimage.swift.git vendors/zimage.swift
-          git clone --depth 1 \
+          clone_retry vendors/qwen.image.swift --depth 1 \
             https://github.com/mzbac/qwen.image.swift.git vendors/qwen.image.swift
-          git clone --depth 1 \
+          clone_retry vendors/flux-2-swift-mlx --depth 1 \
             https://github.com/VincentGourbin/flux-2-swift-mlx.git vendors/flux-2-swift-mlx
-          git clone --depth 1 \
+          clone_retry vendors/swift-mlx-profiler --depth 1 \
             https://github.com/VincentGourbin/swift-mlx-profiler.git vendors/swift-mlx-profiler
-          git clone --depth 1 \
+          clone_retry vendors/ltx2-swift --depth 1 \
             https://github.com/xocialize/ltx-2-mlx-swift.git vendors/ltx2-swift
-          git clone --depth 1 \
+          clone_retry vendors/mlx-exact-conv-swift --depth 1 \
             https://github.com/xocialize/mlx-exact-conv-swift.git vendors/mlx-exact-conv-swift
-          git clone --depth 1 \
+          clone_retry vendors/mlx-profiling --depth 1 \
             https://github.com/xocialize/mlx-profiling.git vendors/mlx-profiling
-          git clone --depth 1 \
+          clone_retry vendors/mlx-block-stream-swift --depth 1 \
             https://github.com/xocialize/mlx-block-stream-swift.git vendors/mlx-block-stream-swift
-          git clone --depth 1 \
+          clone_retry vendors/mlx-engine-swift --depth 1 \
             https://github.com/xocialize/mlx-engine-swift.git vendors/mlx-engine-swift
 
           # One mlx-swift checkout, and package names that Package.swift imports.
