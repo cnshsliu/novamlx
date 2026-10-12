@@ -221,9 +221,9 @@ final class PeerAppState: ObservableObject {
     }
 
     func stopTunnelFromUser() async {
-        guard !isBusy else { return }
-        isBusy = true
-        defer { isBusy = false }
+        // Flip preference first so the footer updates even if teardown awaits
+        // a stuck dial. Do not hold isBusy across stopTunnel — that left Stop
+        // permanently grey while status stayed Connecting.
         launchGeneration += 1
         launchPolicy.stopWatching()
         TunnelWantedPreference.write(false, to: defaults)

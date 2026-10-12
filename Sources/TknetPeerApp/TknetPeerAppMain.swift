@@ -72,7 +72,7 @@ struct PeerMenu: View {
             Button("Stop tunnel") {
                 Task { await state.stopTunnelFromUser() }
             }
-            .disabled(state.lockError != nil || state.isBusy)
+            .disabled(state.lockError != nil)
         } else {
             Button("Start tunnel") {
                 Task { await state.startTunnelFromUser() }
@@ -82,7 +82,7 @@ struct PeerMenu: View {
                 Button("Stop auto-dial") {
                     Task { await state.stopTunnelFromUser() }
                 }
-                .disabled(state.lockError != nil || state.isBusy)
+                .disabled(state.lockError != nil)
             }
         }
         Divider()

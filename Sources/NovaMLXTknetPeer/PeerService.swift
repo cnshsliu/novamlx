@@ -459,6 +459,24 @@ public final class PeerService: @unchecked Sendable {
         gatewayDown: Bool
     ) async {
         let (client, gateway, forwarder, run, statusTask, demandTask) = detached
+        // Publish idle BEFORE awaiting a possibly hung dial. Cancelling
+        // statusTask otherwise leaves aggregates stuck on Connecting while
+        // stopTunnel blocks — the menu showed Connecting + grey Stop with
+        // tunnelWanted already false.
+        state.withLock { state in
+            // A Start that won after detach may already own a new client;
+            // do not clobber its connection.
+            if state.client == nil {
+                state.aggregates.connection = .idle
+                state.aggregates.activeRequests = 0
+            }
+            if gatewayDown {
+                state.aggregates.gatewayListening = false
+                state.aggregates.gatewayPort = nil
+                state.started = false
+            }
+        }
+        publish()
         run?.cancel()
         statusTask?.cancel()
         demandTask?.cancel()
@@ -470,16 +488,6 @@ public final class PeerService: @unchecked Sendable {
             await gateway?.stop()
             try? await forwarder?.shutdown()
         }
-        state.withLock { state in
-            state.aggregates.connection = .idle
-            state.aggregates.activeRequests = 0
-            if gatewayDown {
-                state.aggregates.gatewayListening = false
-                state.aggregates.gatewayPort = nil
-                state.started = false
-            }
-        }
-        publish()
     }
 
     /// Wraps the caller's transports so the service can observe protocol

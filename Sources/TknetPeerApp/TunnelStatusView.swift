@@ -59,14 +59,16 @@ struct TunnelStatusView: View {
     private var tunnelControls: some View {
         HStack(spacing: 12) {
             if state.isTunnelActive {
+                // Stop must stay available while Connecting/Busy — isBusy only
+                // gates Start/Register so a hung dial cannot lock the operator out.
                 Button("Stop") { Task { await state.stopTunnelFromUser() } }
-                    .disabled(state.lockError != nil || state.isBusy)
+                    .disabled(state.lockError != nil)
             } else {
                 Button("Start") { Task { await state.startTunnelFromUser() } }
                     .disabled(state.lockError != nil || state.isBusy || state.config.peerId == nil)
                 if state.tunnelWanted {
                     Button("Stop auto-dial") { Task { await state.stopTunnelFromUser() } }
-                        .disabled(state.lockError != nil || state.isBusy)
+                        .disabled(state.lockError != nil)
                 }
             }
             Text("Stop leaves the local port open. Quit shuts the gateway down.")

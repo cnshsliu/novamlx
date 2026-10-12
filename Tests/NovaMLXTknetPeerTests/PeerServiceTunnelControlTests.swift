@@ -192,6 +192,42 @@ struct PeerServiceTunnelControlTests {
         await service.stop()
     }
 
+    @Test("stopTunnel during hung dial publishes idle promptly")
+    func stopTunnelDuringHungDialPublishesIdle() async throws {
+        let dialStarted = PeerLock(initialState: false)
+        let factory: TransportFactory = {
+            dialStarted.withLock { $0 = true }
+            // Cooperative hang: cancelled by stopTunnel's runTask.cancel().
+            while !Task.isCancelled {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            throw CancellationError()
+        }
+        let recorder = StatusRecorder()
+        let service = makeService(factory: factory)
+        recorder.record(service.statusStream)
+        try await service.start(tunnel: false)
+        #expect(await recorder.waitLast { $0.gatewayListening })
+
+        let startTask = Task {
+            try await service.startTunnel()
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, dialStarted.withLock({ !$0 }) {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(dialStarted.withLock { $0 })
+        #expect(await recorder.waitLast { $0.connection == .connecting && $0.gatewayListening })
+
+        let stoppedAt = Date()
+        await service.stopTunnel()
+        #expect(Date().timeIntervalSince(stoppedAt) < 2.0)
+        #expect(await recorder.waitLast { $0.connection == .idle && $0.gatewayListening })
+
+        _ = await startTask.result
+        await service.stop()
+    }
+
     @Test("stopTunnel then startTunnel dials again on the same port")
     func redialKeepsPort() async throws {
         let log = PairLog()

@@ -92,12 +92,20 @@ public final class TunnelClient: @unchecked Sendable {
             do {
                 let transport = try await transportFactory()
                 sessionTransport = transport
+                // stop()/Task.cancel can land while dial is in flight. Closing
+                // here avoids marking Connected after the operator already Stopped.
+                let stillWanted = state.withLock { $0.running } && !Task.isCancelled
+                guard stillWanted else {
+                    await transport.close()
+                    break
+                }
                 setStatus(.connected)
                 attempt = 0
                 try await runSession(transport: transport)
             } catch {
                 // Dial failure or fatal session error → reconnect below.
                 if Task.isCancelled { break }
+                if !state.withLock({ $0.running }) { break }
             }
             // Session ended (clean close or throw). Reconnect below —
             // UNLESS the server sent 4005 upgrade-required: terminal.
