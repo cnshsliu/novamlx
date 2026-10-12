@@ -382,6 +382,53 @@ jobs:
                   "}\n"
               )
           print("patched ltx2 public encode methods and LTX2Pack")
+
+          # mlx-swift MLXRandom.normal takes `key: (some RandomStateOrKey)?`.
+          # An `RandomStateOrKey?` variable is the existential `any`, which
+          # does not conform to the protocol. Pass the MLXArray key directly.
+          # `Float * MLXArray` is resolved as Duration multiplication on this
+          # SDK; multiply the array by an MLXArray scale instead.
+          def replace_count(path, old, new, count):
+              file = Path(path)
+              text = file.read_text()
+              found = text.count(old)
+              if found != count:
+                  raise SystemExit(
+                      f"error: {path} expected {count} occurrences, found {found}"
+                  )
+              file.write_text(text.replace(old, new))
+
+          control = "vendors/zimage.swift/Sources/ZImage/Pipeline/ZImageControlPipeline.swift"
+          pipeline = "vendors/zimage.swift/Sources/ZImage/Pipeline/ZImagePipeline.swift"
+          replace_count(
+              control,
+              "    let randomKey: RandomStateOrKey? = request.seed.map { MLXRandom.key($0) }\n"
+              "    let initialNoise = MLXRandom.normal(shape, loc: 0, scale: 1, key: randomKey)\n",
+              "    let initialNoise: MLXArray\n"
+              "    if let seed = request.seed {\n"
+              "      initialNoise = MLXRandom.normal(shape, loc: Float(0), scale: Float(1), key: MLXRandom.key(seed))\n"
+              "    } else {\n"
+              "      initialNoise = MLXRandom.normal(shape, loc: Float(0), scale: Float(1))\n"
+              "    }\n",
+              2,
+          )
+          replace_count(
+              pipeline,
+              "    let randomKey: RandomStateOrKey? = request.seed.map { MLXRandom.key($0) }\n"
+              "    var latents = MLXRandom.normal(shape, loc: 0, scale: 1, key: randomKey)\n",
+              "    var latents: MLXArray\n"
+              "    if let seed = request.seed {\n"
+              "      latents = MLXRandom.normal(shape, loc: Float(0), scale: Float(1), key: MLXRandom.key(seed))\n"
+              "    } else {\n"
+              "      latents = MLXRandom.normal(shape, loc: Float(0), scale: Float(1))\n"
+              "    }\n",
+              1,
+          )
+          guide_old = "guidedNoise = positive + request.guidanceScale * (positive - negative)\n"
+          guide_new = "guidedNoise = positive + (positive - negative) * MLXArray(request.guidanceScale)\n"
+          replace_count(control, guide_old, guide_new, 2)
+          replace_count(pipeline, guide_old, guide_new, 1)
+          print("patched zimage random keys and guidance scale")
           PY
 
       - name: Patch upstream StrictConcurrency issues
