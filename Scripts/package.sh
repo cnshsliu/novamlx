@@ -61,7 +61,7 @@ cat >"$APP_CONTENTS/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key>
     <string>VERSION_PLACEHOLDER</string>
     <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
+    <string>26.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>NovaMLX needs microphone access to record audio for speech recognition and voice cloning.</string>
     <key>NSRemovableVolumesUsageDescription</key>
