@@ -1,0 +1,37 @@
+#!/bin/bash
+# Prove tknet-peer builds from a copy that contains no NovaMLX source.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DEST="$(mktemp -d)"
+cleanup() { rm -rf "$DEST"; }
+trap cleanup EXIT
+
+echo "→ copying package to ${DEST} (no NovaMLX tree)"
+# Copy the package contents, not a nested tknet-peer directory.
+mkdir -p "$DEST"
+tar -C "$ROOT" \
+    --exclude '.build' \
+    --exclude '.swiftpm' \
+    --exclude 'dist' \
+    -cf - . | tar -C "$DEST" -xf -
+
+if [ -e "$DEST/Package.swift" ] && grep -q 'name: "NovaMLX"' "$DEST/Package.swift"; then
+    echo "copy still looks like the NovaMLX package" >&2
+    exit 1
+fi
+if [ -d "$DEST/Sources/NovaMLXCore" ] || [ -d "$DEST/vendors" ]; then
+    echo "copy contains NovaMLX sources" >&2
+    exit 1
+fi
+
+cd "$DEST"
+echo "→ swift build -c release --product tknet-peer"
+swift build -c release --product tknet-peer
+echo "→ swift test"
+swift test
+echo "→ MLX-free dependency check"
+bash Scripts/check-mlx-free.sh
+echo "→ LAN pool acceptance"
+bash Scripts/accept-lan-pool.sh
+echo "✓ standalone tknet-peer verified in ${DEST}"

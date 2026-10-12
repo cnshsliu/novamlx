@@ -1,4 +1,4 @@
-import NovaMLXTknetPeer
+import TknetPeer
 import Combine
 import Foundation
 

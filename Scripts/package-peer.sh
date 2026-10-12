@@ -6,7 +6,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
-VERSION="${1:-$(grep 'public static let version' Sources/NovaMLXTknetPeer/Version.swift | sed 's/.*"\(.*\)".*/\1/' || echo '0.2.0')}"
+VERSION="${1:-$(grep 'public static let version' tknet-peer/Sources/TknetPeer/Version.swift | sed 's/.*"\(.*\)".*/\1/' || echo '0.2.0')}"
 ARCH="$(uname -m)"
 DIST_DIR="dist"
 APP_NAME="TknetPeer.app"
