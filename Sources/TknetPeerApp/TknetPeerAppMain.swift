@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Peer menu-bar app. This target links NovaMLXTknetPeer only — no MLX,
+/// Peer menu-bar app. This target links TknetPeer only — no MLX,
 /// NovaMLXCore, NovaMLXDB, or NovaMLXMenuBar.
 ///
 /// `LSUIElement` stays true, so launch is a menu-bar agent. `PeerWindowActivation`

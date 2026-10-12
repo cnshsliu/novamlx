@@ -557,17 +557,17 @@ Use provider catalog presets for popular services (OpenAI, Anthropic, Groq, Toge
 
 ## Tknet Peer
 
-NovaMLX can act as a **Tknet Peer**: tknet.ai routes end-user model requests to
-this machine over an outbound WebSocket tunnel, and the peer forwards them to a
-**source** — NovaMLX's own inference (`http://127.0.0.1:6590/v1`), another local
-service (ollama, llama.cpp), or any cloud API. Source API keys never leave the
-peer.
+Tknet Peer is the local gateway in front of one or more inference servers. Clients send a **pool** name. The peer picks a member. The Mac menu-bar app is `dist/TknetPeer.app` (built with `./build.sh`). The CLI is a separate Swift package that does not need this repository:
 
-- macOS: enable in the app → **Tknet Peer** page.
-- Linux/Windows: `swift build -c release --product tknet-peer`, then
-  `tknet-peer setup` and `tknet-peer serve`.
+```bash
+swift build -c release --package-path tknet-peer --product tknet-peer
+# or, with no NovaMLX checkout, inside a tknet-peer clone:
+swift build -c release --product tknet-peer
+```
 
-Design: `docs/superpowers/specs/2026-09-24-tknet-peer-design.md`.
+Then `tknet-peer setup` and `tknet-peer serve`. Linux and Windows use that CLI. Build and LAN-pool checks: `tknet-peer/README.md`.
+
+Design: `docs/superpowers/specs/2026-10-11-tknet-peer-gateway-design.md`.
 
 ---
 

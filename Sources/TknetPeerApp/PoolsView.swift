@@ -1,4 +1,4 @@
-import NovaMLXTknetPeer
+import TknetPeer
 import SwiftUI
 
 struct PoolsView: View {
