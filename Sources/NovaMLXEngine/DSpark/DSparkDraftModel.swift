@@ -305,8 +305,23 @@ public final class DSparkDraftModel: Module {
     /// fc/hidden_norm/norm, per-layer input_layernorm/post_attention_layernorm/
     /// self_attn.{q,k,v,o}_proj/self_attn.{q,k}_norm/mlp.{gate,up,down}_proj,
     /// markov_head.markov_w{1,2}, confidence_head.proj (62 tensors).
-    public func loadWeights(_ weights: [String: MLXArray]) throws {
-        try update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+    ///
+    /// DeepSpec-native packaging (8B/14B) also ships unused base `embed_tokens` /
+    /// `lm_head` tensors; pass them in `allowedUnused` so verify stays strict on
+    /// everything else. RedHat/vLLM speculators packaging has no extras.
+    public func loadWeights(
+        _ weights: [String: MLXArray],
+        allowedUnused: Set<String> = ["embed_tokens", "lm_head"]
+    ) throws {
+        let filtered: [String: MLXArray]
+        if allowedUnused.isEmpty {
+            filtered = weights
+        } else {
+            filtered = weights.filter { key, _ in
+                !allowedUnused.contains(where: { key == $0 || key.hasPrefix($0 + ".") })
+            }
+        }
+        try update(parameters: ModuleParameters.unflattened(filtered), verify: [.all])
     }
 
     /// Install a reduced-vocab head's draft->target id mapping. Checkpoints store `d2t`

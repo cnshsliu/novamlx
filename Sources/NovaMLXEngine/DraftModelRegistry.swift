@@ -75,11 +75,11 @@ public final class DraftModelRegistry: Sendable {
 
     /// DeepSeek DSpark drafter (V4.1 Flash). Preferred over a second LM draft.
     public func dsparkCandidate(forMainId mainId: String) -> DraftModelCandidate? {
-        for id in dsparkDraftCandidates(forMainId: mainId) {
+        for id in NovaMLXEngine.dsparkDraftCandidates(forMainId: mainId) {
             let dir = NovaMLXPaths.directory(forModelId: id)
             let cfg = dir.appendingPathComponent("config.json")
             guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
-            guard isDSparkDraftConfig(at: dir) || isMtpDraftConfig(at: dir) else { continue }
+            guard NovaMLXEngine.isDSparkDraftConfig(at: dir) || NovaMLXEngine.isMtpDraftConfig(at: dir) else { continue }
             return DraftModelCandidate(
                 draftModelId: id,
                 displayName: id.split(separator: "/").last.map(String.init) ?? id,
@@ -139,11 +139,11 @@ public final class DraftModelRegistry: Sendable {
 
     /// DFlash2 block-diffusion drafter for this backbone (preferred over MTP).
     public func dflashCandidate(forMainId mainId: String) -> DraftModelCandidate? {
-        for id in dflashDraftCandidates(forMainId: mainId) {
+        for id in NovaMLXEngine.dflashDraftCandidates(forMainId: mainId) {
             let dir = NovaMLXPaths.directory(forModelId:id)
             let cfg = dir.appendingPathComponent("config.json")
             guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
-            guard isDFlashDraftConfig(at: dir) else { continue }
+            guard NovaMLXEngine.isDFlashDraftConfig(at: dir) else { continue }
             return DraftModelCandidate(
                 draftModelId: id,
                 displayName: id.split(separator: "/").last.map(String.init) ?? id,
@@ -160,11 +160,11 @@ public final class DraftModelRegistry: Sendable {
     public func mtpCandidate(forMainId mainId: String) -> DraftModelCandidate? {
         let mainDir = NovaMLXPaths.directory(forModelId:mainId)
         let vocab = Self.readVocabSize(from: mainDir)
-        for id in mtpDraftCandidates(forMainId: mainId) {
+        for id in NovaMLXEngine.mtpDraftCandidates(forMainId: mainId) {
             let dir = NovaMLXPaths.directory(forModelId:id)
             let cfg = dir.appendingPathComponent("config.json")
             guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
-            guard isMtpDraftConfig(at: dir) || checkpointHasMtpWeights(at: dir) else { continue }
+            guard NovaMLXEngine.isMtpDraftConfig(at: dir) || NovaMLXEngine.checkpointHasMtpWeights(at: dir) else { continue }
             if let vocab, let draftVocab = Self.readVocabSize(from: dir), draftVocab != vocab {
                 continue
             }

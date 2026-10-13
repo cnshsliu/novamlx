@@ -234,7 +234,7 @@ public struct DSparkConfig: Sendable, Equatable {
         guard let data = try? Data(contentsOf: config),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }
-        return isDSparkDraftConfig(jsonObject: json)
+        return DSparkConfig.isDSparkDraftConfig(jsonObject: json)
     }
 
     public static func fromJSON(_ data: Data) throws -> DSparkConfig {

@@ -255,7 +255,7 @@ public final class InferenceService: @unchecked Sendable {
     public func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
         let resolvedId = settingsManager.resolveModelId(request.model)
         let mtpDir = NovaMLXPaths.directory(forModelId:resolvedId)
-        if isMtpDraftConfig(at: mtpDir) {
+        if NovaMLXEngine.isMtpDraftConfig(at: mtpDir) {
             return AsyncThrowingStream { continuation in
                 continuation.finish(
                     throwing: NovaMLXError.unsupportedModel(
@@ -584,7 +584,7 @@ public final class InferenceService: @unchecked Sendable {
             }
             return
         }
-        if !asMtpCompanion, isMtpDraftConfig(at: url) || isDFlashDraftConfig(at: url) {
+        if !asMtpCompanion, NovaMLXEngine.isMtpDraftConfig(at: url) || NovaMLXEngine.isDFlashDraftConfig(at: url) {
             throw NovaMLXError.mtpCompanionNotLoadable(modelId)
         }
 
@@ -713,7 +713,7 @@ public final class InferenceService: @unchecked Sendable {
 
     private static func rejectMtpAsChat(_ modelId: String) throws {
         let dir = NovaMLXPaths.directory(forModelId:modelId)
-        if isMtpDraftConfig(at: dir) {
+        if NovaMLXEngine.isMtpDraftConfig(at: dir) {
             throw NovaMLXError.unsupportedModel(
                 "MTP draft head cannot be used as a chat model: \(modelId)"
             )
@@ -813,7 +813,7 @@ public final class InferenceService: @unchecked Sendable {
             return
         }
         let mainDir = NovaMLXPaths.directory(forModelId:mainId)
-        guard !isMtpDraftConfig(at: mainDir) else { return }
+        guard !NovaMLXEngine.isMtpDraftConfig(at: mainDir) else { return }
         let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId)
         let dflashLoaded = dflash.map { isModelLoaded($0.draftModelId) } ?? false
         guard Self.shouldLoadMtpCompanion(hasDFlash: dflashLoaded) else {
@@ -883,9 +883,9 @@ public final class InferenceService: @unchecked Sendable {
 
     public func chatLoadedCount() -> Int {
         listLoadedModels().filter { id in
-            !isMtpDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
-                && !isDFlashDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
-                && !isDSparkDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
+            !NovaMLXEngine.isMtpDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
+                && !NovaMLXEngine.isDFlashDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
+                && !NovaMLXEngine.isDSparkDraftConfig(at: NovaMLXPaths.directory(forModelId:id))
                 && !ResourceLimits.isCompanionDraftModelId(id)
         }.count
     }
@@ -1124,7 +1124,7 @@ public final class InferenceService: @unchecked Sendable {
                 progress?(modelId, .skipped)
                 continue
             }
-            if isMtpDraftConfig(at: record.localURL) {
+            if NovaMLXEngine.isMtpDraftConfig(at: record.localURL) {
                 NovaMLXLog.info("[InferenceService] Skipping restore of MTP companion '\(modelId)'")
                 progress?(modelId, .skipped)
                 continue

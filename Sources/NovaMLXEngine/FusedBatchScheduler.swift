@@ -1216,7 +1216,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // Logprobs require per-step logits — bypass spec decoding when requested
                 // so every accepted token has logprob data (avoids silent gaps in the API).
                 let wantLogprobs = seq.request.includeLogprobs
-                let draftTokens = (wantLogprobs || !specDecoder.shouldSpeculate())
+                // Greedy must stay step-by-step: batch verify KV vs stepwise can
+                // flip near-tie argmax (max |Δ|~0.5), breaking lossless compares.
+                let draftTokens = (wantLogprobs || seq.sampler.isGreedy || !specDecoder.shouldSpeculate())
                     ? []
                     : specDecoder.speculate(context: seq.recentTokenIds)
 
@@ -1423,16 +1425,19 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             scrubbed.isEmpty && !delta.isEmpty && !isHarmonyResidueWord
 
                         if isHarmonyResidueWord {
-                            // For channel-type residue words ("analysis", "final",
-                            // "commentary"), remember which one — the next control-
-                            // token chunk (i.e. `<|message|>`) will emit the matching
-                            // boundary tag. For role-type residues ("assistant",
-                            // "user", etc.) just drop them.
-                            if rawTrimmed == "analysis" || rawTrimmed == "final" || rawTrimmed == "commentary" {
-                                seq.pendingHarmonyChannel = rawTrimmed
+                            // Only drop residue words when they immediately follow a
+                            // scrubbed control token (Harmony scaffolding). Otherwise
+                            // keep them — Qwen thinking text legitimately says "user".
+                            if seq.previousTokenWasControl {
+                                if rawTrimmed == "analysis" || rawTrimmed == "final" || rawTrimmed == "commentary" {
+                                    seq.pendingHarmonyChannel = rawTrimmed
+                                }
+                                seq.previousTokenWasControl = false
+                                decoded = ""
+                            } else {
+                                seq.previousTokenWasControl = false
+                                decoded = delta
                             }
-                            seq.previousTokenWasControl = false
-                            decoded = ""
                         } else if isControlTokenChunk {
                             // If we have a pending Harmony channel type, this is
                             // the closing `<|message|>` of the channel header —

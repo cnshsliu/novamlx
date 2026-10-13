@@ -205,7 +205,7 @@ public final class ModelDiscovery: Sendable {
                 if let model = registerQwen21Turbo(at: subdir, id: subdir.lastPathComponent) {
                     models.append(model)
                 }
-            } else if configPath.fileExists || hasGGUFWeights(in: subdir) {
+            } else if configPath.fileExists || NovaMLXUtils.hasGGUFWeights(in: subdir) {
                 let adapterConfigPath = subdir.appendingPathComponent("adapter_config.json")
                 let adapterWeightsPath = subdir.appendingPathComponent("adapters.safetensors")
                 if adapterConfigPath.fileExists && adapterWeightsPath.fileExists {
@@ -240,7 +240,7 @@ public final class ModelDiscovery: Sendable {
                         continue
                     }
                     guard childConfig.fileExists || unetConfig.fileExists || fluxTransformerConfig.fileExists
-                        || hasGGUFWeights(in: child) else { continue }
+                        || NovaMLXUtils.hasGGUFWeights(in: child) else { continue }
                     let adapterConfigPath = child.appendingPathComponent("adapter_config.json")
                     let adapterWeightsPath = child.appendingPathComponent("adapters.safetensors")
                     let isAdapter = adapterConfigPath.fileExists && adapterWeightsPath.fileExists
@@ -256,7 +256,7 @@ public final class ModelDiscovery: Sendable {
 
         if models.isEmpty {
             let rootConfig = directory.appendingPathComponent("config.json")
-            if rootConfig.fileExists || hasGGUFWeights(in: directory) {
+            if rootConfig.fileExists || NovaMLXUtils.hasGGUFWeights(in: directory) {
                 if let model = registerModel(at: directory, id: directory.lastPathComponent) {
                     models.append(model)
                 }
@@ -282,7 +282,7 @@ public final class ModelDiscovery: Sendable {
             if transformerConfig.fileExists && vaeDir.directoryExists {
                 return registerDiffusersModel(at: path, id: id)
             }
-            if hasGGUFWeights(in: path) {
+            if NovaMLXUtils.hasGGUFWeights(in: path) {
                 return registerGGUFModel(at: path, id: id)
             }
             return nil
@@ -324,11 +324,11 @@ public final class ModelDiscovery: Sendable {
         ).first(where: { $0.pathExtension.lowercased() == "gguf" }) else {
             return nil
         }
-        guard let gguf = try? GGUFFile.parse(url: ggufURL) else {
+        guard let gguf = try? NovaMLXUtils.GGUFFile.parse(url: ggufURL) else {
             NovaMLXLog.warning("[Discovery] Failed to parse GGUF header for \(id)")
             return nil
         }
-        let hfType = GGUFHuggingFaceConfig.hfModelType(ggufArch: gguf.architecture ?? "llama")
+        let hfType = NovaMLXUtils.GGUFHuggingFaceConfig.hfModelType(ggufArch: gguf.architecture ?? "llama")
         let family = detectFamily(
             config: HFConfig(architectures: nil, modelType: hfType, visionConfig: nil),
             modelId: id)
@@ -343,7 +343,7 @@ public final class ModelDiscovery: Sendable {
             modelType: .llm,
             family: family,
             estimatedSizeBytes: size,
-            architectures: [GGUFHuggingFaceConfig.architectureName(hfType: hfType)],
+            architectures: [NovaMLXUtils.GGUFHuggingFaceConfig.architectureName(hfType: hfType)],
             configModelType: hfType,
             isAdapter: false,
             isComplete: complete

@@ -715,9 +715,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let container = ModelContainer(identifier: config.identifier, config: config)
         NovaMLXLog.info("[Engine] Loading model from: \(url.path)")
 
-        if hasGGUFWeights(in: url) {
+        if NovaMLXUtils.hasGGUFWeights(in: url) {
             do {
-                try prepareGGUFModelDirectory(url)
+                try NovaMLXUtils.prepareGGUFModelDirectory(url)
                 NovaMLXLog.info("[Engine] Prepared GGUF sidecars (config/tokenizer) for \(config.identifier.id)")
             } catch {
                 throw NovaMLXError.modelLoadFailed(config.identifier.id, underlying: error)
@@ -729,7 +729,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let configJson = (try? Data(contentsOf: url.appendingPathComponent("config.json")))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let arch = (configJson?["architectures"] as? [String])?.first
-        if !isDFlashDraftConfig(at: url) {
+        if !NovaMLXEngine.isDFlashDraftConfig(at: url) {
             Self.ensureChatTemplate(modelDir: url, modelId: config.identifier.id, family: config.identifier.family, architecture: arch)
         }
 
@@ -2042,21 +2042,21 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
         }
 
-        // Third pass: remove Harmony residue words that survive per-token streaming scrub.
-        // In streaming, <|channel|> and <|message|> are scrubbed individually, leaving
-        // channel type words ("analysis", "final") and role names ("user", "assistant")
-        // as standalone text. Check if the result is EXACTLY a residue word or starts
-        // with one followed by content.
+        // Third pass: remove Harmony CHANNEL-type residue words that survive per-token
+        // streaming scrub (`analysis` / `final` / `commentary`). Role names
+        // (`user` / `assistant` / `system` / `developer`) are intentionally NOT
+        // stripped here — they appear in ordinary Qwen thinking text ("the user
+        // wants…"). FusedBatchScheduler drops role residues only when
+        // `previousTokenWasControl` (true Harmony scaffolding).
+        let channelResidue: Set<String> = ["analysis", "final", "commentary"]
         let trimmed = result.trimmingCharacters(in: .whitespaces)
-        if harmonyResidueWords.contains(trimmed) {
+        if channelResidue.contains(trimmed) {
             return ""
         }
-        // Check if starts with a residue word (e.g. "finalYour name is Bob.")
-        for word in harmonyResidueWords {
+        for word in channelResidue {
             if trimmed.hasPrefix(word) {
                 let afterWord = trimmed.dropFirst(word.count)
                 // Only strip if followed by uppercase (sentence start) or end of string.
-                // Do NOT strip on newline — Qwen3 <|turn|>system\n leaves legitimate role text.
                 if afterWord.isEmpty || afterWord.first?.isUppercase == true {
                     result = String(afterWord)
                 }
@@ -3448,9 +3448,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public var chatLoadedCount: Int {
         pool.loadedModelIds.filter { id in
             let dir = NovaMLXPaths.directory(forModelId:id)
-            return !isMtpDraftConfig(at: dir)
-                && !isDFlashDraftConfig(at: dir)
-                && !isDSparkDraftConfig(at: dir)
+            return !NovaMLXEngine.isMtpDraftConfig(at: dir)
+                && !NovaMLXEngine.isDFlashDraftConfig(at: dir)
+                && !NovaMLXEngine.isDSparkDraftConfig(at: dir)
                 && !ResourceLimits.isCompanionDraftModelId(id)
         }.count
     }
