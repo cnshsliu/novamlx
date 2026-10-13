@@ -21,7 +21,7 @@ struct PeerRootView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 360)
+                .frame(maxWidth: 460)
             }
             if let lockError = state.lockError {
                 Text(lockError)
@@ -41,6 +41,8 @@ struct PeerRootView: View {
                     MembersView()
                 case .pools:
                     PoolsView()
+                case .account:
+                    AccountView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -54,6 +56,7 @@ private enum PeerTab: String, CaseIterable, Identifiable {
     case tunnel = "Tunnel"
     case members = "Members"
     case pools = "Pools"
+    case account = "Account"
 
     var id: String { rawValue }
 }

@@ -40,7 +40,10 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Tracing", package: "swift-distributed-tracing"),
             ],
-            swiftSettings: concurrencySettings
+            swiftSettings: concurrencySettings,
+            linkerSettings: [
+                .linkedFramework("Security", .when(platforms: [.macOS])),
+            ]
         ),
         .executableTarget(
             name: "tknet-peer",
