@@ -92,9 +92,9 @@ public final class DraftModelRegistry: Sendable {
         return nil
     }
 
-    /// OPT-IN DSpark drafter ids for a backbone — no disk check, so this stays
-    /// testable. These never enter `dsparkCandidate(forMainId:)` / auto-inject; only
-    /// an explicit `draft_model` request parameter picks them up.
+    /// DSpark drafter ids for a backbone — no disk check, so this stays testable.
+    /// They do not enter `dsparkCandidate(forMainId:)` (that stays the DeepSeek
+    /// on-disk head). `AcceleratorSpeedGate` decides auto-load versus ask.
     public func dsparkOptInCandidateIds(forMainId mainId: String) -> [String] {
         let name = (mainId.split(separator: "/").last.map(String.init) ?? mainId).lowercased()
         if name.contains("dspark") || name.contains("dflash") || name.contains("-mtp") {
@@ -113,8 +113,8 @@ public final class DraftModelRegistry: Sendable {
         return []
     }
 
-    /// OPT-IN DSpark drafter for this backbone, gated on the checkpoint being on disk
-    /// and parseable by the DSpark loader. Not part of `boostStatus` / auto-inject.
+    /// On-disk DSpark drafter for this backbone. The speed gate, not this lookup,
+    /// decides whether load attaches it.
     public func dsparkOptInCandidate(forMainId mainId: String) -> DraftModelCandidate? {
         for id in dsparkOptInCandidateIds(forMainId: mainId) {
             let dir = NovaMLXPaths.directory(forModelId: id)
@@ -237,5 +237,64 @@ public final class DraftModelRegistry: Sendable {
             return vs
         }
         return json["vocab_size"] as? Int
+    }
+
+    /// Every companion the speed gate may attach. No disk check.
+    /// Order here is not the run order; `AcceleratorPreference` sorts that.
+    public func acceleratorCandidates(
+        forMainId mainId: String,
+        family: ModelFamily,
+        isHybrid: Bool,
+        modelType: ModelType
+    ) -> [AcceleratorCandidate] {
+        guard modelType == .llm || modelType == .vlm else { return [] }
+        var seen = Set<String>()
+        var result: [AcceleratorCandidate] = []
+        func add(_ candidate: AcceleratorCandidate) {
+            guard seen.insert(candidate.acceleratorId).inserted else { return }
+            result.append(candidate)
+        }
+        for id in NovaMLXEngine.dflashDraftCandidates(forMainId: mainId) {
+            add(AcceleratorCandidate(
+                kind: .dflash2, acceleratorId: id, displayName: Self.leaf(id),
+                estimatedSizeMB: 1500, family: .qwen
+            ))
+        }
+        for id in NovaMLXEngine.mtpDraftCandidates(forMainId: mainId) {
+            add(AcceleratorCandidate(
+                kind: .mtp, acceleratorId: id, displayName: Self.leaf(id),
+                estimatedSizeMB: 256, family: .qwen
+            ))
+        }
+        for id in NovaMLXEngine.dsparkDraftCandidates(forMainId: mainId) {
+            add(AcceleratorCandidate(
+                kind: .dspark, acceleratorId: id, displayName: Self.leaf(id),
+                estimatedSizeMB: 4500, family: .deepseek
+            ))
+        }
+        for id in dsparkOptInCandidateIds(forMainId: mainId) {
+            let sizeMB =
+                id.contains("speculator.dspark") ? 3800
+                : id.contains("14b") ? 6300
+                : 4600
+            add(AcceleratorCandidate(
+                kind: .dspark, acceleratorId: id, displayName: Self.leaf(id),
+                estimatedSizeMB: sizeMB, family: .qwen
+            ))
+        }
+        if let small = recommendation(family: family, isHybrid: isHybrid) {
+            add(AcceleratorCandidate(
+                kind: .smallDraft,
+                acceleratorId: small.draftModelId,
+                displayName: small.displayName,
+                estimatedSizeMB: small.estimatedSizeMB,
+                family: small.family
+            ))
+        }
+        return result
+    }
+
+    private static func leaf(_ id: String) -> String {
+        id.split(separator: "/").last.map(String.init) ?? id
     }
 }

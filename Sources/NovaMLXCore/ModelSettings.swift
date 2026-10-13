@@ -24,6 +24,9 @@ public struct ModelSettings: Codable, Sendable, Equatable {
     public var kvMemoryBytesPerTokenOverride: Int?
     /// Native in-graph MTP. `nil`/true = use it when the checkpoint has MTP weights; false = serial decode.
     public var nativeMtpEnabled: Bool?
+    /// Remembered load-time answers for speculative companions, keyed by accelerator id.
+    /// `true` loads it next time; `false` skips the prompt. Known-slower profiles still stay off.
+    public var acceleratorChoices: [String: Bool]?
 
     public init(
         maxContextWindow: Int? = nil,
@@ -47,7 +50,8 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         kvGroupSize: Int? = nil,
         thinkingBudget: Int? = nil,
         kvMemoryBytesPerTokenOverride: Int? = nil,
-        nativeMtpEnabled: Bool? = nil
+        nativeMtpEnabled: Bool? = nil,
+        acceleratorChoices: [String: Bool]? = nil
     ) {
         self.maxContextWindow = maxContextWindow
         self.maxTokens = maxTokens
@@ -71,6 +75,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         self.thinkingBudget = thinkingBudget
         self.kvMemoryBytesPerTokenOverride = kvMemoryBytesPerTokenOverride
         self.nativeMtpEnabled = nativeMtpEnabled
+        self.acceleratorChoices = acceleratorChoices
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -92,6 +97,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         case thinkingBudget = "thinking_budget"
         case kvMemoryBytesPerTokenOverride = "kv_memory_bytes_per_token_override"
         case nativeMtpEnabled = "native_mtp"
+        case acceleratorChoices = "accelerator_choices"
     }
 
     public func applySamplingOverrides(to request: InferenceRequest) -> InferenceRequest {

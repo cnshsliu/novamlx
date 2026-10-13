@@ -2393,9 +2393,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
             do {
                 let tag = String(request.id.uuidString.prefix(8))
+                let dflashDrafter = dflashDrafterReady(draftModel.value, draftModelId: draftModelId)
                 if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
                    let target = model.value as? any DFlashTarget,
-                   let drafter = draftModel.value as? DFlashDraftModel
+                   let drafter = dflashDrafter, drafter.hasSpeculativeWeights
                 {
                     var dflashIterator = try DFlashTokenIterator(
                         input: effectiveInput,
@@ -2414,12 +2415,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     }
                     iterator = dflashIterator
                     NovaMLXLog.info(
-                        "[GENERATE:\(tag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) cap=adaptive<=\(drafter.config.blockSize - 1)"
+                        "[GENERATE:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize)"
                     )
-                } else if draftModel.value is DFlashDraftModel {
-                    NovaMLXLog.info(
-                        "[GENERATE:\(tag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"
-                    )
+                } else if dflashDrafter != nil {
+                    if dflashDrafter?.hasSpeculativeWeights != true {
+                        NovaMLXLog.info(
+                            "[GENERATE:\(tag)] DFlash2 '\(draftModelId)' has no path-selector weights — plain decode"
+                        )
+                    } else {
+                        NovaMLXLog.info(
+                            "[GENERATE:\(tag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"
+                        )
+                    }
                     iterator = try TokenIterator(
                         input: effectiveInput, model: model.value,
                         cache: kvCache,
@@ -3180,9 +3187,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                         do {
                             let tag = String(request.id.uuidString.prefix(8))
+                            let dflashDrafter = dflashDrafterReady(draftModel.value, draftModelId: draftModelId)
                             if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
                                let target = model.value as? any DFlashTarget,
-                               let drafter = draftModel.value as? DFlashDraftModel
+                               let drafter = dflashDrafter, drafter.hasSpeculativeWeights
                             {
                                 var dflashIterator = try DFlashTokenIterator(
                                     input: effectiveInput,
@@ -3201,12 +3209,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 }
                                 iterator = dflashIterator
                                 NovaMLXLog.info(
-                                    "[STREAM:\(tag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) cap=adaptive<=\(drafter.config.blockSize - 1)"
+                                    "[STREAM:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize)"
                                 )
-                            } else if draftModel.value is DFlashDraftModel {
-                                NovaMLXLog.info(
-                                    "[STREAM:\(tag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"
-                                )
+                            } else if dflashDrafter != nil {
+                                if dflashDrafter?.hasSpeculativeWeights != true {
+                                    NovaMLXLog.info(
+                                        "[STREAM:\(tag)] DFlash2 '\(draftModelId)' has no path-selector weights — plain decode"
+                                    )
+                                } else {
+                                    NovaMLXLog.info(
+                                        "[STREAM:\(tag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"
+                                    )
+                                }
                                 iterator = try TokenIterator(
                                     input: effectiveInput, model: model.value,
                                     cache: kvCache,
