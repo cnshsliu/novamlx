@@ -89,7 +89,7 @@ public struct TknetREST: Sendable {
             throw RESTError.badStatus(Int(response.status.code), message: await Self.errorMessage(response))
         }
         let data = Data(try await response.body.collect(upTo: 1 << 20).readableBytesView)
-        return try JSONDecoder().decode(PeerEarningsSummary.self, from: data)
+        return try PeerEarningsSummary.decode(from: data)
     }
 
     /// Sign in to the tknet account. The session token is the `session`
@@ -226,6 +226,13 @@ public struct PeerEarningsSummary: Decodable, Sendable {
     public let availability: Availability
     public let byModel: [ModelRow]
     public let recent: [Entry]
+
+    /// Accepts the server's snake_case keys and the same names in camelCase.
+    public static func decode(from data: Data) throws -> PeerEarningsSummary {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(PeerEarningsSummary.self, from: data)
+    }
 }
 
 public enum RESTError: Error, Equatable {
