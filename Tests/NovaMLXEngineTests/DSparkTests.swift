@@ -515,10 +515,21 @@ struct DSparkTests {
         }
         #expect(throws: Never.self) { try model.loadWeights(weights) }
 
-        // The head ships no embed_tokens / lm_head — an extra key must not load.
+        // DeepSpec-native checkpoints ship unused embed_tokens / lm_head — default
+        // allowedUnused drops them. Any other unexpected key must still fail.
+        var deepspec = weights
+        deepspec["embed_tokens.weight"] = MLXArray.zeros([32, 64])
+        deepspec["lm_head.weight"] = MLXArray.zeros([32, 64])
+        #expect(throws: Never.self) { try model.loadWeights(deepspec) }
+
         var extra = weights
-        extra["embed_tokens.weight"] = MLXArray.zeros([32, 64])
+        extra["not_a_real_tensor.weight"] = MLXArray.zeros([4, 4])
         #expect(throws: (any Error).self) { try model.loadWeights(extra) }
+
+        // Strict mode (no allowedUnused) still rejects embed_tokens.
+        #expect(throws: (any Error).self) {
+            try model.loadWeights(deepspec, allowedUnused: [])
+        }
 
         // A missing key must not load either.
         weights.removeValue(forKey: "norm.weight")

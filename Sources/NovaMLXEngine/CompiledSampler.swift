@@ -55,6 +55,10 @@ public final class CompiledSampler: @unchecked Sendable {
         }
     }
 
+    /// Greedy (temperature == 0) sampling — callers can skip n-gram speculation
+    /// whose batch verify can flip near-tie argmax vs step-by-step decode.
+    public var isGreedy: Bool { temperature == 0 }
+
     public func sample(logits: MLXArray) -> MLXArray {
         withRandomState(randomState) {
             compiledSample(logits)

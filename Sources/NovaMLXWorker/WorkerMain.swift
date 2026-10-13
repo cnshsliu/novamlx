@@ -298,6 +298,11 @@ struct NovaMLXWorker {
         let hasLinearAttention = container?.config.hasLinearAttention == true
         let hasDraftModel = request.draftModel != nil
         let nativeMtp = container?.hasNativeMtp == true
+        // Explicit use_mtp=false forces the serial TokenIterator path (ContinuousBatcher).
+        // Needed so greedy lossless compares (plain vs DSpark) share one decode kernel:
+        // FusedBatchScheduler's single-token path and DSpark's dflashVerify can flip
+        // near-tie argmax even when both are greedy step-by-step.
+        let forceSerialDecode = request.useNativeMtp == false
 
         let needsSpecialized = request.sessionId != nil ||
             request.jsonSchemaDef != nil ||
@@ -307,7 +312,8 @@ struct NovaMLXWorker {
             isVLM ||
             hasLinearAttention ||
             hasDraftModel ||
-            nativeMtp
+            nativeMtp ||
+            forceSerialDecode
 
         return needsSpecialized ? .batcher : .fused
     }

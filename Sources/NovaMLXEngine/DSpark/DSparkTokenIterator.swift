@@ -149,7 +149,6 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         self.maskId = drafter.config.maskTokenId
         self.tap = drafter.config.targetLayerIds
         self.maxCap = Swift.max(1, drafter.kdraft)
-
         // This head ships no embed_tokens / lm_head — run on the target's raw tables.
         drafter.bind(
             embed: { [target] ids in target.dflashEmbed(ids) },
@@ -209,7 +208,11 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
             denseStep()
             return
         }
-
+        // Joint multi-token verify for all temperatures. At temp==0 this can flip
+        // near-tie argmax vs width-1 ContinuousBatcher decode (SDPA FP |Δ|~0.5) —
+        // accepted tradeoff for ~1.3–1.7× throughput. Bit-identical greedy would
+        // require per-token target forwards (no speedup); see git history
+        // greedyStepwiseRound.
         let tDraft = Date()
         let blockIds = [Int32(pending)] + Array(repeating: Int32(maskId), count: blockSize - 1)
         let block = MLXArray(blockIds, [1, blockSize])
@@ -261,6 +264,7 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
                 acceptMs: 0, rollbackMs: 0))
     }
 
+
     private func argmaxRows(_ logits: MLXArray) -> [Int] {
         var argmax = [Int]()
         let seq = logits.dim(1)
@@ -271,6 +275,7 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         }
         return argmax
     }
+
 
     private mutating func finishRound(
         drafted: [Int], argmax: [Int], fused: MLXArray,

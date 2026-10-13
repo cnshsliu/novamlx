@@ -12,16 +12,9 @@ public protocol CompiledDecodeReporting: AnyObject {
 
 // MARK: - DFlash target
 
-/// Main model that can verify a DFlash / DSpark block and roll the KV cache back.
-public protocol DFlashTarget: LanguageModel {
-    var dflashEmbedding: Embedding { get }
-    func dflashEmbed(_ tokens: MLXArray) -> MLXArray
-    func dflashLmHead(_ hidden: MLXArray) -> MLXArray
-    func dflashVerify(
-        _ tokens: MLXArray, cache: [KVCache]?, tapLayerIds: [Int]
-    ) -> (logits: MLXArray, fused: MLXArray)
-    func dflashRollback(cache: [KVCache], nRejected: Int, specWidth: Int)
-}
+/// Same contract as `MLXLMCommon.DFlashTarget` — Qwen3/Qwen3.5/etc. conform there.
+/// Keep a single protocol identity so `model.value as? any DFlashTarget` succeeds.
+public typealias DFlashTarget = MLXLMCommon.DFlashTarget
 
 public struct DFlashRoundStats: Sendable {
     public let proposed: Int
@@ -290,7 +283,7 @@ public func isMtpDraftConfig(at modelDir: URL) -> Bool {
 }
 
 public func checkpointHasMtpWeights(at modelDir: URL) -> Bool {
-    if isMtpDraftConfig(at: modelDir) { return true }
+    if NovaMLXEngine.isMtpDraftConfig(at: modelDir) { return true }
     return weightMapKeys(at: modelDir).contains(where: isMtpWeightKey)
 }
 

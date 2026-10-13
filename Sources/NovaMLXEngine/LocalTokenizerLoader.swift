@@ -71,7 +71,7 @@ final class LocalTokenizerLoader: MLXLMCommon.TokenizerLoader, @unchecked Sendab
             let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
             return TokenizerBridge(upstream)
         }
-        if isDFlashDraftConfig(at: directory) {
+        if NovaMLXEngine.isDFlashDraftConfig(at: directory) {
             let fallbacks = [
                 "mlx-community/Qwen3.8-27B-8bit",
                 "mlx-community/Qwen3.8-27B-4bit",
