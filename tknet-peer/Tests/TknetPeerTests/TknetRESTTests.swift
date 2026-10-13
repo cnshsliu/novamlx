@@ -58,4 +58,39 @@ struct TknetRESTTests {
         #expect(name == "lucas-mac")
         try await rest.logout(server: base, session: login.session)
     }
+
+    @Test("earnings payload accepts snake_case and camelCase")
+    func earningsJSON() throws {
+        let snake = Data(MockTknetServer.earningsBody.utf8)
+        let summary = try PeerEarningsSummary.decode(from: snake)
+        #expect(summary.availability.totalEarned == "3.50")
+        #expect(summary.availability.onHold == "1.50")
+        #expect(summary.byModel.first?.model == "coding")
+        #expect(summary.byModel.first?.tokens == 120)
+        #expect(summary.recent.first?.promptTokens == 20)
+        #expect(summary.recent.first?.completionTokens == 100)
+        #expect(summary.recent.first?.payoutId == nil)
+        let camel = Data(
+            #"{"availability":{"totalEarned":"1","available":"1","onHold":"0","paidOut":"0"},"byModel":[],"recent":[]}"#
+                .utf8)
+        let again = try PeerEarningsSummary.decode(from: camel)
+        #expect(again.availability.available == "1")
+        #expect(again.byModel.isEmpty)
+    }
+
+    @Test("earnings requires the connection key")
+    func earnings() async throws {
+        let server = MockTknetServer()
+        try await server.start()
+        defer { Task { await server.stop() } }
+        let rest = TknetREST()
+        defer { Task { try? await rest.shutdown() } }
+        let base = URL(string: "http://127.0.0.1:\(server.port)")!
+        let summary = try await rest.fetchEarnings(server: base, token: MockTknetServer.validToken)
+        #expect(summary.availability.available == "2.00")
+        #expect(summary.byModel.map(\.model) == ["coding"])
+        await #expect(throws: Error.self) {
+            _ = try await rest.fetchEarnings(server: base, token: "wrong")
+        }
+    }
 }

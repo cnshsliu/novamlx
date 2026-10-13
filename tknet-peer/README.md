@@ -95,6 +95,20 @@ That runs `git subtree split --prefix=tknet-peer` and pushes the result to `main
 | `Tests/TknetPeerTests` | Swift Testing suite. |
 | `Scripts/` | Package, acceptance, publish. |
 
-Config and secrets stay in `~/.config/tknet-peer/` (`peer.json`, `secrets/`, `peer.lock`). The CLI and the Mac app share that directory. Only one process may hold the lock.
+Config stays in `~/.config/tknet-peer/` (`peer.json`, `peer.lock`). Only one process may hold the lock.
+
+Secrets:
+
+1. The CLI reads and writes `~/.config/tknet-peer/secrets/secrets.json` (mode `0600`) through `FileSecretStore`. `tknet-peer serve` always uses that file.
+2. The Mac app (`TknetPeer.app` in novamlx) uses the login Keychain, service `ai.tknet.peer`, as its primary store.
+3. On launch the app copies the file into the Keychain when the file changed (a CLI write while the app was quit). It does not delete the file.
+4. Writes from the app go to the Keychain and the file, so the CLI still sees the connection key and member keys.
+
+Build the Mac app from a novamlx checkout (needs macOS):
+
+```bash
+swift build -c release --product TknetPeerApp
+swift test --package-path tknet-peer --filter SecretStoreMigrationTests
+```
 
 `tknet-peer migrate-from-novamlx` reads a copied `nova_config.db` via the `sqlite3` CLI. It does not link NovaMLX.

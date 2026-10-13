@@ -567,6 +567,14 @@ swift build -c release --product tknet-peer
 
 Then `tknet-peer setup` and `tknet-peer serve`. Linux and Windows use that CLI. Build and LAN-pool checks: `tknet-peer/README.md`.
 
+The menu-bar app keeps connection keys and member keys in the login Keychain and mirrors them to `~/.config/tknet-peer/secrets`, which the CLI still reads. The Account tab claims the token factory and shows earnings.
+
+```bash
+swift build -c release --product TknetPeerApp
+swift test --package-path tknet-peer --filter SecretStoreMigrationTests
+swift test --package-path tknet-peer --filter earnings
+```
+
 Design: `docs/superpowers/specs/2026-10-11-tknet-peer-gateway-design.md`.
 
 ---
