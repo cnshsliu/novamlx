@@ -24,6 +24,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log", exact: "1.11.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird", exact: "2.21.1"),
         .package(url: "https://github.com/swift-server/async-http-client", exact: "1.33.1"),
+        // hummingbird-websocket 2.6.0 pulls swift-websocket 1.6.2. That
+        // release's utf8.span writer does not compile on Swift 6.2 Linux.
+        // Scripts/prepare-build.sh turns the span branch off after resolve.
         .package(url: "https://github.com/hummingbird-project/hummingbird-websocket", exact: "2.6.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", exact: "1.8.2"),
         .package(url: "https://github.com/apple/swift-distributed-tracing.git", exact: "1.4.1"),

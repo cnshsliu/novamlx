@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+bash "$ROOT/Scripts/prepare-build.sh"
 swift build -c release --product tknet-peer
 
 BIN="$(find .build -type f \( -name 'tknet-peer' -o -name 'tknet-peer.exe' \) | grep '/release/' | head -n 1 || true)"
