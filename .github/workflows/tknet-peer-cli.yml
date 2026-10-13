@@ -31,6 +31,8 @@ jobs:
       - name: Build, test, package
         working-directory: tknet-peer
         run: |
+          # swift-websocket 1.6.2's utf8.span path fails to compile on Swift 6.2 Linux.
+          bash Scripts/prepare-build.sh
           swift build -c release --product tknet-peer
           swift test
           bash Scripts/check-mlx-free.sh
@@ -52,7 +54,10 @@ jobs:
           swift-version: "6.2"
       - name: Build release CLI
         working-directory: tknet-peer
-        run: swift build -c release --product tknet-peer
+        shell: bash
+        run: |
+          bash Scripts/prepare-build.sh
+          swift build -c release --product tknet-peer
       - name: Package
         working-directory: tknet-peer
         shell: bash
