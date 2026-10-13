@@ -231,13 +231,18 @@ for arg in "$@"; do
 done
 
 ARCH="$(uname -m)"
-BUILD_BIN_DIR=".build/${ARCH}-apple-macosx/${CONFIG}"
-if [ ! -d "$BUILD_BIN_DIR" ]; then
-	# Fallback for older toolchains that drop directly under .build/${CONFIG}
-	BUILD_BIN_DIR=".build/${CONFIG}"
-fi
+# Prefer the directory that actually contains the host binary. SwiftPM 6.2
+# appends the deployment target (arm64-apple-macosx26.0); the unversioned
+# triple is where this script writes mlx.metallib.
+BUILD_BIN_DIR=""
+for candidate in ".build/${ARCH}-apple-macosx"*/"${CONFIG}" ".build/${CONFIG}"; do
+	if [ -f "$candidate/NovaMLX" ]; then
+		BUILD_BIN_DIR="$candidate"
+		break
+	fi
+done
 
-if [ ! -d "$BUILD_BIN_DIR" ]; then
+if [ -z "$BUILD_BIN_DIR" ] || [ ! -d "$BUILD_BIN_DIR" ]; then
 	echo "→ post-build sync: cannot locate build dir ($BUILD_BIN_DIR), skipping"
 	restart_app
 	exit 0

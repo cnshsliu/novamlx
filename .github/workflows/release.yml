@@ -607,8 +607,28 @@ jobs:
 
       - name: Package
         run: |
+          set -uo pipefail
           chmod +x Scripts/package.sh
-          ./Scripts/package.sh "${GITHUB_REF_NAME#v}"
+          log="${RUNNER_TEMP}/novamlx-package.log"
+          # Tags are v1.2.3. Pull requests use refs like 11/merge.
+          version="${GITHUB_REF_NAME#v}"
+          version="${version//\//-}"
+          set +e
+          ./Scripts/package.sh "$version" 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -E -q 'error:' "$log"; then
+              grep -E 'error:' "$log" | head -n 8 | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            else
+              tail -n 12 "$log" | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            fi
+            exit "$rc"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
