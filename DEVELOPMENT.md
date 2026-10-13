@@ -198,10 +198,16 @@ git push origin v1.0.0
 ```
 
 This triggers `.github/workflows/release.yml` which:
-1. Builds on macOS 15 (Apple Silicon)
+1. Builds on a self-hosted Apple Silicon Mac so MLX Metal shaders compile
 2. Runs tests
 3. Creates a tarball + DMG
 4. Creates a GitHub Release with attached binaries
+
+**Build (Apple Silicon)** also runs on pull requests and manual `workflow_dispatch`. It waits for a self-hosted runner labeled `self-hosted`, `macOS`, and `ARM64`, and it does not use GitHub-hosted `macos-*` runners. Until that runner is online, the check stays queued.
+
+Register it on the Mac (MacMaxPro): repository **Settings → Actions → Runners → New self-hosted runner**, choose macOS / ARM64, and keep those default labels. Install the runner as a service so it stays online.
+
+`vendors/` is gitignored. The job clones `mlx-swift`, `mlx-swift-lm`, and `mlx-swift-dots-tts` (plus the other `Package.swift` path packages) into the runner workspace before `./build.sh`.
 
 Manual DMG:
 

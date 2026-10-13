@@ -21,26 +21,529 @@ env:
 jobs:
   build:
     name: Build (Apple Silicon)
-    # GitHub-hosted macOS cannot reliably compile MLX Metal shaders.
-    # Full Metal builds run on a self-hosted Apple Silicon Mac (labels:
-    # self-hosted, macOS, ARM64) or locally with ./build.sh.
-    # Pull requests skip this job. Tag releases and workflow_dispatch wait
-    # for that runner; nothing is published until the build succeeds.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    # Waits for a self-hosted Apple Silicon Mac and verifies Metal locally.
+    # Pull requests, version tags, and workflow_dispatch all queue this job.
+    # It does not skip, and it does not use GitHub-hosted macos-* runners.
+    # Until a runner with these labels is online, the check stays queued.
+    #
+    # Register the runner on the Mac (MacMaxPro):
+    #   Settings → Actions → Runners → New self-hosted runner → macOS / ARM64
+    # Keep GitHub's default labels: self-hosted, macOS, ARM64.
     runs-on: [self-hosted, macOS, ARM64]
+    env:
+      # The Mac's link to github.com drops mid-fetch ("expected acknowledgments",
+      # curl 28, port 443). HTTP/1.1 avoids the HTTP/2 failure mode. Checkout
+      # and the vendor clones below retry the rest.
+      GIT_CONFIG_COUNT: "2"
+      GIT_CONFIG_KEY_0: http.version
+      GIT_CONFIG_VALUE_0: HTTP/1.1
+      GIT_CONFIG_KEY_1: http.postBuffer
+      GIT_CONFIG_VALUE_1: "524288000"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+
+      - name: Checkout (attempt 2)
+        id: checkout2
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+        continue-on-error: true
+
+      - name: Checkout (attempt 3)
+        if: steps.checkout.outcome == 'failure' && steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - name: Clone vendor dependencies
         run: |
-          # mlx-swift — Apple's MLX Swift bindings (has mlx C++ submodule)
-          git clone --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
+          set -euo pipefail
+          # Path packages in Package.swift. vendors/ is gitignored, so a clean
+          # runner checkout does not contain them.
+          log="${RUNNER_TEMP}/vendor-clone.log"
+          exec > >(tee "$log") 2>&1
+          on_exit() {
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              {
+                echo "## Vendor clone failed"
+                echo '```'
+                tail -n 60 "$log" || true
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              tail -n 25 "$log" | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            fi
+          }
+          trap on_exit EXIT
+          clone_retry() {
+            local dest="$1"
+            shift
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              rm -rf "$dest"
+              if git -c http.version=HTTP/1.1 clone "$@"; then
+                return 0
+              fi
+              echo "error: git clone failed for $dest (attempt ${attempt})" >&2
+              sleep $((attempt * 10))
+            done
+            echo "error: git clone failed for $dest" >&2
+            return 1
+          }
+          clone_retry vendors/mlx-swift --depth 1 --branch "${MLX_SWIFT_REF}" --recurse-submodules --shallow-submodules \
             https://github.com/ml-explore/mlx-swift.git vendors/mlx-swift
-
-          # mlx-swift-lm — LM/VLM layer on top of mlx-swift
-          git clone --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
+          clone_retry mlx-swift-lm --depth 1 --branch "${MLX_SWIFT_LM_REF}" \
             https://github.com/ml-explore/mlx-swift-lm.git mlx-swift-lm
+          clone_retry vendors/mlx-swift-dots-tts --depth 1 \
+            https://github.com/sammcj/mlx-swift-dots-tts.git vendors/mlx-swift-dots-tts
+          clone_retry vendors/flux.swift --depth 1 \
+            https://github.com/mzbac/flux.swift.git vendors/flux.swift
+          clone_retry vendors/zimage.swift --depth 1 \
+            https://github.com/mzbac/zimage.swift.git vendors/zimage.swift
+          clone_retry vendors/qwen.image.swift --depth 1 \
+            https://github.com/mzbac/qwen.image.swift.git vendors/qwen.image.swift
+          clone_retry vendors/flux-2-swift-mlx --depth 1 \
+            https://github.com/VincentGourbin/flux-2-swift-mlx.git vendors/flux-2-swift-mlx
+          clone_retry vendors/swift-mlx-profiler --depth 1 \
+            https://github.com/VincentGourbin/swift-mlx-profiler.git vendors/swift-mlx-profiler
+          clone_retry vendors/ltx2-swift --depth 1 \
+            https://github.com/xocialize/ltx-2-mlx-swift.git vendors/ltx2-swift
+          clone_retry vendors/mlx-exact-conv-swift --depth 1 \
+            https://github.com/xocialize/mlx-exact-conv-swift.git vendors/mlx-exact-conv-swift
+          clone_retry vendors/mlx-profiling --depth 1 \
+            https://github.com/xocialize/mlx-profiling.git vendors/mlx-profiling
+          clone_retry vendors/mlx-block-stream-swift --depth 1 \
+            https://github.com/xocialize/mlx-block-stream-swift.git vendors/mlx-block-stream-swift
+          clone_retry vendors/mlx-engine-swift --depth 1 \
+            https://github.com/xocialize/mlx-engine-swift.git vendors/mlx-engine-swift
+
+          # One mlx-swift checkout, and package names that Package.swift imports.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_package(text, url_exact, replacement):
+              key = ".package("
+              i = 0
+              out = []
+              while True:
+                  j = text.find(key, i)
+                  if j < 0:
+                      out.append(text[i:])
+                      break
+                  k = j + len(key)
+                  depth = 1
+                  while k < len(text) and depth:
+                      if text[k] == "(":
+                          depth += 1
+                      elif text[k] == ")":
+                          depth -= 1
+                      k += 1
+                  block = text[j:k]
+                  if url_exact in block:
+                      out.append(text[i:j])
+                      out.append(replacement)
+                  else:
+                      out.append(text[i:k])
+                  i = k
+              return "".join(out)
+
+          def remove_blocks(text, needle):
+              # .executable( is the product form. It is not a prefix of
+              # .executableTarget(, so both have to be listed.
+              keys = (
+                  ".package(",
+                  ".target(",
+                  ".library(",
+                  ".executable(",
+                  ".executableTarget(",
+                  ".testTarget(",
+              )
+              i = 0
+              out = []
+              while i < len(text):
+                  positions = [(text.find(key, i), key) for key in keys]
+                  positions = [(pos, key) for pos, key in positions if pos >= 0]
+                  if not positions:
+                      out.append(text[i:])
+                      break
+                  j, key = min(positions)
+                  k = j + len(key)
+                  depth = 1
+                  while k < len(text) and depth:
+                      if text[k] == "(":
+                          depth += 1
+                      elif text[k] == ")":
+                          depth -= 1
+                      k += 1
+                  block = text[j:k]
+                  if needle in block:
+                      out.append(text[i:j])
+                      while k < len(text) and text[k] in " \t\r\n":
+                          k += 1
+                      if k < len(text) and text[k] == ",":
+                          k += 1
+                  else:
+                      out.append(text[i:k])
+                  i = k
+              return "".join(out)
+
+          def patch(path, mlx_rel, lm_rel=None, package_name=None):
+              file = Path(path)
+              text = file.read_text()
+              original = text
+              text = replace_package(
+                  text,
+                  'https://github.com/ml-explore/mlx-swift"',
+                  f'.package(path: "{mlx_rel}")',
+              )
+              text = replace_package(
+                  text,
+                  'https://github.com/ml-explore/mlx-swift.git"',
+                  f'.package(path: "{mlx_rel}")',
+              )
+              if lm_rel:
+                  text = replace_package(
+                      text,
+                      'https://github.com/ml-explore/mlx-swift-lm"',
+                      f'.package(path: "{lm_rel}", traits: [])',
+                  )
+                  text = replace_package(
+                      text,
+                      'https://github.com/ml-explore/mlx-swift-lm.git"',
+                      f'.package(path: "{lm_rel}", traits: [])',
+                  )
+              text = replace_package(
+                  text,
+                  'https://github.com/huggingface/swift-transformers"',
+                  '.package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3")',
+              )
+              text = replace_package(
+                  text,
+                  'https://github.com/huggingface/swift-transformers.git"',
+                  '.package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3")',
+              )
+              if package_name:
+                  text = text.replace('name: "Flux2Swift"', f'name: "{package_name}"', 1)
+                  text = text.replace('name: "LTX2"', f'name: "{package_name}"', 1)
+              if text != original:
+                  file.write_text(text)
+                  print(f"patched {path}")
+
+          patch("mlx-swift-lm/Package.swift", "../vendors/mlx-swift")
+          for name in (
+              "mlx-swift-dots-tts",
+              "flux.swift",
+              "zimage.swift",
+              "qwen.image.swift",
+              "flux-2-swift-mlx",
+              "ltx2-swift",
+          ):
+              package_name = None
+              if name == "flux-2-swift-mlx":
+                  package_name = "flux-2-swift-mlx"
+              elif name == "ltx2-swift":
+                  package_name = "ltx2-swift"
+              patch(
+                  f"vendors/{name}/Package.swift",
+                  "../mlx-swift",
+                  "../../mlx-swift-lm",
+                  package_name,
+              )
+          for name in (
+              "swift-mlx-profiler",
+              "mlx-exact-conv-swift",
+              "mlx-profiling",
+              "mlx-block-stream-swift",
+              "mlx-engine-swift",
+          ):
+              patch(f"vendors/{name}/Package.swift", "../mlx-swift")
+          block = Path("vendors/mlx-block-stream-swift/Package.swift")
+          block.write_text(block.read_text().replace('name: "BlockStreamKit"', 'name: "mlx-block-stream-swift"', 1))
+
+          def retarget(path, url, dest):
+              file = Path(path)
+              text = file.read_text()
+              text = replace_package(text, url, f'.package(path: "{dest}")')
+              text = replace_package(text, url[:-1] + '.git"', f'.package(path: "{dest}")')
+              file.write_text(text)
+
+          flux = "vendors/flux-2-swift-mlx/Package.swift"
+          retarget(flux, 'https://github.com/VincentGourbin/swift-mlx-profiler"', "../swift-mlx-profiler")
+          flux_text = Path(flux).read_text()
+          # FluxGemma4VLM is unused and pulls a second mlx-swift-lm.
+          flux_text = remove_blocks(flux_text, "gemma-4-swift-mlx")
+          flux_text = remove_blocks(flux_text, "FluxGemma4VLM")
+          # The Flux2CLI executableTarget depends on FluxGemma4VLM, so that
+          # target is removed above. The product is a separate .executable(
+          # entry and has to be removed too, or SwiftPM rejects the manifest.
+          flux_text = remove_blocks(flux_text, "Flux2CLI")
+          Path(flux).write_text(flux_text)
+
+          ltx = "vendors/ltx2-swift/Package.swift"
+          for url, dest in (
+              ('https://github.com/xocialize/mlx-exact-conv-swift"', "../mlx-exact-conv-swift"),
+              ('https://github.com/xocialize/mlx-profiling"', "../mlx-profiling"),
+              ('https://github.com/xocialize/mlx-block-stream-swift"', "../mlx-block-stream-swift"),
+              ('https://github.com/xocialize/mlx-engine-swift"', "../mlx-engine-swift"),
+          ):
+              retarget(ltx, url, dest)
+          print("retargeted flux-2 and ltx2 transitive packages")
+
+          # mlx-swift main keeps Cmlx as an internal target. NovaMLXDistributed
+          # imports it, which SwiftPM only allows through a product.
+          mlx_manifest = Path("vendors/mlx-swift/Package.swift")
+          mlx_text = mlx_manifest.read_text()
+          mlx_library = '.library(name: "MLX", targets: ["MLX"]),'
+          if '.library(name: "Cmlx"' not in mlx_text:
+              if mlx_library not in mlx_text:
+                  raise SystemExit("error: mlx-swift products did not contain the MLX library")
+              mlx_text = mlx_text.replace(
+                  mlx_library,
+                  '.library(name: "Cmlx", targets: ["Cmlx"]),\n        ' + mlx_library,
+                  1,
+              )
+          # A clean clone has no cmake output. Excluding it warns
+          # "Invalid Exclude .../mlx/build: File not found."
+          if not Path("vendors/mlx-swift/Source/Cmlx/mlx/build").exists():
+              mlx_text = mlx_text.replace('        "mlx/build",\n', "", 1)
+          mlx_manifest.write_text(mlx_text)
+          print("exposed Cmlx product")
+
+          # mlx-swift QuantizedLinear.biases is MLXArray?. flux.swift still
+          # appends it as a non-optional weight.
+          quant = Path("vendors/flux.swift/Sources/Quantization/QuantizationUtils.swift")
+          qtext = quant.read_text()
+          old = (
+              '                    allWeights.append(("\\(path).biases", quantizedLinear.biases))\n'
+              "                    if let bias = quantizedLinear.bias {\n"
+              '                        allWeights.append(("\\(path).bias", bias))\n'
+              "                    }\n"
+              "                    \n"
+              '                    logger.debug("    Weight shape: \\(quantizedLinear.weight.shape)")\n'
+              '                    logger.debug("    Scales shape: \\(quantizedLinear.scales.shape)")\n'
+              '                    logger.debug("    Biases shape: \\(quantizedLinear.biases.shape)")\n'
+          )
+          new = (
+              "                    if let biases = quantizedLinear.biases {\n"
+              '                        allWeights.append(("\\(path).biases", biases))\n'
+              '                        logger.debug("    Biases shape: \\(biases.shape)")\n'
+              "                    }\n"
+              "                    if let bias = quantizedLinear.bias {\n"
+              '                        allWeights.append(("\\(path).bias", bias))\n'
+              "                    }\n"
+              "                    \n"
+              '                    logger.debug("    Weight shape: \\(quantizedLinear.weight.shape)")\n'
+              '                    logger.debug("    Scales shape: \\(quantizedLinear.scales.shape)")\n'
+          )
+          if old not in qtext:
+              raise SystemExit("error: flux.swift QuantizedLinear.biases call site changed")
+          quant.write_text(qtext.replace(old, new, 1))
+          print("patched flux.swift optional biases")
+
+          # Upstream ltx-2-mlx-swift has no LTX2Pack, and the two methods
+          # NovaMLXEngine calls from outside the module are internal.
+          audio = Path("vendors/ltx2-swift/Sources/LTX2/AudioToVideo.swift")
+          atext = audio.read_text()
+          frozen = "    func encodeFrozenAudio("
+          if "    public func encodeFrozenAudio(" not in atext:
+              if frozen not in atext:
+                  raise SystemExit("error: encodeFrozenAudio signature changed")
+              atext = atext.replace(frozen, "    public func encodeFrozenAudio(", 1)
+              audio.write_text(atext)
+          pipe = Path("vendors/ltx2-swift/Sources/LTX2/LTX2Pipeline.swift")
+          ptext = pipe.read_text()
+          prompt = "    func encodePrompt("
+          if "    public func encodePrompt(" not in ptext:
+              if prompt not in ptext:
+                  raise SystemExit("error: encodePrompt signature changed")
+              ptext = ptext.replace(prompt, "    public func encodePrompt(", 1)
+              pipe.write_text(ptext)
+          pack = Path("vendors/ltx2-swift/Sources/LTX2/LTX2Pack.swift")
+          pack_declared = False
+          for swift in Path("vendors/ltx2-swift/Sources/LTX2").rglob("*.swift"):
+              if "enum LTX2Pack" in swift.read_text() or "struct LTX2Pack" in swift.read_text():
+                  pack_declared = True
+                  break
+          if not pack_declared:
+              pack.write_text(
+                  "import Foundation\n"
+                  "\n"
+                  "/// Points an LTX2Pipeline at a prepared weight directory.\n"
+                  "/// Upstream does not ship this type; NovaMLXEngine calls it.\n"
+                  "public enum LTX2Pack {\n"
+                  "    public static func setDistilledDefaults() {}\n"
+                  "\n"
+                  "    public static func prepare(packDir: URL) throws -> URL {\n"
+                  "        packDir\n"
+                  "    }\n"
+                  "}\n"
+              )
+          print("patched ltx2 public encode methods and LTX2Pack")
+
+          # mlx-swift MLXRandom.normal takes `key: (some RandomStateOrKey)?`.
+          # An `RandomStateOrKey?` variable is the existential `any`, which
+          # does not conform to the protocol. Pass the MLXArray key directly.
+          # `Float * MLXArray` is resolved as Duration multiplication on this
+          # SDK; multiply the array by an MLXArray scale instead.
+          def replace_count(path, old, new, count):
+              file = Path(path)
+              text = file.read_text()
+              found = text.count(old)
+              if found != count:
+                  raise SystemExit(
+                      f"error: {path} expected {count} occurrences, found {found}"
+                  )
+              file.write_text(text.replace(old, new))
+
+          control = "vendors/zimage.swift/Sources/ZImage/Pipeline/ZImageControlPipeline.swift"
+          pipeline = "vendors/zimage.swift/Sources/ZImage/Pipeline/ZImagePipeline.swift"
+          replace_count(
+              control,
+              "    let randomKey: RandomStateOrKey? = request.seed.map { MLXRandom.key($0) }\n"
+              "    let initialNoise = MLXRandom.normal(shape, loc: 0, scale: 1, key: randomKey)\n",
+              "    let initialNoise: MLXArray\n"
+              "    if let seed = request.seed {\n"
+              "      initialNoise = MLXRandom.normal(shape, loc: Float(0), scale: Float(1), key: MLXRandom.key(seed))\n"
+              "    } else {\n"
+              "      initialNoise = MLXRandom.normal(shape, loc: Float(0), scale: Float(1))\n"
+              "    }\n",
+              2,
+          )
+          replace_count(
+              pipeline,
+              "    let randomKey: RandomStateOrKey? = request.seed.map { MLXRandom.key($0) }\n"
+              "    var latents = MLXRandom.normal(shape, loc: 0, scale: 1, key: randomKey)\n",
+              "    var latents: MLXArray\n"
+              "    if let seed = request.seed {\n"
+              "      latents = MLXRandom.normal(shape, loc: Float(0), scale: Float(1), key: MLXRandom.key(seed))\n"
+              "    } else {\n"
+              "      latents = MLXRandom.normal(shape, loc: Float(0), scale: Float(1))\n"
+              "    }\n",
+              1,
+          )
+          guide_old = "guidedNoise = positive + request.guidanceScale * (positive - negative)\n"
+          guide_new = "guidedNoise = positive + (positive - negative) * MLXArray(request.guidanceScale)\n"
+          replace_count(control, guide_old, guide_new, 2)
+          replace_count(pipeline, guide_old, guide_new, 1)
+          print("patched zimage random keys and guidance scale")
+
+          # mlx-swift-lm SwitchLinear stores weight/bias/scales/biases as
+          # internal @ModuleInfo properties, and QuantizedSwitchLinear has no
+          # raw-weight initializer. NovaMLX TIE writes those slots in place.
+          # Linear/QuantizedLinear keep the arrays as `let`, which TIE replaces.
+          layers = "mlx-swift-lm/Libraries/MLXLMCommon/SwitchLayers.swift"
+          replace_count(
+              layers,
+              "open class SwitchLinear: Module, Quantizable {\n"
+              '    @ModuleInfo(key: "weight") var weight: MLXArray\n'
+              '    @ModuleInfo(key: "bias") var bias: MLXArray?\n',
+              "open class SwitchLinear: Module, Quantizable {\n"
+              '    @ModuleInfo(key: "weight") public var weight: MLXArray\n'
+              '    @ModuleInfo(key: "bias") public var bias: MLXArray?\n',
+              1,
+          )
+          replace_count(
+              layers,
+              "    let outputDims: Int\n"
+              "    let numExperts: Int\n"
+              "\n"
+              "    public init(inputDims: Int, outputDims: Int, numExperts: Int, bias: Bool = true) {\n",
+              "    let outputDims: Int\n"
+              "    let numExperts: Int\n"
+              "    public var tieLocalIndices: MLXArray?\n"
+              "\n"
+              "    public init(inputDims: Int, outputDims: Int, numExperts: Int, bias: Bool = true) {\n",
+              1,
+          )
+          replace_count(
+              layers,
+              "        self._weight.wrappedValue = weight\n"
+              "        self._bias.wrappedValue = bias\n"
+              "    }\n",
+              "        self._weight.wrappedValue = weight\n"
+              "        self._bias.wrappedValue = bias\n"
+              "        super.init()\n"
+              "    }\n",
+              1,
+          )
+          replace_count(
+              layers,
+              "open class QuantizedSwitchLinear: SwitchLinear, Quantized {\n"
+              '    @ModuleInfo(key: "scales") var scales: MLXArray\n'
+              '    @ModuleInfo(key: "biases") var biases: MLXArray?\n',
+              "open class QuantizedSwitchLinear: SwitchLinear, Quantized {\n"
+              '    @ModuleInfo(key: "scales") public var scales: MLXArray\n'
+              '    @ModuleInfo(key: "biases") public var biases: MLXArray?\n',
+              1,
+          )
+          replace_count(
+              layers,
+              "    public let mode: QuantizationMode\n"
+              "\n"
+              "    public init(\n"
+              "        _ other: SwitchLinear, groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine\n"
+              "    ) {\n",
+              "    public let mode: QuantizationMode\n"
+              "\n"
+              "    public init(\n"
+              "        inputDims: Int, outputDims: Int, numExperts: Int,\n"
+              "        weight: MLXArray, scales: MLXArray, biases: MLXArray?,\n"
+              "        groupSize: Int, bits: Int, mode: QuantizationMode\n"
+              "    ) {\n"
+              "        self.groupSize = groupSize\n"
+              "        self.bits = bits\n"
+              "        self.mode = mode\n"
+              "        self._scales.wrappedValue = scales\n"
+              "        self._biases.wrappedValue = biases\n"
+              "        super.init(\n"
+              "            inputDims: inputDims, outputDims: outputDims, numExperts: numExperts,\n"
+              "            weight: weight, bias: nil)\n"
+              "    }\n"
+              "\n"
+              "    public init(\n"
+              "        _ other: SwitchLinear, groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine\n"
+              "    ) {\n",
+              1,
+          )
+          linear = "vendors/mlx-swift/Source/MLXNN/Linear.swift"
+          replace_count(
+              linear,
+              "open class Linear: Module, UnaryLayer, Quantizable {\n"
+              "\n"
+              "    public let weight: MLXArray\n"
+              "    public let bias: MLXArray?\n",
+              "open class Linear: Module, UnaryLayer, Quantizable {\n"
+              "\n"
+              "    public var weight: MLXArray\n"
+              "    public var bias: MLXArray?\n",
+              1,
+          )
+          quantized = "vendors/mlx-swift/Source/MLXNN/Quantized.swift"
+          replace_count(
+              quantized,
+              "open class QuantizedLinear: Linear, Quantized {\n"
+              "\n"
+              "    public let groupSize: Int\n"
+              "    public let bits: Int\n"
+              "\n"
+              "    public let mode: QuantizationMode\n"
+              "    public let scales: MLXArray\n"
+              "    public let biases: MLXArray?\n",
+              "open class QuantizedLinear: Linear, Quantized {\n"
+              "\n"
+              "    public let groupSize: Int\n"
+              "    public let bits: Int\n"
+              "\n"
+              "    public let mode: QuantizationMode\n"
+              "    public var scales: MLXArray\n"
+              "    public var biases: MLXArray?\n",
+              1,
+          )
+          print("patched switch linear visibility and linear weight assignment")
+          PY
 
       - name: Patch upstream StrictConcurrency issues
         run: |
@@ -50,8 +553,53 @@ jobs:
 
       - name: Build
         run: |
+          set -uo pipefail
           chmod +x build.sh
-          ./build.sh -c release
+          log="${RUNNER_TEMP}/novamlx-build.log"
+          report() {
+            {
+              echo "## Build failed"
+              echo '```'
+              grep -n -E 'error:' "$log" | head -n 30 || true
+              echo '--- tail ---'
+              tail -n 40 "$log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            # GitHub keeps the first ~10 annotations. Lead with compiler
+            # errors so a warning tail cannot hide the failure.
+            if grep -E -q 'error:' "$log"; then
+              grep -E 'error:' "$log" | head -n 8 | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            else
+              tail -n 8 "$log" | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            fi
+          }
+          rc=1
+          for attempt in 1 2 3; do
+            : > "$log"
+            set +e
+            ./build.sh -c release 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            # MacMaxPro's link to github.com drops during SwiftPM fetches.
+            # A compile error does not match this and is not retried.
+            if grep -E -q "unable to access|RPC failed|timed out|Failed to clone|Could not resolve|Couldn't connect|expected 'acknowledgments'|Recv failure|early EOF|Connection reset" "$log" \
+              && [ "$attempt" -lt 3 ]; then
+              echo "GitHub fetch failed during build (attempt ${attempt}); retrying"
+              sleep $((attempt * 20))
+              continue
+            fi
+            report
+            exit "$rc"
+          done
+          report
+          exit "$rc"
 
       - name: Run tests
         run: swift test
@@ -59,8 +607,28 @@ jobs:
 
       - name: Package
         run: |
+          set -uo pipefail
           chmod +x Scripts/package.sh
-          ./Scripts/package.sh "${GITHUB_REF_NAME#v}"
+          log="${RUNNER_TEMP}/novamlx-package.log"
+          # Tags are v1.2.3. Pull requests use refs like 11/merge.
+          version="${GITHUB_REF_NAME#v}"
+          version="${version//\//-}"
+          set +e
+          ./Scripts/package.sh "$version" 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if grep -E -q 'error:' "$log"; then
+              grep -E 'error:' "$log" | head -n 8 | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            else
+              tail -n 12 "$log" | while IFS= read -r line; do
+                printf '::error::%s\n' "$line"
+              done
+            fi
+            exit "$rc"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

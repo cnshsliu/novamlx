@@ -31,8 +31,5 @@ enum CustomModelRegistration {
                     DeepseekV4Configuration.self, from: flat)
                 return DeepseekV4Model(configuration)
             })
-        MLXLMCommon.customWeightLoader = { dir, module in
-            try DeepseekV41OfficialLoader.loadIfOfficial(dir: dir, model: module)
-        }
     }
 }
