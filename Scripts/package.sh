@@ -4,11 +4,27 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
 VERSION="${1:-$(grep 'public let version' Sources/NovaMLXCore/Types.swift 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' || echo '1.0.0')}"
-BUILD_DIR=".build/arm64-apple-macosx/release"
+# Pull-request refs are "11/merge". A slash breaks sed and the DMG path.
+VERSION="${VERSION//\//-}"
+ARCH="$(uname -m)"
+# SwiftPM 6.2 names the product directory with the deployment target
+# (.build/arm64-apple-macosx26.0/release). Older toolchains omit the version.
+BUILD_DIR=""
+for candidate in ".build/${ARCH}-apple-macosx"*/release ".build/release"; do
+	if [ -f "$candidate/NovaMLX" ]; then
+		BUILD_DIR="$candidate"
+		break
+	fi
+done
+if [ -z "$BUILD_DIR" ]; then
+	echo "error: cannot find NovaMLX under .build for ${ARCH} release" >&2
+	find .build -name NovaMLX -type f 2>/dev/null | head -n 20 >&2 || true
+	exit 1
+fi
 DIST_DIR="dist"
 APP_NAME="NovaMLX.app"
 
-echo "→ Packaging NovaMLX v${VERSION}..."
+echo "→ Packaging NovaMLX v${VERSION} from ${BUILD_DIR}..."
 
 # Leave dist/TknetPeer.app in place. Scripts/package-peer.sh owns that bundle.
 rm -rf "$DIST_DIR/NovaMLX.app" "$DIST_DIR"/NovaMLX-*.dmg "$DIST_DIR"/NovaMLX-*.tar.gz "$DIST_DIR/dmg_staging"
@@ -21,8 +37,15 @@ mkdir -p "$APP_CONTENTS/Resources"
 cp "$BUILD_DIR/NovaMLX" "$APP_CONTENTS/MacOS/"
 cp "$BUILD_DIR/NovaMLXWorker" "$APP_CONTENTS/MacOS/"
 cp "$BUILD_DIR/nova" "$APP_CONTENTS/MacOS/"
-[ -f "$BUILD_DIR/mlx.metallib" ] && cp "$BUILD_DIR/mlx.metallib" "$APP_CONTENTS/MacOS/"
-[ -f ".build/default.metallib" ] && cp ".build/default.metallib" "$APP_CONTENTS/MacOS/mlx.metallib"
+# Metal shaders are linked into the unversioned triple. SwiftPM products may
+# live under arm64-apple-macosx<deployment>.
+if [ -f "$BUILD_DIR/mlx.metallib" ]; then
+	cp "$BUILD_DIR/mlx.metallib" "$APP_CONTENTS/MacOS/"
+elif [ -f ".build/${ARCH}-apple-macosx/release/mlx.metallib" ]; then
+	cp ".build/${ARCH}-apple-macosx/release/mlx.metallib" "$APP_CONTENTS/MacOS/"
+elif [ -f ".build/default.metallib" ]; then
+	cp ".build/default.metallib" "$APP_CONTENTS/MacOS/mlx.metallib"
+fi
 
 if [ -f "docs/AppIcon.icns" ]; then
 	cp "docs/AppIcon.icns" "$APP_CONTENTS/Resources/AppIcon.icns"
@@ -61,7 +84,7 @@ cat >"$APP_CONTENTS/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key>
     <string>VERSION_PLACEHOLDER</string>
     <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
+    <string>26.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>NovaMLX needs microphone access to record audio for speech recognition and voice cloning.</string>
     <key>NSRemovableVolumesUsageDescription</key>

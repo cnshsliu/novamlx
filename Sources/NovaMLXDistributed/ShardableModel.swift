@@ -6,6 +6,37 @@ import NovaMLXCore
 import NovaMLXUtils
 import NovaMLXEngine
 
+/// Tied input embeddings used as the output projection.
+public protocol EmbeddingAsLinearProtocol: Module {
+    func asLinear(_ h: MLXArray) -> MLXArray
+}
+
+extension Embedding: EmbeddingAsLinearProtocol {}
+
+/// Hybrid block: `(x, attentionMask, ssmMask, cache)` — Qwen3.5 / Qwen3-Next.
+public protocol DistributedLayerProtocol4: Module {
+    func callAsFunction(
+        _ x: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        ssmMask: MLXArray?,
+        cache: KVCache?
+    ) -> MLXArray
+}
+
+/// Standard block: `(x, mask, cache)` — Qwen3 and similar.
+public protocol DistributedLayerProtocol3: Module {
+    func callAsFunction(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?
+    ) -> MLXArray
+}
+
+/// Older block: `(x, cache)`.
+public protocol TransformerBlockProtocol: Module {
+    func callAsFunction(_ x: MLXArray, cache: KVCache?) -> MLXArray
+}
+
 // MARK: - ShardableModel
 
 /// Provides layer-level access to a ``LanguageModel`` for pipeline-parallel sharding.

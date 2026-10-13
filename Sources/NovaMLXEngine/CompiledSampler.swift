@@ -26,9 +26,13 @@ public final class CompiledSampler: @unchecked Sendable {
                 argMax(logits, axis: -1)
             }
         } else if topP > 0 && topP < 1 {
-            let tp = MLXArray(topP)
-            let temp = MLXArray(temperature)
+            // Build the scale arrays inside the compiled closure. MLXArray is not
+            // Sendable, and this closure is compiled as @Sendable.
+            let topP = topP
+            let temperature = temperature
             compiledSample = compile { logits in
+                let tp = MLXArray(topP)
+                let temp = MLXArray(temperature)
                 var l = logits
                 if l.dtype == .bfloat16 { l = l.asType(.float32) }
                 let negInf = MLXArray(-Float.infinity)
@@ -41,8 +45,9 @@ public final class CompiledSampler: @unchecked Sendable {
                 return categorical(restored * (1 / temp))
             }
         } else {
-            let temp = MLXArray(temperature)
+            let temperature = temperature
             compiledSample = compile { logits in
+                let temp = MLXArray(temperature)
                 var l = logits
                 if l.dtype == .bfloat16 { l = l.asType(.float32) }
                 return categorical(logSoftmax(l) * (1 / temp))
