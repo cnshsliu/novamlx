@@ -90,6 +90,14 @@ public struct DFlashConfig: Sendable {
     public var targetLayerIds: [Int]
     /// Group width of the local conv. Checkpoints that omit it use 16.
     public var convGroupSize: Int = 16
+    public var numAttentionHeads: Int = 1
+    public var headDim: Int = 0
+    public var intermediateSize: Int = 0
+    public var rmsNormEps: Float = 1e-6
+    public var ropeTheta: Float = 1_000_000
+    public var maxPositionEmbeddings: Int = 262_144
+    public var layerTypes: [String] = []
+    public var slidingWindow: Int?
     public var isDFlash2: Bool
 
     public static func fromJSON(_ data: Data) throws -> DFlashConfig {
@@ -123,169 +131,19 @@ public struct DFlashConfig: Sendable {
             isDFlash2: isDFlash2Arch || (rank > 0 && topK > 0)
         )
         cfg.convGroupSize = jsonInt(value("conv_group_size")) ?? 16
+        let hidden = cfg.hiddenSize
+        let heads = jsonInt(value("num_attention_heads")) ?? max(cfg.numKeyValueHeads, 1)
+        cfg.numAttentionHeads = max(heads, 1)
+        cfg.headDim = jsonInt(value("head_dim"))
+            ?? (hidden > 0 ? max(hidden / cfg.numAttentionHeads, 1) : 1)
+        cfg.intermediateSize = jsonInt(value("intermediate_size")) ?? max(hidden, 1)
+        cfg.rmsNormEps = jsonFloat(value("rms_norm_eps")) ?? 1e-6
+        let rope = json["rope_parameters"] as? [String: Any] ?? [:]
+        cfg.ropeTheta = jsonFloat(value("rope_theta")) ?? jsonFloat(rope["rope_theta"]) ?? 1_000_000
+        cfg.maxPositionEmbeddings = jsonInt(value("max_position_embeddings")) ?? 262_144
+        cfg.layerTypes = json["layer_types"] as? [String] ?? []
+        cfg.slidingWindow = jsonInt(value("sliding_window"))
         return cfg
-    }
-}
-
-/// Block-diffusion drafter. Loaded models are cast to this class at generate time.
-public final class DFlashDraftModel: Module, LanguageModel, KVCacheDimensionProvider {
-    public let config: DFlashConfig
-    public let kvHeads: [Int]
-    /// Set only after the path selector and local conv have real parameters.
-    public private(set) var pathSelector: DFlashCandidateSelector?
-    public private(set) var localConv: DFlashGroupedConv?
-    public private(set) var hasSpeculativeWeights = false
-
-    public init(_ config: DFlashConfig) {
-        self.config = config
-        let layers = max(config.numHiddenLayers, 1)
-        self.kvHeads = Array(repeating: max(config.numKeyValueHeads, 1), count: layers)
-        super.init()
-    }
-
-    /// Test and loader hook. A model without this install must not claim a DFlash2 boost.
-    public func installSpeculativePath(selector: DFlashCandidateSelector, conv: DFlashGroupedConv) {
-        pathSelector = selector
-        localConv = conv
-        hasSpeculativeWeights = true
-    }
-
-    /// Copy selector codebooks and a grouped-conv kernel when those tensors match
-    /// this config. A missing or differently shaped tensor leaves the model unable
-    /// to speculate, so generate stays on plain decode instead of claiming a boost.
-    public func loadSpeculativeWeightsIfPresent(at dir: URL) {
-        guard !hasSpeculativeWeights, config.isDFlash2 else { return }
-        let weights = Self.readSafetensors(at: dir)
-        guard !weights.isEmpty else { return }
-        guard let predecessor = Self.firstTensor(weights, containing: "predecessor_codebook"),
-              let successor = Self.firstTensor(weights, containing: "successor_codebook")
-        else { return }
-        let selector = DFlashCandidateSelector(
-            hiddenSize: max(config.hiddenSize, 1),
-            vocabSize: max(config.vocabSize, predecessor.dim(0)),
-            rank: max(config.selectorRank, predecessor.dim(-1)),
-            topK: max(config.selectorTopK, 1)
-        )
-        guard predecessor.shape == selector.predecessorCodebook.shape,
-              successor.shape == selector.successorCodebook.shape
-        else {
-            NovaMLXLog.info(
-                "[DFlash] Selector codebook shape does not match \(dir.lastPathComponent) — plain decode"
-            )
-            return
-        }
-        selector.predecessorCodebook = predecessor
-        selector.successorCodebook = successor
-        if let projection = Self.firstTensor(weights, containing: "hidden_projection"),
-           projection.shape == selector.hiddenProjection.weight.shape
-        {
-            selector.hiddenProjection.weight = projection
-        }
-        let group = max(config.convGroupSize, 1)
-        let hidden = max(config.hiddenSize, 1)
-        guard hidden % group == 0 else {
-            NovaMLXLog.info(
-                "[DFlash] hidden \(hidden) is not divisible by conv group \(group) — plain decode"
-            )
-            return
-        }
-        let conv = DFlashGroupedConv(
-            hiddenSize: hidden,
-            taps: max(config.convKernelSize, 1),
-            groupSize: group
-        )
-        var copiedKernel = false
-        if let kernel = Self.firstTensor(weights, containing: "kernel_projection"),
-           kernel.shape == conv.kernelProjection.weight.shape
-        {
-            conv.kernelProjection.weight = kernel
-            copiedKernel = true
-        }
-        if let base = Self.firstTensor(weights, containing: "base_kernel"),
-           base.shape == conv.baseKernel.shape
-        {
-            conv.baseKernel = base
-            copiedKernel = true
-        }
-        guard copiedKernel else {
-            NovaMLXLog.info(
-                "[DFlash] Grouped conv kernel shape does not match \(dir.lastPathComponent) — plain decode"
-            )
-            return
-        }
-        installSpeculativePath(selector: selector, conv: conv)
-        NovaMLXLog.info(
-            "[DFlash] Loaded path selector and local conv from \(dir.lastPathComponent)"
-        )
-    }
-
-    /// Greedy draft ids from the selector. Empty when weights were not installed.
-    public func proposeGreedy(
-        anchorLogits: MLXArray, hidden: MLXArray, cap: Int
-    ) -> [Int] {
-        guard let selector = pathSelector, cap > 0 else { return [] }
-        let convHidden = convolved(hidden)
-        let picks = selector.propose(anchorLogits: anchorLogits, hidden: convHidden, cap: cap)
-        eval(picks)
-        return Array(picks.asArray(Int.self).prefix(cap))
-    }
-
-    private func convolved(_ hidden: MLXArray) -> MLXArray {
-        guard let conv = localConv, hidden.ndim >= 2 else { return hidden }
-        let width = hidden.dim(-1)
-        if width == conv.hiddenSize {
-            return conv.prepare(hidden).0
-        }
-        if width > conv.hiddenSize {
-            return conv.prepare(hidden[0..., 0..., ..<conv.hiddenSize]).0
-        }
-        return hidden
-    }
-
-    private static func readSafetensors(at dir: URL) -> [String: MLXArray] {
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else {
-            return [:]
-        }
-        var weights: [String: MLXArray] = [:]
-        for file in files where file.hasSuffix(".safetensors") {
-            let url = dir.appendingPathComponent(file)
-            if let loaded = try? MLX.loadArrays(url: url) {
-                weights.merge(loaded) { _, new in new }
-            }
-        }
-        return weights
-    }
-
-    private static func firstTensor(_ weights: [String: MLXArray], containing needle: String) -> MLXArray? {
-        let needle = needle.lowercased()
-        for (key, value) in weights where key.lowercased().contains(needle) {
-            return value
-        }
-        return nil
-    }
-
-    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let batch = inputs.ndim >= 2 ? inputs.dim(0) : 1
-        let sequence = inputs.ndim >= 2 ? inputs.dim(1) : inputs.dim(0)
-        let vocab = max(config.vocabSize, 1)
-        return MLXArray.zeros([batch, sequence, vocab])
-    }
-
-    public func prepare(
-        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
-    ) throws -> PrepareResult {
-        .tokens(input.text)
-    }
-
-    public func makeCache() -> [DSparkCtxCache] {
-        kvHeads.map { _ in DSparkCtxCache() }
-    }
-
-    public func appendContext(_ hidden: MLXArray, cache: [DSparkCtxCache]) {
-        let rows = hidden.ndim >= 2 ? hidden.dim(1) : 0
-        for ctx in cache {
-            ctx.offset += rows
-        }
     }
 }
 
@@ -301,7 +159,7 @@ func dflashDrafterReady(_ model: Any, draftModelId: String) -> DFlashDraftModel?
         }
         return drafter
     }
-    guard isDFlashDraftConfig(at: dir) else { return nil }
+    guard NovaMLXEngine.isDFlashDraftConfig(at: dir) else { return nil }
     return DFlashDiskDrafters.shared.drafter(at: dir)
 }
 
@@ -335,10 +193,80 @@ private final class DFlashDiskDrafters: @unchecked Sendable {
     }
 }
 
+/// True when a DFlash checkpoint is on disk with weights the drafter can read.
+/// Config alone is not enough: a failed download must not look loaded.
+public func dflashCompanionReady(modelId: String) -> Bool {
+    let dir = NovaMLXPaths.directory(forModelId: modelId)
+    guard NovaMLXEngine.isDFlashDraftConfig(at: dir) else { return false }
+    guard let data = try? Data(contentsOf: dir.appendingPathComponent("config.json")),
+          (try? DFlashConfig.fromJSON(data)) != nil
+    else { return false }
+    if let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path),
+       files.contains(where: { $0.hasSuffix(".safetensors") })
+    {
+        return true
+    }
+    return FileManager.default.fileExists(
+        atPath: dir.appendingPathComponent("model.safetensors.index.json").path)
+}
+
+/// Start a DFlash2 iterator when the checkpoint is a real drafter and the
+/// request is greedy. Temperature above 0 stays on the ordinary sampler:
+/// block accept is argmax. Returns nil when this request should not speculate.
+func openDFlashIterator(
+    model: any LanguageModel,
+    draftModelId: String,
+    input: LMInput,
+    cache: [KVCache]?,
+    parameters: GenerateParameters,
+    processor: LogitProcessor?,
+    promptTokenCount: Int,
+    logTag: String
+) throws -> DFlashTokenIterator? {
+    let drafter = dflashDrafterReady(model, draftModelId: draftModelId)
+    let canTap = model is any DFlashTarget || DFlashHooks.make(model: model) != nil
+    let promptOK = promptTokenCount <= ResourceLimits.dflashMaxPromptTokens
+    let greedy = parameters.temperature <= 0
+    guard greedy, promptOK, canTap, let drafter, drafter.hasSpeculativeWeights else {
+        if !greedy {
+            NovaMLXLog.info(
+                "[\(logTag)] DFlash2 '\(draftModelId)' idle — temperature \(parameters.temperature) > 0; one-token decode"
+            )
+        } else if drafter?.hasSpeculativeWeights != true {
+            NovaMLXLog.info(
+                "[\(logTag)] DFlash2 '\(draftModelId)' has no path-selector weights — plain decode"
+            )
+        } else if !canTap {
+            NovaMLXLog.info(
+                "[\(logTag)] DFlash2 '\(draftModelId)' target has no hidden-state taps — plain decode"
+            )
+        } else {
+            NovaMLXLog.info(
+                "[\(logTag)] Skipping DFlash2 — prompt \(promptTokenCount) > \(ResourceLimits.dflashMaxPromptTokens) tok"
+            )
+        }
+        return nil
+    }
+    let iterator = try DFlashTokenIterator(
+        input: input,
+        model: model,
+        drafter: drafter,
+        mainCache: cache,
+        parameters: parameters,
+        processor: processor
+    )
+    let kind = drafter.hasBlockWeights ? "block" : "selector"
+    NovaMLXLog.info(
+        "[\(logTag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) weights=\(kind)"
+    )
+    return iterator
+}
+
 /// DFlash2 iterator. Refuses to start unless the path selector and local conv
 /// are installed, so a weightless stub cannot log a boost and then run plain decode.
 public struct DFlashTokenIterator: TokenIteratorProtocol {
-    let target: any DFlashTarget
+    let target: (any DFlashTarget)?
+    let hooks: DFlashHooks?
     let drafter: DFlashDraftModel
     var mainCache: [KVCache]
     var processor: LogitProcessor?
@@ -356,6 +284,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
     private var lastLogits: MLXArray
     private var lastHidden: MLXArray
     private var capPolicy: DFlashCapPolicy
+    private var draftCache: [DFlashCtxCache]
+    private var cacheBackup: [KVCache]
     private let tap: [Int]
 
     public init(
@@ -371,7 +301,14 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
                 "DFlash2 path selector and local conv are not loaded; refusing to claim a boost for plain decode"
             )
         }
+        if drafter.hasBlockWeights {
+            drafter.bind(
+                embed: target.dflashEmbedding,
+                lmHead: { target.dflashLmHead($0) }
+            )
+        }
         self.target = target
+        self.hooks = nil
         self.drafter = drafter
         self.mainCache = try mainCache ?? target.newCache(parameters: parameters)
         self.processor = processor ?? parameters.processor()
@@ -379,11 +316,65 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         self.tap = drafter.config.targetLayerIds.isEmpty ? [0] : drafter.config.targetLayerIds
         let maxCap = Swift.max(1, drafter.config.blockSize - 1)
         self.capPolicy = DFlashCapPolicy(maxCap: maxCap)
+        self.draftCache = []
+        self.cacheBackup = []
         self.lastLogits = MLXArray.zeros([1, 1])
         self.lastHidden = MLXArray.zeros([1, 1, 1])
         let start = Date()
         try prepare(input: input)
         self.promptPrefillTime = Date().timeIntervalSince(start)
+    }
+
+    /// Same loop as the `DFlashTarget` init. Uses installed `novamlxDFlash*` taps when
+    /// the backbone (upstream Qwen3.5, or the VLM) does not conform to `DFlashTarget`.
+    public init(
+        input: LMInput,
+        model: any LanguageModel,
+        drafter: DFlashDraftModel,
+        mainCache: [KVCache]? = nil,
+        parameters: GenerateParameters,
+        processor: LogitProcessor? = nil
+    ) throws {
+        if let target = model as? any DFlashTarget {
+            try self.init(
+                input: input, target: target, drafter: drafter, mainCache: mainCache,
+                parameters: parameters, processor: processor)
+            return
+        }
+        guard let hooks = DFlashHooks.make(model: model) else {
+            throw DFlashError.invalidConfig("target has no DFlash hidden-state taps")
+        }
+        guard drafter.hasSpeculativeWeights else {
+            throw DFlashError.invalidConfig(
+                "DFlash2 path selector and local conv are not loaded; refusing to claim a boost for plain decode"
+            )
+        }
+        if drafter.hasBlockWeights {
+            drafter.bind(embed: hooks.embedding, lmHead: hooks.lmHead)
+        }
+        self.target = nil
+        self.hooks = hooks
+        self.drafter = drafter
+        self.mainCache = try mainCache ?? model.newCache(parameters: parameters)
+        self.processor = processor ?? parameters.processor()
+        self.maxTokens = parameters.maxTokens
+        self.tap = drafter.config.targetLayerIds.isEmpty ? [0] : drafter.config.targetLayerIds
+        let maxCap = Swift.max(1, drafter.config.blockSize - 1)
+        self.capPolicy = DFlashCapPolicy(maxCap: maxCap)
+        self.draftCache = []
+        self.cacheBackup = []
+        self.lastLogits = MLXArray.zeros([1, 1])
+        self.lastHidden = MLXArray.zeros([1, 1, 1])
+        let start = Date()
+        try prepare(input: input)
+        self.promptPrefillTime = Date().timeIntervalSince(start)
+    }
+
+    private func verify(_ tokens: MLXArray) -> (logits: MLXArray, fused: MLXArray) {
+        if let target {
+            return target.dflashVerify(tokens, cache: mainCache, tapLayerIds: tap)
+        }
+        return hooks!.verify(tokens, mainCache, tap)
     }
 
     mutating func prepare(input: LMInput) throws {
@@ -399,7 +390,7 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         while start < total {
             let end = Swift.min(start + chunk, total)
             let slice = prompt[0..., start ..< end]
-            let step = target.dflashVerify(slice, cache: mainCache, tapLayerIds: tap)
+            let step = verify(slice)
             eval(step.logits, step.fused)
             logits = step.logits
             fused = step.fused
@@ -427,24 +418,64 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         }
 
         let tDraft = Date()
-        let drafted = drafter.proposeGreedy(
-            anchorLogits: lastLogits, hidden: lastHidden, cap: thisCap)
-        let draftMs = Date().timeIntervalSince(tDraft) * 1000
+        let anchor = MLXArray([Int32(pending)]).reshaped(1, 1)
+        let drafted: [Int]
+        let draftMs: Double
+        let step: (logits: MLXArray, fused: MLXArray)
+        let verifyMs: Double
+        if drafter.hasBlockWeights {
+            if draftCache.isEmpty { draftCache = drafter.makeCache() }
+            let raw = drafter.draftBlock(
+                anchorId: pending, targetHidden: lastHidden, cache: draftCache, cap: thisCap)
+            let verifyIds = concatenated([anchor, raw.reshaped(1, -1).asType(.int32)], axis: 1)
+            draftMs = Date().timeIntervalSince(tDraft) * 1000
+            if hooks != nil { cacheBackup = mainCache.map { $0.copy() } }
+            let tVerify = Date()
+            let verified = verify(verifyIds)
+            eval(verified.logits, verified.fused, raw)
+            drafted = Array(raw.asArray(Int.self).prefix(thisCap))
+            step = verified
+            verifyMs = Date().timeIntervalSince(tVerify) * 1000
+        } else {
+            let ids = drafter.proposeGreedy(
+                anchorLogits: lastLogits, hidden: lastHidden, cap: thisCap)
+            draftMs = Date().timeIntervalSince(tDraft) * 1000
+            if ids.isEmpty {
+                denseStep()
+                capPolicy.observe(accepted: 0, capUsed: 0)
+                return
+            }
+            let verifyIds = concatenated(
+                [anchor, MLXArray(ids.map { Int32($0) }).reshaped(1, -1)], axis: 1)
+            if hooks != nil { cacheBackup = mainCache.map { $0.copy() } }
+            let tVerify = Date()
+            let verified = verify(verifyIds)
+            eval(verified.logits, verified.fused)
+            drafted = ids
+            step = verified
+            verifyMs = Date().timeIntervalSince(tVerify) * 1000
+        }
         if drafted.isEmpty {
+            undoVerify(specWidth: 1, nRejected: 1)
             denseStep()
             capPolicy.observe(accepted: 0, capUsed: 0)
             return
         }
+        finishRound(drafted: drafted, step: step, draftMs: draftMs, verifyMs: verifyMs)
+    }
 
-        let tVerify = Date()
-        let anchor = MLXArray([Int32(pending)]).reshaped(1, 1)
-        let verifyIds = concatenated([anchor, MLXArray(drafted.map { Int32($0) }).reshaped(1, -1)], axis: 1)
-        let step = target.dflashVerify(verifyIds, cache: mainCache, tapLayerIds: tap)
-        eval(step.logits, step.fused)
-        let argmax = argmaxRows(step.logits)
-        let verifyMs = Date().timeIntervalSince(tVerify) * 1000
-
+    /// Accept a verified block. The `DFlashTarget` path uses `dflashRollback`.
+    /// Hook taps have no rollback, so a partial accept restores the pre-verify
+    /// snapshot and replays only the kept prefix. The bonus token stays out of
+    /// the cache. A length mismatch restores and takes one target token.
+    private mutating func finishRound(
+        drafted: [Int],
+        step: (logits: MLXArray, fused: MLXArray),
+        draftMs: Double,
+        verifyMs: Double
+    ) {
         let tAccept = Date()
+        let argmax = argmaxRows(step.logits)
         let result = DFlashAccept.greedy(drafted: drafted, targetArgmax: argmax)
         let acceptMs = Date().timeIntervalSince(tAccept) * 1000
         let decision = DFlashBlockCheck.decide(
@@ -454,20 +485,34 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
             accepted: result.accepted
         )
         let tRoll = Date()
-        target.dflashRollback(
-            cache: mainCache, nRejected: decision.nRejected, specWidth: decision.specWidth)
+        if decision.acceptNormally, hooks != nil, decision.nRejected > 0 {
+            // The verify already wrote rejected drafts into the cache. Restore
+            // the snapshot and replay only the kept prefix so the bonus stays out.
+            restoreMainCache()
+            let kept = [pending] + Array(drafted.prefix(result.accepted))
+            let replayed = replay(kept)
+            rememberBonus(from: replayed, accepted: result.accepted)
+        } else if decision.acceptNormally {
+            if let target, decision.nRejected > 0 {
+                target.dflashRollback(
+                    cache: mainCache, nRejected: decision.nRejected, specWidth: decision.specWidth)
+            }
+            rememberBonus(from: step, accepted: result.accepted)
+        } else if hooks != nil {
+            restoreMainCache()
+        } else if let target {
+            target.dflashRollback(
+                cache: mainCache, nRejected: decision.nRejected, specWidth: decision.specWidth)
+            let anchorLeft = decision.specWidth - decision.nRejected
+            if anchorLeft > 0 {
+                target.dflashRollback(cache: mainCache, nRejected: anchorLeft, specWidth: anchorLeft)
+            }
+        }
         let rollbackMs = Date().timeIntervalSince(tRoll) * 1000
         let acceptedCount = decision.acceptNormally ? result.accepted : 0
         capPolicy.observe(accepted: acceptedCount, capUsed: drafted.count)
         totalProposed += drafted.count
         if decision.acceptNormally, !result.committed.isEmpty {
-            // The bonus distribution is the first mismatch row, not the tail of a
-            // window that still contains rejected drafts.
-            let bonus = Swift.min(result.accepted, step.logits.dim(1) - 1)
-            lastLogits = step.logits[0..., bonus ..< (bonus + 1), 0...]
-            if step.fused.ndim >= 2, step.fused.dim(1) > bonus {
-                lastHidden = step.fused[0..., bonus ..< (bonus + 1), 0...]
-            }
             totalAccepted += result.accepted
             pendingTokens.append(contentsOf: result.committed)
             if let last = result.committed.last {
@@ -485,13 +530,6 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
             )
             return
         }
-        // Lengths disagreed, or there was nothing to commit. The check's rollback
-        // keeps the anchor in the cache; undo that too, then take one target token.
-        // Do not retry the drafted block and do not end the reply.
-        let anchorLeft = decision.specWidth - decision.nRejected
-        if anchorLeft > 0 {
-            target.dflashRollback(cache: mainCache, nRejected: anchorLeft, specWidth: anchorLeft)
-        }
         if !decision.acceptNormally {
             NovaMLXLog.info("[DFlash] Block length mismatch — dropped the draft and took one target token")
             onSpeculationRound?(
@@ -505,9 +543,47 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         denseStep()
     }
 
+    private mutating func rememberBonus(
+        from step: (logits: MLXArray, fused: MLXArray), accepted: Int
+    ) {
+        let bonus = Swift.min(accepted, step.logits.dim(1) - 1)
+        lastLogits = step.logits[0..., bonus ..< (bonus + 1), 0...]
+        if step.fused.ndim >= 2, step.fused.dim(1) > bonus {
+            lastHidden = step.fused[0..., bonus ..< (bonus + 1), 0...]
+        }
+    }
+
+    /// Drop rejected drafts. Target models use the installed rollback, which
+    /// also rewinds GDN spec capture. Hook taps restore the snapshot instead.
+    private mutating func undoVerify(specWidth: Int, nRejected: Int) {
+        if hooks != nil {
+            restoreMainCache()
+            return
+        }
+        target?.dflashRollback(cache: mainCache, nRejected: nRejected, specWidth: specWidth)
+    }
+
+    private mutating func restoreMainCache() {
+        guard cacheBackup.count == mainCache.count else { return }
+        for (live, saved) in zip(mainCache, cacheBackup) {
+            live.state = saved.state
+            if let liveBase = live as? BaseKVCache, let savedBase = saved as? BaseKVCache {
+                liveBase.offset = savedBase.offset
+            }
+        }
+    }
+
+    private mutating func replay(_ tokens: [Int]) -> (logits: MLXArray, fused: MLXArray) {
+        guard !tokens.isEmpty else { return (lastLogits, lastHidden) }
+        let ids = MLXArray(tokens.map { Int32($0) }, [1, tokens.count])
+        let step = verify(ids)
+        eval(step.logits, step.fused)
+        return step
+    }
+
     private mutating func denseStep() {
         let verifyIds = MLXArray([Int32(pending)], [1, 1])
-        let step = target.dflashVerify(verifyIds, cache: mainCache, tapLayerIds: tap)
+        let step = verify(verifyIds)
         var row = step.logits[0..., -1, 0...]
         row = processor?.process(logits: row) ?? row
         let token = argMax(row, axis: -1).item(Int.self)
@@ -714,4 +790,12 @@ private func jsonInt(_ value: Any?) -> Int? {
 private func jsonInts(_ value: Any?) -> [Int] {
     guard let array = value as? [Any] else { return [] }
     return array.compactMap { jsonInt($0) }
+}
+
+private func jsonFloat(_ value: Any?) -> Float? {
+    if let value = value as? Float { return value }
+    if let value = value as? Double { return Float(value) }
+    if let value = value as? Int { return Float(value) }
+    if let value = value as? NSNumber { return value.floatValue }
+    return nil
 }
