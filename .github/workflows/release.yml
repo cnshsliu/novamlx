@@ -429,6 +429,120 @@ jobs:
           replace_count(control, guide_old, guide_new, 2)
           replace_count(pipeline, guide_old, guide_new, 1)
           print("patched zimage random keys and guidance scale")
+
+          # mlx-swift-lm SwitchLinear stores weight/bias/scales/biases as
+          # internal @ModuleInfo properties, and QuantizedSwitchLinear has no
+          # raw-weight initializer. NovaMLX TIE writes those slots in place.
+          # Linear/QuantizedLinear keep the arrays as `let`, which TIE replaces.
+          layers = "mlx-swift-lm/Libraries/MLXLMCommon/SwitchLayers.swift"
+          replace_count(
+              layers,
+              "open class SwitchLinear: Module, Quantizable {\n"
+              '    @ModuleInfo(key: "weight") var weight: MLXArray\n'
+              '    @ModuleInfo(key: "bias") var bias: MLXArray?\n',
+              "open class SwitchLinear: Module, Quantizable {\n"
+              '    @ModuleInfo(key: "weight") public var weight: MLXArray\n'
+              '    @ModuleInfo(key: "bias") public var bias: MLXArray?\n',
+              1,
+          )
+          replace_count(
+              layers,
+              "    let outputDims: Int\n"
+              "    let numExperts: Int\n"
+              "\n"
+              "    public init(inputDims: Int, outputDims: Int, numExperts: Int, bias: Bool = true) {\n",
+              "    let outputDims: Int\n"
+              "    let numExperts: Int\n"
+              "    public var tieLocalIndices: MLXArray?\n"
+              "\n"
+              "    public init(inputDims: Int, outputDims: Int, numExperts: Int, bias: Bool = true) {\n",
+              1,
+          )
+          replace_count(
+              layers,
+              "        self._weight.wrappedValue = weight\n"
+              "        self._bias.wrappedValue = bias\n"
+              "    }\n",
+              "        self._weight.wrappedValue = weight\n"
+              "        self._bias.wrappedValue = bias\n"
+              "        super.init()\n"
+              "    }\n",
+              1,
+          )
+          replace_count(
+              layers,
+              "open class QuantizedSwitchLinear: SwitchLinear, Quantized {\n"
+              '    @ModuleInfo(key: "scales") var scales: MLXArray\n'
+              '    @ModuleInfo(key: "biases") var biases: MLXArray?\n',
+              "open class QuantizedSwitchLinear: SwitchLinear, Quantized {\n"
+              '    @ModuleInfo(key: "scales") public var scales: MLXArray\n'
+              '    @ModuleInfo(key: "biases") public var biases: MLXArray?\n',
+              1,
+          )
+          replace_count(
+              layers,
+              "    public let mode: QuantizationMode\n"
+              "\n"
+              "    public init(\n"
+              "        _ other: SwitchLinear, groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine\n"
+              "    ) {\n",
+              "    public let mode: QuantizationMode\n"
+              "\n"
+              "    public init(\n"
+              "        inputDims: Int, outputDims: Int, numExperts: Int,\n"
+              "        weight: MLXArray, scales: MLXArray, biases: MLXArray?,\n"
+              "        groupSize: Int, bits: Int, mode: QuantizationMode\n"
+              "    ) {\n"
+              "        self.groupSize = groupSize\n"
+              "        self.bits = bits\n"
+              "        self.mode = mode\n"
+              "        self._scales.wrappedValue = scales\n"
+              "        self._biases.wrappedValue = biases\n"
+              "        super.init(\n"
+              "            inputDims: inputDims, outputDims: outputDims, numExperts: numExperts,\n"
+              "            weight: weight, bias: nil)\n"
+              "    }\n"
+              "\n"
+              "    public init(\n"
+              "        _ other: SwitchLinear, groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode = .affine\n"
+              "    ) {\n",
+              1,
+          )
+          linear = "vendors/mlx-swift/Source/MLXNN/Linear.swift"
+          replace_count(
+              linear,
+              "open class Linear: Module, UnaryLayer, Quantizable {\n"
+              "\n"
+              "    public let weight: MLXArray\n"
+              "    public let bias: MLXArray?\n",
+              "open class Linear: Module, UnaryLayer, Quantizable {\n"
+              "\n"
+              "    public var weight: MLXArray\n"
+              "    public var bias: MLXArray?\n",
+              1,
+          )
+          quantized = "vendors/mlx-swift/Source/MLXNN/Quantized.swift"
+          replace_count(
+              quantized,
+              "open class QuantizedLinear: Linear, Quantized {\n"
+              "\n"
+              "    public let groupSize: Int\n"
+              "    public let bits: Int\n"
+              "\n"
+              "    public let mode: QuantizationMode\n"
+              "    public let scales: MLXArray\n"
+              "    public let biases: MLXArray?\n",
+              "open class QuantizedLinear: Linear, Quantized {\n"
+              "\n"
+              "    public let groupSize: Int\n"
+              "    public let bits: Int\n"
+              "\n"
+              "    public let mode: QuantizationMode\n"
+              "    public var scales: MLXArray\n"
+              "    public var biases: MLXArray?\n",
+              1,
+          )
+          print("patched switch linear visibility and linear weight assignment")
           PY
 
       - name: Patch upstream StrictConcurrency issues
