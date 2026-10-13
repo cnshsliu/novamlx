@@ -2,10 +2,11 @@ import Foundation
 
 /// Where source API keys and the peer connection key live.
 ///
-/// The Mac app and the CLI share `FileSecretStore` under
-/// `~/.config/tknet-peer/secrets` so one peer identity works in both.
-/// Keychain is a later hardening step — do not split the stores until a
-/// migration exists. Implementations MUST NOT log values.
+/// The CLI uses `FileSecretStore` under `~/.config/tknet-peer/secrets`.
+/// The Mac app uses `KeychainSecretStore` as its primary and
+/// `MirroringSecretStore` to keep that same file in sync, so `tknet-peer
+/// serve` still reads the connection key and member keys. Implementations
+/// MUST NOT log values.
 public protocol SecretStore: Sendable {
     func save(_ secret: String, for ref: String) throws
     func load(_ ref: String) throws -> String?
@@ -43,5 +44,24 @@ public struct FileSecretStore: SecretStore {
 
     public func delete(_ ref: String) {
         var all = readAll(); all[ref] = nil; writeAll(all)
+    }
+
+    /// Every ref in `secrets.json`. Callers must not log the values.
+    /// Missing or unreadable files are an empty map so a first launch can migrate.
+    public func snapshot() -> [String: String] { readAll() }
+
+    /// Stable id of the current file bytes. `"missing"` when the file is absent.
+    /// Used to notice CLI writes that happened while the app was quit.
+    func contentFingerprint() -> String {
+        guard FileManager.default.fileExists(atPath: fileURL.path),
+              let data = try? Data(contentsOf: fileURL) else {
+            return "missing"
+        }
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in data {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return "fnv64:\(String(hash, radix: 16))"
     }
 }

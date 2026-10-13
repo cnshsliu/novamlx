@@ -104,7 +104,7 @@ struct TunnelStatusView: View {
                     }
                 }
             } else {
-                Text("Register once. The connection key stays on this Mac and is shared with `tknet-peer`.")
+                Text("Register once. The connection key is kept in the Keychain and mirrored for `tknet-peer`.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 TextField("Server", text: $serverText)

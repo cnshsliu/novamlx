@@ -25,9 +25,10 @@ final class TunnelServerBox: @unchecked Sendable {
 
 /// Menu-bar owner of the local gateway and the tknet tunnel.
 ///
-/// Secrets stay in `FileSecretStore` next to the CLI (`~/.config/tknet-peer/secrets`)
-/// so both tools share one peer identity. Keychain is a later hardening step.
-/// Quit stops the gateway and the tunnel and releases the process lock.
+/// Secrets are read from the Keychain (`ai.tknet.peer`). The same values are
+/// mirrored to `~/.config/tknet-peer/secrets` so `tknet-peer serve` keeps
+/// working. A file the CLI wrote while this app was quit is copied in on
+/// launch. Quit stops the gateway and the tunnel and releases the process lock.
 /// Stop stops only the tunnel — the port stays up, and `tunnelWanted` stays
 /// false so the next launch does not dial. Retry exhaustion does not clear
 /// `tunnelWanted`.
@@ -41,9 +42,19 @@ final class PeerAppState: ObservableObject {
     @Published private(set) var lockError: String?
     @Published private(set) var tunnelWanted: Bool
     @Published private(set) var isBusy = false
+    @Published private(set) var isAccountBusy = false
+    @Published private(set) var isEarningsBusy = false
+    @Published private(set) var earnings: PeerEarningsSummary?
+    @Published private(set) var earningsError: String?
+    /// Signed-in tknet account. Nil means signed out. The session stays in the secret store.
+    @Published private(set) var accountEmail: String?
+    @Published private(set) var accountName: String?
+    @Published private(set) var accountError: String?
+    /// Peer id last claimed on the active server by the signed-in account.
+    @Published private(set) var claimedPeerId: String?
 
     private let configURL: URL
-    private let secrets: FileSecretStore
+    private let secrets: any SecretStore
     private let defaults: UserDefaults
     private let serverBox: TunnelServerBox
     private var service: PeerService?
@@ -61,7 +72,8 @@ final class PeerAppState: ObservableObject {
             .appendingPathComponent(".config/tknet-peer", isDirectory: true)
         let configURL = directory.appendingPathComponent("peer.json")
         self.configURL = configURL
-        self.secrets = FileSecretStore(directory: directory.appendingPathComponent("secrets"))
+        let secretsResult = Self.makeSecrets(in: directory)
+        self.secrets = secretsResult.store
         self.defaults = defaults
         var loaded = (try? ConfigStore.load(from: configURL)) ?? .defaultConfig()
         if loaded.adoptRegistrationsIntoMemory() {
@@ -71,6 +83,12 @@ final class PeerAppState: ObservableObject {
         self.config = loaded
         self.tunnelWanted = TunnelWantedPreference.read(from: defaults)
         self.serverBox = TunnelServerBox(loaded.serverURL)
+        self.lastError = secretsResult.migrationError
+    }
+
+    /// Email last used to sign in on the active server. Empty when none.
+    var savedLoginEmail: String {
+        readSecret(accountRef("email")) ?? ""
     }
 
     var activeREST: String {
@@ -80,7 +98,7 @@ final class PeerAppState: ObservableObject {
     /// Connection key for the active server. Nil when this peer is not registered.
     var connectionKey: String? {
         guard config.peerId != nil else { return nil }
-        let value = secrets.load(tokenKey(for: config.serverURL)) ?? secrets.load("peer/token") ?? ""
+        let value = readSecret(tokenKey(for: config.serverURL)) ?? readSecret("peer/token") ?? ""
         return value.isEmpty ? nil : value
     }
 
@@ -174,6 +192,7 @@ final class PeerAppState: ObservableObject {
         guard !isShutdown else { return }
         running = true
         gatewayPort = service.gatewayListenPort
+        Task { await self.refreshAccount() }
         await dialIfWanted()
     }
 
@@ -253,7 +272,7 @@ final class PeerAppState: ObservableObject {
             var config = self.config
             let tunnel = PeerConfig.tunnelURL(fromREST: server)
             let previousId = config.registrations[PeerConfig.tunnelKey(tunnel)]
-            let stored = previousId == nil ? "" : (secrets.load(tokenKey(for: tunnel)) ?? "")
+            let stored = previousId == nil ? "" : (readSecret(tokenKey(for: tunnel)) ?? "")
             let (peerId, token) = try await rest.register(
                 server: server,
                 peerName: trimmedName,
@@ -266,8 +285,10 @@ final class PeerAppState: ObservableObject {
             if let restBase = PeerConfig.normalizedREST(server) {
                 config.rememberPeerName(restBase, name: trimmedName)
             }
-            secrets.save(token, for: tokenKey(for: tunnel))
-            secrets.save(token, for: "peer/token")
+            try secrets.save(token, for: tokenKey(for: tunnel))
+            try secrets.save(token, for: "peer/token")
+            earnings = nil
+            earningsError = nil
             serverBox.update(tunnel)
             guard await persist(config) else { return false }
             if tunnelWanted {
@@ -359,7 +380,155 @@ final class PeerAppState: ObservableObject {
         return await persist(config)
     }
 
+    // MARK: - Account and earnings
+
+    /// Check the stored login. A dead session is dropped. The password is never stored.
+    func refreshAccount() async {
+        guard !isShutdown else { return }
+        guard let server = URL(string: activeREST) else { return }
+        claimedPeerId = readSecret(accountRef("claimed"))
+        guard let session = readSecret(accountRef("session")) else {
+            accountEmail = nil
+            accountName = nil
+            return
+        }
+        do {
+            let account = try await rest.currentUser(server: server, session: session)
+            guard !isShutdown else { return }
+            accountEmail = account.email
+            accountName = account.name
+            try? secrets.save(account.email, for: accountRef("email"))
+            accountError = nil
+        } catch let error as RESTError {
+            if case .badStatus(401, _) = error {
+                try? secrets.delete(accountRef("session"))
+                accountEmail = nil
+                accountName = nil
+            }
+            accountError = Self.userMessage(error)
+        } catch {
+            accountError = Self.userMessage(error)
+        }
+    }
+
+    /// Sign in and keep the session for this server. Returns false on failure.
+    @discardableResult
+    func signIn(email: String, password: String) async -> Bool {
+        guard !isAccountBusy, !isShutdown else { return false }
+        guard let server = URL(string: activeREST) else {
+            accountError = "Invalid server URL (expected http/https)."
+            return false
+        }
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !password.isEmpty else {
+            accountError = "Email and password are required."
+            return false
+        }
+        isAccountBusy = true
+        defer { isAccountBusy = false }
+        do {
+            let login = try await rest.login(server: server, email: trimmed, password: password)
+            guard !isShutdown else { return false }
+            try secrets.save(login.session, for: accountRef("session"))
+            try secrets.save(login.account.email, for: accountRef("email"))
+            accountEmail = login.account.email
+            accountName = login.account.name
+            accountError = nil
+            return true
+        } catch {
+            accountError = Self.userMessage(error)
+            return false
+        }
+    }
+
+    func signOut() async {
+        guard !isAccountBusy else { return }
+        isAccountBusy = true
+        defer { isAccountBusy = false }
+        if let server = URL(string: activeREST), let session = readSecret(accountRef("session")) {
+            try? await rest.logout(server: server, session: session)
+        }
+        try? secrets.delete(accountRef("session"))
+        accountEmail = nil
+        accountName = nil
+        claimedPeerId = nil
+        accountError = nil
+    }
+
+    /// Link this token factory to the signed-in account. The connection key proves possession.
+    @discardableResult
+    func claimTokenFactory() async -> Bool {
+        guard !isAccountBusy, !isShutdown else { return false }
+        guard let server = URL(string: activeREST) else {
+            accountError = "Invalid server URL (expected http/https)."
+            return false
+        }
+        guard accountEmail != nil, let session = readSecret(accountRef("session")) else {
+            accountError = "Sign in before claiming this token factory."
+            return false
+        }
+        guard let peerId = config.peerId, !peerId.isEmpty, let key = connectionKey else {
+            accountError = "Register this token factory before claiming it."
+            return false
+        }
+        isAccountBusy = true
+        defer { isAccountBusy = false }
+        do {
+            _ = try await rest.claimPeer(
+                server: server, session: session, peerId: peerId, connectionKey: key)
+            guard !isShutdown else { return false }
+            try secrets.save(peerId, for: accountRef("claimed"))
+            claimedPeerId = peerId
+            accountError = nil
+            return true
+        } catch {
+            accountError = Self.userMessage(error)
+            return false
+        }
+    }
+
+    /// Supplier money view. No-op until this token factory has a connection key.
+    func fetchEarnings() async {
+        guard !isEarningsBusy, !isShutdown else { return }
+        guard let token = connectionKey, let server = URL(string: activeREST) else { return }
+        isEarningsBusy = true
+        defer { isEarningsBusy = false }
+        do {
+            earnings = try await rest.fetchEarnings(server: server, token: token)
+            guard !isShutdown else { return }
+            earningsError = nil
+        } catch {
+            earningsError = Self.userMessage(error)
+        }
+    }
+
     // MARK: - Internals
+
+    /// Keychain primary, file mirror. If the Keychain refuses the write, keep
+    /// the file store so the gateway and `tknet-peer serve` still share a key.
+    private static func makeSecrets(in directory: URL) -> (store: any SecretStore, migrationError: String?) {
+        let file = FileSecretStore(directory: directory.appendingPathComponent("secrets"))
+        let mirror = MirroringSecretStore(primary: KeychainSecretStore(), file: file)
+        do {
+            try mirror.reconcile()
+            return (mirror, nil)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            return (file, "Keychain unavailable (\(message)). Secrets stay in the shared file store.")
+        }
+    }
+
+    private func readSecret(_ ref: String) -> String? {
+        guard let value = try? secrets.load(ref), !value.isEmpty else { return nil }
+        return value
+    }
+
+    private func accountRef(_ kind: String) -> String {
+        guard let server = URL(string: activeREST) else { return "user/\(kind)/default" }
+        let host = server.host ?? "default"
+        let port = server.port.map { ":\($0)" } ?? ""
+        return "user/\(kind)/\(host)\(port)"
+    }
 
     private func apply(_ status: PeerStatus, from service: PeerService) {
         self.status = status
@@ -432,10 +601,8 @@ final class PeerAppState: ObservableObject {
 
     private func syncActiveToken() {
         guard config.peerId != nil else { return }
-        let perServer = secrets.load(tokenKey(for: config.serverURL)) ?? ""
-        if !perServer.isEmpty {
-            secrets.save(perServer, for: "peer/token")
-        }
+        guard let perServer = readSecret(tokenKey(for: config.serverURL)) else { return }
+        try? secrets.save(perServer, for: "peer/token")
     }
 
     private func tokenKey(for tunnel: URL) -> String {

@@ -124,6 +124,7 @@ extension TknetPeerCLI {
     }
 
     /// Secrets live next to the config file, in a 0700 directory.
+    /// The Mac app mirrors this file into the Keychain. `serve` keeps reading it.
     static func secretsDirectory(for configPath: String) -> URL {
         configURL(configPath).deletingLastPathComponent().appendingPathComponent("secrets")
     }

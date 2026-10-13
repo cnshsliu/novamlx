@@ -18,6 +18,8 @@ final class MockTknetServer: @unchecked Sendable {
     static let registerBody = #"{"peerId":"peer-42","token":"tok-42"}"#
     static let demandBody =
         #"{"entries":[{"demandId":"d1","model":"m","modality":"language","note":null}]}"#
+    static let earningsBody =
+        #"{"availability":{"total_earned":"3.50","available":"2.00","on_hold":"1.50","paid_out":"0.00"},"by_model":[{"model":"coding","requests":4,"tokens":120,"earned":"3.50"}],"recent":[{"request_id":"r1","model":"coding","prompt_tokens":20,"completion_tokens":100,"gross_amount":"3.50","payout_id":null,"created_at":"2026-10-01T00:00:00Z"}]}"#
     static let validToken = "tok-42"
     static let session = "sess-42"
     static let userBody =
@@ -36,6 +38,15 @@ final class MockTknetServer: @unchecked Sendable {
                 status: .created,
                 headers: [.contentType: "application/json"],
                 body: Self.textBody(Self.registerBody))
+        }
+        router.get("/api/peer/earnings") { request, _ -> Response in
+            guard request.headers[.authorization] == "Bearer \(Self.validToken)" else {
+                return Response(status: .unauthorized, body: Self.textBody("{}"))
+            }
+            return Response(
+                status: .ok,
+                headers: [.contentType: "application/json"],
+                body: Self.textBody(Self.earningsBody))
         }
         router.get("/api/peer/demand") { request, _ -> Response in
             guard request.headers[.authorization] == "Bearer \(Self.validToken)" else {
