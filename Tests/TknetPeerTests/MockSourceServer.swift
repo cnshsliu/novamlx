@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+@testable import TknetPeer
 
 /// Real local HTTP server pretending to be an OpenAI-compatible source.
 /// Serves streaming SSE replies (shared by Tasks 5, 7, 12) so the relay does
@@ -12,6 +13,7 @@ final class MockSourceServer: @unchecked Sendable {
     private var _delayNextResponse: TimeInterval = 0
     private var _lastAuthorizationHeader: String?
     private var _lastBodyModel: String?
+    private var _lastPath: String?
     private var serverTask: Task<Void, Never>?
     private var _port = 0
 
@@ -53,6 +55,10 @@ final class MockSourceServer: @unchecked Sendable {
     var lastBodyModel: String? {
         lock.lock(); defer { lock.unlock() }; return _lastBodyModel
     }
+    /// Last request path, such as `/v1/embeddings`.
+    var lastPath: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastPath
+    }
     /// Actual bound port; valid after `start()` returns.
     var port: Int {
         lock.lock(); defer { lock.unlock() }; return _port
@@ -65,19 +71,34 @@ final class MockSourceServer: @unchecked Sendable {
     /// listener is up, so `port` is the real bound port — no guessing.
     func start() async throws {
         let router = Router()
-        router.post("/v1/chat/completions") { [weak self] request, _ -> Response in
-            guard let self else {
-                return Response(status: .internalServerError, body: Self.textBody("server gone"))
+        let paths = [
+            "/v1/chat/completions", "/v1/embeddings",
+            "/v1/images/generations", "/v1/images/edits",
+            "/v1/images/background-removals",
+            "/v1/audio/speech", "/v1/audio/transcriptions",
+            "/v1/decisions",
+        ]
+        for path in paths {
+            router.post(RouterPath(path)) { [weak self] request, _ -> Response in
+                guard let self else {
+                    return Response(status: .internalServerError, body: Self.textBody("server gone"))
+                }
+                let body = try await request.body.collect(upTo: .max)
+                if self.delayNextResponse > 0 {
+                    let delay = self.delayNextResponse
+                    self.delayNextResponse = 0
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                let raw = Data(body.readableBytesView)
+                let contentType = request.headers[.contentType]
+                let model = UpstreamBodyCodec.poolName(body: raw, contentType: contentType)
+                self.record(
+                    authorization: request.headers[.authorization],
+                    model: model,
+                    noAutoload: request.headers[values: .init("X-No-Autoload")!].first,
+                    path: request.uri.path)
+                return self.respond()
             }
-            let body = try await request.body.collect(upTo: .max)
-            if self.delayNextResponse > 0 {
-                let delay = self.delayNextResponse
-                self.delayNextResponse = 0
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            }
-            let json = (try? JSONSerialization.jsonObject(with: Data(body.readableBytesView))) as? [String: Any]
-            self.record(authorization: request.headers[.authorization], model: json?["model"] as? String, noAutoload: request.headers[values: .init("X-No-Autoload")!].first)
-            return self.respond()
         }
 
         let port = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
@@ -127,11 +148,12 @@ final class MockSourceServer: @unchecked Sendable {
         }
     }
 
-    private func record(authorization: String?, model: String?, noAutoload: String?) {
+    private func record(authorization: String?, model: String?, noAutoload: String?, path: String) {
         lock.lock(); defer { lock.unlock() }
         _lastAuthorizationHeader = authorization
         _lastBodyModel = model
         _lastNoAutoloadHeader = noAutoload
+        _lastPath = path
         _hitCount += 1
     }
 

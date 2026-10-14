@@ -200,7 +200,7 @@ public final class PeerService: @unchecked Sendable {
             return state.client
         }
         client?.updateRelay(newConfig)
-        try? await client?.updateCapabilities(newConfig.capabilities)
+        try? await client?.updateCapabilities(newConfig.wireCapabilities)
         onConfigChange?(newConfig)
         publish()
     }
@@ -277,7 +277,7 @@ public final class PeerService: @unchecked Sendable {
                 totalCompletionTokens: state.aggregates.totalCompletionTokens,
                 lastError: state.aggregates.lastError,
                 demand: state.aggregates.demand,
-                capabilities: state.config.activeCapabilities,
+                capabilities: state.config.wireCapabilities,
                 gatewayListening: state.aggregates.gatewayListening,
                 gatewayPort: state.aggregates.gatewayPort)
         }

@@ -111,8 +111,15 @@ public final class Relay: Sendable {
             return
         }
 
+        let gatewayPath = request.effectivePath
+        let interface = pool.api ?? capability.api
+        guard let upstreamPath = SupplyAPI.upstreamSuffix(gatewayPath: gatewayPath) else {
+            fail("invalid path \(gatewayPath)", upstreamStatus: 400)
+            return
+        }
         let outcome = await forwarder.forward(
-            poolId: pool.id, body: request.body, timeoutSeconds: config.requestTimeoutSeconds)
+            poolId: pool.id, body: request.body, timeoutSeconds: config.requestTimeoutSeconds,
+            upstreamPath: upstreamPath, interface: interface)
         switch outcome {
         case .cancelled:
             emit(.responseEnd(reqId: request.reqId, result: RequestResult(
@@ -122,6 +129,8 @@ public final class Relay: Sendable {
             fail("no pool \(capability.sourceId) for model \(request.model)")
         case .poolDisabled, .noHealthyMembers:
             fail("no healthy members for model \(request.model)")
+        case .pathNotAllowed(let path):
+            fail("path \(path) not allowed for model \(request.model)", upstreamStatus: 400)
         case .allMembersFailed(let message, let status, let timedOut):
             if timedOut {
                 emit(.responseEnd(reqId: request.reqId, result: RequestResult(
