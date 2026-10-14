@@ -8,7 +8,7 @@ import AppKit
 enum MenuBarIcon {
     private static let canvas = NSSize(width: 18, height: 18)
 
-    static func image(for status: TunnelStatus?) -> NSImage {
+    static func image(for status: TunnelStatus?, trafficPhase: Int? = nil) -> NSImage {
         if case .upgradeRequired = status {
             let symbol = NSImage(
                 systemSymbolName: "exclamationmark.triangle",
@@ -18,14 +18,14 @@ enum MenuBarIcon {
             return symbol ?? NSImage()
         }
         let image = NSImage(size: canvas, flipped: false) { rect in
-            draw(in: rect, status: status)
+            draw(in: rect, status: status, trafficPhase: trafficPhase)
             return true
         }
         image.isTemplate = true
         return image
     }
 
-    private static func draw(in rect: NSRect, status: TunnelStatus?) {
+    private static func draw(in rect: NSRect, status: TunnelStatus?, trafficPhase: Int?) {
         var beamAlpha: CGFloat = 1
         var arcAlpha: CGFloat = 1
         var beamDashed = false
@@ -55,7 +55,13 @@ enum MenuBarIcon {
         let left = NSPoint(x: 2.7, y: mid.y)
         let right = NSPoint(x: rect.maxX - 2.7, y: mid.y)
 
-        NSColor.black.withAlphaComponent(arcAlpha).setStroke()
+        // While tokens flow the portal rings breathe with the traffic rhythm.
+        var pulse: CGFloat = 1
+        if let phase = trafficPhase {
+            pulse = 0.62 + 0.38 * sin(CGFloat(phase) / 8 * .pi * 2)
+        }
+
+        NSColor.black.withAlphaComponent(arcAlpha * pulse).setStroke()
         for (startAngle, endAngle) in [(38.0, 142.0), (218.0, 322.0)] {
             let arc = NSBezierPath()
             arc.appendArc(withCenter: mid, radius: 5.1, startAngle: startAngle, endAngle: endAngle)
@@ -89,6 +95,18 @@ enum MenuBarIcon {
             } else {
                 node.lineWidth = 1.25
                 node.stroke()
+            }
+        }
+
+        // Packets riding the beam while tokens flow.
+        if drawBeam, let phase = trafficPhase {
+            NSColor.black.setFill()
+            let origin = left.x + nodeRadius + 0.2
+            let span = right.x - left.x - 2 * (nodeRadius + 0.2)
+            for offset in [0.0, 1.0 / 3.0, 2.0 / 3.0] {
+                let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
+                let x = origin + t * span
+                NSBezierPath(ovalIn: NSRect(x: x - 1.5, y: mid.y - 1.5, width: 3, height: 3)).fill()
             }
         }
     }

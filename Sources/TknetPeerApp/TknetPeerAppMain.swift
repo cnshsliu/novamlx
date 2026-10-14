@@ -25,7 +25,7 @@ struct TknetPeerApp: App {
             PeerMenu()
                 .environmentObject(appState)
         } label: {
-            PeerMenuBarLabel(status: appState.status?.connection)
+            PeerMenuBarLabel(status: appState.status?.connection, trafficPhase: appState.trafficPhase)
         }
         .menuBarExtraStyle(.menu)
 
@@ -152,21 +152,25 @@ final class PeerAppDelegate: NSObject, NSApplicationDelegate {
 /// contents, so it can hold the SwiftUI `openWindow` action for Dock reopen.
 private struct PeerMenuBarLabel: View {
     let status: TunnelStatus?
+    let trafficPhase: Int?
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Label {
             Text("Tknet Peer")
         } icon: {
-            Image(nsImage: MenuBarIcon.image(for: status))
+            Image(nsImage: MenuBarIcon.image(for: status, trafficPhase: trafficPhase))
         }
         .onAppear {
             let open = openWindow
             PeerWindowActivation.openWindow = { open(id: "peer") }
-            DockIcon.apply(status: status)
+            DockIcon.apply(status: status, trafficPhase: trafficPhase)
         }
         .onChange(of: status) { _, newStatus in
-            DockIcon.apply(status: newStatus)
+            DockIcon.apply(status: newStatus, trafficPhase: trafficPhase)
+        }
+        .onChange(of: trafficPhase) { _, newPhase in
+            DockIcon.apply(status: status, trafficPhase: newPhase)
         }
     }
 }
@@ -206,8 +210,36 @@ struct PeerMenu: View {
             }
         }
         Divider()
+        Button(state.isSimulatingTraffic ? "Stop Token Flow Simulation" : "Simulate Token Flow") {
+            state.toggleTrafficSimulation()
+        }
+        .disabled(!state.isTunnelActive)
+        Divider()
+        Button("Restart Tknet Peer") {
+            AppRelaunch.restart()
+        }
         Button("Quit Tknet Peer") {
             NSApp.terminate(nil)
         }
+    }
+}
+
+/// Restarts the app: a detached watcher waits for this process to exit, then
+/// reopens the bundle. Termination goes through the normal path, so the
+/// tunnel shuts down and the process lock is released before the relaunch.
+enum AppRelaunch {
+    static func restart() {
+        let bundlePath = Bundle.main.bundlePath
+        if bundlePath.hasSuffix(".app") {
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let watcher = Process()
+            watcher.executableURL = URL(fileURLWithPath: "/bin/bash")
+            watcher.arguments = [
+                "-c",
+                "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; open \"\(bundlePath)\"",
+            ]
+            try? watcher.run()
+        }
+        NSApp.terminate(nil)
     }
 }

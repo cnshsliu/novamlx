@@ -5,13 +5,13 @@ import AppKit
 /// Dock icon: the full-color tunnel mark, tinted by tunnel state. Visible only
 /// while a Peer window promotes the app to the regular activation policy.
 enum DockIcon {
-    static func apply(status: TunnelStatus?) {
-        NSApp.applicationIconImage = image(for: status)
+    static func apply(status: TunnelStatus?, trafficPhase: Int? = nil) {
+        NSApp.applicationIconImage = image(for: status, trafficPhase: trafficPhase)
     }
 
-    static func image(for status: TunnelStatus?) -> NSImage {
+    static func image(for status: TunnelStatus?, trafficPhase: Int? = nil) -> NSImage {
         NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
-            draw(in: rect, status: status)
+            draw(in: rect, status: status, trafficPhase: trafficPhase)
             return true
         }
     }
@@ -23,7 +23,7 @@ enum DockIcon {
     private static let hole = NSColor(calibratedRed: 0.039, green: 0.055, blue: 0.133, alpha: 1)
     private static let amber = NSColor(calibratedRed: 0.961, green: 0.620, blue: 0.043, alpha: 1)
 
-    private static func draw(in rect: NSRect, status: TunnelStatus?) {
+    private static func draw(in rect: NSRect, status: TunnelStatus?, trafficPhase: Int?) {
         var beamAlpha: CGFloat = 1
         var arcAlpha: CGFloat = 1
         var beamDashed = false
@@ -50,13 +50,19 @@ enum DockIcon {
 
         let center = NSPoint(x: rect.midX, y: rect.midY)
 
+        // While tokens flow the portal rings breathe with the traffic rhythm.
+        var pulse: CGFloat = 1
+        if let phase = trafficPhase {
+            pulse = 0.62 + 0.38 * sin(CGFloat(phase) / 8 * .pi * 2)
+        }
+
         // Background
         let bg = NSBezierPath(roundedRect: rect, xRadius: 114, yRadius: 114)
         NSGradient(colors: [bgTop, bgBottom])?.draw(in: bg, angle: -60)
 
         // Portal glow
         let glowRect = NSRect(x: center.x - 170, y: center.y - 170, width: 340, height: 340)
-        NSGradient(colors: [cyan.withAlphaComponent(0.35), cyan.withAlphaComponent(0)])?
+        NSGradient(colors: [cyan.withAlphaComponent(0.35 * pulse), cyan.withAlphaComponent(0)])?
             .draw(in: glowRect, relativeCenterPosition: .zero)
 
         // Beam between the peers, drawn as one gradient bar or dashed segments
@@ -77,15 +83,28 @@ enum DockIcon {
                 NSGradient(colors: [cyan.withAlphaComponent(beamAlpha),
                                     indigo.withAlphaComponent(beamAlpha)])?.draw(in: beam, angle: 0)
             }
-            for (x, color) in [(131.0, cyan), (381.0, indigo)] as [(CGFloat, NSColor)] {
-                color.withAlphaComponent(beamAlpha).setFill()
-                NSBezierPath(ovalIn: NSRect(x: x - 11, y: 245, width: 22, height: 22)).fill()
+            let packetXs: [CGFloat]
+            let packetRadius: CGFloat
+            if let phase = trafficPhase {
+                packetXs = [0.0, 1.0 / 3.0, 2.0 / 3.0].map { offset in
+                    let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
+                    return 71 + t * 370
+                }
+                packetRadius = 15
+            } else {
+                packetXs = [131, 381]
+                packetRadius = 11
+            }
+            for x in packetXs {
+                blend(from: cyan, to: indigo, at: (x - 60) / 392, alpha: beamAlpha).setFill()
+                NSBezierPath(ovalIn: NSRect(x: x - packetRadius, y: 256 - packetRadius,
+                                            width: packetRadius * 2, height: packetRadius * 2)).fill()
             }
         }
 
         // Portal arcs, top and bottom
-        strokeArc(center: center, startAngle: 140, endAngle: 40, alpha: arcAlpha)
-        strokeArc(center: center, startAngle: 320, endAngle: 220, alpha: arcAlpha)
+        strokeArc(center: center, startAngle: 140, endAngle: 40, alpha: arcAlpha * pulse)
+        strokeArc(center: center, startAngle: 320, endAngle: 220, alpha: arcAlpha * pulse)
 
         // Peer nodes: colored ring with a dark center
         let nodeAlpha = drawBeam ? beamAlpha : arcAlpha
