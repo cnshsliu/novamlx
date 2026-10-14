@@ -22,7 +22,7 @@ public enum NovaDBReadError: Error, Equatable, CustomStringConvertible {
 public enum NovaDBSnapshotReader {
     public static func load(database url: URL) throws -> NovaMigrationInput {
         let providers = try query(url, sql: """
-            SELECT name, endpoint, api_key, remote_model, is_enabled, is_free,
+            SELECT name, endpoint, api_key, remote_model, is_enabled,
                    provider_id, anthropic_endpoint
             FROM tokenhub_providers
             ORDER BY name
@@ -129,7 +129,6 @@ private struct ProviderRow: Decodable {
     let apiKey: String?
     let remoteModel: String?
     let isEnabled: FlexBool?
-    let isFree: FlexBool?
     let providerId: String?
     let anthropicEndpoint: String?
 
@@ -138,7 +137,6 @@ private struct ProviderRow: Decodable {
         case apiKey = "api_key"
         case remoteModel = "remote_model"
         case isEnabled = "is_enabled"
-        case isFree = "is_free"
         case providerId = "provider_id"
         case anthropicEndpoint = "anthropic_endpoint"
     }
@@ -151,7 +149,6 @@ private struct ProviderRow: Decodable {
             apiKey: apiKey ?? "",
             remoteModel: remoteModel ?? "",
             isEnabled: isEnabled?.value ?? true,
-            isFree: isFree?.value ?? false,
             anthropicEndpoint: anthropicEndpoint)
     }
 }
@@ -173,7 +170,7 @@ private struct BalancerRow: Decodable {
     var snapshot: NovaLBSnapshot {
         NovaLBSnapshot(
             id: id, name: name, slug: slug,
-            strategy: strategy ?? "tiered",
+            strategy: strategy ?? "round_robin",
             maxRetries: maxRetries?.value ?? 3,
             isEnabled: isEnabled?.value ?? true)
     }

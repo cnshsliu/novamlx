@@ -387,12 +387,9 @@ extension TknetPeerCLI {
             @Option(name: .customLong("upstream-model")) var upstreamModel: String
             @Option(name: .customLong("api-key")) var apiKey: String?
             @Option var weight: Int?
-            @Flag var free: Bool = false
-            @Flag var paid: Bool = false
             @Option var type: String = "openaiCompatible"
 
             func run() async throws {
-                if free && paid { throw ValidationError("Pass only one of --free and --paid.") }
                 guard let endpointURL = URL(string: endpoint) else {
                     throw ValidationError("Invalid endpoint: \(endpoint)")
                 }
@@ -402,7 +399,7 @@ extension TknetPeerCLI {
                     try PeerAdmin.addMember(
                         &peerConfig, secrets: secrets, id: id, name: name ?? id,
                         endpoint: endpointURL, upstreamModel: upstreamModel, apiKey: apiKey,
-                        weight: weight, isFree: free, type: try PeerAdmin.sourceType(type))
+                        weight: weight, type: try PeerAdmin.sourceType(type))
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }
@@ -444,14 +441,11 @@ extension TknetPeerCLI {
             @Option(name: .customLong("upstream-model")) var upstreamModel: String?
             @Option(name: .customLong("api-key")) var apiKey: String?
             @Option var weight: Int?
-            @Flag var free: Bool = false
-            @Flag var paid: Bool = false
             @Option var type: String?
             @Flag var enable: Bool = false
             @Flag var disable: Bool = false
 
             func run() throws {
-                if free && paid { throw ValidationError("Pass only one of --free and --paid.") }
                 if enable && disable { throw ValidationError("Pass only one of --enable and --disable.") }
                 var peerConfig = try TknetPeerCLI.loadConfig(config)
                 let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
@@ -463,13 +457,12 @@ extension TknetPeerCLI {
                     do { return try PeerAdmin.sourceType(raw) }
                     catch let error as PeerAdminError { throw ValidationError(error.message) }
                 }
-                let isFree: Bool? = free ? true : (paid ? false : nil)
                 let isEnabled: Bool? = enable ? true : (disable ? false : nil)
                 do {
                     try PeerAdmin.updateMember(
                         &peerConfig, secrets: secrets, id: id, name: name, endpoint: endpointURL,
                         upstreamModel: upstreamModel, apiKey: apiKey, weight: weight,
-                        isFree: isFree, type: memberType, isEnabled: isEnabled)
+                        type: memberType, isEnabled: isEnabled)
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }
@@ -489,7 +482,7 @@ extension TknetPeerCLI {
             @Option var config: String = CLIConfig.defaultConfigPath
             @Option var id: String?
             @Option var name: String
-            @Option var strategy: String = "tiered"
+            @Option var strategy: String = "round_robin"
             @Option(name: .customLong("max-retries")) var maxRetries: Int = 3
             @Option(name: .customLong("member")) var member: [String] = []
 

@@ -20,7 +20,18 @@ struct NovaConfigMigratorTests {
         let pool = result.config.pool(id: "coding")
         #expect(pool?.name == "coding")
         #expect(pool?.memberIds == ["local-Qwen3-8B"])
+        #expect(pool?.strategy == .roundRobin)
         #expect(result.warnings.isEmpty)
+    }
+
+    @Test("retired tiered strategy becomes round robin")
+    func tieredBecomesRoundRobin() {
+        let input = NovaMigrationInput(
+            loadBalancers: [NovaLBSnapshot(id: "lb-1", name: "Coding", slug: "coding", strategy: "tiered")],
+            members: [NovaLBMemberSnapshot(lbSlug: "coding", kind: "local", ref: "Qwen3-8B")])
+        let result = NovaConfigMigrator.migrate(input, existing: PeerConfig.defaultConfig())
+        #expect(result.config.pool(id: "coding")?.strategy == .roundRobin)
+        #expect(result.warnings.contains { $0.contains("tiered") && $0.contains("round_robin") })
     }
 
     @Test("remote LB member reuses Tokenhub provider member and secret")
@@ -29,7 +40,7 @@ struct NovaConfigMigratorTests {
             providers: [NovaProviderSnapshot(
                 id: "openai", name: "OpenAI",
                 endpoint: "https://api.openai.com/v1/chat/completions",
-                apiKey: "sk-test", remoteModel: "gpt-4o", isFree: true)],
+                apiKey: "sk-test", remoteModel: "gpt-4o")],
             loadBalancers: [NovaLBSnapshot(id: "lb-1", name: "Coding", slug: "coding", strategy: "round_robin")],
             members: [NovaLBMemberSnapshot(lbSlug: "coding", kind: "remote", ref: "OpenAI")])
         let result = NovaConfigMigrator.migrate(input, existing: PeerConfig.defaultConfig())
@@ -37,7 +48,6 @@ struct NovaConfigMigratorTests {
         #expect(member?.id == "th-openai")
         #expect(member?.endpoint.absoluteString == "https://api.openai.com/v1")
         #expect(member?.upstreamModel == "gpt-4o")
-        #expect(member?.isFree == true)
         #expect(member?.weight == nil)
         #expect(result.secrets[member?.apiKeyRef ?? ""] == "sk-test")
         #expect(result.config.pool(id: "coding")?.memberIds == ["th-openai"])
