@@ -377,7 +377,7 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         self.processor = processor ?? parameters.processor()
         self.maxTokens = parameters.maxTokens
         self.tap = drafter.config.targetLayerIds.isEmpty ? [0] : drafter.config.targetLayerIds
-        let maxCap = max(1, drafter.config.blockSize - 1)
+        let maxCap = Swift.max(1, drafter.config.blockSize - 1)
         self.capPolicy = DFlashCapPolicy(maxCap: maxCap)
         self.lastLogits = MLXArray.zeros([1, 1])
         self.lastHidden = MLXArray.zeros([1, 1, 1])
