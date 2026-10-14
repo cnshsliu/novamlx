@@ -134,6 +134,7 @@ final class PeerAppState: ObservableObject {
         }
     }
 
+    /// In-window status glyph. The menu bar uses `MenuBarIcon` instead.
     var connectionSymbol: String {
         switch status?.connection {
         case .connected: return "circle.fill"

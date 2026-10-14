@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="tknet peer — t monogram">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#131B3E"/>
+      <stop offset="1" stop-color="#080C1E"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="330" y1="262" x2="700" y2="792" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#818CF8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <circle cx="512" cy="512" r="360" fill="url(#glow)"/>
+
+  <!-- lowercase t: stem that curves into the outgoing link -->
+  <path d="M 512 262 L 512 668 Q 512 792 652 792 L 700 792"
+        fill="none" stroke="url(#mark)" stroke-width="92" stroke-linecap="round"/>
+  <!-- crossbar -->
+  <line x1="330" y1="448" x2="694" y2="448" stroke="url(#mark)" stroke-width="92" stroke-linecap="round"/>
+
+  <!-- connection nodes at the endpoints of the mark -->
+  <circle cx="512" cy="262" r="60" fill="#22D3EE"/>
+  <circle cx="512" cy="262" r="26" fill="#0A0E22"/>
+  <circle cx="330" cy="448" r="60" fill="#67E8F9"/>
+  <circle cx="330" cy="448" r="26" fill="#0A0E22"/>
+  <circle cx="694" cy="448" r="60" fill="#818CF8"/>
+  <circle cx="694" cy="448" r="26" fill="#0A0E22"/>
+  <circle cx="700" cy="792" r="60" fill="#818CF8"/>
+  <circle cx="700" cy="792" r="26" fill="#0A0E22"/>
+</svg>

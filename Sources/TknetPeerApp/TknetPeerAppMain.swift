@@ -1,3 +1,5 @@
+import TknetPeer
+
 import AppKit
 import SwiftUI
 
@@ -23,7 +25,7 @@ struct TknetPeerApp: App {
             PeerMenu()
                 .environmentObject(appState)
         } label: {
-            PeerMenuBarLabel(symbol: appState.connectionSymbol)
+            PeerMenuBarLabel(status: appState.status?.connection)
         }
         .menuBarExtraStyle(.menu)
 
@@ -149,15 +151,19 @@ final class PeerAppDelegate: NSObject, NSApplicationDelegate {
 /// Menu-bar label stays mounted for the life of the status item, unlike menu
 /// contents, so it can hold the SwiftUI `openWindow` action for Dock reopen.
 private struct PeerMenuBarLabel: View {
-    let symbol: String
+    let status: TunnelStatus?
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Label("Tknet Peer", systemImage: symbol)
-            .onAppear {
-                let open = openWindow
-                PeerWindowActivation.openWindow = { open(id: "peer") }
-            }
+        Label {
+            Text("Tknet Peer")
+        } icon: {
+            Image(nsImage: MenuBarIcon.image(for: status))
+        }
+        .onAppear {
+            let open = openWindow
+            PeerWindowActivation.openWindow = { open(id: "peer") }
+        }
     }
 }
 

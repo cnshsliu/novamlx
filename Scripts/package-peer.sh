@@ -46,6 +46,14 @@ chmod u+w "$TMP" 2>/dev/null || true
 mv -f "$TMP" "$APP_CONTENTS/MacOS/TknetPeerApp"
 chmod 755 "$APP_CONTENTS/MacOS/TknetPeerApp"
 
+ICON_SRC="tknet-peer/Assets/AppIcon.icns"
+if [ -f "$ICON_SRC" ]; then
+	cp -p "$ICON_SRC" "$APP_CONTENTS/Resources/AppIcon.icns"
+	echo "→ Installed $ICON_SRC"
+else
+	echo "warning: $ICON_SRC missing — app keeps the generic icon" >&2
+fi
+
 cat >"$APP_CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -71,6 +79,10 @@ cat >"$APP_CONTENTS/Info.plist" <<PLIST
 	<string>${VERSION}</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<!-- Launch as a menu-bar agent. TknetPeerApp promotes to a regular
 	     activation policy only while a Peer window is open. -->
 	<key>LSUIElement</key>
