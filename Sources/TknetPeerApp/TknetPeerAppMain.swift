@@ -51,6 +51,9 @@ enum PeerWindowActivation {
     /// Bumped by every show. A deferred demote from an older close no-ops.
     private static var showGeneration = 0
 
+    /// Bumped by show and by close. A deferred order-front from an older show no-ops.
+    private static var presentation = 0
+
     static func isPeerWindow(_ window: NSWindow) -> Bool {
         if window is NSPanel { return false }
         guard window.canBecomeMain else { return false }
@@ -58,22 +61,64 @@ enum PeerWindowActivation {
         return window.identifier?.rawValue == windowIdentifier
     }
 
-    static func show(openIfNeeded: () -> Void) {
+    /// `setActivationPolicy(.regular)` does not take effect in the turn that
+    /// calls it. `openWindow` from the status-item menu in that same turn
+    /// creates the Peer window and leaves it off screen — the next click used
+    /// to be what ordered it front. Ask for the window while the menu action
+    /// is still valid, then order it front once the policy flip has landed.
+    static func show(openIfNeeded: @escaping () -> Void) {
         showGeneration += 1
+        presentation += 1
+        let ticket = presentation
         NSApp.setActivationPolicy(.regular)
         // Apply calls are skipped while the app is accessory, so repaint the
         // Dock icon with current state the moment it becomes visible.
         if let state = PeerAppDelegate.appState {
             DockIcon.apply(status: state.status?.connection, trafficPhase: state.trafficPhase)
         }
-        if let existing = peerWindows(excluding: nil).first {
-            if existing.isMiniaturized {
-                existing.deminiaturize(nil)
+
+        func requestOpen() {
+            if let stable = openWindow {
+                stable()
+            } else {
+                openIfNeeded()
             }
-            existing.makeKeyAndOrderFront(nil)
-        } else {
-            openIfNeeded()
         }
+
+        // Include a window that was created but never ordered front.
+        if let existing = NSApp.windows.first(where: isPeerWindow) {
+            orderFront(existing)
+        } else {
+            requestOpen()
+        }
+
+        Task { @MainActor in
+            // SwiftUI attaches the NSWindow after openWindow, and menu
+            // tracking can order it back out as it ends.
+            var retriedOpen = false
+            for _ in 0..<4 {
+                try? await Task.sleep(for: .milliseconds(40))
+                guard ticket == presentation else { return }
+                if let created = NSApp.windows.first(where: isPeerWindow) {
+                    if created.isVisible && (created.isKeyWindow || created.isMiniaturized) {
+                        return
+                    }
+                    orderFront(created)
+                    continue
+                }
+                if retriedOpen { continue }
+                retriedOpen = true
+                requestOpen()
+            }
+        }
+    }
+
+    private static func orderFront(_ window: NSWindow) {
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         NSApp.activate()
     }
 
@@ -81,6 +126,7 @@ enum PeerWindowActivation {
     /// The hop lets that close finish; a later `show` bumps `showGeneration` and
     /// cancels this demote. Miniaturized windows still count as open.
     static func scheduleDemote(excluding closing: NSWindow) {
+        presentation += 1
         let generation = showGeneration
         let closingID = ObjectIdentifier(closing)
         Task { @MainActor in
@@ -188,7 +234,6 @@ struct PeerMenu: View {
     var body: some View {
         Button("Open Tknet Peer…") {
             let open = openWindow
-            PeerWindowActivation.openWindow = { open(id: "peer") }
             PeerWindowActivation.show {
                 open(id: "peer")
             }
