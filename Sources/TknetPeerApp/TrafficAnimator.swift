@@ -1,24 +1,33 @@
-import Foundation
+import AppKit
 
-/// Drives the menu-bar packet animation. Kept out of `PeerAppState` on
-/// purpose: the phase ticks at ~4.5 Hz, and as an `@Published` on the
-/// app-wide state object it invalidated every `@EnvironmentObject` subscriber
-/// per frame — including the closed-but-alive Peer window's view graph, which
-/// dominated the animation's CPU cost. Only the menu-bar label observes this
-/// object, so a frame re-renders nothing but the status item.
+/// Drives the Dock-icon packet animation.
+///
+/// Two deliberate constraints keep the animation at zero cost when it can't
+/// be seen:
+/// - The clock only starts while the app runs as `.regular` — as an accessory
+///   there is no Dock icon, so there is nothing to animate.
+/// - Nothing observes the phase. The menu-bar mark is static; only the Dock
+///   icon animates, updated through `onTick`. Publishing the phase from the
+///   app-wide state object used to invalidate every SwiftUI subscriber per
+///   frame, including the closed-but-alive Peer window's view graph.
 @MainActor
-final class TrafficAnimator: ObservableObject {
+final class TrafficAnimator {
     /// Non-nil while traffic flowed within the last second. The real signal
     /// plugs into `noteTraffic`.
-    @Published private(set) var phase: Int?
+    private(set) var phase: Int?
+
+    /// Fired on every phase change; PeerAppState wires this to the Dock icon.
+    var onTick: ((Int?) -> Void)?
 
     private var lastTrafficAt = Date.distantPast
     private var timer: Timer?
 
     func noteTraffic() {
         lastTrafficAt = Date()
-        if phase == nil { phase = 0 }
         guard timer == nil else { return }
+        guard NSApp.activationPolicy() == .regular else { return }
+        phase = 0
+        onTick?(phase)
         let timer = Timer(timeInterval: 0.22, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.advance() }
         }
@@ -27,12 +36,16 @@ final class TrafficAnimator: ObservableObject {
     }
 
     private func advance() {
-        guard Date().timeIntervalSince(lastTrafficAt) < 1.0 else {
+        guard NSApp.activationPolicy() == .regular,
+              Date().timeIntervalSince(lastTrafficAt) < 1.0
+        else {
             timer?.invalidate()
             timer = nil
             phase = nil
+            onTick?(nil)
             return
         }
         phase = ((phase ?? 0) + 1) % 8
+        onTick?(phase)
     }
 }

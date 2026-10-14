@@ -83,6 +83,9 @@ final class PeerAppState: ObservableObject {
         self.tunnelWanted = TunnelWantedPreference.read(from: defaults)
         self.serverBox = TunnelServerBox(loaded.serverURL)
         self.lastError = secretsResult.migrationError
+        trafficAnimator.onTick = { [weak self] phase in
+            DockIcon.apply(status: self?.status?.connection, trafficPhase: phase)
+        }
     }
 
     /// Email last used to sign in on the active server. Empty when none.
@@ -107,8 +110,8 @@ final class PeerAppState: ObservableObject {
 
     // MARK: - Traffic animation
 
-    /// Owns the animation clock. Deliberately a separate ObservableObject —
-    /// see TrafficAnimator.
+    /// Owns the animation clock. Deliberately not part of this observable
+    /// state — see TrafficAnimator.
     let trafficAnimator = TrafficAnimator()
 
     /// Pass-through for callers that only read the phase.

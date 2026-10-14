@@ -25,7 +25,7 @@ struct TknetPeerApp: App {
             PeerMenu()
                 .environmentObject(appState)
         } label: {
-            PeerMenuBarLabel(status: appState.status?.connection, animator: appState.trafficAnimator)
+            PeerMenuBarLabel(status: appState.status?.connection)
         }
         .menuBarExtraStyle(.menu)
 
@@ -160,25 +160,23 @@ final class PeerAppDelegate: NSObject, NSApplicationDelegate {
 /// contents, so it can hold the SwiftUI `openWindow` action for Dock reopen.
 private struct PeerMenuBarLabel: View {
     let status: TunnelStatus?
-    @ObservedObject var animator: TrafficAnimator
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Label {
             Text("Tknet Peer")
         } icon: {
-            Image(nsImage: MenuBarIcon.image(for: status, trafficPhase: animator.phase))
+            Image(nsImage: MenuBarIcon.image(for: status))
         }
         .onAppear {
             let open = openWindow
             PeerWindowActivation.openWindow = { open(id: "peer") }
-            DockIcon.apply(status: status, trafficPhase: animator.phase)
+            DockIcon.apply(status: status)
         }
         .onChange(of: status) { _, newStatus in
-            DockIcon.apply(status: newStatus, trafficPhase: animator.phase)
-        }
-        .onChange(of: animator.phase) { _, newPhase in
-            DockIcon.apply(status: status, trafficPhase: newPhase)
+            // If traffic is flowing the next tick (≤220ms) re-applies with the
+            // current phase.
+            DockIcon.apply(status: newStatus)
         }
     }
 }
