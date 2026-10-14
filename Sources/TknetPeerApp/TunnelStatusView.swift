@@ -7,6 +7,8 @@ struct TunnelStatusView: View {
     @State private var peerName = ""
     @State private var revealKey = false
     @State private var didLoadDrafts = false
+    @State private var pendingRestore: URL?
+    @State private var identityNotice: String?
 
     var body: some View {
         ScrollView {
@@ -103,8 +105,9 @@ struct TunnelStatusView: View {
                         NSPasteboard.general.setString(key, forType: .string)
                     }
                 }
+                backupControls
             } else {
-                Text("Register once. The connection key is kept in the Keychain and mirrored for `tknet-peer`.")
+                Text("Register once. The connection key stays in ~/.config/tknet-peer. If this Mac already has an identity, restore the backup instead of registering again.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 TextField("Server", text: $serverText)
@@ -115,12 +118,84 @@ struct TunnelStatusView: View {
                     Task { await state.register(serverText: serverText, peerName: peerName) }
                 }
                 .disabled(state.lockError != nil || state.isBusy)
+                Button("Restore from backup…") { pickRestore() }
+                    .disabled(state.lockError != nil || state.isBusy)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .confirmationDialog(
+            "Replace this Mac's identity with the backup?",
+            isPresented: Binding(
+                get: { pendingRestore != nil },
+                set: { if !$0 { pendingRestore = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Replace and restore", role: .destructive) {
+                guard let url = pendingRestore else { return }
+                pendingRestore = nil
+                Task {
+                    identityNotice = nil
+                    if await state.restoreIdentity(from: url), let peerId = state.config.peerId {
+                        identityNotice = "Restored peer \(peerId)."
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingRestore = nil }
+        } message: {
+            Text("The peer id and connection key now stored on this Mac will be overwritten.")
+        }
+    }
+
+    private var backupControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button("Back up identity…") { pickExport() }
+                Button("Restore from backup…") { pickRestore() }
+            }
+            .disabled(state.lockError != nil || state.isBusy)
+            Text("CAUTION: tknet cannot reissue this identity. Keep the backup in a safe place. The copy includes member API keys.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let identityNotice {
+                Text(identityNotice)
+                    .font(.caption)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func pickExport() {
+        guard let url = chooseFolder(
+            prompt: "Back Up",
+            message: "Choose a safe place for the backup."
+        ) else { return }
+        identityNotice = nil
+        if let folder = state.exportIdentity(to: url) {
+            identityNotice = "Backed up to \(folder.path)"
+        }
+    }
+
+    private func pickRestore() {
+        guard let url = chooseFolder(
+            prompt: "Restore",
+            message: "Choose the backup folder, or the folder that contains tknet-peer-identity."
+        ) else { return }
+        pendingRestore = url
+    }
+
+    private func chooseFolder(prompt: String, message: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = prompt
+        panel.message = message
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
     }
 
     private var connectionColor: Color {

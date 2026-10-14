@@ -277,6 +277,72 @@ final class PeerAppState: ObservableObject {
         }
     }
 
+    /// Copies `peer.json` and `secrets/secrets.json` into `destination/tknet-peer-identity`.
+    @discardableResult
+    func exportIdentity(to destination: URL) -> URL? {
+        guard lockError == nil, !isShutdown else { return nil }
+        do {
+            let folder = try IdentityBackup.export(
+                configFile: configURL, secretsFile: identitySecretsFile, to: destination)
+            lastError = nil
+            return folder
+        } catch {
+            lastError = Self.userMessage(error)
+            return nil
+        }
+    }
+
+    /// Replaces this machine's identity with a backup. Stops the tunnel first.
+    /// A failed write leaves the previous files in place and dials again when
+    /// the tunnel was supposed to stay up.
+    @discardableResult
+    func restoreIdentity(from selected: URL) async -> Bool {
+        guard lockError == nil, !isShutdown, !isBusy else { return false }
+        let snapshot: IdentityBackup.Snapshot
+        do {
+            snapshot = try IdentityBackup.load(from: selected)
+        } catch {
+            lastError = Self.userMessage(error)
+            return false
+        }
+        isBusy = true
+        defer { isBusy = false }
+        let redial = tunnelWanted
+        await service?.stopTunnel()
+        guard !isShutdown else { return false }
+        do {
+            let restored = try IdentityBackup.install(
+                snapshot, configFile: configURL, secretsFile: identitySecretsFile)
+            config = restored
+            serverBox.update(restored.serverURL)
+            syncActiveToken()
+            if let service {
+                await service.applyConfig(restored)
+                config = service.currentConfig
+            }
+            earnings = nil
+            earningsError = nil
+            lastError = nil
+            await refreshAccount()
+        } catch {
+            lastError = Self.userMessage(error)
+            if redial, !isShutdown {
+                try? await service?.startTunnel()
+            }
+            return false
+        }
+        if redial, !isShutdown {
+            launchGeneration += 1
+            launchPolicy.stopWatching()
+            do {
+                try await service?.startTunnel()
+            } catch {
+                lastError = Self.userMessage(error)
+            }
+        }
+        return true
+    }
+
     func stopTunnelFromUser() async {
         // Flip preference first so the footer updates even if teardown awaits
         // a stuck dial. Do not hold isBusy across stopTunnel — that left Stop
@@ -662,6 +728,13 @@ final class PeerAppState: ObservableObject {
         guard config.peerId != nil else { return }
         guard let perServer = readSecret(tokenKey(for: config.serverURL)) else { return }
         try? secrets.save(perServer, for: "peer/token")
+    }
+
+    private var identitySecretsFile: URL {
+        configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("secrets", isDirectory: true)
+            .appendingPathComponent("secrets.json")
     }
 
     private func tokenKey(for tunnel: URL) -> String {
