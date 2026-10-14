@@ -163,6 +163,10 @@ private struct PeerMenuBarLabel: View {
         .onAppear {
             let open = openWindow
             PeerWindowActivation.openWindow = { open(id: "peer") }
+            DockIcon.apply(status: status)
+        }
+        .onChange(of: status) { _, newStatus in
+            DockIcon.apply(status: newStatus)
         }
     }
 }
