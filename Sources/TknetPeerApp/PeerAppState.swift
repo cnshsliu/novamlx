@@ -107,31 +107,15 @@ final class PeerAppState: ObservableObject {
 
     // MARK: - Traffic animation
 
-    /// Drives the menu-bar packet animation. Non-nil while traffic flowed
-    /// within the last second. The real signal plugs into `noteTraffic`.
-    @Published private(set) var trafficPhase: Int?
-    private var lastTrafficAt = Date.distantPast
-    private var trafficTimer: Timer?
+    /// Owns the animation clock. Deliberately a separate ObservableObject —
+    /// see TrafficAnimator.
+    let trafficAnimator = TrafficAnimator()
+
+    /// Pass-through for callers that only read the phase.
+    var trafficPhase: Int? { trafficAnimator.phase }
 
     func noteTraffic() {
-        lastTrafficAt = Date()
-        if trafficPhase == nil { trafficPhase = 0 }
-        guard trafficTimer == nil else { return }
-        let timer = Timer(timeInterval: 0.22, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.advanceTraffic() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        trafficTimer = timer
-    }
-
-    private func advanceTraffic() {
-        guard Date().timeIntervalSince(lastTrafficAt) < 1.0 else {
-            trafficTimer?.invalidate()
-            trafficTimer = nil
-            trafficPhase = nil
-            return
-        }
-        trafficPhase = ((trafficPhase ?? 0) + 1) % 8
+        trafficAnimator.noteTraffic()
     }
 
     /// Fakes a token stream so the menu-bar animation can be previewed

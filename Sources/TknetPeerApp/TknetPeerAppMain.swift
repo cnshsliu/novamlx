@@ -25,7 +25,7 @@ struct TknetPeerApp: App {
             PeerMenu()
                 .environmentObject(appState)
         } label: {
-            PeerMenuBarLabel(status: appState.status?.connection, trafficPhase: appState.trafficPhase)
+            PeerMenuBarLabel(status: appState.status?.connection, animator: appState.trafficAnimator)
         }
         .menuBarExtraStyle(.menu)
 
@@ -61,6 +61,11 @@ enum PeerWindowActivation {
     static func show(openIfNeeded: () -> Void) {
         showGeneration += 1
         NSApp.setActivationPolicy(.regular)
+        // Apply calls are skipped while the app is accessory, so repaint the
+        // Dock icon with current state the moment it becomes visible.
+        if let state = PeerAppDelegate.appState {
+            DockIcon.apply(status: state.status?.connection, trafficPhase: state.trafficPhase)
+        }
         if let existing = peerWindows(excluding: nil).first {
             if existing.isMiniaturized {
                 existing.deminiaturize(nil)
@@ -79,6 +84,9 @@ enum PeerWindowActivation {
         let generation = showGeneration
         let closingID = ObjectIdentifier(closing)
         Task { @MainActor in
+            // A single run-loop hop can still see the closing window as
+            // visible, which would silently skip the demote; wait it out.
+            try? await Task.sleep(for: .milliseconds(150))
             guard generation == showGeneration else { return }
             guard peerWindows(excluding: closingID).isEmpty else { return }
             NSApp.setActivationPolicy(.accessory)
@@ -152,24 +160,24 @@ final class PeerAppDelegate: NSObject, NSApplicationDelegate {
 /// contents, so it can hold the SwiftUI `openWindow` action for Dock reopen.
 private struct PeerMenuBarLabel: View {
     let status: TunnelStatus?
-    let trafficPhase: Int?
+    @ObservedObject var animator: TrafficAnimator
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Label {
             Text("Tknet Peer")
         } icon: {
-            Image(nsImage: MenuBarIcon.image(for: status, trafficPhase: trafficPhase))
+            Image(nsImage: MenuBarIcon.image(for: status, trafficPhase: animator.phase))
         }
         .onAppear {
             let open = openWindow
             PeerWindowActivation.openWindow = { open(id: "peer") }
-            DockIcon.apply(status: status, trafficPhase: trafficPhase)
+            DockIcon.apply(status: status, trafficPhase: animator.phase)
         }
         .onChange(of: status) { _, newStatus in
-            DockIcon.apply(status: newStatus, trafficPhase: trafficPhase)
+            DockIcon.apply(status: newStatus, trafficPhase: animator.phase)
         }
-        .onChange(of: trafficPhase) { _, newPhase in
+        .onChange(of: animator.phase) { _, newPhase in
             DockIcon.apply(status: status, trafficPhase: newPhase)
         }
     }

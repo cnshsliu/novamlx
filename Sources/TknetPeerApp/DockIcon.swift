@@ -4,16 +4,69 @@ import AppKit
 
 /// Dock icon: the full-color tunnel mark, tinted by tunnel state. Visible only
 /// while a Peer window promotes the app to the regular activation policy.
+///
+/// Assigning `applicationIconImage` snapshots the NSImage to a CGImage on the
+/// main thread, so every frame must come from a bitmap rep, not a custom
+/// drawing handler — snapshotting a handler re-rasterizes the gradients each
+/// tick (~20% CPU). Frames are prerendered once per (status, phase) into
+/// bitmaps; the phase cycles through 8 values, so steady-state animation is a
+/// cache hit plus a property assignment.
 enum DockIcon {
+    /// Redrawing is the dominant cost of the traffic animation, so skip it
+    /// while the app runs as an accessory and the Dock isn't showing the
+    /// icon at all.
     static func apply(status: TunnelStatus?, trafficPhase: Int? = nil) {
-        NSApp.applicationIconImage = image(for: status, trafficPhase: trafficPhase)
+        guard NSApp.activationPolicy() == .regular else { return }
+        NSApp.applicationIconImage = frameImage(for: status, trafficPhase: trafficPhase)
     }
 
-    static func image(for status: TunnelStatus?, trafficPhase: Int? = nil) -> NSImage {
-        NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
-            draw(in: rect, status: status, trafficPhase: trafficPhase)
-            return true
+    // MARK: - Cached frames
+
+    private static let frameCacheLock = NSLock()
+    /// Access only under `frameCacheLock`. Frames of the previous status are
+    /// dropped when the status changes.
+    nonisolated(unsafe) private static var frameCache: [String: NSImage] = [:]
+
+    private static func frameImage(for status: TunnelStatus?, trafficPhase: Int?) -> NSImage {
+        let statusKey = String(describing: status)
+        let key = statusKey + ":" + String(describing: trafficPhase)
+        frameCacheLock.lock()
+        if let cached = frameCache[key] {
+            frameCacheLock.unlock()
+            return cached
         }
+        frameCache = frameCache.filter { $0.key.hasPrefix(statusKey + ":") }
+        frameCacheLock.unlock()
+
+        // Render at 128pt: the Dock tile is ~64pt, and NSDockTile.display
+        // re-composites the image on our main thread at every assignment, so
+        // the bitmap size directly drives the per-frame cost. The drawing code
+        // uses 512 coordinates; scale them down.
+        let size = NSSize(width: 128, height: 128)
+        let rect = NSRect(origin: .zero, size: NSSize(width: 512, height: 512))
+        let image = NSImage(size: size)
+        image.lockFocus()
+        let scale = NSAffineTransform()
+        scale.scale(by: 0.25)
+        scale.concat()
+        drawStatic(in: rect, status: status)
+        if drawBeam(for: status) {
+            if let phase = trafficPhase {
+                let xs: [CGFloat] = [0.0, 1.0 / 3.0, 2.0 / 3.0].map { offset in
+                    let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
+                    return 71 + t * 370
+                }
+                drawPackets(at: xs, radius: 15, status: status)
+            } else {
+                drawPackets(at: [131, 381], radius: 11, status: status)
+            }
+        }
+        image.unlockFocus()
+
+        frameCacheLock.lock()
+        frameCache[key] = image
+        frameCacheLock.unlock()
+        return image
     }
 
     private static let cyan = NSColor(calibratedRed: 0.133, green: 0.827, blue: 0.933, alpha: 1)
@@ -23,11 +76,19 @@ enum DockIcon {
     private static let hole = NSColor(calibratedRed: 0.039, green: 0.055, blue: 0.133, alpha: 1)
     private static let amber = NSColor(calibratedRed: 0.961, green: 0.620, blue: 0.043, alpha: 1)
 
-    private static func draw(in rect: NSRect, status: TunnelStatus?, trafficPhase: Int?) {
+    // MARK: - Static base
+
+    private static func drawBeam(for status: TunnelStatus?) -> Bool {
+        switch status {
+        case .idle, .none: false
+        default: true
+        }
+    }
+
+    private static func drawStatic(in rect: NSRect, status: TunnelStatus?) {
         var beamAlpha: CGFloat = 1
         var arcAlpha: CGFloat = 1
         var beamDashed = false
-        var drawBeam = true
         var badge = false
 
         switch status {
@@ -44,17 +105,11 @@ enum DockIcon {
         case .upgradeRequired:
             badge = true
         case .idle, .none:
-            drawBeam = false
             arcAlpha = 0.55
         }
 
         let center = NSPoint(x: rect.midX, y: rect.midY)
-
-        // While tokens flow the portal rings breathe with the traffic rhythm.
-        var pulse: CGFloat = 1
-        if let phase = trafficPhase {
-            pulse = 0.62 + 0.38 * sin(CGFloat(phase) / 8 * .pi * 2)
-        }
+        let drawBeam = drawBeam(for: status)
 
         // Background
         let bg = NSBezierPath(roundedRect: rect, xRadius: 114, yRadius: 114)
@@ -62,7 +117,7 @@ enum DockIcon {
 
         // Portal glow
         let glowRect = NSRect(x: center.x - 170, y: center.y - 170, width: 340, height: 340)
-        NSGradient(colors: [cyan.withAlphaComponent(0.35 * pulse), cyan.withAlphaComponent(0)])?
+        NSGradient(colors: [cyan.withAlphaComponent(0.35), cyan.withAlphaComponent(0)])?
             .draw(in: glowRect, relativeCenterPosition: .zero)
 
         // Beam between the peers, drawn as one gradient bar or dashed segments
@@ -83,28 +138,11 @@ enum DockIcon {
                 NSGradient(colors: [cyan.withAlphaComponent(beamAlpha),
                                     indigo.withAlphaComponent(beamAlpha)])?.draw(in: beam, angle: 0)
             }
-            let packetXs: [CGFloat]
-            let packetRadius: CGFloat
-            if let phase = trafficPhase {
-                packetXs = [0.0, 1.0 / 3.0, 2.0 / 3.0].map { offset in
-                    let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
-                    return 71 + t * 370
-                }
-                packetRadius = 15
-            } else {
-                packetXs = [131, 381]
-                packetRadius = 11
-            }
-            for x in packetXs {
-                blend(from: cyan, to: indigo, at: (x - 60) / 392, alpha: beamAlpha).setFill()
-                NSBezierPath(ovalIn: NSRect(x: x - packetRadius, y: 256 - packetRadius,
-                                            width: packetRadius * 2, height: packetRadius * 2)).fill()
-            }
         }
 
         // Portal arcs, top and bottom
-        strokeArc(center: center, startAngle: 140, endAngle: 40, alpha: arcAlpha * pulse)
-        strokeArc(center: center, startAngle: 320, endAngle: 220, alpha: arcAlpha * pulse)
+        strokeArc(center: center, startAngle: 140, endAngle: 40, alpha: arcAlpha)
+        strokeArc(center: center, startAngle: 320, endAngle: 220, alpha: arcAlpha)
 
         // Peer nodes: colored ring with a dark center
         let nodeAlpha = drawBeam ? beamAlpha : arcAlpha
@@ -119,6 +157,21 @@ enum DockIcon {
             NSBezierPath(roundedRect: NSRect(x: 415, y: 88, width: 18, height: 44),
                          xRadius: 9, yRadius: 9).fill()
             NSBezierPath(ovalIn: NSRect(x: 415, y: 60, width: 18, height: 18)).fill()
+        }
+    }
+
+    // MARK: - Per-frame packets
+
+    private static func drawPackets(at xs: [CGFloat], radius: CGFloat, status: TunnelStatus?) {
+        let beamAlpha: CGFloat
+        switch status {
+        case .stopping: beamAlpha = 0.45
+        default: beamAlpha = 1
+        }
+        for x in xs {
+            blend(from: cyan, to: indigo, at: (x - 60) / 392, alpha: beamAlpha).setFill()
+            NSBezierPath(ovalIn: NSRect(x: x - radius, y: 256 - radius,
+                                        width: radius * 2, height: radius * 2)).fill()
         }
     }
 
