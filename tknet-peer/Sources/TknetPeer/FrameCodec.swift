@@ -28,11 +28,13 @@ public enum FrameCodec {
         case .responseEnd(let reqId, let result):
             obj = ["type": "response.end", "data": ["reqId": reqId, "result": jsonValue(result)]]
         case .request(let req):
-            obj = ["type": "request", "data": [
+            var data: [String: Any] = [
                 "reqId": req.reqId, "model": req.model,
                 "apiFormat": req.apiFormat.rawValue,
                 "body": req.body.base64EncodedString(),
-            ]]
+            ]
+            if let path = req.path { data["path"] = path }
+            obj = ["type": "request", "data": data]
         case .requestCancel(let reqId):
             obj = ["type": "request.cancel", "data": ["reqId": reqId]]
         case .demandUpdate(let entries):
@@ -75,7 +77,8 @@ public enum FrameCodec {
             return .request(RequestFrame(
                 reqId: p.reqId, model: p.model,
                 apiFormat: APIFormat(rawValue: p.apiFormat) ?? .openai,
-                body: Data(base64Encoded: p.body) ?? Data()
+                body: Data(base64Encoded: p.body) ?? Data(),
+                path: p.path
             ))
         case "request.cancel":
             let p = try decodePayload(CancelPayload.self)
@@ -124,7 +127,7 @@ struct HelloPayload: Codable {
 struct CapabilitiesPayload: Codable { var capabilities: [Capability] }
 struct ChunkPayload: Codable { var reqId: String; var payload: String }
 struct EndPayload: Codable { var reqId: String; var result: RequestResult }
-struct RequestPayload: Codable { var reqId: String; var model: String; var apiFormat: String; var body: String }
+struct RequestPayload: Codable { var reqId: String; var model: String; var apiFormat: String; var body: String; var path: String? }
 struct CancelPayload: Codable { var reqId: String }
 struct DemandPayload: Codable { var entries: [DemandEntry] }
 struct ErrorPayload: Codable { var message: String }

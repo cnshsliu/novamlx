@@ -467,7 +467,7 @@ final class PeerAppState: ObservableObject {
 
     func savePool(
         id: String, name: String, strategy: PoolStrategy, memberIds: [String],
-        maxRetries: Int, isEnabled: Bool, isNew: Bool
+        maxRetries: Int, isEnabled: Bool, isNew: Bool, api: APIContract
     ) async -> Bool {
         guard lockError == nil else { return false }
         guard !memberIds.isEmpty else {
@@ -479,7 +479,7 @@ final class PeerAppState: ObservableObject {
             if isNew || config.pool(id: id) == nil {
                 try PeerAdmin.addPool(
                     &config, id: id, name: name, strategy: strategy,
-                    maxRetries: maxRetries, memberIds: memberIds)
+                    maxRetries: maxRetries, memberIds: memberIds, api: api)
                 if !isEnabled {
                     try PeerAdmin.updatePool(&config, id: id, isEnabled: false)
                 }
@@ -489,7 +489,8 @@ final class PeerAppState: ObservableObject {
                 let remove = existing.filter { !memberIds.contains($0) }
                 try PeerAdmin.updatePool(
                     &config, id: id, name: name, strategy: strategy, maxRetries: maxRetries,
-                    addMembers: add, removeMembers: remove, isEnabled: isEnabled)
+                    addMembers: add, removeMembers: remove, isEnabled: isEnabled,
+                    api: api, setApi: true)
             }
         } catch {
             lastError = Self.userMessage(error)

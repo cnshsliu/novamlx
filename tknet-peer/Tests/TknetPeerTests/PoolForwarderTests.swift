@@ -28,7 +28,8 @@ struct PoolForwarderTests {
         var config = PeerConfig.defaultConfig()
         config.members = [member("a", a, upstream: "ua"), member("b", b, upstream: "ub")]
         config.pools = [PoolConfig(
-            id: "coding", name: "coding", strategy: .roundRobin, memberIds: ["a", "b"], maxRetries: 3)]
+            id: "coding", name: "coding", strategy: .roundRobin, memberIds: ["a", "b"], maxRetries: 3,
+            api: SupplyAPI.chat)]
         let forwarder = PoolForwarder(config: config, secrets: secrets)
         do {
             try await body(forwarder, a, b)
@@ -125,4 +126,71 @@ struct PoolForwarderTests {
             #expect(b.lastBodyModel == "ub")
         }
     }
+
+    @Test("embeddings keep the pool and land on the embeddings path")
+    func embeddingsPath() async throws {
+        try await withForwarder { forwarder, a, _ in
+            var config = forwarder.currentConfig
+            config.pools[0].api = SupplyAPI.embeddings
+            forwarder.updateConfig(config)
+            let body = Data(#"{"model":"coding","input":"hello"}"#.utf8)
+            let outcome = await forwarder.forward(
+                poolName: "coding", body: body, timeoutSeconds: 30,
+                upstreamPath: "embeddings", contentType: "application/json")
+            guard case .success(let upstream) = outcome else {
+                Issue.record("expected success, got \(outcome)")
+                return
+            }
+            #expect(upstream.status == 200)
+            _ = await collect(upstream.body)
+            #expect(a.lastPath == "/v1/embeddings")
+            #expect(a.lastBodyModel == "ua")
+        }
+    }
+
+    @Test("wrong path is rejected before any member is hit")
+    func pathRejectedBeforePick() async throws {
+        try await withForwarder { forwarder, a, b in
+            var config = forwarder.currentConfig
+            config.pools[0].api = SupplyAPI.embeddings
+            forwarder.updateConfig(config)
+            let outcome = await forwarder.forward(
+                poolName: "coding", body: chatBody(), timeoutSeconds: 30,
+                upstreamPath: "chat/completions")
+            guard case .pathNotAllowed(let path) = outcome else {
+                Issue.record("expected pathNotAllowed, got \(outcome)")
+                return
+            }
+            #expect(path == "/v1/chat/completions")
+            #expect(a.hitCount == 0)
+            #expect(b.hitCount == 0)
+        }
+    }
+
+    @Test("generations pool rejects edits")
+    func generationsRejectsEdits() async throws {
+        try await withForwarder { forwarder, a, _ in
+            var config = forwarder.currentConfig
+            config.pools[0].api = SupplyAPI.imageGenerations
+            forwarder.updateConfig(config)
+            let body = Data(#"{"model":"coding","prompt":"hi"}"#.utf8)
+            let bad = await forwarder.forward(
+                poolName: "coding", body: body, timeoutSeconds: 30,
+                upstreamPath: "images/edits", contentType: "application/json")
+            guard case .pathNotAllowed = bad else {
+                Issue.record("expected pathNotAllowed, got \(bad)")
+                return
+            }
+            #expect(a.hitCount == 0)
+            let ok = await forwarder.forward(
+                poolName: "coding", body: body, timeoutSeconds: 30,
+                upstreamPath: "images/generations", contentType: "application/json")
+            guard case .success = ok else {
+                Issue.record("expected success, got \(ok)")
+                return
+            }
+            #expect(a.lastPath == "/v1/images/generations")
+        }
+    }
 }
+

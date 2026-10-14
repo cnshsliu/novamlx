@@ -26,6 +26,26 @@ struct FrameCodecTests {
         #expect(decoded == frame)
     }
 
+    @Test("request path round-trips and pathless means chat")
+    func requestPath() throws {
+        let body = #"{"model":"e","input":"hi"}"#.data(using: .utf8)!
+        let withPath = Frame.request(RequestFrame(
+            reqId: "r2", model: "e", apiFormat: .openai, body: body, path: "/v1/embeddings"))
+        let decoded = try FrameCodec.decode(FrameCodec.encode(withPath))
+        #expect(decoded == withPath)
+        guard case .request(let req) = decoded else { return }
+        #expect(req.effectivePath == "/v1/embeddings")
+
+        let legacy = #"{"type":"request","data":{"reqId":"r3","model":"m","apiFormat":"openai","body":"e30="}}"#
+        let old = try FrameCodec.decode(legacy)
+        guard case .request(let legacyReq) = old else {
+            Issue.record("expected request")
+            return
+        }
+        #expect(legacyReq.path == nil)
+        #expect(legacyReq.effectivePath == "/v1/chat/completions")
+    }
+
     @Test("responseEnd carries full telemetry")
     func responseEndRoundTrip() throws {
         let result = RequestResult(

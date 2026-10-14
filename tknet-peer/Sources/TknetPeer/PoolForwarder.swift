@@ -49,6 +49,8 @@ public enum PoolForwardOutcome: Sendable {
     case unknownPool
     case poolDisabled
     case noHealthyMembers
+    /// Path is not in the pool's interface — rejected before member pick.
+    case pathNotAllowed(path: String)
     case allMembersFailed(lastError: String, lastStatus: Int, timedOut: Bool)
     case cancelled
 }
@@ -88,32 +90,44 @@ public final class PoolForwarder: Sendable {
         try await client.shutdown()
     }
 
-    public func forward(poolId: String, body: Data, timeoutSeconds: Double) async -> PoolForwardOutcome {
+    public func forward(
+        poolId: String, body: Data, timeoutSeconds: Double,
+        upstreamPath: String = "chat/completions", contentType: String? = nil,
+        interface: APIContract? = nil
+    ) async -> PoolForwardOutcome {
         let config = holder.value
         guard let pool = config.pool(id: poolId) else { return .unknownPool }
-        return await dispatch(pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds)
+        return await dispatch(
+            pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds,
+            upstreamPath: upstreamPath, contentType: contentType, interface: interface)
     }
 
-    public func forward(poolName: String, body: Data, timeoutSeconds: Double) async -> PoolForwardOutcome {
+    public func forward(
+        poolName: String, body: Data, timeoutSeconds: Double,
+        upstreamPath: String = "chat/completions", contentType: String? = nil,
+        interface: APIContract? = nil
+    ) async -> PoolForwardOutcome {
         let config = holder.value
         guard let pool = config.pool(named: poolName) else { return .unknownPool }
-        return await dispatch(pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds)
+        return await dispatch(
+            pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds,
+            upstreamPath: upstreamPath, contentType: contentType, interface: interface)
     }
 
-    /// Builds the upstream POST. `X-No-Autoload: 1` is set only for loopback
-    /// and `localNovaMLX` members. The API key is a header, never logged.
-    static func makeUpstreamRequest(member: MemberConfig, body: Data, apiKey: String?) throws -> HTTPClientRequest {
-        guard var json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
-            throw UpstreamRequestError.bodyNotJSON
-        }
-        json["model"] = member.upstreamModel
-        guard let rewritten = try? JSONSerialization.data(withJSONObject: json) else {
-            throw UpstreamRequestError.rewriteFailed
-        }
+    /// Builds the upstream POST. `upstreamPath` is the path under the member's
+    /// `/v1` base, such as `chat/completions` or `embeddings`. `X-No-Autoload: 1`
+    /// is set only for loopback and `localNovaMLX` members. The API key is a
+    /// header, never logged.
+    static func makeUpstreamRequest(
+        member: MemberConfig, body: Data, apiKey: String?,
+        upstreamPath: String = "chat/completions", contentType: String? = nil
+    ) throws -> HTTPClientRequest {
+        let (rewritten, sendType) = try UpstreamBodyCodec.prepare(
+            body: body, contentType: contentType, upstreamModel: member.upstreamModel)
         var request = HTTPClientRequest(
-            url: member.endpoint.appendingPathComponent("chat/completions").absoluteString)
+            url: UpstreamBodyCodec.upstreamURL(endpoint: member.endpoint, path: upstreamPath))
         request.method = .POST
-        request.headers.add(name: "content-type", value: "application/json")
+        request.headers.add(name: "content-type", value: sendType)
         if MemberAddress.isLocalTier(member) {
             request.headers.add(name: "X-No-Autoload", value: "1")
         }
@@ -126,17 +140,25 @@ public final class PoolForwarder: Sendable {
 
     // MARK: - Dispatch
 
-    private func dispatch(pool: PoolConfig, config: PeerConfig, body: Data,
-                          timeoutSeconds: Double) async -> PoolForwardOutcome {
+    private func dispatch(
+        pool: PoolConfig, config: PeerConfig, body: Data, timeoutSeconds: Double,
+        upstreamPath: String, contentType: String?, interface: APIContract?
+    ) async -> PoolForwardOutcome {
+        let gatewayPath = upstreamPath.hasPrefix("/v1/") ? upstreamPath : "/v1/\(upstreamPath)"
+        let effectiveApi = interface ?? pool.api
+        guard SupplyAPI.allows(effectiveApi, gatewayPath: gatewayPath) else {
+            return .pathNotAllowed(path: gatewayPath)
+        }
         guard pool.isEnabled else { return .poolDisabled }
         let members = config.members(in: pool)
         let stats = await stats.snapshot()
         let candidates = PoolRouter.plan(PoolRouterInput(pool: pool, members: members, stats: stats))
         guard !candidates.isEmpty else { return .noHealthyMembers }
 
-        guard (try? JSONSerialization.jsonObject(with: body)) is [String: Any] else {
+        if UpstreamBodyCodec.poolName(body: body, contentType: contentType) == nil,
+           UpstreamBodyCodec.boundary(in: contentType) != nil || jsonObject(body) == nil {
             return .allMembersFailed(
-                lastError: "request body is not a JSON object", lastStatus: 0, timedOut: false)
+                lastError: unreadableBodyMessage(contentType), lastStatus: 0, timedOut: false)
         }
 
         holder.bumpRequestCount(poolId: pool.id)
@@ -160,7 +182,9 @@ public final class PoolForwarder: Sendable {
             let started = ContinuousClock.now
             let apiKey = (try? secrets.load(member.apiKeyRef)) ?? nil
             do {
-                let request = try Self.makeUpstreamRequest(member: member, body: body, apiKey: apiKey)
+                let request = try Self.makeUpstreamRequest(
+                    member: member, body: body, apiKey: apiKey,
+                    upstreamPath: upstreamPath, contentType: contentType)
                 let response = try await client.execute(request, timeout: timeout)
                 let status = Int(response.status.code)
                 let latency = Self.latencyMs(since: started)
@@ -183,7 +207,7 @@ public final class PoolForwarder: Sendable {
                 return .cancelled
             } catch UpstreamRequestError.bodyNotJSON {
                 return .allMembersFailed(
-                    lastError: "request body is not a JSON object", lastStatus: 0, timedOut: false)
+                    lastError: unreadableBodyMessage(contentType), lastStatus: 0, timedOut: false)
             } catch UpstreamRequestError.rewriteFailed {
                 lastError = "model rewrite failed"
                 lastStatus = 0
@@ -207,6 +231,17 @@ public final class PoolForwarder: Sendable {
             }
         }
         return .allMembersFailed(lastError: lastError, lastStatus: lastStatus, timedOut: timedOut)
+    }
+
+    private func unreadableBodyMessage(_ contentType: String?) -> String {
+        if UpstreamBodyCodec.boundary(in: contentType) != nil {
+            return "multipart form has no model field"
+        }
+        return "request body is not a JSON object"
+    }
+
+    private func jsonObject(_ body: Data) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
     }
 
     private func record(memberId: String, succeeded: Bool, latencyMs: Int64,
