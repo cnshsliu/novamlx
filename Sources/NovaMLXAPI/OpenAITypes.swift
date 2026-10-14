@@ -761,6 +761,8 @@ public struct AdminModelStatus: Codable, Sendable {
     public let tie: TieStatusInfo?
     public let nativeMtpAvailable: Bool?
     public let nativeMtpEnabled: Bool?
+    /// Present when load needs a yes/no before attaching an unmeasured companion.
+    public let acceleratorPrompt: AcceleratorPromptInfo?
 
     public init(
         id: String,
@@ -773,7 +775,8 @@ public struct AdminModelStatus: Codable, Sendable {
         specBoost: SpecBoostInfo? = nil,
         tie: TieStatusInfo? = nil,
         nativeMtpAvailable: Bool? = nil,
-        nativeMtpEnabled: Bool? = nil
+        nativeMtpEnabled: Bool? = nil,
+        acceleratorPrompt: AcceleratorPromptInfo? = nil
     ) {
         self.id = id
         self.family = family
@@ -785,6 +788,7 @@ public struct AdminModelStatus: Codable, Sendable {
         self.tie = tie
         self.nativeMtpAvailable = nativeMtpAvailable
         self.nativeMtpEnabled = nativeMtpEnabled
+        self.acceleratorPrompt = acceleratorPrompt
         if let date = downloadedAt {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -825,6 +829,47 @@ public struct AdminDownloadRequest: Codable, Sendable {
 
     public init(modelId: String) {
         self.modelId = modelId
+    }
+}
+
+public struct AcceleratorPromptInfo: Codable, Sendable {
+    public struct Option: Codable, Sendable {
+        public let acceleratorId: String
+        public let kind: String
+        public let displayName: String
+        public let reason: String
+        public let estimatedSizeMB: Int
+
+        public init(
+            acceleratorId: String, kind: String, displayName: String,
+            reason: String, estimatedSizeMB: Int
+        ) {
+            self.acceleratorId = acceleratorId
+            self.kind = kind
+            self.displayName = displayName
+            self.reason = reason
+            self.estimatedSizeMB = estimatedSizeMB
+        }
+    }
+
+    public let mainModelId: String
+    public let options: [Option]
+    public let autoAttachedId: String?
+
+    public init(mainModelId: String, options: [Option], autoAttachedId: String?) {
+        self.mainModelId = mainModelId
+        self.options = options
+        self.autoAttachedId = autoAttachedId
+    }
+}
+
+public struct AcceleratorChoiceRequest: Codable, Sendable {
+    public let modelId: String
+    public let enabledIds: [String]
+
+    public init(modelId: String, enabledIds: [String]) {
+        self.modelId = modelId
+        self.enabledIds = enabledIds
     }
 }
 

@@ -9,6 +9,11 @@ import NovaMLXModelManager
 import NovaMLXDistributed
 import AsyncAlgorithms
 
+extension Notification.Name {
+    /// Posted with the backbone model id when load needs a yes/no on unknown boosters.
+    public static let novaMLXAcceleratorPrompt = Notification.Name("novaMLXAcceleratorPrompt")
+}
+
 /// Per-model load dedup. Concurrent callers for the same modelId await a
 /// single underlying task. Cleanup is synchronous in the actor's isolation
 /// context so a failed load releases its slot before the error propagates,
@@ -56,6 +61,9 @@ public final class InferenceService: @unchecked Sendable {
     private let httpLock = NovaMLXLock()
     private var httpToEngine: [String: UUID] = [:]
     private var ttlSweepTask: Task<Void, Never>?
+    private var acceleratorDownloads: ModelManager?
+    private let acceleratorLock = NovaMLXLock()
+    private var acceleratorPrompts: [String: AcceleratorPrompt] = [:]
 
     // Cluster distributed inference mode
     private let clusterMode: Bool
@@ -463,81 +471,67 @@ public final class InferenceService: @unchecked Sendable {
         guard isModelLoaded(request.model) else { return request }
 
         let mainId = settingsManager.resolveModelId(request.model)
-        if let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: mainId),
-           isModelLoaded(dspark.draftModelId)
-        {
-            if !request.allowsMtp {
-                NovaMLXLog.info("[SpecBoost] Skipping DSpark auto-inject for '\(mainId)' (MTP/DFlash off)")
-            } else {
-                NovaMLXLog.info("[SpecBoost] Auto-injecting DSpark draft '\(dspark.draftModelId)' for '\(request.model)'")
-                return withDraft(request, draftId: dspark.draftModelId)
+        let family = draftFamily(for: request)
+        let scenario = Self.requestScenario(request)
+        let remembered = settingsManager.getSettings(mainId).acceleratorChoices ?? [:]
+        let candidates = DraftModelRegistry.shared.acceleratorCandidates(
+            forMainId: mainId,
+            family: family,
+            isHybrid: isHybridModel(request.model),
+            modelType: .llm
+        )
+        let plan = AcceleratorSpeedGate.plan(
+            mainModelId: mainId,
+            scenario: scenario,
+            candidates: candidates,
+            remembered: remembered
+        )
+        // One primary path. DFlash2, then MTP, then DSpark, then a small draft.
+        for candidate in plan.attach {
+            let blockKind = candidate.kind == .dflash2 || candidate.kind == .mtp || candidate.kind == .dspark
+            if blockKind && !request.allowsMtp {
+                NovaMLXLog.info("[SpecBoost] Skipping \(candidate.kind.rawValue) auto-inject for '\(mainId)' (MTP/DFlash off)")
+                continue
             }
-        }
-        if let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId),
-           isModelLoaded(dflash.draftModelId)
-        {
-            if !request.allowsMtp {
-                NovaMLXLog.info("[SpecBoost] Skipping DFlash2 auto-inject for '\(mainId)' (MTP/DFlash off)")
-            } else {
-                NovaMLXLog.info("[SpecBoost] Auto-injecting DFlash2 draft '\(dflash.draftModelId)' for '\(request.model)'")
-                return withDraft(request, draftId: dflash.draftModelId)
-            }
-        }
-        // Qwen MTP heads are greedy. Auto-injecting them at temp>0 ignores the
-        // requested sampler and often loops after </think>, leaving message.content
-        // empty or a few characters. Keep MTP for greedy (temp==0) decode.
-        if let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId),
-           isModelLoaded(mtp.draftModelId)
-        {
-            if !request.allowsMtp {
-                NovaMLXLog.info("[SpecBoost] Skipping MTP auto-inject for '\(mainId)' (MTP off)")
-            } else {
+            guard isModelLoaded(candidate.acceleratorId) else { continue }
+            if candidate.kind == .mtp {
                 let temp = request.temperature ?? 1
                 if temp > 0 {
                     NovaMLXLog.info("[SpecBoost] Skipping MTP auto-inject for '\(mainId)' (temp=\(temp) > 0; Qwen MTP is greedy-only)")
-                } else {
-                    NovaMLXLog.info("[SpecBoost] Auto-injecting MTP draft '\(mtp.draftModelId)' for '\(request.model)'")
-                    return withDraft(request, draftId: mtp.draftModelId)
+                    continue
                 }
             }
+            if candidate.kind == .smallDraft {
+                let mainDir = NovaMLXPaths.directory(forModelId: mainId)
+                let draftDir = NovaMLXPaths.directory(forModelId: candidate.acceleratorId)
+                guard let mainVocab = DraftModelRegistry.readVocabSize(from: mainDir),
+                      let draftVocab = DraftModelRegistry.readVocabSize(from: draftDir),
+                      mainVocab == draftVocab else {
+                    NovaMLXLog.warning("[SpecBoost] Vocab mismatch for \(request.model), skipping auto-injection")
+                    continue
+                }
+            }
+            NovaMLXLog.info(
+                "[SpecBoost] Auto-injecting \(candidate.kind.rawValue) '\(candidate.acceleratorId)' for '\(request.model)'"
+            )
+            return withDraft(request, draftId: candidate.acceleratorId)
         }
+        return request
+    }
 
-        guard !isHybridModel(request.model) else { return request }
+    private func draftFamily(for request: InferenceRequest) -> ModelFamily {
+        inferredFamily(settingsManager.resolveModelId(request.model))
+    }
 
-        // Look up recommendation from registry
-        let family: ModelFamily
-        if let container = engine.getContainer(for: request.model) {
-            family = container.identifier.family
-        } else {
-            // Worker mode: engine pool is empty, infer family from model ID
-            let id = settingsManager.resolveModelId(request.model).lowercased()
-            if id.contains("qwen") { family = .qwen }
-            else if id.contains("llama") { family = .llama }
-            else if id.contains("gemma") { family = .gemma }
-            else if id.contains("mistral") { family = .mistral }
-            else if id.contains("phi") { family = .phi }
-            else { return request }
+    private static func requestScenario(_ request: InferenceRequest) -> SpecScenario {
+        var characters = 0
+        var code = false
+        for message in request.messages {
+            let text = message.content ?? ""
+            characters += text.count
+            if text.contains("```") { code = true }
         }
-
-        guard let candidate = DraftModelRegistry.shared.recommendation(
-            family: family,
-            isHybrid: false
-        ) else { return request }
-
-        guard isModelLoaded(candidate.draftModelId) else { return request }
-
-        // Validate vocab_size match from config.json on disk
-        let mainDir = NovaMLXPaths.directory(forModelId:mainId)
-        let draftDir = NovaMLXPaths.directory(forModelId:candidate.draftModelId)
-        guard let mainVocab = DraftModelRegistry.readVocabSize(from: mainDir),
-              let draftVocab = DraftModelRegistry.readVocabSize(from: draftDir),
-              mainVocab == draftVocab else {
-            NovaMLXLog.warning("[SpecBoost] Vocab mismatch for \(request.model), skipping auto-injection")
-            return request
-        }
-
-        NovaMLXLog.info("[SpecBoost] Auto-injecting draft '\(candidate.draftModelId)' for '\(request.model)'")
-        return withDraft(request, draftId: candidate.draftModelId)
+        return AcceleratorSpeedGate.scenario(messageCharacters: characters, containsCodeFence: code)
     }
 
     private func withDraft(_ request: InferenceRequest, draftId: String) -> InferenceRequest {
@@ -676,10 +670,40 @@ public final class InferenceService: @unchecked Sendable {
             self.saveLoadedModelsList()
         }
 
-        await loadCompanionDSparkIfPresent(mainId: modelId)
-        await loadCompanionDFlashIfPresent(mainId: modelId)
-        await loadCompanionMtpIfPresent(mainId: modelId)
+        if !asMtpCompanion, config.modelType == .llm || config.modelType == .vlm {
+            await applyAcceleratorGate(
+                mainId: modelId,
+                family: config.identifier.family,
+                modelType: config.modelType
+            )
+        }
         await applyResourceLimits()
+    }
+
+    /// Host download manager used when an `auto_on` or accepted companion is not on disk.
+    public func bindAcceleratorDownloads(_ manager: ModelManager) {
+        acceleratorDownloads = manager
+    }
+
+    public func pendingAcceleratorPrompt(for modelId: String) -> AcceleratorPrompt? {
+        let resolved = settingsManager.resolveModelId(modelId)
+        return acceleratorLock.withLock { acceleratorPrompts[resolved] }
+    }
+
+    /// Remember the load-time answer and attach the best enabled companion.
+    /// An empty set stores "no" for every option that was asked.
+    public func resolveAcceleratorPrompt(_ prompt: AcceleratorPrompt, enabledIds: Set<String>) async {
+        let resolved = settingsManager.resolveModelId(prompt.mainModelId)
+        settingsManager.updateSettings(resolved) { settings in
+            var choices = settings.acceleratorChoices ?? [:]
+            for option in prompt.options {
+                choices[option.acceleratorId] = enabledIds.contains(option.acceleratorId)
+            }
+            settings.acceleratorChoices = choices
+        }
+        acceleratorLock.withLock { acceleratorPrompts[resolved] = nil }
+        await applyAcceleratorGate(
+            mainId: resolved, family: prompt.family, modelType: prompt.modelType)
     }
 
     private func ensureTieLayoutIfNeeded(
@@ -720,70 +744,161 @@ public final class InferenceService: @unchecked Sendable {
         }
     }
 
-    private func loadCompanionDSparkIfPresent(mainId: String) async {
-        if settingsManager.getSettings(mainId).nativeMtpEnabled == false {
-            NovaMLXLog.info("[SpecBoost] Skipping DSpark companion load for '\(mainId)' (MTP/DFlash off)")
+    /// Load-time gate. `auto_on` downloads and attaches. `auto_off` is silent.
+    /// `ask_user` stores a prompt and does not attach until the user answers.
+    private func applyAcceleratorGate(
+        mainId: String, family: ModelFamily, modelType: ModelType
+    ) async {
+        let resolved = settingsManager.resolveModelId(mainId)
+        if settingsManager.getSettings(resolved).nativeMtpEnabled == false {
+            NovaMLXLog.info("[SpecBoost] Skipping accelerator companions for '\(resolved)' (MTP/DFlash off)")
+            acceleratorLock.withLock { acceleratorPrompts[resolved] = nil }
             return
         }
-        guard let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: mainId) else { return }
-        guard !isModelLoaded(dspark.draftModelId) else { return }
-        let dir = NovaMLXPaths.directory(forModelId: dspark.draftModelId)
-        guard FileManager.default.fileExists(
-            atPath: dir.appendingPathComponent("config.json").path)
-        else {
-            NovaMLXLog.info(
-                "[SpecBoost] DSpark companion '\(dspark.draftModelId)' not on disk — in-graph DSpark/MTP still runs from the V4.1 checkpoint; download the drafter for the split path"
+        let remembered = settingsManager.getSettings(resolved).acceleratorChoices ?? [:]
+        let candidates = DraftModelRegistry.shared.acceleratorCandidates(
+            forMainId: resolved, family: family, isHybrid: isHybridModel(resolved), modelType: modelType
+        )
+        let plan = AcceleratorSpeedGate.plan(
+            mainModelId: resolved, scenario: .unspecified, candidates: candidates, remembered: remembered
+        )
+        var attached: String?
+        for candidate in plan.attach {
+            if await ensureAccelerator(candidate, mainId: resolved) {
+                attached = candidate.acceleratorId
+                NovaMLXLog.info(
+                    "[SpecBoost] Attached \(candidate.kind.rawValue) '\(candidate.acceleratorId)' for '\(resolved)'"
+                )
+                break
+            }
+            NovaMLXLog.warning(
+                "[SpecBoost] \(candidate.kind.rawValue) '\(candidate.acceleratorId)' did not attach; trying the next choice"
             )
+        }
+        if let attached {
+            await unloadAcceleratorCompanions(of: resolved, except: attached)
+        }
+        if plan.ask.isEmpty {
+            acceleratorLock.withLock { acceleratorPrompts[resolved] = nil }
             return
         }
-        NovaMLXLog.info("[SpecBoost] Loading DSpark companion '\(dspark.draftModelId)' for '\(mainId)'")
+        let prompt = AcceleratorPrompt(
+            mainModelId: resolved,
+            family: family,
+            modelType: modelType,
+            options: plan.ask.map {
+                AcceleratorPromptOption(
+                    acceleratorId: $0.candidate.acceleratorId,
+                    kind: $0.candidate.kind.rawValue,
+                    displayName: $0.candidate.displayName,
+                    reason: $0.reason,
+                    estimatedSizeMB: $0.candidate.estimatedSizeMB
+                )
+            },
+            autoAttachedId: attached
+        )
+        acceleratorLock.withLock { acceleratorPrompts[resolved] = prompt }
+        NotificationCenter.default.post(name: .novaMLXAcceleratorPrompt, object: resolved)
+    }
+
+    private func ensureAccelerator(_ candidate: AcceleratorCandidate, mainId: String) async -> Bool {
+        if candidate.kind == .dspark {
+            if DSparkDrafterStore.isLoadableDSparkDraft(modelId: candidate.acceleratorId) { return true }
+            guard await downloadAccelerator(candidate) else { return false }
+            return DSparkDrafterStore.isLoadableDSparkDraft(modelId: candidate.acceleratorId)
+        }
+        if isModelLoaded(candidate.acceleratorId) { return true }
+        var dir = NovaMLXPaths.directory(forModelId: candidate.acceleratorId)
+        if !FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path) {
+            guard await downloadAccelerator(candidate) else {
+                NovaMLXLog.info(
+                    "[SpecBoost] '\(candidate.acceleratorId)' is not on disk; continuing without it"
+                )
+                return false
+            }
+            dir = NovaMLXPaths.directory(forModelId: candidate.acceleratorId)
+        }
+        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path) else {
+            return false
+        }
         let config = ModelConfig(
-            identifier: ModelIdentifier(id: dspark.draftModelId, family: .deepseek),
+            identifier: ModelIdentifier(id: candidate.acceleratorId, family: candidate.family),
             modelType: .llm
         )
         do {
             try await loadModel(at: dir, config: config, asMtpCompanion: true)
+            return true
         } catch {
-            NovaMLXLog.warning("[SpecBoost] DSpark companion load failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func loadCompanionDFlashIfPresent(mainId: String) async {
-        if settingsManager.getSettings(mainId).nativeMtpEnabled == false {
-            NovaMLXLog.info("[SpecBoost] Skipping DFlash2 companion load for '\(mainId)' (MTP/DFlash off)")
-            return
-        }
-        guard let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId) else { return }
-        guard !isModelLoaded(dflash.draftModelId) else { return }
-        let dir = NovaMLXPaths.directory(forModelId:dflash.draftModelId)
-        guard FileManager.default.fileExists(
-            atPath: dir.appendingPathComponent("config.json").path)
-        else {
-            NovaMLXLog.info(
-                "[SpecBoost] DFlash2 companion '\(dflash.draftModelId)' not on disk — download it to unlock ~3× decode on Qwen3.8-27B"
+            NovaMLXLog.warning(
+                "[SpecBoost] Companion '\(candidate.acceleratorId)' failed for '\(mainId)': \(error.localizedDescription)"
             )
-            return
-        }
-        NovaMLXLog.info("[SpecBoost] Loading DFlash2 companion '\(dflash.draftModelId)' for '\(mainId)'")
-        let config = ModelConfig(
-            identifier: ModelIdentifier(id: dflash.draftModelId, family: .qwen),
-            modelType: .llm
-        )
-        do {
-            try await loadModel(at: dir, config: config, asMtpCompanion: true)
-            await unloadMtpCompanions(of: mainId)
-        } catch {
-            NovaMLXLog.warning("[SpecBoost] DFlash2 companion load failed: \(error.localizedDescription)")
+            return false
         }
     }
 
-    private func unloadMtpCompanions(of mainId: String) async {
-        guard let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId) else { return }
-        guard isModelLoaded(mtp.draftModelId) else { return }
-        NovaMLXLog.info(
-            "[SpecBoost] Unloading MTP '\(mtp.draftModelId)' because DFlash2 is active for '\(mainId)'"
+    private func downloadAccelerator(_ candidate: AcceleratorCandidate) async -> Bool {
+        guard let manager = acceleratorDownloads else { return false }
+        if manager.isDownloaded(candidate.acceleratorId) { return true }
+        if manager.getRecord(candidate.acceleratorId) == nil {
+            manager.register(
+                id: candidate.acceleratorId,
+                family: candidate.family,
+                modelType: .llm,
+                remoteURL: "https://huggingface.co/\(candidate.acceleratorId)",
+                sizeBytes: UInt64(candidate.estimatedSizeMB) * 1_000_000
+            )
+        }
+        if manager.getDownloadStatus(candidate.acceleratorId)?.state != .downloading {
+            do {
+                try manager.startDownload(candidate.acceleratorId)
+            } catch {
+                NovaMLXLog.warning(
+                    "[SpecBoost] Download failed to start for '\(candidate.acceleratorId)': \(error.localizedDescription)"
+                )
+                if manager.getDownloadStatus(candidate.acceleratorId)?.state != .downloading {
+                    return false
+                }
+            }
+        }
+        for _ in 0..<86_400 {
+            if manager.isDownloaded(candidate.acceleratorId) { return true }
+            let state = manager.getDownloadStatus(candidate.acceleratorId)?.state
+            if state == .failed || state == .notDownloaded { return false }
+            if state != .downloading && state != nil { return false }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        return manager.isDownloaded(candidate.acceleratorId)
+    }
+
+    private func unloadAcceleratorCompanions(of mainId: String, except keep: String? = nil) async {
+        let family = inferredFamily(mainId)
+        let candidates = DraftModelRegistry.shared.acceleratorCandidates(
+            forMainId: mainId, family: family, isHybrid: isHybridModel(mainId), modelType: .llm
         )
-        await unloadModel(ModelIdentifier(id: mtp.draftModelId, family: .qwen))
+        for candidate in candidates where candidate.acceleratorId != keep && candidate.acceleratorId != mainId {
+            guard isModelLoaded(candidate.acceleratorId) else { continue }
+            if candidate.kind == .dspark, DSparkDrafterStore.isLoadableDSparkDraft(modelId: candidate.acceleratorId) {
+                continue
+            }
+            NovaMLXLog.info(
+                "[SpecBoost] Unloading \(candidate.kind.rawValue) '\(candidate.acceleratorId)' for '\(mainId)'"
+            )
+            await unloadModel(ModelIdentifier(id: candidate.acceleratorId, family: candidate.family))
+        }
+    }
+
+    private func inferredFamily(_ modelId: String) -> ModelFamily {
+        if let container = engine.getContainer(for: modelId) {
+            return container.identifier.family
+        }
+        let id = modelId.lowercased()
+        if id.contains("qwen") { return .qwen }
+        if id.contains("llama") { return .llama }
+        if id.contains("gemma") { return .gemma }
+        if id.contains("mistral") { return .mistral }
+        if id.contains("phi") { return .phi }
+        if id.contains("deepseek") { return .deepseek }
+        return .other
     }
 
     /// MTP is only a fallback when DFlash2 is not loaded.
@@ -805,41 +920,6 @@ public final class InferenceService: @unchecked Sendable {
             keep.insert(mtpId)
         }
         return keep
-    }
-
-    private func loadCompanionMtpIfPresent(mainId: String) async {
-        if settingsManager.getSettings(mainId).nativeMtpEnabled == false {
-            NovaMLXLog.info("[SpecBoost] Skipping companion MTP load for '\(mainId)' (MTP off)")
-            return
-        }
-        let mainDir = NovaMLXPaths.directory(forModelId:mainId)
-        guard !NovaMLXEngine.isMtpDraftConfig(at: mainDir) else { return }
-        let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: mainId)
-        let dflashLoaded = dflash.map { isModelLoaded($0.draftModelId) } ?? false
-        guard Self.shouldLoadMtpCompanion(hasDFlash: dflashLoaded) else {
-            if let dflash {
-                NovaMLXLog.info(
-                    "[SpecBoost] Skipping MTP companion for '\(mainId)' — DFlash2 '\(dflash.draftModelId)' is loaded"
-                )
-            }
-            return
-        }
-        guard let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: mainId) else { return }
-        guard !isModelLoaded(mtp.draftModelId) else { return }
-        let mtpDir = NovaMLXPaths.directory(forModelId:mtp.draftModelId)
-        guard FileManager.default.fileExists(
-            atPath: mtpDir.appendingPathComponent("config.json").path)
-        else { return }
-        NovaMLXLog.info("[SpecBoost] Loading companion MTP '\(mtp.draftModelId)' for '\(mainId)'")
-        let config = ModelConfig(
-            identifier: ModelIdentifier(id: mtp.draftModelId, family: .qwen),
-            modelType: .llm
-        )
-        do {
-            try await loadModel(at: mtpDir, config: config, asMtpCompanion: true)
-        } catch {
-            NovaMLXLog.warning("[SpecBoost] MTP companion load failed: \(error.localizedDescription)")
-        }
     }
 
     /// Exclusive mode: one chat/backbone model plus DFlash2, or MTP if no DFlash.
@@ -998,29 +1078,15 @@ public final class InferenceService: @unchecked Sendable {
     public func setMtpEnabled(_ modelId: String, enabled: Bool) async {
         let resolvedId = settingsManager.resolveModelId(modelId)
         settingsManager.updateSettings(resolvedId) { $0.nativeMtpEnabled = enabled }
-        if let mtp = DraftModelRegistry.shared.mtpCandidate(forMainId: resolvedId) {
-            if enabled {
-                await loadCompanionMtpIfPresent(mainId: resolvedId)
-            } else if isModelLoaded(mtp.draftModelId) {
-                NovaMLXLog.info("[SpecBoost] Unloading companion MTP '\(mtp.draftModelId)' (MTP off)")
-                await unloadModel(ModelIdentifier(id: mtp.draftModelId, family: mtp.family))
-            }
-        }
-        if let dflash = DraftModelRegistry.shared.dflashCandidate(forMainId: resolvedId) {
-            if enabled {
-                await loadCompanionDFlashIfPresent(mainId: resolvedId)
-            } else if isModelLoaded(dflash.draftModelId) {
-                NovaMLXLog.info("[SpecBoost] Unloading DFlash2 '\(dflash.draftModelId)' (MTP/DFlash off)")
-                await unloadModel(ModelIdentifier(id: dflash.draftModelId, family: dflash.family))
-            }
-        }
-        if let dspark = DraftModelRegistry.shared.dsparkCandidate(forMainId: resolvedId) {
-            if enabled {
-                await loadCompanionDSparkIfPresent(mainId: resolvedId)
-            } else if isModelLoaded(dspark.draftModelId) {
-                NovaMLXLog.info("[SpecBoost] Unloading DSpark '\(dspark.draftModelId)' (MTP/DFlash off)")
-                await unloadModel(ModelIdentifier(id: dspark.draftModelId, family: dspark.family))
-            }
+        if enabled {
+            await applyAcceleratorGate(
+                mainId: resolvedId,
+                family: inferredFamily(resolvedId),
+                modelType: .llm
+            )
+        } else {
+            acceleratorLock.withLock { acceleratorPrompts[resolvedId] = nil }
+            await unloadAcceleratorCompanions(of: resolvedId)
         }
     }
 

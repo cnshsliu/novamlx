@@ -750,8 +750,8 @@ struct DSparkTests {
 
     // MARK: - Registry (opt-in Qwen3.8 DSpark candidate)
 
-    @Test("Qwen3.8 DSpark candidate is opt-in only — never auto-injected")
-    func qwen38DSparkOptInOnly() {
+    @Test("Qwen3.8 DSpark id is listed, and the speed gate asks instead of auto-loading")
+    func qwen38DSparkAsksInsteadOfAutoLoad() {
         let registry = DraftModelRegistry.shared
         #expect(
             registry.dsparkOptInCandidateIds(forMainId: "mlx-community/Qwen3.8-27B-8bit")
@@ -766,13 +766,19 @@ struct DSparkTests {
                 forMainId: "mlx-community/Qwen3.8-27B-MTP-4bit"
             ).isEmpty)
 
-        // The auto-inject source (`dsparkCandidate`) stays DeepSeek-only: qwen3.8
-        // must not resolve the RedHat head through it.
+        // Disk lookup stays DeepSeek-only. The gate, not that lookup, decides Qwen heads.
         #expect(registry.dsparkCandidate(forMainId: "mlx-community/Qwen3.8-27B-8bit") == nil)
+        let gate = AcceleratorSpeedGate.decision(
+            mainModelId: "mlx-community/Qwen3.8-27B-8bit",
+            acceleratorId: "RedHatAI/Qwen3.8-27B-speculator.dspark",
+            kind: .dspark,
+            scenario: .unspecified
+        )
+        #expect(gate.decision == .askUser)
     }
 
-    @Test("Qwen3-8B/14B map to the DeepSpec-native heads, opt-in only")
-    func qwen3SmallDSparkOptInOnly() {
+    @Test("Qwen3-8B/14B DSpark heads are auto-on through the speed gate")
+    func qwen3SmallDSparkAutoOn() {
         let registry = DraftModelRegistry.shared
         #expect(
             registry.dsparkOptInCandidateIds(forMainId: "mlx-community/Qwen3-8B-8bit")
@@ -781,7 +787,6 @@ struct DSparkTests {
             registry.dsparkOptInCandidateIds(forMainId: "mlx-community/Qwen3-14B-8bit")
                 == ["deepseek-ai/dspark_qwen3_14b_block7"])
         #expect(registry.dsparkOptInCandidateIds(forMainId: "Qwen/Qwen3-8B").count == 1)
-        // No shadowing across the families.
         #expect(
             registry.dsparkOptInCandidateIds(forMainId: "mlx-community/Qwen3.8-27B-8bit")
                 == ["RedHatAI/Qwen3.8-27B-speculator.dspark"])
@@ -789,9 +794,22 @@ struct DSparkTests {
             registry.dsparkOptInCandidateIds(
                 forMainId: "deepseek-ai/dspark_qwen3_8b_block7"
             ).isEmpty)
-        // Auto-inject stays blind to them.
         #expect(registry.dsparkCandidate(forMainId: "mlx-community/Qwen3-8B-8bit") == nil)
         #expect(registry.dsparkCandidate(forMainId: "mlx-community/Qwen3-14B-8bit") == nil)
+        #expect(
+            AcceleratorSpeedGate.decision(
+                mainModelId: "mlx-community/Qwen3-8B-8bit",
+                acceleratorId: "deepseek-ai/dspark_qwen3_8b_block7",
+                kind: .dspark,
+                scenario: .unspecified
+            ).decision == .autoOn)
+        #expect(
+            AcceleratorSpeedGate.decision(
+                mainModelId: "mlx-community/Qwen3-14B-8bit",
+                acceleratorId: "deepseek-ai/dspark_qwen3_14b_block7",
+                kind: .dspark,
+                scenario: .codeMath
+            ).decision == .autoOn)
     }
 
     @Test("real RedHat speculators checkpoint loads through DSparkDrafterStore")

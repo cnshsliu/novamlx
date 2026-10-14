@@ -1,6 +1,7 @@
 import SwiftUI
 import Charts
 import NovaMLXCore
+import NovaMLXEngine
 import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
@@ -44,6 +45,7 @@ public struct NovaAppView: View {
 
     @EnvironmentObject var l10n: L10n
     @State private var selectedPage: AppPage
+    @State private var acceleratorPrompt: AcceleratorPrompt?
     /// Page drafts. Not observed here, so a keystroke does not rebuild the sidebar.
     @State private var pageMemory = PageMemoryBox()
 
@@ -75,6 +77,22 @@ public struct NovaAppView: View {
         .task { await modelManager.refreshModelCaches() }
         .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
             Task { await modelManager.refreshModelCaches() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .novaMLXAcceleratorPrompt)) { note in
+            guard let id = note.object as? String,
+                  let prompt = inferenceService.pendingAcceleratorPrompt(for: id),
+                  !prompt.options.isEmpty
+            else { return }
+            acceleratorPrompt = prompt
+        }
+        .sheet(item: $acceleratorPrompt) { prompt in
+            AcceleratorPromptSheet(prompt: prompt) { enabled in
+                let choice = prompt
+                acceleratorPrompt = nil
+                Task {
+                    await inferenceService.resolveAcceleratorPrompt(choice, enabledIds: enabled)
+                }
+            }
         }
     }
 

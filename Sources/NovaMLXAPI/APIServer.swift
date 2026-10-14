@@ -742,6 +742,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
         self.updateChecker = UpdateChecker()
         self.hfService = HuggingFaceService(modelDirectory: modelManager.modelsDirectory, endpoint: huggingfaceEndpoint)
         self.config = config
+        inferenceService.bindAcceleratorDownloads(modelManager)
         // When HF download completes, re-run discovery so model appears in registry
         self.hfService.onModelDownloaded = { [weak self] repoId in
             NovaMLXLog.info("[HF] Download completed for \(repoId), running model discovery...")
@@ -2533,7 +2534,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     return try Self.jsonResponse(AdminModelStatus(
                         id: req.modelId, family: record.family.rawValue,
                         downloaded: true, loaded: true,
-                        sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt
+                        sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt,
+                        acceleratorPrompt: Self.acceleratorPromptInfo(
+                            inference.pendingAcceleratorPrompt(for: req.modelId))
                     ))
                 }
                 Post("/unload") { request, context in
@@ -2575,6 +2578,25 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     try models.deleteModel(modelId)
 
                     return Response(status: .noContent)
+                }
+                Post("/accelerators/decide") { request, context in
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AcceleratorChoiceRequest.self, from: body)
+                    guard let prompt = inference.pendingAcceleratorPrompt(for: req.modelId) else {
+                        throw NovaMLXError.apiError("No accelerator choice is waiting for \(req.modelId)")
+                    }
+                    await inference.resolveAcceleratorPrompt(prompt, enabledIds: Set(req.enabledIds))
+                    let record = models.getRecord(req.modelId)
+                    return try Self.jsonResponse(AdminModelStatus(
+                        id: req.modelId,
+                        family: record?.family.rawValue ?? prompt.family.rawValue,
+                        downloaded: true,
+                        loaded: inference.isModelLoaded(req.modelId),
+                        sizeBytes: record?.sizeBytes ?? 0,
+                        downloadedAt: record?.downloadedAt,
+                        acceleratorPrompt: Self.acceleratorPromptInfo(
+                            inference.pendingAcceleratorPrompt(for: req.modelId))
+                    ))
                 }
                 Post("/boost/download") { request, context in
                     let body = try await request.body.collect(upTo: .max)
@@ -3994,6 +4016,23 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     }
 
 
+
+    static func acceleratorPromptInfo(_ prompt: AcceleratorPrompt?) -> AcceleratorPromptInfo? {
+        guard let prompt, !prompt.options.isEmpty else { return nil }
+        return AcceleratorPromptInfo(
+            mainModelId: prompt.mainModelId,
+            options: prompt.options.map {
+                AcceleratorPromptInfo.Option(
+                    acceleratorId: $0.acceleratorId,
+                    kind: $0.kind,
+                    displayName: $0.displayName,
+                    reason: $0.reason,
+                    estimatedSizeMB: $0.estimatedSizeMB
+                )
+            },
+            autoAttachedId: prompt.autoAttachedId
+        )
+    }
 
     static func jsonResponse<T: Encodable>(_ value: T) throws -> Response {
         try jsonResponse(value, httpStatus: .ok)
