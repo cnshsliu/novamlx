@@ -8,7 +8,7 @@ import AppKit
 enum MenuBarIcon {
     private static let canvas = NSSize(width: 18, height: 18)
 
-    static func image(for status: TunnelStatus?) -> NSImage {
+    static func image(for status: TunnelStatus?, trafficPhase: Int? = nil) -> NSImage {
         if case .upgradeRequired = status {
             let symbol = NSImage(
                 systemSymbolName: "exclamationmark.triangle",
@@ -18,14 +18,14 @@ enum MenuBarIcon {
             return symbol ?? NSImage()
         }
         let image = NSImage(size: canvas, flipped: false) { rect in
-            draw(in: rect, status: status)
+            draw(in: rect, status: status, trafficPhase: trafficPhase)
             return true
         }
         image.isTemplate = true
         return image
     }
 
-    private static func draw(in rect: NSRect, status: TunnelStatus?) {
+    private static func draw(in rect: NSRect, status: TunnelStatus?, trafficPhase: Int?) {
         var beamAlpha: CGFloat = 1
         var arcAlpha: CGFloat = 1
         var beamDashed = false
@@ -89,6 +89,18 @@ enum MenuBarIcon {
             } else {
                 node.lineWidth = 1.25
                 node.stroke()
+            }
+        }
+
+        // Packets riding the beam while tokens flow.
+        if drawBeam, let phase = trafficPhase {
+            NSColor.black.setFill()
+            let origin = left.x + nodeRadius + 0.2
+            let span = right.x - left.x - 2 * (nodeRadius + 0.2)
+            for offset in [0.0, 0.5] {
+                let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
+                let x = origin + t * span
+                NSBezierPath(ovalIn: NSRect(x: x - 1.1, y: mid.y - 1.1, width: 2.2, height: 2.2)).fill()
             }
         }
     }

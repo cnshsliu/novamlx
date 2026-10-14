@@ -5,13 +5,13 @@ import AppKit
 /// Dock icon: the full-color tunnel mark, tinted by tunnel state. Visible only
 /// while a Peer window promotes the app to the regular activation policy.
 enum DockIcon {
-    static func apply(status: TunnelStatus?) {
-        NSApp.applicationIconImage = image(for: status)
+    static func apply(status: TunnelStatus?, trafficPhase: Int? = nil) {
+        NSApp.applicationIconImage = image(for: status, trafficPhase: trafficPhase)
     }
 
-    static func image(for status: TunnelStatus?) -> NSImage {
+    static func image(for status: TunnelStatus?, trafficPhase: Int? = nil) -> NSImage {
         NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
-            draw(in: rect, status: status)
+            draw(in: rect, status: status, trafficPhase: trafficPhase)
             return true
         }
     }
@@ -23,7 +23,7 @@ enum DockIcon {
     private static let hole = NSColor(calibratedRed: 0.039, green: 0.055, blue: 0.133, alpha: 1)
     private static let amber = NSColor(calibratedRed: 0.961, green: 0.620, blue: 0.043, alpha: 1)
 
-    private static func draw(in rect: NSRect, status: TunnelStatus?) {
+    private static func draw(in rect: NSRect, status: TunnelStatus?, trafficPhase: Int?) {
         var beamAlpha: CGFloat = 1
         var arcAlpha: CGFloat = 1
         var beamDashed = false
@@ -77,8 +77,17 @@ enum DockIcon {
                 NSGradient(colors: [cyan.withAlphaComponent(beamAlpha),
                                     indigo.withAlphaComponent(beamAlpha)])?.draw(in: beam, angle: 0)
             }
-            for (x, color) in [(131.0, cyan), (381.0, indigo)] as [(CGFloat, NSColor)] {
-                color.withAlphaComponent(beamAlpha).setFill()
+            let packetXs: [CGFloat]
+            if let phase = trafficPhase {
+                packetXs = [0.0, 0.5].map { offset in
+                    let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
+                    return 71 + t * 370
+                }
+            } else {
+                packetXs = [131, 381]
+            }
+            for x in packetXs {
+                blend(from: cyan, to: indigo, at: (x - 60) / 392, alpha: beamAlpha).setFill()
                 NSBezierPath(ovalIn: NSRect(x: x - 11, y: 245, width: 22, height: 22)).fill()
             }
         }

@@ -105,6 +105,57 @@ final class PeerAppState: ObservableObject {
         status?.gatewayListening == true
     }
 
+    // MARK: - Traffic animation
+
+    /// Drives the menu-bar packet animation. Non-nil while traffic flowed
+    /// within the last second. The real signal plugs into `noteTraffic`.
+    @Published private(set) var trafficPhase: Int?
+    private var lastTrafficAt = Date.distantPast
+    private var trafficTimer: Timer?
+
+    func noteTraffic() {
+        lastTrafficAt = Date()
+        if trafficPhase == nil { trafficPhase = 0 }
+        guard trafficTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.advanceTraffic() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        trafficTimer = timer
+    }
+
+    private func advanceTraffic() {
+        guard Date().timeIntervalSince(lastTrafficAt) < 1.0 else {
+            trafficTimer?.invalidate()
+            trafficTimer = nil
+            trafficPhase = nil
+            return
+        }
+        trafficPhase = ((trafficPhase ?? 0) + 1) % 8
+    }
+
+    /// Fakes a token stream so the menu-bar animation can be previewed
+    /// without a live tunnel. Toggles: start on the first call, stop on the
+    /// second.
+    @Published private(set) var isSimulatingTraffic = false
+    private var trafficSimulation: Task<Void, Never>?
+
+    func toggleTrafficSimulation() {
+        if let task = trafficSimulation {
+            task.cancel()
+            trafficSimulation = nil
+            isSimulatingTraffic = false
+            return
+        }
+        isSimulatingTraffic = true
+        trafficSimulation = Task { @MainActor in
+            while !Task.isCancelled {
+                noteTraffic()
+                try? await Task.sleep(for: .milliseconds(90))
+            }
+        }
+    }
+
     /// Dial in progress or the session is up. Idle after retry exhaustion is not active,
     /// so Start can dial again without waiting for the next launch.
     var isTunnelActive: Bool {

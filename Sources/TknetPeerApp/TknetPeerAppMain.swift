@@ -25,7 +25,7 @@ struct TknetPeerApp: App {
             PeerMenu()
                 .environmentObject(appState)
         } label: {
-            PeerMenuBarLabel(status: appState.status?.connection)
+            PeerMenuBarLabel(status: appState.status?.connection, trafficPhase: appState.trafficPhase)
         }
         .menuBarExtraStyle(.menu)
 
@@ -152,21 +152,25 @@ final class PeerAppDelegate: NSObject, NSApplicationDelegate {
 /// contents, so it can hold the SwiftUI `openWindow` action for Dock reopen.
 private struct PeerMenuBarLabel: View {
     let status: TunnelStatus?
+    let trafficPhase: Int?
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Label {
             Text("Tknet Peer")
         } icon: {
-            Image(nsImage: MenuBarIcon.image(for: status))
+            Image(nsImage: MenuBarIcon.image(for: status, trafficPhase: trafficPhase))
         }
         .onAppear {
             let open = openWindow
             PeerWindowActivation.openWindow = { open(id: "peer") }
-            DockIcon.apply(status: status)
+            DockIcon.apply(status: status, trafficPhase: trafficPhase)
         }
         .onChange(of: status) { _, newStatus in
-            DockIcon.apply(status: newStatus)
+            DockIcon.apply(status: newStatus, trafficPhase: trafficPhase)
+        }
+        .onChange(of: trafficPhase) { _, newPhase in
+            DockIcon.apply(status: status, trafficPhase: newPhase)
         }
     }
 }
@@ -205,6 +209,11 @@ struct PeerMenu: View {
                 .disabled(state.lockError != nil)
             }
         }
+        Divider()
+        Button(state.isSimulatingTraffic ? "Stop Token Flow Simulation" : "Simulate Token Flow") {
+            state.toggleTrafficSimulation()
+        }
+        .disabled(!state.isTunnelActive)
         Divider()
         Button("Quit Tknet Peer") {
             NSApp.terminate(nil)
