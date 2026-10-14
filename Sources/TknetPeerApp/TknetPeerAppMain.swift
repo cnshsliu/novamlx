@@ -215,8 +215,31 @@ struct PeerMenu: View {
         }
         .disabled(!state.isTunnelActive)
         Divider()
+        Button("Restart Tknet Peer") {
+            AppRelaunch.restart()
+        }
         Button("Quit Tknet Peer") {
             NSApp.terminate(nil)
         }
+    }
+}
+
+/// Restarts the app: a detached watcher waits for this process to exit, then
+/// reopens the bundle. Termination goes through the normal path, so the
+/// tunnel shuts down and the process lock is released before the relaunch.
+enum AppRelaunch {
+    static func restart() {
+        let bundlePath = Bundle.main.bundlePath
+        if bundlePath.hasSuffix(".app") {
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let watcher = Process()
+            watcher.executableURL = URL(fileURLWithPath: "/bin/bash")
+            watcher.arguments = [
+                "-c",
+                "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; open \"\(bundlePath)\"",
+            ]
+            try? watcher.run()
+        }
+        NSApp.terminate(nil)
     }
 }
