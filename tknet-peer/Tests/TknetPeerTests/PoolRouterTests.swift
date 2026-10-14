@@ -5,11 +5,11 @@ import Testing
 @Suite("PoolRouter")
 struct PoolRouterTests {
     private func member(_ id: String, endpoint: String, type: SourceType = .openaiCompatible,
-                        free: Bool = false, weight: Int? = nil, enabled: Bool = true) -> MemberConfig {
+                        weight: Int? = nil, enabled: Bool = true) -> MemberConfig {
         MemberConfig(
             id: id, name: id, type: type, endpoint: URL(string: endpoint)!,
             apiKeyRef: "src/\(id)", upstreamModel: id, weight: weight,
-            isEnabled: enabled, isFree: free)
+            isEnabled: enabled)
     }
 
     private func pool(_ strategy: PoolStrategy, requestCount: Int = 0) -> PoolConfig {
@@ -19,14 +19,14 @@ struct PoolRouterTests {
     private func fixture() -> [MemberConfig] {
         [
             member("local", endpoint: "http://127.0.0.1:6590/v1", type: .localNovaMLX),
-            member("free", endpoint: "http://10.0.0.2:8080/v1", free: true),
-            member("paid", endpoint: "http://10.0.0.3:8080/v1", free: false),
+            member("lan", endpoint: "http://10.0.0.2:8080/v1"),
+            member("remote", endpoint: "http://10.0.0.3:8080/v1"),
         ]
     }
 
     @Test("empty member list returns an empty plan")
     func emptyMembers() {
-        let input = PoolRouterInput(pool: pool(.tiered), members: [])
+        let input = PoolRouterInput(pool: pool(.roundRobin), members: [])
         #expect(PoolRouter.plan(input).isEmpty)
     }
 
@@ -34,26 +34,8 @@ struct PoolRouterTests {
     func disabledSkipped() {
         var members = fixture()
         members[0].isEnabled = false
-        let plan = PoolRouter.plan(PoolRouterInput(pool: pool(.tiered), members: members))
-        #expect(plan.map(\.id) == ["free", "paid"])
-    }
-
-    @Test("tiered prefers loopback, then free, then paid")
-    func tieredOrdering() {
-        let plan = PoolRouter.plan(PoolRouterInput(pool: pool(.tiered), members: fixture()))
-        #expect(plan.map(\.id) == ["local", "free", "paid"])
-    }
-
-    @Test("tiered rotates inside a tier by requestCount")
-    func tieredRotatesInsideTier() {
-        let members = [
-            member("a", endpoint: "http://127.0.0.1:1/v1"),
-            member("b", endpoint: "http://localhost:2/v1"),
-        ]
-        let first = PoolRouter.plan(PoolRouterInput(pool: pool(.tiered, requestCount: 0), members: members))
-        let second = PoolRouter.plan(PoolRouterInput(pool: pool(.tiered, requestCount: 1), members: members))
-        #expect(first.map(\.id) == ["a", "b"])
-        #expect(second.map(\.id) == ["b", "a"])
+        let plan = PoolRouter.plan(PoolRouterInput(pool: pool(.roundRobin), members: members))
+        #expect(plan.map(\.id) == ["lan", "remote"])
     }
 
     @Test("round robin rotates by requestCount")
@@ -62,9 +44,9 @@ struct PoolRouterTests {
         let p0 = PoolRouter.plan(PoolRouterInput(pool: pool(.roundRobin, requestCount: 0), members: members))
         let p1 = PoolRouter.plan(PoolRouterInput(pool: pool(.roundRobin, requestCount: 1), members: members))
         let p2 = PoolRouter.plan(PoolRouterInput(pool: pool(.roundRobin, requestCount: 2), members: members))
-        #expect(p0.map(\.id) == ["local", "free", "paid"])
-        #expect(p1.map(\.id) == ["free", "paid", "local"])
-        #expect(p2.map(\.id) == ["paid", "local", "free"])
+        #expect(p0.map(\.id) == ["local", "lan", "remote"])
+        #expect(p1.map(\.id) == ["lan", "remote", "local"])
+        #expect(p2.map(\.id) == ["remote", "local", "lan"])
     }
 
     @Test("weighted expands nil to 1 and 0 to 1")
@@ -85,8 +67,8 @@ struct PoolRouterTests {
     func lowestLatencyColdStart() {
         let members = fixture()
         let stats: [String: MemberStats] = [
-            "free": MemberStats(memberId: "free", successCount: 5, totalLatencyMs: 500),
-            "paid": MemberStats(memberId: "paid", successCount: 10, totalLatencyMs: 1000),
+            "lan": MemberStats(memberId: "lan", successCount: 5, totalLatencyMs: 500),
+            "remote": MemberStats(memberId: "remote", successCount: 10, totalLatencyMs: 1000),
         ]
         let plan = PoolRouter.plan(PoolRouterInput(
             pool: pool(.lowestLatency), members: members, stats: stats))
@@ -106,7 +88,6 @@ struct PoolRouterTests {
 
     @Test("strategy raw values stay snake case")
     func snakeCaseRawValues() {
-        #expect(PoolStrategy.tiered.rawValue == "tiered")
         #expect(PoolStrategy.roundRobin.rawValue == "round_robin")
         #expect(PoolStrategy.weighted.rawValue == "weighted")
         #expect(PoolStrategy.lowestLatency.rawValue == "lowest_latency")

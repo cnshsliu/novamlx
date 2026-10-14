@@ -2,8 +2,7 @@ import Foundation
 
 /// Read-only inputs for one routing decision.
 /// Port of `LBRouterInput` (`Sources/NovaMLXCore/LBRouter.swift`): stats are
-/// keyed by `member.id` instead of `UUID`, and local eligibility is
-/// `MemberAddress.isLocalTier` with no "is the model loaded" filter.
+/// keyed by `member.id` instead of `UUID`.
 public struct PoolRouterInput: Sendable {
     public var pool: PoolConfig
     public var members: [MemberConfig]
@@ -23,7 +22,6 @@ public enum PoolRouter {
         guard !healthy.isEmpty else { return [] }
 
         switch input.pool.strategy {
-        case .tiered: return applyTiered(healthy, input)
         case .roundRobin: return applyRoundRobin(healthy, input)
         case .weighted: return applyWeighted(healthy, input)
         case .lowestLatency: return applyLowestLatency(healthy, input)
@@ -32,21 +30,6 @@ public enum PoolRouter {
     }
 
     // MARK: - Strategies
-    // Structure follows NovaMLX `LBRouter`. Tiered rotation is the behavior
-    // that file's comment describes (pre-rotate, then rank by tier). The
-    // original comparator also sorted by UUID inside a tier, which cancelled
-    // that rotation; here a stable tier sort keeps the rotated order.
-
-    /// Tiers: loopback / localNovaMLX = 2, non-loopback free = 1, else 0.
-    /// Higher tier first. Inside a tier, rotate by `pool.requestCount`.
-    private static func applyTiered(_ members: [MemberConfig], _ input: PoolRouterInput) -> [MemberConfig] {
-        func tier(_ member: MemberConfig) -> Int {
-            if MemberAddress.isLocalTier(member) { return 2 }
-            return member.isFree ? 1 : 0
-        }
-        let rotated = members.rotated(by: input.pool.requestCount)
-        return rotated.sorted { tier($0) > tier($1) }
-    }
 
     /// Equal rotation. Each request starts at the next member.
     private static func applyRoundRobin(_ members: [MemberConfig], _ input: PoolRouterInput) -> [MemberConfig] {

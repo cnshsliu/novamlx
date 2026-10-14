@@ -8,12 +8,11 @@ public struct NovaProviderSnapshot: Codable, Equatable, Sendable {
     public var apiKey: String
     public var remoteModel: String
     public var isEnabled: Bool
-    public var isFree: Bool
     /// Set when the Nova row only speaks Anthropic. Those providers are skipped.
     public var anthropicEndpoint: String?
 
     public init(id: String = "", name: String, endpoint: String, apiKey: String = "",
-                remoteModel: String, isEnabled: Bool = true, isFree: Bool = false,
+                remoteModel: String, isEnabled: Bool = true,
                 anthropicEndpoint: String? = nil) {
         self.id = id
         self.name = name
@@ -21,7 +20,6 @@ public struct NovaProviderSnapshot: Codable, Equatable, Sendable {
         self.apiKey = apiKey
         self.remoteModel = remoteModel
         self.isEnabled = isEnabled
-        self.isFree = isFree
         self.anthropicEndpoint = anthropicEndpoint
     }
 }
@@ -34,7 +32,7 @@ public struct NovaLBSnapshot: Codable, Equatable, Sendable {
     public var maxRetries: Int
     public var isEnabled: Bool
 
-    public init(id: String, name: String, slug: String, strategy: String = "tiered",
+    public init(id: String, name: String, slug: String, strategy: String = "round_robin",
                 maxRetries: Int = 3, isEnabled: Bool = true) {
         self.id = id
         self.name = name
@@ -181,8 +179,9 @@ public enum NovaConfigMigrator {
                 warnings.append("pool id \(base) collided; using \(poolId)")
             }
             let strategy = PoolStrategy(rawValue: lb.strategy) ?? {
-                warnings.append("pool \(lb.slug) has unknown strategy \(lb.strategy); using tiered")
-                return PoolStrategy.tiered
+                let note = lb.strategy == "tiered" ? "retired strategy tiered" : "unknown strategy \(lb.strategy)"
+                warnings.append("pool \(lb.slug) has \(note); using round_robin")
+                return PoolStrategy.roundRobin
             }()
             var pool = PoolConfig(
                 id: poolId,
@@ -260,8 +259,7 @@ public enum NovaConfigMigrator {
             apiKeyRef: "src/\(id)",
             upstreamModel: provider.remoteModel,
             weight: nil,
-            isEnabled: provider.isEnabled,
-            isFree: provider.isFree)
+            isEnabled: provider.isEnabled)
     }
 
     private static func member(
@@ -282,7 +280,7 @@ public enum NovaConfigMigrator {
             return MemberConfig(
                 id: id, name: ref, type: .localNovaMLX, endpoint: localBase,
                 apiKeyRef: "src/\(id)", upstreamModel: ref, weight: row.weight,
-                isEnabled: row.isEnabled, isFree: false)
+                isEnabled: row.isEnabled)
         case "remote":
             if let found = providers[ref.lowercased()] {
                 var copy = found

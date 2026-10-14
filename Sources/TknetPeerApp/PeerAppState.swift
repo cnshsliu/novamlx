@@ -309,7 +309,7 @@ final class PeerAppState: ObservableObject {
     /// edit and generated on create. The member joins the pool of that name.
     func saveMember(
         existingId: String?, model: String, upstreamOverride: String, type: SourceType,
-        endpoint: URL, apiKey: String?, weight: Int?, isEnabled: Bool, isFree: Bool
+        endpoint: URL, apiKey: String?, weight: Int?, isEnabled: Bool
     ) async -> Bool {
         guard lockError == nil else { return false }
         let publicModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -326,7 +326,7 @@ final class PeerAppState: ObservableObject {
             try PeerAdmin.addMember(
                 &config, secrets: secrets, id: id, name: publicModel, endpoint: endpoint,
                 upstreamModel: upstream, apiKey: apiKey, weight: weight,
-                isFree: isFree, type: type, isEnabled: isEnabled)
+                type: type, isEnabled: isEnabled)
             if let previous {
                 let oldModel = PeerAdmin.publicModel(previous)
                 if oldModel != publicModel {

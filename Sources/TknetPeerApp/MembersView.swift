@@ -31,7 +31,7 @@ struct MembersView: View {
                                     .textSelection(.enabled)
                                 Text(detailLine(member))
                                     .font(.caption)
-                                Text(member.isEnabled ? (member.isFree ? "Enabled · free" : "Enabled · paid") : "Disabled")
+                                Text(member.isEnabled ? "Enabled" : "Disabled")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -96,7 +96,6 @@ private struct MemberDraft: Identifiable {
     var apiKey: String
     var weight: String
     var isEnabled: Bool
-    var isFree: Bool
     var isNew: Bool
 
     init() {
@@ -108,7 +107,6 @@ private struct MemberDraft: Identifiable {
         apiKey = ""
         weight = ""
         isEnabled = true
-        isFree = false
         isNew = true
     }
 
@@ -122,7 +120,6 @@ private struct MemberDraft: Identifiable {
         apiKey = ""
         weight = member.weight.map(String.init) ?? ""
         isEnabled = member.isEnabled
-        isFree = member.isFree
         isNew = false
     }
 }
@@ -140,7 +137,6 @@ private struct MemberForm: View {
     @State private var apiKey: String
     @State private var weight: String
     @State private var isEnabled: Bool
-    @State private var isFree: Bool
     @State private var showMore: Bool
     @State private var formError: String?
 
@@ -154,8 +150,7 @@ private struct MemberForm: View {
         _apiKey = State(initialValue: draft.apiKey)
         _weight = State(initialValue: draft.weight)
         _isEnabled = State(initialValue: draft.isEnabled)
-        _isFree = State(initialValue: draft.isFree)
-        let hasMore = !draft.upstreamOverride.isEmpty || !draft.weight.isEmpty || draft.isFree
+        let hasMore = !draft.upstreamOverride.isEmpty || !draft.weight.isEmpty
         _showMore = State(initialValue: hasMore)
     }
 
@@ -170,20 +165,27 @@ private struct MemberForm: View {
                     type = inferredType(newValue)
                 }
             SecureField(draft.isNew ? "API key" : "API key (blank keeps the current key)", text: $apiKey)
-            Picker("Type", selection: Binding(
-                get: { type },
-                set: { type = $0; typeEdited = true }
-            )) {
-                Text("OpenAI-compatible").tag(SourceType.openaiCompatible)
-                Text("Local NovaMLX").tag(SourceType.localNovaMLX)
-                Text("Anthropic").tag(SourceType.anthropic)
+            HStack(spacing: 16) {
+                HStack(spacing: 6) {
+                    Text("Type")
+                    Picker("Type", selection: Binding(
+                        get: { type },
+                        set: { type = $0; typeEdited = true }
+                    )) {
+                        Text("OpenAI-compatible").tag(SourceType.openaiCompatible)
+                        Text("Local NovaMLX").tag(SourceType.localNovaMLX)
+                        Text("Anthropic").tag(SourceType.anthropic)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                Toggle("Enabled", isOn: $isEnabled)
+                Spacer(minLength: 0)
             }
-            Toggle("Enabled", isOn: $isEnabled)
             DisclosureGroup("More", isExpanded: $showMore) {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Upstream model (blank uses Model)", text: $upstreamOverride)
                     TextField("Weight (optional)", text: $weight)
-                    Toggle("Free", isOn: $isFree)
                 }
                 .padding(.top, 4)
             }
@@ -231,8 +233,7 @@ private struct MemberForm: View {
             endpoint: url,
             apiKey: key,
             weight: weightValue,
-            isEnabled: isEnabled,
-            isFree: isFree)
+            isEnabled: isEnabled)
         if saved {
             dismiss()
         } else {

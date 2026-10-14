@@ -85,7 +85,7 @@ private struct PoolDraft: Identifiable {
     init() {
         poolId = ""
         name = ""
-        strategy = .tiered
+        strategy = .roundRobin
         memberIds = []
         maxRetries = 3
         isEnabled = true
@@ -207,7 +207,6 @@ private struct PoolForm: View {
 
 private func strategyLabel(_ strategy: PoolStrategy) -> String {
     switch strategy {
-    case .tiered: return "Tiered"
     case .roundRobin: return "Round robin"
     case .weighted: return "Weighted"
     case .lowestLatency: return "Lowest latency"

@@ -12,7 +12,7 @@ public enum PeerAdmin {
     public static func addMember(
         _ config: inout PeerConfig, secrets: any SecretStore,
         id: String, name: String, endpoint: URL, upstreamModel: String,
-        apiKey: String?, weight: Int?, isFree: Bool, type: SourceType,
+        apiKey: String?, weight: Int?, type: SourceType,
         isEnabled: Bool = true
     ) throws {
         try validateIdentity(id)
@@ -24,14 +24,14 @@ public enum PeerAdmin {
         config.upsertMember(MemberConfig(
             id: id, name: name.isEmpty ? id : name, type: type, endpoint: endpoint,
             apiKeyRef: ref, upstreamModel: upstream, weight: weight,
-            isEnabled: isEnabled, isFree: isFree))
+            isEnabled: isEnabled))
         if let apiKey { try secrets.save(apiKey, for: ref) }
     }
 
     public static func updateMember(
         _ config: inout PeerConfig, secrets: any SecretStore, id: String,
         name: String? = nil, endpoint: URL? = nil, upstreamModel: String? = nil,
-        apiKey: String? = nil, weight: Int? = nil, isFree: Bool? = nil,
+        apiKey: String? = nil, weight: Int? = nil,
         type: SourceType? = nil, isEnabled: Bool? = nil
     ) throws {
         guard var member = config.member(id: id) else {
@@ -51,7 +51,6 @@ public enum PeerAdmin {
             try validateWeight(weight)
             member.weight = weight
         }
-        if let isFree { member.isFree = isFree }
         if let type { member.type = type }
         if let isEnabled { member.isEnabled = isEnabled }
         config.upsertMember(member)
@@ -106,7 +105,7 @@ public enum PeerAdmin {
 
     public static func addPool(
         _ config: inout PeerConfig, id: String?, name: String,
-        strategy: PoolStrategy = .tiered, maxRetries: Int = 3, memberIds: [String]
+        strategy: PoolStrategy = .roundRobin, maxRetries: Int = 3, memberIds: [String]
     ) throws {
         let poolName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !poolName.isEmpty else { throw PeerAdminError("Pool name is required.") }
@@ -156,7 +155,7 @@ public enum PeerAdmin {
     public static func strategy(_ raw: String) throws -> PoolStrategy {
         guard let strategy = PoolStrategy(rawValue: raw) else {
             throw PeerAdminError(
-                "Unknown strategy \(raw). Use tiered, round_robin, weighted, lowest_latency, or random.")
+                "Unknown strategy \(raw). Use round_robin, weighted, lowest_latency, or random.")
         }
         return strategy
     }
@@ -173,7 +172,7 @@ public enum PeerAdmin {
         if config.members.isEmpty { return "(no members)" }
         return config.members.map { member in
             let weight = member.weight.map(String.init) ?? "-"
-            return "\(member.id)\t\(member.name)\t\(member.endpoint.absoluteString)\tupstream=\(member.upstreamModel)\tenabled=\(member.isEnabled)\tfree=\(member.isFree)\tweight=\(weight)\ttype=\(member.type.rawValue)"
+            return "\(member.id)\t\(member.name)\t\(member.endpoint.absoluteString)\tupstream=\(member.upstreamModel)\tenabled=\(member.isEnabled)\tweight=\(weight)\ttype=\(member.type.rawValue)"
         }.joined(separator: "\n")
     }
 

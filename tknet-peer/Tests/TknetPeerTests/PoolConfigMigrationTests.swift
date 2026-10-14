@@ -24,12 +24,11 @@ struct PoolConfigMigrationTests {
         #expect(config.members.count == 1)
         #expect(config.members[0].id == "src-d1")
         #expect(config.members[0].isEnabled == true)
-        #expect(config.members[0].isFree == false)
         #expect(config.pools.count == 1)
         #expect(config.pools[0].id == "src-d1")
         #expect(config.pools[0].name == "qwen-3-8b")
         #expect(config.pools[0].memberIds == ["src-d1"])
-        #expect(config.pools[0].strategy == .tiered)
+        #expect(config.pools[0].strategy == .roundRobin)
         #expect(config.pools[0].maxRetries == 3)
         #expect(config.capabilities[0].sourceId == "src-d1")
     }
@@ -41,7 +40,7 @@ struct PoolConfigMigrationTests {
             MemberConfig(id: "m1", name: "a", type: .openaiCompatible,
                          endpoint: URL(string: "http://10.0.0.2:8080/v1")!,
                          apiKeyRef: "src/m1", upstreamModel: "x",
-                         weight: 2, isEnabled: true, isFree: true)
+                         weight: 2, isEnabled: true)
         ]
         config.pools = [
             PoolConfig(id: "coding", name: "coding", strategy: .roundRobin,
@@ -116,6 +115,7 @@ struct PoolConfigMigrationTests {
         let config = try JSONDecoder().decode(PeerConfig.self, from: json)
         #expect(config.members.map(\.id) == ["new"])
         #expect(config.pools.map(\.id) == ["coding"])
+        #expect(config.pools[0].strategy == .roundRobin)
         let encoded = String(data: try JSONEncoder().encode(config), encoding: .utf8) ?? ""
         #expect(!encoded.contains("\"sources\""))
     }

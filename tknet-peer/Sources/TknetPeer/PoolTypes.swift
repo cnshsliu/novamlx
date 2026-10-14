@@ -1,11 +1,8 @@
 import Foundation
 
-/// Selection strategy for a pool. Raw values match NovaMLX `LBStrategy`
-/// (`Sources/NovaMLXCore/LoadBalancerTypes.swift`) so a later migration can
-/// read the same strings.
+/// Selection strategy for a pool. Raw values match the remaining NovaMLX
+/// `LBStrategy` strings so a migration can read the same names.
 public enum PoolStrategy: String, Codable, Sendable, CaseIterable, Equatable {
-    /// Loopback / local NovaMLX, then free, then paid. Rotate inside a tier.
-    case tiered
     /// Equal rotation across enabled members.
     case roundRobin = "round_robin"
     /// Repeat each member by weight, then rotate.
@@ -14,6 +11,14 @@ public enum PoolStrategy: String, Codable, Sendable, CaseIterable, Equatable {
     case lowestLatency = "lowest_latency"
     /// Order by a stable hash of the member id.
     case random
+
+    /// `tiered` and any unknown name load as round robin. Tiered ranked a
+    /// loopback member above everyone else, which does not match a gateway
+    /// whose inference sits on another machine.
+    public static func resolved(_ raw: String?) -> PoolStrategy {
+        guard let raw, let known = PoolStrategy(rawValue: raw) else { return .roundRobin }
+        return known
+    }
 }
 
 /// One upstream the gateway can forward to. Evolved from `SourceConfig`:
@@ -29,11 +34,10 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
     public var upstreamModel: String
     public var weight: Int?
     public var isEnabled: Bool
-    public var isFree: Bool
 
     public init(id: String, name: String, type: SourceType, endpoint: URL,
                 apiKeyRef: String, upstreamModel: String,
-                weight: Int? = nil, isEnabled: Bool = true, isFree: Bool = false) {
+                weight: Int? = nil, isEnabled: Bool = true) {
         self.id = id
         self.name = name
         self.type = type
@@ -42,11 +46,10 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         self.upstreamModel = upstreamModel
         self.weight = weight
         self.isEnabled = isEnabled
-        self.isFree = isFree
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, type, endpoint, apiKeyRef, upstreamModel, weight, isEnabled, isFree
+        case id, name, type, endpoint, apiKeyRef, upstreamModel, weight, isEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -59,7 +62,6 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         upstreamModel = try c.decode(String.self, forKey: .upstreamModel)
         weight = try c.decodeIfPresent(Int.self, forKey: .weight)
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
-        isFree = try c.decodeIfPresent(Bool.self, forKey: .isFree) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -72,7 +74,6 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         try c.encode(upstreamModel, forKey: .upstreamModel)
         try c.encodeIfPresent(weight, forKey: .weight)
         try c.encode(isEnabled, forKey: .isEnabled)
-        try c.encode(isFree, forKey: .isFree)
     }
 }
 
@@ -87,7 +88,7 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
     /// Bumped once per accepted request, not once per retry.
     public var requestCount: Int
 
-    public init(id: String, name: String, strategy: PoolStrategy = .tiered,
+    public init(id: String, name: String, strategy: PoolStrategy = .roundRobin,
                 memberIds: [String], maxRetries: Int = 3, isEnabled: Bool = true,
                 requestCount: Int = 0) {
         self.id = id
@@ -107,7 +108,7 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? id
-        strategy = try c.decodeIfPresent(PoolStrategy.self, forKey: .strategy) ?? .tiered
+        strategy = PoolStrategy.resolved(try c.decodeIfPresent(String.self, forKey: .strategy))
         memberIds = try c.decodeIfPresent([String].self, forKey: .memberIds) ?? []
         maxRetries = try c.decodeIfPresent(Int.self, forKey: .maxRetries) ?? 3
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
@@ -126,7 +127,7 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// Loopback detection for tiered ranking and `X-No-Autoload`.
+/// Loopback detection for `X-No-Autoload`.
 public enum MemberAddress {
     /// `127.0.0.1`, `localhost`, and `::1` only — the addresses NovaMLX binds.
     public static func isLoopback(_ url: URL) -> Bool {
@@ -134,7 +135,8 @@ public enum MemberAddress {
         return host == "127.0.0.1" || host == "localhost" || host == "::1"
     }
 
-    /// Local tier: an explicit NovaMLX preset, or any loopback endpoint.
+    /// NovaMLX on this machine: an explicit preset, or any loopback endpoint.
+    /// Used only to send `X-No-Autoload`, not to rank the member.
     public static func isLocalTier(_ member: MemberConfig) -> Bool {
         member.type == .localNovaMLX || isLoopback(member.endpoint)
     }

@@ -16,7 +16,7 @@ struct CLIPoolCommandTests {
         try PeerAdmin.addMember(
             &config, secrets: store, id: "m1", name: "alpha",
             endpoint: URL(string: "http://10.0.0.2:8080/v1")!, upstreamModel: "u1",
-            apiKey: "super-secret-key", weight: 2, isFree: true, type: .openaiCompatible)
+            apiKey: "super-secret-key", weight: 2, type: .openaiCompatible)
         #expect(config.member(id: "m1")?.apiKeyRef == "src/m1")
         #expect(store.load("src/m1") == "super-secret-key")
         let text = PeerAdmin.memberList(config)
@@ -32,11 +32,11 @@ struct CLIPoolCommandTests {
         try PeerAdmin.addMember(
             &config, secrets: store, id: "m1", name: "a",
             endpoint: URL(string: "http://10.0.0.2:1/v1")!, upstreamModel: "u",
-            apiKey: nil, weight: nil, isFree: false, type: .openaiCompatible)
+            apiKey: nil, weight: nil, type: .openaiCompatible)
         try PeerAdmin.addMember(
             &config, secrets: store, id: "m2", name: "b",
             endpoint: URL(string: "http://10.0.0.3:1/v1")!, upstreamModel: "u",
-            apiKey: nil, weight: nil, isFree: false, type: .openaiCompatible)
+            apiKey: nil, weight: nil, type: .openaiCompatible)
         try PeerAdmin.addPool(&config, id: nil, name: "coding", memberIds: ["m1", "m2"])
         try PeerAdmin.removeMember(&config, id: "m1")
         #expect(config.member(id: "m1") == nil)
@@ -51,7 +51,7 @@ struct CLIPoolCommandTests {
             try PeerAdmin.addMember(
                 &config, secrets: store, id: id, name: id,
                 endpoint: URL(string: "http://10.0.0.2:1/v1")!, upstreamModel: "u",
-                apiKey: nil, weight: nil, isFree: false, type: .openaiCompatible)
+                apiKey: nil, weight: nil, type: .openaiCompatible)
         }
         try PeerAdmin.addPool(
             &config, id: "coding", name: "coding", strategy: .roundRobin,
@@ -77,7 +77,7 @@ struct CLIPoolCommandTests {
             try PeerAdmin.addMember(
                 &config, secrets: store, id: id, name: "Qwen3-8B",
                 endpoint: URL(string: "http://\(host):8080/v1")!, upstreamModel: "Qwen3-8B",
-                apiKey: nil, weight: nil, isFree: false, type: .openaiCompatible)
+                apiKey: nil, weight: nil, type: .openaiCompatible)
             try PeerAdmin.ensureModelPool(&config, model: "Qwen3-8B", memberId: id)
         }
         #expect(config.pools.count == 1)

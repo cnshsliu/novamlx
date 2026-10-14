@@ -54,7 +54,7 @@ struct NovaDBSnapshotReaderTests {
         #expect(process.terminationStatus == 0)
         let input = try NovaDBSnapshotReader.load(database: db)
         #expect(input.providers.first?.name == "OpenAI")
-        #expect(input.providers.first?.isFree == true)
+        #expect(input.providers.first?.isEnabled == true)
         #expect(input.members.first?.ref == "OpenAI")
         #expect(input.members.first?.lbSlug == "coding")
         let result = NovaConfigMigrator.migrate(input, existing: PeerConfig.defaultConfig())
