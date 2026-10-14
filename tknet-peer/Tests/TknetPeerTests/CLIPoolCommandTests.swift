@@ -68,4 +68,22 @@ struct CLIPoolCommandTests {
     func unknownStrategy() {
         #expect(throws: PeerAdminError.self) { try PeerAdmin.strategy("fastest") }
     }
+
+    @Test("same model joins one pool")
+    func ensureModelPoolSharesName() throws {
+        var config = PeerConfig.defaultConfig()
+        let store = secrets()
+        for (id, host) in [("m1", "10.0.0.2"), ("m2", "10.0.0.3")] {
+            try PeerAdmin.addMember(
+                &config, secrets: store, id: id, name: "Qwen3-8B",
+                endpoint: URL(string: "http://\(host):8080/v1")!, upstreamModel: "Qwen3-8B",
+                apiKey: nil, weight: nil, isFree: false, type: .openaiCompatible)
+            try PeerAdmin.ensureModelPool(&config, model: "Qwen3-8B", memberId: id)
+        }
+        #expect(config.pools.count == 1)
+        #expect(config.pool(named: "Qwen3-8B")?.id == "Qwen3-8B")
+        #expect(config.pool(named: "Qwen3-8B")?.memberIds == ["m1", "m2"])
+        PeerAdmin.detachMember(&config, memberId: "m1", fromPoolNamed: "Qwen3-8B")
+        #expect(config.pool(named: "Qwen3-8B")?.memberIds == ["m2"])
+    }
 }

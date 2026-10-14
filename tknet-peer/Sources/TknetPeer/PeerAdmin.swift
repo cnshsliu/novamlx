@@ -63,6 +63,47 @@ public enum PeerAdmin {
         config.removeMember(id: id)
     }
 
+    /// Name clients see. A stored name that is empty or just the internal id
+    /// falls back to the upstream model string.
+    public static func publicModel(_ member: MemberConfig) -> String {
+        let name = member.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty || name == member.id { return member.upstreamModel }
+        return name
+    }
+
+    /// Puts `memberId` in the pool named `model`, creating that pool when
+    /// it does not exist. A second endpoint for the same model joins it.
+    public static func ensureModelPool(_ config: inout PeerConfig, model: String, memberId: String) throws {
+        let poolName = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !poolName.isEmpty else { throw PeerAdminError("Model name is required.") }
+        guard config.member(id: memberId) != nil else { throw PeerAdminError("No member \(memberId).") }
+        if var pool = config.pool(named: poolName) {
+            if !pool.memberIds.contains(memberId) {
+                pool.memberIds.append(memberId)
+            }
+            config.upsertPool(pool)
+            return
+        }
+        var poolId = poolName
+        if config.pool(id: poolId) != nil {
+            var suffix = 2
+            while config.pool(id: "\(poolName)-\(suffix)") != nil {
+                suffix += 1
+            }
+            poolId = "\(poolName)-\(suffix)"
+        }
+        config.upsertPool(PoolConfig(id: poolId, name: poolName, memberIds: [memberId]))
+    }
+
+    /// Drops the member from the pool with this published name. Other pools stay.
+    public static func detachMember(_ config: inout PeerConfig, memberId: String, fromPoolNamed name: String) {
+        let poolName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var pool = config.pool(named: poolName) else { return }
+        guard pool.memberIds.contains(memberId) else { return }
+        pool.memberIds.removeAll { $0 == memberId }
+        config.upsertPool(pool)
+    }
+
     public static func addPool(
         _ config: inout PeerConfig, id: String?, name: String,
         strategy: PoolStrategy = .tiered, maxRetries: Int = 3, memberIds: [String]

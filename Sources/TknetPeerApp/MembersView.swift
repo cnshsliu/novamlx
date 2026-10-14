@@ -16,19 +16,20 @@ struct MembersView: View {
                     .disabled(state.lockError != nil)
             }
             if state.config.members.isEmpty {
-                Text("No members yet. Add an OpenAI-compatible endpoint or the local NovaMLX port.")
+                Text("No members yet. Add an endpoint and the model name clients should send.")
                     .foregroundStyle(.secondary)
             } else {
                 List {
                     ForEach(state.config.members) { member in
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(member.name).font(.body.bold())
+                                Text(MemberLabel.title(member, among: state.config.members))
+                                    .font(.body.bold())
                                 Text(member.endpoint.absoluteString)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
-                                Text("\(typeLabel(member.type)) · \(member.upstreamModel)")
+                                Text(detailLine(member))
                                     .font(.caption)
                                 Text(member.isEnabled ? (member.isFree ? "Enabled · free" : "Enabled · paid") : "Disabled")
                                     .font(.caption2)
@@ -47,7 +48,7 @@ struct MembersView: View {
             MemberForm(draft: draft)
         }
         .confirmationDialog(
-            "Delete \(pendingDelete?.name ?? "member")?",
+            "Delete \(pendingDelete.map { MemberLabel.title($0, among: state.config.members) } ?? "member")?",
             isPresented: Binding(
                 get: { pendingDelete != nil },
                 set: { if !$0 { pendingDelete = nil } }),
@@ -62,16 +63,36 @@ struct MembersView: View {
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         }
     }
+
+    private func detailLine(_ member: MemberConfig) -> String {
+        let model = PeerAdmin.publicModel(member)
+        let type = typeLabel(member.type)
+        if member.upstreamModel != model {
+            return "\(type) · upstream \(member.upstreamModel)"
+        }
+        return type
+    }
+}
+
+enum MemberLabel {
+    static func title(_ member: MemberConfig, among members: [MemberConfig]) -> String {
+        let model = PeerAdmin.publicModel(member)
+        let shared = members.filter { PeerAdmin.publicModel($0) == model }.count > 1
+        if shared, let host = member.endpoint.host, !host.isEmpty {
+            return "\(model) · \(host)"
+        }
+        return model
+    }
 }
 
 private struct MemberDraft: Identifiable {
     let token = UUID()
     var id: UUID { token }
-    var memberId: String
-    var name: String
+    var memberId: String?
+    var model: String
+    var upstreamOverride: String
     var type: SourceType
     var endpoint: String
-    var upstreamModel: String
     var apiKey: String
     var weight: String
     var isEnabled: Bool
@@ -79,11 +100,11 @@ private struct MemberDraft: Identifiable {
     var isNew: Bool
 
     init() {
-        memberId = ""
-        name = ""
-        type = .openaiCompatible
+        memberId = nil
+        model = ""
+        upstreamOverride = ""
+        type = .localNovaMLX
         endpoint = "http://127.0.0.1:6590/v1"
-        upstreamModel = ""
         apiKey = ""
         weight = ""
         isEnabled = true
@@ -92,11 +113,12 @@ private struct MemberDraft: Identifiable {
     }
 
     init(_ member: MemberConfig) {
+        let model = PeerAdmin.publicModel(member)
         memberId = member.id
-        name = member.name
+        self.model = model
+        upstreamOverride = member.upstreamModel == model ? "" : member.upstreamModel
         type = member.type
         endpoint = member.endpoint.absoluteString
-        upstreamModel = member.upstreamModel
         apiKey = ""
         weight = member.weight.map(String.init) ?? ""
         isEnabled = member.isEnabled
@@ -110,48 +132,61 @@ private struct MemberForm: View {
     @EnvironmentObject private var state: PeerAppState
     let draft: MemberDraft
 
-    @State private var memberId: String
-    @State private var name: String
+    @State private var model: String
+    @State private var upstreamOverride: String
     @State private var type: SourceType
+    @State private var typeEdited: Bool
     @State private var endpoint: String
-    @State private var upstreamModel: String
     @State private var apiKey: String
     @State private var weight: String
     @State private var isEnabled: Bool
     @State private var isFree: Bool
+    @State private var showMore: Bool
     @State private var formError: String?
 
     init(draft: MemberDraft) {
         self.draft = draft
-        _memberId = State(initialValue: draft.memberId)
-        _name = State(initialValue: draft.name)
+        _model = State(initialValue: draft.model)
+        _upstreamOverride = State(initialValue: draft.upstreamOverride)
         _type = State(initialValue: draft.type)
+        _typeEdited = State(initialValue: !draft.isNew)
         _endpoint = State(initialValue: draft.endpoint)
-        _upstreamModel = State(initialValue: draft.upstreamModel)
         _apiKey = State(initialValue: draft.apiKey)
         _weight = State(initialValue: draft.weight)
         _isEnabled = State(initialValue: draft.isEnabled)
         _isFree = State(initialValue: draft.isFree)
+        let hasMore = !draft.upstreamOverride.isEmpty || !draft.weight.isEmpty || draft.isFree
+        _showMore = State(initialValue: hasMore)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(draft.isNew ? "Add member" : "Edit member")
                 .font(.title3.bold())
-            TextField("Id", text: $memberId)
-                .disabled(!draft.isNew)
-            TextField("Name", text: $name)
-            Picker("Type", selection: $type) {
+            TextField("Model", text: $model)
+            TextField("Endpoint URL", text: $endpoint)
+                .onChange(of: endpoint) { _, newValue in
+                    guard !typeEdited else { return }
+                    type = inferredType(newValue)
+                }
+            SecureField(draft.isNew ? "API key" : "API key (blank keeps the current key)", text: $apiKey)
+            Picker("Type", selection: Binding(
+                get: { type },
+                set: { type = $0; typeEdited = true }
+            )) {
                 Text("OpenAI-compatible").tag(SourceType.openaiCompatible)
                 Text("Local NovaMLX").tag(SourceType.localNovaMLX)
                 Text("Anthropic").tag(SourceType.anthropic)
             }
-            TextField("Endpoint URL", text: $endpoint)
-            TextField("Upstream model", text: $upstreamModel)
-            SecureField(draft.isNew ? "API key" : "API key (blank keeps the current key)", text: $apiKey)
-            TextField("Weight (optional)", text: $weight)
             Toggle("Enabled", isOn: $isEnabled)
-            Toggle("Free", isOn: $isFree)
+            DisclosureGroup("More", isExpanded: $showMore) {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Upstream model (blank uses Model)", text: $upstreamOverride)
+                    TextField("Weight (optional)", text: $weight)
+                    Toggle("Free", isOn: $isFree)
+                }
+                .padding(.top, 4)
+            }
             if let formError {
                 Text(formError).foregroundStyle(.red).font(.callout)
             }
@@ -166,13 +201,14 @@ private struct MemberForm: View {
     }
 
     private func save() async {
-        let id = memberId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !id.isEmpty else {
-            formError = "Member id is required."
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModel.isEmpty else {
+            formError = "Model name is required."
             return
         }
-        guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host != nil else {
             formError = "Endpoint must be an http(s) URL."
             return
         }
@@ -188,11 +224,11 @@ private struct MemberForm: View {
         }
         let key: String? = apiKey.isEmpty ? (draft.isNew ? "" : nil) : apiKey
         let saved = await state.saveMember(
-            id: id,
-            name: trimmedName.isEmpty ? id : trimmedName,
+            existingId: draft.memberId,
+            model: trimmedModel,
+            upstreamOverride: upstreamOverride,
             type: type,
             endpoint: url,
-            upstreamModel: upstreamModel,
             apiKey: key,
             weight: weightValue,
             isEnabled: isEnabled,
@@ -203,6 +239,16 @@ private struct MemberForm: View {
             formError = state.lastError ?? "Could not save the member."
         }
     }
+}
+
+private func inferredType(_ endpoint: String) -> SourceType {
+    guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        return .openaiCompatible
+    }
+    if MemberAddress.isLoopback(url) { return .localNovaMLX }
+    let host = url.host?.lowercased() ?? ""
+    if host.contains("anthropic.com") { return .anthropic }
+    return .openaiCompatible
 }
 
 private func typeLabel(_ type: SourceType) -> String {

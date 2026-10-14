@@ -16,7 +16,7 @@ struct PoolsView: View {
                     .disabled(state.lockError != nil || state.config.members.isEmpty)
             }
             if state.config.pools.isEmpty {
-                Text("No pools yet. A pool name is the model id clients send to the gateway.")
+                Text("No pools yet. Saving a member creates a pool with that model name.")
                     .foregroundStyle(.secondary)
             } else {
                 List {
@@ -26,7 +26,7 @@ struct PoolsView: View {
                                 Text(pool.name).font(.body.bold())
                                 Text(strategyLabel(pool.strategy))
                                     .font(.caption)
-                                Text(pool.memberIds.joined(separator: ", "))
+                                Text(memberSummary(pool))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Text(pool.isEnabled ? "Enabled · retries \(pool.maxRetries)" : "Disabled")
@@ -60,6 +60,14 @@ struct PoolsView: View {
             }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         }
+    }
+
+    private func memberSummary(_ pool: PoolConfig) -> String {
+        let labels = pool.memberIds.map { id in
+            guard let member = state.config.member(id: id) else { return id }
+            return MemberLabel.title(member, among: state.config.members)
+        }
+        return labels.isEmpty ? "No members" : labels.joined(separator: ", ")
     }
 }
 
@@ -124,16 +132,25 @@ private struct PoolForm: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(draft.isNew ? "Add pool" : "Edit pool")
                 .font(.title3.bold())
-            TextField("Id", text: $poolId)
-                .disabled(!draft.isNew)
-            TextField("Name (model id clients use)", text: $name)
-            Picker("Strategy", selection: $strategy) {
-                ForEach(PoolStrategy.allCases, id: \.self) { strategy in
-                    Text(strategyLabel(strategy)).tag(strategy)
+            TextField("Model", text: $name)
+            HStack(spacing: 16) {
+                HStack(spacing: 6) {
+                    Text("Strategy")
+                    Picker("Strategy", selection: $strategy) {
+                        ForEach(PoolStrategy.allCases, id: \.self) { strategy in
+                            Text(strategyLabel(strategy)).tag(strategy)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
                 }
+                Stepper(value: $maxRetries, in: 1...20) {
+                    Text("Retries \(maxRetries)")
+                }
+                .fixedSize()
+                Toggle("Enabled", isOn: $isEnabled)
+                Spacer(minLength: 0)
             }
-            Stepper("Max retries \(maxRetries)", value: $maxRetries, in: 1...20)
-            Toggle("Enabled", isOn: $isEnabled)
             Text("Members")
                 .font(.headline)
             ScrollView {
@@ -145,7 +162,7 @@ private struct PoolForm: View {
                                 if isOn { selected.insert(member.id) } else { selected.remove(member.id) }
                             }
                         )) {
-                            Text("\(member.name) (\(member.id))")
+                            Text(MemberLabel.title(member, among: members))
                         }
                     }
                 }
@@ -161,13 +178,13 @@ private struct PoolForm: View {
             }
         }
         .padding(20)
-        .frame(width: 480)
+        .frame(width: 540)
     }
 
     private func save() async {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
-            formError = "Pool name is required."
+            formError = "Model name is required."
             return
         }
         let idSource = poolId.trimmingCharacters(in: .whitespacesAndNewlines)

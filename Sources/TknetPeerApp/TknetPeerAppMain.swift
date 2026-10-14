@@ -107,7 +107,13 @@ final class PeerAppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         let state = Self.appState
-        Task { await state?.launch() }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            PeerWindowActivation.show {
+                PeerWindowActivation.openWindow?()
+            }
+            await state?.launch()
+        }
     }
 
     /// Dock click while promoted. Accessory launch has no Dock icon, so this

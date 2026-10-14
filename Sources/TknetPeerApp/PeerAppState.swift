@@ -25,10 +25,9 @@ final class TunnelServerBox: @unchecked Sendable {
 
 /// Menu-bar owner of the local gateway and the tknet tunnel.
 ///
-/// Secrets are read from the Keychain (`ai.tknet.peer`). The same values are
-/// mirrored to `~/.config/tknet-peer/secrets` so `tknet-peer serve` keeps
-/// working. A file the CLI wrote while this app was quit is copied in on
-/// launch. Quit stops the gateway and the tunnel and releases the process lock.
+/// Secrets are read from `~/.config/tknet-peer/secrets`, the same files
+/// `tknet-peer serve` uses. Quit stops the gateway and the tunnel and
+/// releases the process lock.
 /// Stop stops only the tunnel — the port stays up, and `tunnelWanted` stays
 /// false so the next launch does not dial. Retry exhaustion does not clear
 /// `tunnelWanted`.
@@ -305,22 +304,48 @@ final class PeerAppState: ObservableObject {
 
     // MARK: - Members and pools
 
+    /// Saves a member under one public model name. The internal id is kept on
+    /// edit and generated on create. The member joins the pool of that name.
     func saveMember(
-        id: String, name: String, type: SourceType, endpoint: URL, upstreamModel: String,
-        apiKey: String?, weight: Int?, isEnabled: Bool, isFree: Bool
+        existingId: String?, model: String, upstreamOverride: String, type: SourceType,
+        endpoint: URL, apiKey: String?, weight: Int?, isEnabled: Bool, isFree: Bool
     ) async -> Bool {
         guard lockError == nil else { return false }
+        let publicModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !publicModel.isEmpty else {
+            lastError = "Model name is required."
+            return false
+        }
+        let override = upstreamOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        let upstream = override.isEmpty ? publicModel : override
         var config = self.config
+        let previous = existingId.flatMap { config.member(id: $0) }
+        let id = previous?.id ?? Self.freshMemberId(in: config)
         do {
             try PeerAdmin.addMember(
-                &config, secrets: secrets, id: id, name: name, endpoint: endpoint,
-                upstreamModel: upstreamModel, apiKey: apiKey, weight: weight,
+                &config, secrets: secrets, id: id, name: publicModel, endpoint: endpoint,
+                upstreamModel: upstream, apiKey: apiKey, weight: weight,
                 isFree: isFree, type: type, isEnabled: isEnabled)
+            if let previous {
+                let oldModel = PeerAdmin.publicModel(previous)
+                if oldModel != publicModel {
+                    PeerAdmin.detachMember(&config, memberId: id, fromPoolNamed: oldModel)
+                }
+            }
+            try PeerAdmin.ensureModelPool(&config, model: publicModel, memberId: id)
         } catch {
             lastError = Self.userMessage(error)
             return false
         }
         return await persist(config)
+    }
+
+    private static func freshMemberId(in config: PeerConfig) -> String {
+        for _ in 0..<8 {
+            let id = "m-" + UUID().uuidString.lowercased().prefix(8)
+            if config.member(id: id) == nil { return id }
+        }
+        return "m-" + UUID().uuidString.lowercased()
     }
 
     func deleteMember(id: String) async -> Bool {
@@ -504,18 +529,13 @@ final class PeerAppState: ObservableObject {
 
     // MARK: - Internals
 
-    /// Keychain primary, file mirror. If the Keychain refuses the write, keep
-    /// the file store so the gateway and `tknet-peer serve` still share a key.
+    /// Shared file store only. An ad-hoc signed build asks for the login
+    /// keychain password once per item, and Always Allow does not survive
+    /// the next codesign, so the prompt repeats. `tknet-peer serve` reads
+    /// this same directory.
     private static func makeSecrets(in directory: URL) -> (store: any SecretStore, migrationError: String?) {
         let file = FileSecretStore(directory: directory.appendingPathComponent("secrets"))
-        let mirror = MirroringSecretStore(primary: KeychainSecretStore(), file: file)
-        do {
-            try mirror.reconcile()
-            return (mirror, nil)
-        } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-            return (file, "Keychain unavailable (\(message)). Secrets stay in the shared file store.")
-        }
+        return (file, nil)
     }
 
     private func readSecret(_ ref: String) -> String? {
