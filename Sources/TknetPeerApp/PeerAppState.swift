@@ -117,7 +117,7 @@ final class PeerAppState: ObservableObject {
         lastTrafficAt = Date()
         if trafficPhase == nil { trafficPhase = 0 }
         guard trafficTimer == nil else { return }
-        let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.22, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.advanceTraffic() }
         }
         RunLoop.main.add(timer, forMode: .common)

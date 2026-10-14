@@ -50,13 +50,19 @@ enum DockIcon {
 
         let center = NSPoint(x: rect.midX, y: rect.midY)
 
+        // While tokens flow the portal rings breathe with the traffic rhythm.
+        var pulse: CGFloat = 1
+        if let phase = trafficPhase {
+            pulse = 0.62 + 0.38 * sin(CGFloat(phase) / 8 * .pi * 2)
+        }
+
         // Background
         let bg = NSBezierPath(roundedRect: rect, xRadius: 114, yRadius: 114)
         NSGradient(colors: [bgTop, bgBottom])?.draw(in: bg, angle: -60)
 
         // Portal glow
         let glowRect = NSRect(x: center.x - 170, y: center.y - 170, width: 340, height: 340)
-        NSGradient(colors: [cyan.withAlphaComponent(0.35), cyan.withAlphaComponent(0)])?
+        NSGradient(colors: [cyan.withAlphaComponent(0.35 * pulse), cyan.withAlphaComponent(0)])?
             .draw(in: glowRect, relativeCenterPosition: .zero)
 
         // Beam between the peers, drawn as one gradient bar or dashed segments
@@ -78,23 +84,27 @@ enum DockIcon {
                                     indigo.withAlphaComponent(beamAlpha)])?.draw(in: beam, angle: 0)
             }
             let packetXs: [CGFloat]
+            let packetRadius: CGFloat
             if let phase = trafficPhase {
-                packetXs = [0.0, 0.5].map { offset in
+                packetXs = [0.0, 1.0 / 3.0, 2.0 / 3.0].map { offset in
                     let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
                     return 71 + t * 370
                 }
+                packetRadius = 15
             } else {
                 packetXs = [131, 381]
+                packetRadius = 11
             }
             for x in packetXs {
                 blend(from: cyan, to: indigo, at: (x - 60) / 392, alpha: beamAlpha).setFill()
-                NSBezierPath(ovalIn: NSRect(x: x - 11, y: 245, width: 22, height: 22)).fill()
+                NSBezierPath(ovalIn: NSRect(x: x - packetRadius, y: 256 - packetRadius,
+                                            width: packetRadius * 2, height: packetRadius * 2)).fill()
             }
         }
 
         // Portal arcs, top and bottom
-        strokeArc(center: center, startAngle: 140, endAngle: 40, alpha: arcAlpha)
-        strokeArc(center: center, startAngle: 320, endAngle: 220, alpha: arcAlpha)
+        strokeArc(center: center, startAngle: 140, endAngle: 40, alpha: arcAlpha * pulse)
+        strokeArc(center: center, startAngle: 320, endAngle: 220, alpha: arcAlpha * pulse)
 
         // Peer nodes: colored ring with a dark center
         let nodeAlpha = drawBeam ? beamAlpha : arcAlpha

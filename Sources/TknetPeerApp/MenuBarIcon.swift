@@ -55,7 +55,13 @@ enum MenuBarIcon {
         let left = NSPoint(x: 2.7, y: mid.y)
         let right = NSPoint(x: rect.maxX - 2.7, y: mid.y)
 
-        NSColor.black.withAlphaComponent(arcAlpha).setStroke()
+        // While tokens flow the portal rings breathe with the traffic rhythm.
+        var pulse: CGFloat = 1
+        if let phase = trafficPhase {
+            pulse = 0.62 + 0.38 * sin(CGFloat(phase) / 8 * .pi * 2)
+        }
+
+        NSColor.black.withAlphaComponent(arcAlpha * pulse).setStroke()
         for (startAngle, endAngle) in [(38.0, 142.0), (218.0, 322.0)] {
             let arc = NSBezierPath()
             arc.appendArc(withCenter: mid, radius: 5.1, startAngle: startAngle, endAngle: endAngle)
@@ -97,10 +103,10 @@ enum MenuBarIcon {
             NSColor.black.setFill()
             let origin = left.x + nodeRadius + 0.2
             let span = right.x - left.x - 2 * (nodeRadius + 0.2)
-            for offset in [0.0, 0.5] {
+            for offset in [0.0, 1.0 / 3.0, 2.0 / 3.0] {
                 let t = (CGFloat(phase) / 8 + offset).truncatingRemainder(dividingBy: 1)
                 let x = origin + t * span
-                NSBezierPath(ovalIn: NSRect(x: x - 1.1, y: mid.y - 1.1, width: 2.2, height: 2.2)).fill()
+                NSBezierPath(ovalIn: NSRect(x: x - 1.5, y: mid.y - 1.5, width: 3, height: 3)).fill()
             }
         }
     }
