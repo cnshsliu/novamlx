@@ -61,9 +61,9 @@ public struct MirroringSecretStore: SecretStore {
     }
 
     public func load(_ ref: String) throws -> String? {
-        if let value = try primary.load(ref) { return value }
+        if let value = try? primary.load(ref) { return value }
         guard !Self.isMeta(ref), let value = file.load(ref) else { return nil }
-        try primary.save(value, for: ref)
+        try? primary.save(value, for: ref)
         return value
     }
 

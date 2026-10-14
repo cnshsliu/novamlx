@@ -1,5 +1,6 @@
 import Foundation
 #if os(macOS)
+import LocalAuthentication
 import Security
 
 public enum KeychainSecretError: Error, Equatable, LocalizedError {
@@ -28,6 +29,7 @@ public struct KeychainSecretStore: SecretStore {
     }
 
     public func save(_ secret: String, for ref: String) throws {
+        SecKeychainSetUserInteractionAllowed(false)
         guard let data = secret.data(using: .utf8) else {
             throw KeychainSecretError.encoding
         }
@@ -50,6 +52,7 @@ public struct KeychainSecretStore: SecretStore {
     }
 
     public func load(_ ref: String) throws -> String? {
+        SecKeychainSetUserInteractionAllowed(false)
         var query = baseQuery(ref)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -66,6 +69,7 @@ public struct KeychainSecretStore: SecretStore {
     }
 
     public func delete(_ ref: String) throws {
+        SecKeychainSetUserInteractionAllowed(false)
         let status = SecItemDelete(baseQuery(ref) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainSecretError.status(status)
@@ -73,10 +77,14 @@ public struct KeychainSecretStore: SecretStore {
     }
 
     private func baseQuery(_ ref: String) -> [String: Any] {
-        [
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: ref,
+            // A prompt during launch never appears and the call never returns.
+            kSecUseAuthenticationContext as String: context,
         ]
     }
 }
