@@ -105,7 +105,8 @@ public enum PeerAdmin {
 
     public static func addPool(
         _ config: inout PeerConfig, id: String?, name: String,
-        strategy: PoolStrategy = .roundRobin, maxRetries: Int = 3, memberIds: [String]
+        strategy: PoolStrategy = .roundRobin, maxRetries: Int = 3, memberIds: [String],
+        api: APIContract? = nil
     ) throws {
         let poolName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !poolName.isEmpty else { throw PeerAdminError("Pool name is required.") }
@@ -117,13 +118,14 @@ public enum PeerAdmin {
         }
         config.upsertPool(PoolConfig(
             id: poolId, name: poolName, strategy: strategy,
-            memberIds: memberIds, maxRetries: maxRetries))
+            memberIds: memberIds, maxRetries: maxRetries, api: api))
     }
 
     public static func updatePool(
         _ config: inout PeerConfig, id: String, name: String? = nil,
         strategy: PoolStrategy? = nil, maxRetries: Int? = nil,
-        addMembers: [String] = [], removeMembers: [String] = [], isEnabled: Bool? = nil
+        addMembers: [String] = [], removeMembers: [String] = [], isEnabled: Bool? = nil,
+        api: APIContract? = nil, setApi: Bool = false
     ) throws {
         guard var pool = config.pool(id: id) else { throw PeerAdminError("No pool \(id).") }
         if let name {
@@ -137,6 +139,7 @@ public enum PeerAdmin {
             pool.maxRetries = maxRetries
         }
         if let isEnabled { pool.isEnabled = isEnabled }
+        if setApi { pool.api = api }
         for memberId in addMembers {
             guard config.member(id: memberId) != nil else { throw PeerAdminError("No member \(memberId).") }
             if !pool.memberIds.contains(memberId) { pool.memberIds.append(memberId) }
@@ -160,6 +163,15 @@ public enum PeerAdmin {
         return strategy
     }
 
+    public static func apiContract(_ raw: String) throws -> APIContract {
+        let kind = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let api = SupplyAPI.contract(kind: kind) else {
+            let kinds = SupplyAPI.allContracts.map(\.kind).joined(separator: ", ")
+            throw PeerAdminError("Unknown interface \(raw). Use one of: \(kinds).")
+        }
+        return api
+    }
+
     public static func sourceType(_ raw: String) throws -> SourceType {
         guard let type = SourceType(rawValue: raw) else {
             throw PeerAdminError("Unknown member type \(raw). Use openaiCompatible, anthropic, or localNovaMLX.")
@@ -179,7 +191,7 @@ public enum PeerAdmin {
     public static func poolList(_ config: PeerConfig) -> String {
         if config.pools.isEmpty { return "(no pools)" }
         return config.pools.map { pool in
-            "\(pool.id)\t\(pool.name)\tstrategy=\(pool.strategy.rawValue)\tretries=\(pool.maxRetries)\tenabled=\(pool.isEnabled)\tmembers=\(pool.memberIds.joined(separator: ","))"
+            "\(pool.id)\t\(pool.name)\tstrategy=\(pool.strategy.rawValue)\tretries=\(pool.maxRetries)\tenabled=\(pool.isEnabled)\tapi=\(pool.api?.kind ?? "openai.chat")\tmembers=\(pool.memberIds.joined(separator: ","))"
         }.joined(separator: "\n")
     }
 

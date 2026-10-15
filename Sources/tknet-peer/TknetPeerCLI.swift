@@ -485,6 +485,8 @@ extension TknetPeerCLI {
             @Option var strategy: String = "round_robin"
             @Option(name: .customLong("max-retries")) var maxRetries: Int = 3
             @Option(name: .customLong("member")) var member: [String] = []
+            @Option(help: "Interface kind, e.g. openai.chat or openai.embeddings")
+            var api: String = "openai.chat"
 
             func run() throws {
                 var peerConfig = try TknetPeerCLI.loadConfig(config)
@@ -492,7 +494,8 @@ extension TknetPeerCLI {
                     try PeerAdmin.addPool(
                         &peerConfig, id: id, name: name,
                         strategy: try PeerAdmin.strategy(strategy),
-                        maxRetries: maxRetries, memberIds: member)
+                        maxRetries: maxRetries, memberIds: member,
+                        api: try PeerAdmin.apiContract(api))
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }
@@ -535,6 +538,8 @@ extension TknetPeerCLI {
             @Option(name: .customLong("remove-member")) var removeMember: [String] = []
             @Flag var enable: Bool = false
             @Flag var disable: Bool = false
+            @Option(help: "Interface kind, e.g. openai.embeddings. Omit to leave unchanged.")
+            var api: String?
 
             func run() throws {
                 if enable && disable { throw ValidationError("Pass only one of --enable and --disable.") }
@@ -547,10 +552,21 @@ extension TknetPeerCLI {
                     parsed = nil
                 }
                 let isEnabled: Bool? = enable ? true : (disable ? false : nil)
+                let apiContract: APIContract?
+                let setApi: Bool
+                if let api {
+                    do { apiContract = try PeerAdmin.apiContract(api) }
+                    catch let error as PeerAdminError { throw ValidationError(error.message) }
+                    setApi = true
+                } else {
+                    apiContract = nil
+                    setApi = false
+                }
                 do {
                     try PeerAdmin.updatePool(
                         &peerConfig, id: id, name: name, strategy: parsed, maxRetries: maxRetries,
-                        addMembers: addMember, removeMembers: removeMember, isEnabled: isEnabled)
+                        addMembers: addMember, removeMembers: removeMember, isEnabled: isEnabled,
+                        api: apiContract, setApi: setApi)
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }
