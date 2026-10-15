@@ -380,7 +380,7 @@ private struct MemberDraft: Identifiable {
         weight = ""
         isEnabled = true
         isNew = true
-        factories = []
+        factories = [factory]
     }
 
     init(_ member: MemberConfig, factories: [FactoryConfig]) {
@@ -442,7 +442,10 @@ private struct MemberForm: View {
     }
 
     private var selectedFactory: FactoryConfig? {
-        draft.factories.first { $0.id == factoryId }
+        if let match = draft.factories.first(where: { $0.id == factoryId }) {
+            return match
+        }
+        return state.config.factories.first { $0.id == factoryId }
     }
 
     var body: some View {
@@ -468,8 +471,16 @@ private struct MemberForm: View {
                     }
                 }
             }
-            if selectedFactory != nil {
+            if let factory = selectedFactory {
                 TextField("Path (e.g. /v1)", text: $endpoint)
+                if let composed = PeerConfig.memberEndpoint(factoryBase: factory.baseUrl, path: endpoint) {
+                    Text(composed.absoluteString)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
             } else {
                 TextField("Endpoint URL", text: $endpoint)
                     .onChange(of: endpoint) { _, newValue in
@@ -481,6 +492,8 @@ private struct MemberForm: View {
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
                     Text("Type")
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     Picker("Type", selection: Binding(
                         get: { type },
                         set: { type = $0; typeEdited = true }
@@ -492,6 +505,7 @@ private struct MemberForm: View {
                     .labelsHidden()
                     .fixedSize()
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 Toggle("Enabled", isOn: $isEnabled)
                 Spacer(minLength: 0)
             }
@@ -523,10 +537,9 @@ private struct MemberForm: View {
         let text = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         if oldFactory != nil, newFactory == nil {
             // path -> full URL
-            if let old = oldFactory {
-                var path = text
-                if !path.hasPrefix("/") { path = "/" + path }
-                endpoint = old.baseUrl.absoluteString + path
+            if let old = oldFactory,
+               let url = PeerConfig.memberEndpoint(factoryBase: old.baseUrl, path: text) {
+                endpoint = url.absoluteString
             }
         } else if oldFactory == nil, let newBase = newFactory?.baseUrl.absoluteString {
             // full URL -> path against the new base
@@ -561,10 +574,7 @@ private struct MemberForm: View {
         }
         var endpointURL: URL
         if let factory = selectedFactory {
-            var path = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-            if path.isEmpty { path = "/" }
-            if !path.hasPrefix("/") { path = "/" + path }
-            guard let url = URL(string: factory.baseUrl.absoluteString + path) else {
+            guard let url = PeerConfig.memberEndpoint(factoryBase: factory.baseUrl, path: endpoint) else {
                 formError = "Path is not valid."
                 return
             }
