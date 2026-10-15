@@ -35,13 +35,6 @@ public enum MemberProbe {
     /// un-shutdown (AsyncHTTPClient traps on that in debug builds).
     private static let client = HTTPClient(eventLoopGroupProvider: .singleton)
 
-    public enum Depth: Equatable, Sendable {
-        /// Real invocation with a minimal payload — the token-factory grade.
-        case full
-        /// Authed discovery request: proves reachability + auth, not tokens.
-        case light
-    }
-
     // MARK: - Discovery
 
     /// `GET {base-with-/v1}/models` — the model list a factory advertises.
@@ -148,36 +141,17 @@ public enum MemberProbe {
 
     // MARK: - Bare-call test
 
-    /// Test one member by invoking it. Depth defaults from the kind:
-    /// quota-heavy kinds get `.light` unless `deep` is true.
+    /// Test one member the honest way: a real invocation with the smallest
+    /// payload that proves the member produces output. No shortcuts — a
+    /// passing test means this member actually answered (Lucas 2026-10-15:
+    /// discovery-request "light tests" masked wrong keys and had to go).
+    /// `timeoutSeconds` defaults generously: image generation takes a while.
     public static func test(
         route: MemberRoute, model: String, apiKey: String?,
-        deep: Bool = false, timeoutSeconds: Double = 30
+        timeoutSeconds: Double = 180
     ) async -> MemberProbeResult {
-        // Local factories cost nothing: go full whenever a bare template
-        // exists. Light probing stays for remote, quota-metered APIs — and
-        // is not an auth check when the discovery endpoint is public
-        // (NovaMLX serves /v1/models unauthenticated).
-        let hasTemplate = barePayload(kind: route.kind, model: model) != nil
-        let depth: Depth = (deep || !route.kind.defaultsToLightProbe
-                            || (route.isLocal && hasTemplate)) ? .full : .light
-        if depth == .light {
-            var result = await discoverModels(base: Self.factoryBase(of: route), apiKey: apiKey)
-            result = MemberProbeResult(
-                ok: result.ok, httpStatus: result.httpStatus, models: [],
-                message: result.ok
-                    ? "auth ok (light test — \(route.kind.displayName))"
-                    : result.message)
-            return result
-        }
-        guard let payload = barePayload(kind: route.kind, model: model) else {
-            return MemberProbeResult(
-                ok: false, httpStatus: 0, models: [],
-                message: "no test template for \(route.kind.rawValue)")
-        }
         var request = HTTPClientRequest(url: route.url.absoluteString)
         request.method = .POST
-        request.headers.add(name: "content-type", value: "application/json")
         if let apiKey, !apiKey.isEmpty {
             if route.kind.usesXAPIKey {
                 request.headers.add(name: "x-api-key", value: apiKey)
@@ -186,7 +160,17 @@ public enum MemberProbe {
                 request.headers.add(name: "authorization", value: "Bearer \(apiKey)")
             }
         }
-        request.body = .bytes(Data(payload.utf8))
+        if let json = barePayload(kind: route.kind, model: model) {
+            request.headers.add(name: "content-type", value: "application/json")
+            request.body = .bytes(Data(json.utf8))
+        } else if let (body, contentType) = bareMultipartBody(kind: route.kind, model: model) {
+            request.headers.add(name: "content-type", value: contentType)
+            request.body = .bytes(body)
+        } else {
+            return MemberProbeResult(
+                ok: false, httpStatus: 0, models: [],
+                message: "no test template for \(route.kind.rawValue)")
+        }
         do {
             let response = try await client.execute(
                 request, timeout: .seconds(max(1, Int64(timeoutSeconds.rounded()))))
@@ -244,10 +228,89 @@ public enum MemberProbe {
         case .openaiEmbeddings:
             return #"{"model":"\#(encoded)","input":"ping"}"#
         case .openaiSpeech:
-            return #"{"model":"\#(encoded)","input":"ping","voice":"alloy"}"#
+            return #"{"model":"\#(encoded)","input":"hi","voice":"alloy"}"#
+        case .openaiImages:
+            return #"{"model":"\#(encoded)","prompt":"a single black dot on a white background","n":1}"#
         default:
             return nil
         }
+    }
+
+    /// Multipart templates for the file-bearing kinds: a 1x1 PNG image and a
+    /// 100ms silent WAV, both tiny and valid.
+    static func bareMultipartBody(
+        kind: InterfaceKind, model: String
+    ) -> (body: Data, contentType: String)? {
+        switch kind {
+        case .openaiImageEdits:
+            return multipart(fields: [
+                ("model", nil, Data(model.utf8)),
+                ("prompt", nil, Data("keep it".utf8)),
+                ("image", "probe.png", tinyPNG),
+            ])
+        case .openaiTranscription:
+            return multipart(fields: [
+                ("model", nil, Data(model.utf8)),
+                ("file", "probe.wav", silentWAV),
+            ])
+        case .novaBackgroundRemoval:
+            return multipart(fields: [
+                ("model", nil, Data(model.utf8)),
+                ("image", "probe.png", tinyPNG),
+            ])
+        default:
+            return nil
+        }
+    }
+
+    /// 1x1 transparent PNG.
+    static let tinyPNG = Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")!
+
+    /// ~100ms of 8kHz 16-bit mono silence — a valid, parseable WAV.
+    static let silentWAV: Data = {
+        let sampleRate = 8000
+        let frames = sampleRate / 10
+        let dataSize = frames * 2
+        var data = Data()
+        func append(_ value: UInt32) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        func append16(_ value: UInt16) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        data.append(Data("RIFF".utf8))
+        append(UInt32(36 + dataSize))
+        data.append(Data("WAVE".utf8))
+        data.append(Data("fmt ".utf8))
+        append(UInt32(16)); append16(1); append16(1)
+        append(UInt32(sampleRate)); append(UInt32(sampleRate * 2))
+        append16(2); append16(16)
+        data.append(Data("data".utf8))
+        append(UInt32(dataSize))
+        data.append(Data(count: dataSize))
+        return data
+    }()
+
+    static func multipart(
+        fields: [(name: String, filename: String?, content: Data)]
+    ) -> (body: Data, contentType: String) {
+        let boundary = "tknet-probe-\(UUID().uuidString)"
+        var body = Data()
+        func line(_ text: String) { body.append(Data(text.utf8)) }
+        for field in fields {
+            line("--\(boundary)\r\n")
+            if let filename = field.filename {
+                line("Content-Disposition: form-data; name=\"\(field.name)\"; filename=\"\(filename)\"\r\n")
+                line("Content-Type: application/octet-stream\r\n\r\n")
+            } else {
+                line("Content-Disposition: form-data; name=\"\(field.name)\"\r\n\r\n")
+            }
+            body.append(field.content)
+            line("\r\n")
+        }
+        line("--\(boundary)--\r\n")
+        return (body, "multipart/form-data; boundary=\(boundary)")
     }
 
     /// 2xx is not enough (peer-bot's standard): the body must carry real
@@ -269,6 +332,10 @@ public enum MemberProbe {
             return (object["data"] as? [[String: Any]])?.isEmpty == false
         case .novaDecision:
             return (object["answers"] as? [String: Any])?.isEmpty == false
+        case .openaiImages, .openaiImageEdits, .novaBackgroundRemoval:
+            return (object["data"] as? [[String: Any]])?.isEmpty == false
+        case .openaiTranscription:
+            return object["text"] != nil
         default:
             return true
         }
