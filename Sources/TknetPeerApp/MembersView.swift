@@ -1,3 +1,4 @@
+import AppKit
 import TknetPeer
 import SwiftUI
 
@@ -366,8 +367,11 @@ private struct MemberRowView: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
-                    Text(MemberLabel.title(member, among: state.config.members))
+                    // Click copies the model name (without any "· host" suffix).
+                    Text(PeerAdmin.publicModel(member))
                         .font(.body.bold())
+                        .onTapGesture { copyToPasteboard(PeerAdmin.publicModel(member)) }
+                        .help("Click to copy the model name")
                     if let result, !result.ok {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -378,7 +382,8 @@ private struct MemberRowView: View {
                 Text(fullEndpointURL)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .onTapGesture { copyToPasteboard(fullEndpointURL) }
+                    .help("Click to copy the endpoint URL")
                 Text(detailLine)
                     .font(.caption)
                 Text(member.isEnabled ? "Enabled" : "Disabled")
@@ -413,6 +418,11 @@ private struct MemberRowView: View {
         var base = member.endpoint.absoluteString
         while base.hasSuffix("/") { base.removeLast() }
         return base + "/chat/completions"
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private var detailLine: String {
