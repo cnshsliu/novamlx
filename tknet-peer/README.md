@@ -84,7 +84,7 @@ From the novamlx repository, with `gh` logged in:
 bash tknet-peer/Scripts/publish-repo.sh git@github.com:cnshsliu/tknet-peer.git
 ```
 
-That runs `git subtree split --prefix=tknet-peer`. If `github.com/cnshsliu/tknet-peer` does not exist, `gh repo create` makes a public repository with no README, then the script pushes the split history to `main`. novamlx can then replace `.package(path: "tknet-peer")` with a URL dependency. Until that push, the Mac app builds against the path package.
+That runs `git subtree split --prefix=tknet-peer`. If `github.com/cnshsliu/tknet-peer` does not exist, `gh repo create` makes a public repository with no README, then the script pushes the split history to `main`. NovaMLX depends on that repository with `from: "0.2.0"`. `./build.sh peer` still compiles the copy in this checkout.
 
 ## Layout
 

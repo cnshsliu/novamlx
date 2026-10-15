@@ -1,5 +1,5 @@
 {
-  "originHash" : "38d99cc7e018dd13af81fc87bbfcf701fe9d3be00de273ca9b6e329efbb8cfd6",
+  "originHash" : "bd79270ec5a299011bbe602bcc7cfb33b0f0c435d452a04445d51980a8836b40",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/adam-fowler/compress-nio.git",
       "state" : {
-        "revision" : "e1caa19077dda4b00441142ef57da3db02acd466",
-        "version" : "1.4.2"
+        "revision" : "e238631c31f06274ad75c003c154f0b6ad4910e7",
+        "version" : "1.5.0"
       }
     },
     {
@@ -305,6 +305,15 @@
       "state" : {
         "revision" : "126df9655565068bd97838c072c1db11f9fd42ee",
         "version" : "1.6.1"
+      }
+    },
+    {
+      "identity" : "tknet-peer",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/cnshsliu/tknet-peer",
+      "state" : {
+        "revision" : "1b7000f68506b37765b6db93cb362a5c40f7f41b",
+        "version" : "0.2.0"
       }
     },
     {
