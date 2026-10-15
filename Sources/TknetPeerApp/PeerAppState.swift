@@ -67,8 +67,13 @@ final class PeerAppState: ObservableObject {
     private let rest = TknetREST()
 
     init(defaults: UserDefaults = .standard) {
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/tknet-peer", isDirectory: true)
+        // `TKNETPEER_CONFIG_DIR` relocates the whole config/secrets directory.
+        // UI tests use it for isolation — overriding $HOME does nothing because
+        // `homeDirectoryForCurrentUser` is getpwuid-based, not $HOME-based.
+        let directory = ProcessInfo.processInfo.environment["TKNETPEER_CONFIG_DIR"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".config/tknet-peer", isDirectory: true)
         let configURL = directory.appendingPathComponent("peer.json")
         self.configURL = configURL
         let secretsResult = Self.makeSecrets(in: directory)
@@ -413,7 +418,8 @@ final class PeerAppState: ObservableObject {
     /// edit and generated on create. The member joins the pool of that name.
     func saveMember(
         existingId: String?, model: String, upstreamOverride: String, type: SourceType,
-        endpoint: URL, apiKey: String?, weight: Int?, isEnabled: Bool
+        endpoint: URL, apiKey: String?, weight: Int?, isEnabled: Bool,
+        factoryId: String? = nil
     ) async -> Bool {
         guard lockError == nil else { return false }
         let publicModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -430,7 +436,7 @@ final class PeerAppState: ObservableObject {
             try PeerAdmin.addMember(
                 &config, secrets: secrets, id: id, name: publicModel, endpoint: endpoint,
                 upstreamModel: upstream, apiKey: apiKey, weight: weight,
-                type: type, isEnabled: isEnabled)
+                type: type, isEnabled: isEnabled, factoryId: factoryId)
             if let previous {
                 let oldModel = PeerAdmin.publicModel(previous)
                 if oldModel != publicModel {
@@ -463,6 +469,41 @@ final class PeerAppState: ObservableObject {
             return false
         }
         return await persist(config)
+    }
+
+    // MARK: - Factories
+
+    func saveFactory(
+        id: String?, name: String, baseUrl: URL, apiKey: String?
+    ) async -> Bool {
+        guard lockError == nil else { return false }
+        var config = self.config
+        do {
+            try PeerAdmin.saveFactory(
+                &config, secrets: secrets, id: id, name: name,
+                baseUrl: baseUrl, apiKey: apiKey)
+        } catch {
+            lastError = Self.userMessage(error)
+            return false
+        }
+        return await persist(config)
+    }
+
+    func deleteFactory(id: String, deleteMembers: Bool) async -> Bool {
+        guard lockError == nil else { return false }
+        var config = self.config
+        do {
+            try PeerAdmin.removeFactory(&config, id: id, deleteMembers: deleteMembers)
+        } catch {
+            lastError = Self.userMessage(error)
+            return false
+        }
+        return await persist(config)
+    }
+
+    /// The key stored on a factory, pre-filled into new member forms.
+    func factoryDefaultKey(_ factory: FactoryConfig) -> String? {
+        factory.apiKeyRef.flatMap { readSecret($0) }
     }
 
     func savePool(

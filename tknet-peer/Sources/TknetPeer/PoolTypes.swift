@@ -34,10 +34,14 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
     public var upstreamModel: String
     public var weight: Int?
     public var isEnabled: Bool
+    /// The factory (`FactoryConfig.id`) this member belongs to, when grouped.
+    /// `endpoint` stays the absolute source of truth either way.
+    public var factoryId: String?
 
     public init(id: String, name: String, type: SourceType, endpoint: URL,
                 apiKeyRef: String, upstreamModel: String,
-                weight: Int? = nil, isEnabled: Bool = true) {
+                weight: Int? = nil, isEnabled: Bool = true,
+                factoryId: String? = nil) {
         self.id = id
         self.name = name
         self.type = type
@@ -46,10 +50,12 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         self.upstreamModel = upstreamModel
         self.weight = weight
         self.isEnabled = isEnabled
+        self.factoryId = factoryId
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, type, endpoint, apiKeyRef, upstreamModel, weight, isEnabled
+        case factoryId
     }
 
     public init(from decoder: Decoder) throws {
@@ -62,6 +68,7 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         upstreamModel = try c.decode(String.self, forKey: .upstreamModel)
         weight = try c.decodeIfPresent(Int.self, forKey: .weight)
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        factoryId = try c.decodeIfPresent(String.self, forKey: .factoryId)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -74,6 +81,62 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         try c.encode(upstreamModel, forKey: .upstreamModel)
         try c.encodeIfPresent(weight, forKey: .weight)
         try c.encode(isEnabled, forKey: .isEnabled)
+        try c.encodeIfPresent(factoryId, forKey: .factoryId)
+    }
+}
+
+/// A group of members sharing one `scheme://host:port` base. The user-facing
+/// word is "Factory" (2026-10-15) — unrelated to the "token factory" peer
+/// identity used elsewhere in the app. `baseUrl` carries scheme + host +
+/// port only; a member's `endpoint` is this base plus the member's path.
+public struct FactoryConfig: Codable, Equatable, Sendable, Identifiable {
+    public var id: String
+    public var name: String
+    /// Base URL, scheme + host + port. Any path/query pasted by the user is
+    /// dropped before saving.
+    public var baseUrl: URL
+    /// Reference into the SecretStore for the key shared by this factory's
+    /// members. Pre-fills new member forms; each member keeps its own ref.
+    public var apiKeyRef: String?
+
+    public init(id: String, name: String, baseUrl: URL, apiKeyRef: String? = nil) {
+        self.id = id
+        self.name = name
+        self.baseUrl = baseUrl
+        self.apiKeyRef = apiKeyRef
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, baseUrl, apiKeyRef
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        baseUrl = try c.decode(URL.self, forKey: .baseUrl)
+        apiKeyRef = try c.decodeIfPresent(String.self, forKey: .apiKeyRef)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(baseUrl, forKey: .baseUrl)
+        try c.encodeIfPresent(apiKeyRef, forKey: .apiKeyRef)
+    }
+
+    /// `scheme://host[:port]` with the port kept only when non-default.
+    public var displayURL: String {
+        guard var parts = URLComponents(url: baseUrl, resolvingAgainstBaseURL: false) else {
+            return baseUrl.absoluteString
+        }
+        if let port = parts.port,
+           (parts.scheme?.lowercased() == "https" && port == 443)
+            || (parts.scheme?.lowercased() == "http" && port == 80) {
+            parts.port = nil
+        }
+        return parts.url?.absoluteString ?? baseUrl.absoluteString
     }
 }
 

@@ -1,10 +1,37 @@
 import TknetPeer
 import SwiftUI
 
+/// Left pane selection: `all` or one concrete factory id.
+private enum FactorySelection: Hashable {
+    case all
+    case factory(String)
+
+    var factoryId: String? {
+        if case .factory(let id) = self { return id }
+        return nil
+    }
+}
+
 struct MembersView: View {
     @EnvironmentObject private var state: PeerAppState
-    @State private var draft: MemberDraft?
-    @State private var pendingDelete: MemberConfig?
+    @State private var selectedFactory: FactorySelection = .all
+    @State private var selectedMemberId: String?
+    @State private var factoryDraft: FactoryDraft?
+    @State private var memberDraft: MemberDraft?
+    @State private var pendingDeleteFactory: FactoryConfig?
+    @State private var pendingDeleteMember: MemberConfig?
+
+    private var factories: [FactoryConfig] { state.config.factories }
+
+    private var visibleMembers: [MemberConfig] {
+        switch selectedFactory {
+        case .all:
+            return state.config.members
+        case .factory(let id):
+            guard let factory = factories.first(where: { $0.id == id }) else { return [] }
+            return state.config.members(in: factory)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -12,56 +39,211 @@ struct MembersView: View {
                 Text("Members")
                     .font(.headline)
                 Spacer()
-                Button("Add member") { draft = MemberDraft() }
+                Button("Add Factory") { factoryDraft = FactoryDraft() }
                     .disabled(state.lockError != nil)
+                Button("Add member") { openMemberDraft() }
+                    .disabled(state.lockError != nil || selectedFactory.factoryId == nil)
             }
-            if state.config.members.isEmpty {
-                Text("No members yet. Add an endpoint and the model name clients should send.")
-                    .foregroundStyle(.secondary)
-            } else {
-                List {
-                    ForEach(state.config.members) { member in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(MemberLabel.title(member, among: state.config.members))
-                                    .font(.body.bold())
-                                Text(member.endpoint.absoluteString)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                                Text(detailLine(member))
-                                    .font(.caption)
-                                Text(member.isEnabled ? "Enabled" : "Disabled")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("Edit") { draft = MemberDraft(member) }
-                            Button("Delete") { pendingDelete = member }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
+            HStack(spacing: 0) {
+                factoryPane
+                Divider()
+                memberPane
             }
+            .frame(maxHeight: .infinity)
         }
-        .sheet(item: $draft) { draft in
+        .sheet(item: $factoryDraft) { draft in
+            FactoryForm(draft: draft)
+        }
+        .sheet(item: $memberDraft) { draft in
             MemberForm(draft: draft)
         }
         .confirmationDialog(
-            "Delete \(pendingDelete.map { MemberLabel.title($0, among: state.config.members) } ?? "member")?",
+            "Delete member \(pendingDeleteMember.map { MemberLabel.title($0, among: state.config.members) } ?? "member")?",
             isPresented: Binding(
-                get: { pendingDelete != nil },
-                set: { if !$0 { pendingDelete = nil } }),
+                get: { pendingDeleteMember != nil },
+                set: { if !$0 { pendingDeleteMember = nil } }),
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                if let id = pendingDelete?.id {
+                if let id = pendingDeleteMember?.id {
                     Task { await state.deleteMember(id: id) }
+                    if selectedMemberId == id { selectedMemberId = nil }
                 }
-                pendingDelete = nil
+                pendingDeleteMember = nil
             }
-            Button("Cancel", role: .cancel) { pendingDelete = nil }
+            Button("Cancel", role: .cancel) { pendingDeleteMember = nil }
         }
+        .confirmationDialog(
+            "Delete factory \(pendingDeleteFactory?.name ?? "")?",
+            isPresented: Binding(
+                get: { pendingDeleteFactory != nil },
+                set: { if !$0 { pendingDeleteFactory = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Keep members (ungrouped)", role: .destructive) {
+                deleteFactory(deleteMembers: false)
+            }
+            Button("Delete members too", role: .destructive) {
+                deleteFactory(deleteMembers: true)
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteFactory = nil }
+        }
+    }
+
+    // MARK: - Left pane (factories)
+
+    private var factoryPane: some View {
+        VStack(spacing: 0) {
+            List(selection: Binding(
+                get: { selectedFactory },
+                set: { selectedFactory = $0 ?? .all; selectedMemberId = nil })) {
+                Text("All")
+                    .tag(FactorySelection.all)
+                    .font(.body.weight(.medium))
+                if factories.isEmpty {
+                    // No factories yet: visible but never selectable.
+                    Text("(none)")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(factories) { factory in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(factory.name).font(.body)
+                                Text(factory.displayURL)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Text("\(state.config.members(in: factory).count)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(FactorySelection.factory(factory.id))
+                    }
+                }
+            }
+            .frame(width: 220)
+            paneControls(
+                minusAction: {
+                    if let id = selectedFactory.factoryId,
+                       let factory = factories.first(where: { $0.id == id }) {
+                        pendingDeleteFactory = factory
+                    }
+                },
+                minusEnabled: selectedFactory.factoryId != nil && state.lockError == nil,
+                plusAction: { factoryDraft = FactoryDraft() },
+                plusEnabled: state.lockError == nil,
+                minusID: "factory-remove", plusID: "factory-add")
+        }
+    }
+
+    // MARK: - Right pane (members of the selection)
+
+    private var memberPane: some View {
+        VStack(spacing: 0) {
+            if visibleMembers.isEmpty {
+                Spacer()
+                Text(emptyMembersText)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                List(selection: $selectedMemberId) {
+                    ForEach(visibleMembers) { member in
+                        memberRow(member)
+                            .tag(member.id)
+                    }
+                }
+            }
+            paneControls(
+                minusAction: {
+                    if let id = selectedMemberId,
+                       let member = state.config.members.first(where: { $0.id == id }) {
+                        pendingDeleteMember = member
+                    }
+                },
+                minusEnabled: selectedMemberId != nil && state.lockError == nil,
+                plusAction: { openMemberDraft() },
+                // "+" only when a concrete factory (not All) is selected.
+                plusEnabled: selectedFactory.factoryId != nil && state.lockError == nil,
+                minusID: "member-remove", plusID: "member-add")
+        }
+    }
+
+    @ViewBuilder
+    private func memberRow(_ member: MemberConfig) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(MemberLabel.title(member, among: state.config.members))
+                    .font(.body.bold())
+                Text(member.endpoint.absoluteString)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text(detailLine(member))
+                    .font(.caption)
+                Text(member.isEnabled ? "Enabled" : "Disabled")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Edit") { memberDraft = MemberDraft(member, factories: factories) }
+                .buttonStyle(.link)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var emptyMembersText: String {
+        switch selectedFactory {
+        case .all:
+            return factories.isEmpty
+                ? "No members yet. Add a Factory, then add members to it."
+                : "No members yet."
+        case .factory(let id):
+            guard let factory = factories.first(where: { $0.id == id }) else { return "" }
+            return "No members in \(factory.name). Use + to add one."
+        }
+    }
+
+    private func paneControls(
+        minusAction: @escaping () -> Void, minusEnabled: Bool,
+        plusAction: @escaping () -> Void, plusEnabled: Bool,
+        minusID: String, plusID: String
+    ) -> some View {
+        HStack(spacing: 4) {
+            Button(action: minusAction) {
+                Image(systemName: "minus")
+            }
+            .disabled(!minusEnabled)
+            .accessibilityIdentifier(minusID)
+            Button(action: plusAction) {
+                Image(systemName: "plus")
+            }
+            .disabled(!plusEnabled)
+            .accessibilityIdentifier(plusID)
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.bar)
+    }
+
+    private func openMemberDraft() {
+        guard let id = selectedFactory.factoryId,
+              let factory = factories.first(where: { $0.id == id }) else { return }
+        memberDraft = MemberDraft(factory: factory, defaultKey: state.factoryDefaultKey(factory))
+    }
+
+    private func deleteFactory(deleteMembers: Bool) {
+        guard let factory = pendingDeleteFactory else { return }
+        if selectedFactory == .factory(factory.id) {
+            selectedFactory = .all
+            selectedMemberId = nil
+        }
+        pendingDeleteFactory = nil
+        Task { await state.deleteFactory(id: factory.id, deleteMembers: deleteMembers) }
     }
 
     private func detailLine(_ member: MemberConfig) -> String {
@@ -85,6 +267,91 @@ enum MemberLabel {
     }
 }
 
+// MARK: - Factory form
+
+private struct FactoryDraft: Identifiable {
+    let token = UUID()
+    var id: UUID { token }
+    var factoryId: String?
+    var name: String
+    var url: String
+    var isNew: Bool
+
+    init() {
+        factoryId = nil
+        name = ""
+        url = "https://"
+        isNew = true
+    }
+
+    init(_ factory: FactoryConfig) {
+        factoryId = factory.id
+        name = factory.name
+        url = factory.displayURL
+        isNew = false
+    }
+}
+
+private struct FactoryForm: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var state: PeerAppState
+    let draft: FactoryDraft
+
+    @State private var name: String
+    @State private var url: String
+    @State private var apiKey: String
+    @State private var formError: String?
+
+    init(draft: FactoryDraft) {
+        self.draft = draft
+        _name = State(initialValue: draft.name)
+        _url = State(initialValue: draft.url)
+        _apiKey = State(initialValue: "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(draft.isNew ? "Add Factory" : "Edit Factory")
+                .font(.title3.bold())
+            TextField("Name", text: $name)
+            TextField("URL (host:port)", text: $url)
+            SecureField(draft.isNew ? "API key (optional)" : "API key (blank keeps the current key)", text: $apiKey)
+            if let formError {
+                Text(formError).foregroundStyle(.red).font(.callout)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") { Task { await save() } }
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private func save() async {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            formError = "Factory name is required."
+            return
+        }
+        guard let base = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            formError = "Factory URL must be an http(s) host[:port]."
+            return
+        }
+        let key = apiKey.isEmpty ? nil : apiKey
+        let saved = await state.saveFactory(
+            id: draft.factoryId, name: trimmedName, baseUrl: base, apiKey: key)
+        if saved {
+            dismiss()
+        } else {
+            formError = state.lastError ?? "Could not save the factory."
+        }
+    }
+}
+
+// MARK: - Member form
+
 private struct MemberDraft: Identifiable {
     let token = UUID()
     var id: UUID { token }
@@ -92,35 +359,52 @@ private struct MemberDraft: Identifiable {
     var model: String
     var upstreamOverride: String
     var type: SourceType
+    var factoryId: String?
+    /// Path on the factory base (leading "/"), or the full URL when ungrouped.
     var endpoint: String
     var apiKey: String
     var weight: String
     var isEnabled: Bool
     var isNew: Bool
+    /// Factories available for reassignment while editing.
+    var factories: [FactoryConfig]
 
-    init() {
+    init(factory: FactoryConfig, defaultKey: String?) {
         memberId = nil
         model = ""
         upstreamOverride = ""
-        type = .localNovaMLX
-        endpoint = "http://127.0.0.1:6590/v1"
-        apiKey = ""
+        type = .openaiCompatible
+        factoryId = factory.id
+        endpoint = "/v1"
+        apiKey = defaultKey ?? ""
         weight = ""
         isEnabled = true
         isNew = true
+        factories = []
     }
 
-    init(_ member: MemberConfig) {
+    init(_ member: MemberConfig, factories: [FactoryConfig]) {
         let model = PeerAdmin.publicModel(member)
         memberId = member.id
         self.model = model
         upstreamOverride = member.upstreamModel == model ? "" : member.upstreamModel
         type = member.type
-        endpoint = member.endpoint.absoluteString
+        factoryId = member.factoryId
+        if let factoryId = member.factoryId,
+           let factory = factories.first(where: { $0.id == factoryId }) {
+            let base = factory.baseUrl.absoluteString
+            var path = member.endpoint.absoluteString
+            if path.hasPrefix(base) { path.removeFirst(base.count) }
+            if path.isEmpty { path = "/" }
+            endpoint = path
+        } else {
+            endpoint = member.endpoint.absoluteString
+        }
         apiKey = ""
         weight = member.weight.map(String.init) ?? ""
         isEnabled = member.isEnabled
         isNew = false
+        self.factories = factories
     }
 }
 
@@ -133,6 +417,8 @@ private struct MemberForm: View {
     @State private var upstreamOverride: String
     @State private var type: SourceType
     @State private var typeEdited: Bool
+    /// nil = ungrouped (full URL field); otherwise the chosen factory id.
+    @State private var factoryId: String?
     @State private var endpoint: String
     @State private var apiKey: String
     @State private var weight: String
@@ -146,6 +432,7 @@ private struct MemberForm: View {
         _upstreamOverride = State(initialValue: draft.upstreamOverride)
         _type = State(initialValue: draft.type)
         _typeEdited = State(initialValue: !draft.isNew)
+        _factoryId = State(initialValue: draft.factoryId)
         _endpoint = State(initialValue: draft.endpoint)
         _apiKey = State(initialValue: draft.apiKey)
         _weight = State(initialValue: draft.weight)
@@ -154,16 +441,42 @@ private struct MemberForm: View {
         _showMore = State(initialValue: hasMore)
     }
 
+    private var selectedFactory: FactoryConfig? {
+        draft.factories.first { $0.id == factoryId }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(draft.isNew ? "Add member" : "Edit member")
                 .font(.title3.bold())
             TextField("Model", text: $model)
-            TextField("Endpoint URL", text: $endpoint)
-                .onChange(of: endpoint) { _, newValue in
-                    guard !typeEdited else { return }
-                    type = inferredType(newValue)
+            if draft.isNew {
+                // Adding from a factory pane: the factory is fixed.
+                if let factory = selectedFactory {
+                    LabeledContent("Factory") {
+                        Text(factory.name).foregroundStyle(.secondary)
+                    }
                 }
+            } else {
+                // Editing: allow reassignment between factories / ungrouped.
+                Picker("Factory", selection: Binding(
+                    get: { factoryId },
+                    set: { reassign($0) })) {
+                    Text("(none)").tag(String?.none)
+                    ForEach(draft.factories) { factory in
+                        Text(factory.name).tag(String?.some(factory.id))
+                    }
+                }
+            }
+            if selectedFactory != nil {
+                TextField("Path (e.g. /v1)", text: $endpoint)
+            } else {
+                TextField("Endpoint URL", text: $endpoint)
+                    .onChange(of: endpoint) { _, newValue in
+                        guard !typeEdited, factoryId == nil else { return }
+                        type = inferredType(newValue)
+                    }
+            }
             SecureField(draft.isNew ? "API key" : "API key (blank keeps the current key)", text: $apiKey)
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
@@ -202,17 +515,68 @@ private struct MemberForm: View {
         .frame(width: 460)
     }
 
+    /// Switching factories converts the field between path and full-URL form.
+    private func reassign(_ newId: String?) {
+        let oldFactory = selectedFactory
+        factoryId = newId
+        let newFactory = draft.factories.first { $0.id == newId }
+        let text = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if oldFactory != nil, newFactory == nil {
+            // path -> full URL
+            if let old = oldFactory {
+                var path = text
+                if !path.hasPrefix("/") { path = "/" + path }
+                endpoint = old.baseUrl.absoluteString + path
+            }
+        } else if oldFactory == nil, let newBase = newFactory?.baseUrl.absoluteString {
+            // full URL -> path against the new base
+            if text.hasPrefix(newBase) {
+                var path = String(text.dropFirst(newBase.count))
+                if path.isEmpty { path = "/" }
+                endpoint = path
+            } else if let url = URL(string: text),
+                      PeerConfig.factoryBase(of: url) == PeerConfig.factoryBase(of: URL(string: newBase)!) {
+                var path = url.path
+                if path.isEmpty { path = "/" }
+                if let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.query {
+                    path += "?\(query)"
+                }
+                endpoint = path
+            } else if text.hasPrefix("/") {
+                endpoint = text
+            } else if !text.isEmpty {
+                // Different host entirely: keep only the path portion.
+                var path = URL(string: text)?.path ?? "/"
+                if path.isEmpty { path = "/" }
+                endpoint = path
+            }
+        }
+    }
+
     private func save() async {
         let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModel.isEmpty else {
             formError = "Model name is required."
             return
         }
-        guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              url.host != nil else {
-            formError = "Endpoint must be an http(s) URL."
-            return
+        var endpointURL: URL
+        if let factory = selectedFactory {
+            var path = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if path.isEmpty { path = "/" }
+            if !path.hasPrefix("/") { path = "/" + path }
+            guard let url = URL(string: factory.baseUrl.absoluteString + path) else {
+                formError = "Path is not valid."
+                return
+            }
+            endpointURL = url
+        } else {
+            guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+                  url.host != nil else {
+                formError = "Endpoint must be an http(s) URL."
+                return
+            }
+            endpointURL = url
         }
         let weightValue: Int?
         let trimmedWeight = weight.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -230,10 +594,11 @@ private struct MemberForm: View {
             model: trimmedModel,
             upstreamOverride: upstreamOverride,
             type: type,
-            endpoint: url,
+            endpoint: endpointURL,
             apiKey: key,
             weight: weightValue,
-            isEnabled: isEnabled)
+            isEnabled: isEnabled,
+            factoryId: factoryId)
         if saved {
             dismiss()
         } else {
