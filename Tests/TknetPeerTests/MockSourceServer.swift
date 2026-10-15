@@ -14,6 +14,8 @@ final class MockSourceServer: @unchecked Sendable {
     private var _lastAuthorizationHeader: String?
     private var _lastBodyModel: String?
     private var _lastPath: String?
+    private var _lastProbeAuthorization: String?
+    private var _lastProbePath: String?
     private var serverTask: Task<Void, Never>?
     private var _port = 0
 
@@ -59,6 +61,14 @@ final class MockSourceServer: @unchecked Sendable {
     var lastPath: String? {
         lock.lock(); defer { lock.unlock() }; return _lastPath
     }
+    /// Last `authorization` header seen on a GET (models probe).
+    var lastProbeAuthorization: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastProbeAuthorization
+    }
+    /// Last path seen on a GET (models probe).
+    var lastProbePath: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastProbePath
+    }
     /// Actual bound port; valid after `start()` returns.
     var port: Int {
         lock.lock(); defer { lock.unlock() }; return _port
@@ -99,6 +109,23 @@ final class MockSourceServer: @unchecked Sendable {
                     path: request.uri.path)
                 return self.respond()
             }
+        }
+
+        // Model listing for MemberProbe tests. Records separately from the
+        // chat counters so probe tests never disturb hit-count assertions.
+        router.get(RouterPath("/v1/models")) { [weak self] request, _ -> Response in
+            guard let self else {
+                return Response(status: .internalServerError, body: Self.textBody("server gone"))
+            }
+            self.recordProbe(
+                authorization: request.headers[.authorization],
+                path: request.uri.path)
+            var buffer = ByteBuffer()
+            buffer.writeString(#"{"object":"list","data":[{"id":"llama-4-8b"},{"id":"qwen3.5-14b"},{"id":"qwen3.5-14b"}]}"#)
+            return Response(
+                status: .ok,
+                headers: [.contentType: "application/json"],
+                body: .init(byteBuffer: buffer))
         }
 
         let port = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int, Error>) in
@@ -155,6 +182,12 @@ final class MockSourceServer: @unchecked Sendable {
         _lastNoAutoloadHeader = noAutoload
         _lastPath = path
         _hitCount += 1
+    }
+
+    private func recordProbe(authorization: String?, path: String) {
+        lock.lock(); defer { lock.unlock() }
+        _lastProbeAuthorization = authorization
+        _lastProbePath = path
     }
 
     private func setPort(_ port: Int) {
