@@ -684,14 +684,6 @@ private struct MemberForm: View {
                 .font(.title3.bold())
             TextField("Model", text: $model)
                 .onChange(of: model) { _, _ in testResult = nil }
-            if let models = testResult?.models, !models.isEmpty {
-                Menu("Choose advertised model…") {
-                    ForEach(models, id: \.self) { id in
-                        Button(id) { model = id }
-                    }
-                }
-                .controlSize(.small)
-            }
             if draft.isNew {
                 // Adding from a factory pane: the factory is fixed.
                 if let factory = selectedFactory {
@@ -800,13 +792,18 @@ private struct MemberForm: View {
     }
 
     private func runTest() async {
-        guard let factory = selectedFactory else { return }
+        // Save the dialog as-is first, then test the persisted member: the
+        // test must exercise exactly what would be saved — including key
+        // inheritance, which a form-local probe cannot see.
+        guard let memberId = await persist() else { return }
+        originalKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         isTesting = true
         defer { isTesting = false }
-        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        testResult = await state.probeMember(
-            factory: factory, kind: kind, model: testModelName,
-            apiKey: trimmedKey.isEmpty ? nil : trimmedKey)
+        guard let member = state.config.member(id: memberId) else {
+            formError = "The member vanished before it could be tested."
+            return
+        }
+        testResult = await state.probeMember(member)
         formError = nil
     }
 
@@ -818,14 +815,21 @@ private struct MemberForm: View {
     }
 
     private func save() async {
+        guard await persist() != nil else { return }
+        dismiss()
+    }
+
+    /// Validates and writes the dialog; returns the member id, nil on error
+    /// with `formError` set.
+    private func persist() async -> String? {
         let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModel.isEmpty else {
             formError = "Model name is required."
-            return
+            return nil
         }
         guard let factoryId = selectedFactory?.id else {
             formError = "No factory selected."
-            return
+            return nil
         }
         let weightValue: Int?
         let trimmedWeight = weight.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -835,18 +839,18 @@ private struct MemberForm: View {
             weightValue = parsed
         } else {
             formError = "Weight must be a whole number of at least 1."
-            return
+            return nil
         }
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if let problem = state.envKeyProblem(trimmedKey) {
             formError = problem
-            return
+            return nil
         }
         // nil = unchanged on edit; new members: "" (empty) = inherit factory.
         let keyValue: String? = draft.isNew
             ? trimmedKey
             : (trimmedKey == originalKey ? nil : trimmedKey)
-        let saved = await state.saveMember(
+        return await state.saveMember(
             existingId: draft.memberId,
             model: trimmedModel,
             upstreamOverride: upstreamOverride,
@@ -855,10 +859,5 @@ private struct MemberForm: View {
             apiKey: keyValue,
             weight: weightValue,
             isEnabled: isEnabled)
-        if saved {
-            dismiss()
-        } else {
-            formError = state.lastError ?? "Could not save the member."
-        }
     }
 }

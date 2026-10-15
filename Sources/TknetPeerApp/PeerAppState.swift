@@ -426,19 +426,19 @@ final class PeerAppState: ObservableObject {
         existingId: String?, model: String, upstreamOverride: String,
         factoryId: String, kind: InterfaceKind,
         apiKey: String? = nil, weight: Int?, isEnabled: Bool
-    ) async -> Bool {
-        guard lockError == nil else { return false }
+    ) async -> String? {
+        guard lockError == nil else { return nil }
         let publicModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !publicModel.isEmpty else {
             lastError = "Model name is required."
-            return false
+            return nil
         }
         let override = upstreamOverride.trimmingCharacters(in: .whitespacesAndNewlines)
         let upstream = override.isEmpty ? publicModel : override
         var config = self.config
         guard let interfaceId = config.ensureInterface(kind: kind, on: factoryId) else {
             lastError = "No factory \(factoryId)."
-            return false
+            return nil
         }
         let previous = existingId.flatMap { config.member(id: $0) }
         let id = previous?.id ?? Self.freshMemberId(in: config)
@@ -464,9 +464,10 @@ final class PeerAppState: ObservableObject {
             try PeerAdmin.ensureModelPool(&config, model: publicModel, memberId: id)
         } catch {
             lastError = Self.userMessage(error)
-            return false
+            return nil
         }
-        return await persist(config)
+        guard await persist(config) else { return nil }
+        return id
     }
 
     private static func freshMemberId(in config: PeerConfig) -> String {
