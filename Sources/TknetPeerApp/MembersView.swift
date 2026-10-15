@@ -302,7 +302,7 @@ private struct MemberRowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(MemberLabel.title(member, among: state.config.members))
                     .font(.body.bold())
-                Text(fullEndpointURL)
+                Text(member.endpoint.absoluteString)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -341,14 +341,6 @@ private struct MemberRowView: View {
     private var isRunning: Bool {
         if case .running = testState { return true }
         return false
-    }
-
-    /// The concrete URL a chat request is forwarded to — the member's base
-    /// plus the default upstream path, not just the `/v1` base.
-    private var fullEndpointURL: String {
-        var base = member.endpoint.absoluteString
-        while base.hasSuffix("/") { base.removeLast() }
-        return base + "/chat/completions"
     }
 
     private var detailLine: String {
