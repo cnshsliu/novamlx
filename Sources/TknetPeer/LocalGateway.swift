@@ -84,16 +84,15 @@ public final class LocalGateway: @unchecked Sendable {
                 let timeout = forwarder.currentConfig.requestTimeoutSeconds
                 let outcome = await forwarder.forward(
                     poolName: model, body: raw, timeoutSeconds: timeout,
-                    upstreamPath: route.upstreamPath, contentType: contentType)
+                    gatewayPath: route.gatewayPath, contentType: contentType)
                 return response(for: outcome, model: model)
             }
         }
         return router
     }
 
-    /// Gateway path and the suffix appended to a member endpoint that already
-    /// ends in `/v1`. Same operations the supply contract advertises for
-    /// embeddings, images, and audio, plus chat.
+    /// Gateway paths served. Each must map to one InterfaceKind path; the
+    /// pool's kind owns the upstream URL, the gateway path is the routing key.
     private static let forwardedPosts: [(gatewayPath: String, upstreamPath: String)] = [
         ("/v1/chat/completions", "chat/completions"),
         ("/v1/embeddings", "embeddings"),

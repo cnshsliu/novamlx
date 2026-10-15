@@ -55,8 +55,23 @@ public enum PoolForwardOutcome: Sendable {
     case cancelled
 }
 
+/// Everything needed to POST one member: the full interface URL, the wire
+/// auth style, and whether the factory sits on this machine.
+public struct MemberRoute: Equatable, Sendable {
+    public var url: URL
+    public var kind: InterfaceKind
+    public var isLocal: Bool
+
+    public init(url: URL, kind: InterfaceKind, isLocal: Bool) {
+        self.url = url
+        self.kind = kind
+        self.isLocal = isLocal
+    }
+}
+
 /// Shared HTTP forwarder for the local gateway and the tunnel relay.
-/// Selection is `PoolRouter`; retry rules match `LBProxy.handle`.
+/// Selection is `PoolRouter`; retry rules match `LBProxy.handle`. A member's
+/// URL is always its interface's full endpoint — nothing is appended here.
 public final class PoolForwarder: Sendable {
     private let holder: Relay.ConfigHolder
     private let secrets: any SecretStore
@@ -70,8 +85,6 @@ public final class PoolForwarder: Sendable {
         config: PeerConfig, secrets: any SecretStore, stats: MemberStatsStore = MemberStatsStore(),
         envFile: URL = EnvKeyFile.defaultURL
     ) {
-        var config = config
-        config.migrateLegacyPoolsIfNeeded()
         self.holder = Relay.ConfigHolder(config)
         self.secrets = secrets
         self.stats = stats
@@ -79,7 +92,7 @@ public final class PoolForwarder: Sendable {
         self.client = HTTPClient(eventLoopGroupProvider: .singleton)
     }
 
-    /// Test seam and gateway reads. Already migrated.
+    /// Test seam and gateway reads.
     public var currentConfig: PeerConfig { holder.value }
 
     public func updateConfig(_ config: PeerConfig) { holder.update(config) }
@@ -97,69 +110,77 @@ public final class PoolForwarder: Sendable {
 
     public func forward(
         poolId: String, body: Data, timeoutSeconds: Double,
-        upstreamPath: String = "chat/completions", contentType: String? = nil,
-        interface: APIContract? = nil
+        gatewayPath: String = InterfaceKind.openaiChat.gatewayPath, contentType: String? = nil
     ) async -> PoolForwardOutcome {
         let config = holder.value
         guard let pool = config.pool(id: poolId) else { return .unknownPool }
         return await dispatch(
             pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds,
-            upstreamPath: upstreamPath, contentType: contentType, interface: interface)
+            gatewayPath: gatewayPath, contentType: contentType)
     }
 
     public func forward(
         poolName: String, body: Data, timeoutSeconds: Double,
-        upstreamPath: String = "chat/completions", contentType: String? = nil,
-        interface: APIContract? = nil
+        gatewayPath: String = InterfaceKind.openaiChat.gatewayPath, contentType: String? = nil
     ) async -> PoolForwardOutcome {
         let config = holder.value
         guard let pool = config.pool(named: poolName) else { return .unknownPool }
         return await dispatch(
             pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds,
-            upstreamPath: upstreamPath, contentType: contentType, interface: interface)
+            gatewayPath: gatewayPath, contentType: contentType)
     }
 
-    /// Builds the upstream POST. `upstreamPath` is the path under the member's
-    /// `/v1` base, such as `chat/completions` or `embeddings`. `X-No-Autoload: 1`
-    /// is set only for loopback and `localNovaMLX` members. The API key is a
+    /// Resolve one member into its full forward target. Nil when the member's
+    /// interface (or its factory) no longer exists.
+    public static func route(for member: MemberConfig, in config: PeerConfig) -> MemberRoute? {
+        guard let interface = config.memberInterface(member),
+              let factory = config.factory(ofInterface: interface.id),
+              let url = factory.endpointURL(of: interface.kind) else { return nil }
+        return MemberRoute(
+            url: url, kind: interface.kind,
+            isLocal: MemberAddress.isLocalTier(factoryBase: factory.baseUrl))
+    }
+
+    /// Builds the upstream POST to the member's full interface URL. `X-No-Autoload: 1`
+    /// goes only to loopback factories (local NovaMLX). The API key is a
     /// header, never logged.
     static func makeUpstreamRequest(
-        member: MemberConfig, body: Data, apiKey: String?,
-        upstreamPath: String = "chat/completions", contentType: String? = nil
+        route: MemberRoute, body: Data, upstreamModel: String, apiKey: String?,
+        contentType: String? = nil
     ) throws -> HTTPClientRequest {
         let (rewritten, sendType) = try UpstreamBodyCodec.prepare(
-            body: body, contentType: contentType, upstreamModel: member.upstreamModel)
-        var request = HTTPClientRequest(
-            url: UpstreamBodyCodec.upstreamURL(endpoint: member.endpoint, path: upstreamPath))
+            body: body, contentType: contentType, upstreamModel: upstreamModel)
+        var request = HTTPClientRequest(url: route.url.absoluteString)
         request.method = .POST
         request.headers.add(name: "content-type", value: sendType)
-        if MemberAddress.isLocalTier(member) {
+        if route.isLocal {
             request.headers.add(name: "X-No-Autoload", value: "1")
         }
         if let apiKey, !apiKey.isEmpty {
-            request.headers.add(name: "authorization", value: "Bearer \(apiKey)")
+            if route.kind.usesXAPIKey {
+                request.headers.add(name: "x-api-key", value: apiKey)
+                request.headers.add(name: "anthropic-version", value: "2023-06-01")
+            } else {
+                request.headers.add(name: "authorization", value: "Bearer \(apiKey)")
+            }
         }
         request.body = .bytes(rewritten)
         return request
     }
 
-    /// Stored-key resolution: own key, else the factory's shared key. An
-    /// ALL-UPPERCASE stored value names a variable in the env file.
+    /// Factory-key resolution. An ALL-UPPERCASE stored value names a variable
+    /// in the env file.
     enum KeyResolution: Equatable {
         case key(String?)
         case missingReference(String)
     }
 
     func apiKey(for member: MemberConfig, config: PeerConfig) -> KeyResolution {
-        var stored: String?
-        if let own = try? secrets.load(member.apiKeyRef), !own.isEmpty {
-            stored = own
-        } else if let factoryId = member.factoryId,
-                  let ref = config.factory(id: factoryId)?.apiKeyRef,
-                  let shared = try? secrets.load(ref), !shared.isEmpty {
-            stored = shared
+        guard let factory = config.factory(ofInterface: member.interfaceId),
+              let ref = factory.apiKeyRef,
+              let stored = try? secrets.load(ref), !stored.isEmpty else {
+            return .key(nil)
         }
-        guard let stored else { return .key(nil) }
         guard EnvKeyFile.isReference(stored) else { return .key(stored) }
         guard let value = EnvKeyFile.load(url: envFile)[stored], !value.isEmpty else {
             return .missingReference(stored)
@@ -171,11 +192,12 @@ public final class PoolForwarder: Sendable {
 
     private func dispatch(
         pool: PoolConfig, config: PeerConfig, body: Data, timeoutSeconds: Double,
-        upstreamPath: String, contentType: String?, interface: APIContract?
+        gatewayPath: String, contentType: String?
     ) async -> PoolForwardOutcome {
-        let gatewayPath = upstreamPath.hasPrefix("/v1/") ? upstreamPath : "/v1/\(upstreamPath)"
-        let effectiveApi = interface ?? pool.api
-        guard SupplyAPI.allows(effectiveApi, gatewayPath: gatewayPath) else {
+        let kind = pool.kind ?? .openaiChat
+        // Interface homogeneity is the pool's contract: the gateway path must
+        // be one this kind of interface serves.
+        guard SupplyAPI.allows(PeerConfig.apiContract(of: kind), gatewayPath: gatewayPath) else {
             return .pathNotAllowed(path: gatewayPath)
         }
         guard pool.isEnabled else { return .poolDisabled }
@@ -199,8 +221,8 @@ public final class PoolForwarder: Sendable {
 
         for member in candidates.prefix(maxAttempts) {
             if Task.isCancelled { return .cancelled }
-            if member.type == .anthropic {
-                lastError = "anthropic source forwarding not yet supported"
+            guard let route = Self.route(for: member, in: config) else {
+                lastError = "member \(member.id) has no valid interface"
                 lastStatus = 0
                 timedOut = false
                 await record(memberId: member.id, succeeded: false, latencyMs: 0,
@@ -223,8 +245,8 @@ public final class PoolForwarder: Sendable {
             }
             do {
                 let request = try Self.makeUpstreamRequest(
-                    member: member, body: body, apiKey: resolvedKey,
-                    upstreamPath: upstreamPath, contentType: contentType)
+                    route: route, body: body, upstreamModel: member.upstreamModel,
+                    apiKey: resolvedKey, contentType: contentType)
                 let response = try await client.execute(request, timeout: timeout)
                 let status = Int(response.status.code)
                 let latency = Self.latencyMs(since: started)

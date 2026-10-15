@@ -4,11 +4,9 @@ import Testing
 
 @Suite("PoolRouter")
 struct PoolRouterTests {
-    private func member(_ id: String, endpoint: String, type: SourceType = .openaiCompatible,
-                        weight: Int? = nil, enabled: Bool = true) -> MemberConfig {
+    private func member(_ id: String, weight: Int? = nil, enabled: Bool = true) -> MemberConfig {
         MemberConfig(
-            id: id, name: id, type: type, endpoint: URL(string: endpoint)!,
-            apiKeyRef: "src/\(id)", upstreamModel: id, weight: weight,
+            id: id, name: id, interfaceId: "i-\(id)", upstreamModel: id, weight: weight,
             isEnabled: enabled)
     }
 
@@ -18,9 +16,9 @@ struct PoolRouterTests {
 
     private func fixture() -> [MemberConfig] {
         [
-            member("local", endpoint: "http://127.0.0.1:6590/v1", type: .localNovaMLX),
-            member("lan", endpoint: "http://10.0.0.2:8080/v1"),
-            member("remote", endpoint: "http://10.0.0.3:8080/v1"),
+            member("local"),
+            member("lan"),
+            member("remote"),
         ]
     }
 
@@ -52,9 +50,9 @@ struct PoolRouterTests {
     @Test("weighted expands nil to 1 and 0 to 1")
     func weightedNilAndZero() {
         let members = [
-            member("a", endpoint: "http://10.0.0.2:1/v1", weight: nil),
-            member("b", endpoint: "http://10.0.0.3:1/v1", weight: 3),
-            member("c", endpoint: "http://10.0.0.4:1/v1", weight: 0),
+            member("a", weight: nil),
+            member("b", weight: 3),
+            member("c", weight: 0),
         ]
         let plan = PoolRouter.plan(PoolRouterInput(pool: pool(.weighted), members: members))
         #expect(plan.count == 5)

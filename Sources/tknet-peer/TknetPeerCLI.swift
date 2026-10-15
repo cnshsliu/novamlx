@@ -244,13 +244,20 @@ extension TknetPeerCLI {
                     .compactMap { Double($0) }
 
                 let sourceId = "src-\(entry.demandId)"
+                let base = PeerAdmin.normalizeFactoryBase(endpointURL)
+                    ?? URL(string: "http://127.0.0.1:6590")!
+                let factoryId = NovaConfigMigrator.ensureFactory(base: base, in: &peerConfig)
+                let interfaceId = try PeerAdmin.ensureInterface(
+                    &peerConfig, factoryId: factoryId, kind: .openaiChat)
                 peerConfig.upsertMember(MemberConfig(
-                    id: sourceId, name: entry.model, type: .openaiCompatible,
-                    endpoint: endpointURL, apiKeyRef: "src/\(sourceId)",
+                    id: sourceId, name: entry.model, interfaceId: interfaceId,
                     upstreamModel: upstream))
                 peerConfig.upsertPool(PoolConfig(
-                    id: sourceId, name: entry.model, memberIds: [sourceId]))
-                secrets.save(key, for: "src/\(sourceId)")
+                    id: sourceId, name: entry.model, kind: .openaiChat, memberIds: [sourceId]))
+                if !key.isEmpty,
+                   let ref = peerConfig.factory(id: factoryId)?.apiKeyRef {
+                    secrets.save(key, for: ref)
+                }
                 peerConfig.capabilities.removeAll { $0.demandId == entry.demandId }
                 peerConfig.capabilities.append(Capability(
                     demandId: entry.demandId, model: entry.model, sourceId: sourceId,
@@ -383,23 +390,34 @@ extension TknetPeerCLI {
             @Option var config: String = CLIConfig.defaultConfigPath
             @Option var id: String
             @Option var name: String?
-            @Option var endpoint: String
+            /// Factory host (`scheme://host[:port]`); found or created.
+            @Option var factory: String
+            /// Interface kind raw value, e.g. `openai.chat`.
+            @Option var interface: String = InterfaceKind.openaiChat.rawValue
             @Option(name: .customLong("upstream-model")) var upstreamModel: String
             @Option(name: .customLong("api-key")) var apiKey: String?
             @Option var weight: Int?
-            @Option var type: String = "openaiCompatible"
 
             func run() async throws {
-                guard let endpointURL = URL(string: endpoint) else {
-                    throw ValidationError("Invalid endpoint: \(endpoint)")
+                guard let baseURL = URL(string: factory),
+                      let normalized = PeerAdmin.normalizeFactoryBase(baseURL) else {
+                    throw ValidationError("Invalid factory host: \(factory)")
                 }
                 var peerConfig = try TknetPeerCLI.loadConfig(config)
                 let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
                 do {
+                    let factoryId = NovaConfigMigrator.ensureFactory(base: normalized, in: &peerConfig)
+                    let kind = try PeerAdmin.interfaceKind(interface)
+                    let interfaceId = try PeerAdmin.ensureInterface(
+                        &peerConfig, factoryId: factoryId, kind: kind)
                     try PeerAdmin.addMember(
-                        &peerConfig, secrets: secrets, id: id, name: name ?? id,
-                        endpoint: endpointURL, upstreamModel: upstreamModel, apiKey: apiKey,
-                        weight: weight, type: try PeerAdmin.sourceType(type))
+                        &peerConfig, id: id, name: name ?? id,
+                        interfaceId: interfaceId, upstreamModel: upstreamModel,
+                        weight: weight)
+                    if let apiKey, !apiKey.isEmpty,
+                       let ref = peerConfig.factory(id: factoryId)?.apiKeyRef {
+                        try secrets.save(apiKey, for: ref)
+                    }
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }
@@ -437,32 +455,19 @@ extension TknetPeerCLI {
             @Option var config: String = CLIConfig.defaultConfigPath
             @Option var id: String
             @Option var name: String?
-            @Option var endpoint: String?
             @Option(name: .customLong("upstream-model")) var upstreamModel: String?
-            @Option(name: .customLong("api-key")) var apiKey: String?
             @Option var weight: Int?
-            @Option var type: String?
             @Flag var enable: Bool = false
             @Flag var disable: Bool = false
 
             func run() throws {
                 if enable && disable { throw ValidationError("Pass only one of --enable and --disable.") }
                 var peerConfig = try TknetPeerCLI.loadConfig(config)
-                let secrets = FileSecretStore(directory: TknetPeerCLI.secretsDirectory(for: config))
-                let endpointURL = try endpoint.map { raw -> URL in
-                    guard let url = URL(string: raw) else { throw ValidationError("Invalid endpoint: \(raw)") }
-                    return url
-                }
-                let memberType = try type.map { raw -> SourceType in
-                    do { return try PeerAdmin.sourceType(raw) }
-                    catch let error as PeerAdminError { throw ValidationError(error.message) }
-                }
                 let isEnabled: Bool? = enable ? true : (disable ? false : nil)
                 do {
                     try PeerAdmin.updateMember(
-                        &peerConfig, secrets: secrets, id: id, name: name, endpoint: endpointURL,
-                        upstreamModel: upstreamModel, apiKey: apiKey, weight: weight,
-                        type: memberType, isEnabled: isEnabled)
+                        &peerConfig, id: id, name: name,
+                        upstreamModel: upstreamModel, weight: weight, isEnabled: isEnabled)
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }
@@ -486,7 +491,7 @@ extension TknetPeerCLI {
             @Option(name: .customLong("max-retries")) var maxRetries: Int = 3
             @Option(name: .customLong("member")) var member: [String] = []
             @Option(help: "Interface kind, e.g. openai.chat or openai.embeddings")
-            var api: String = "openai.chat"
+            var interface: String = InterfaceKind.openaiChat.rawValue
 
             func run() throws {
                 var peerConfig = try TknetPeerCLI.loadConfig(config)
@@ -495,7 +500,7 @@ extension TknetPeerCLI {
                         &peerConfig, id: id, name: name,
                         strategy: try PeerAdmin.strategy(strategy),
                         maxRetries: maxRetries, memberIds: member,
-                        api: try PeerAdmin.apiContract(api))
+                        kind: try PeerAdmin.interfaceKind(interface))
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }
@@ -539,7 +544,7 @@ extension TknetPeerCLI {
             @Flag var enable: Bool = false
             @Flag var disable: Bool = false
             @Option(help: "Interface kind, e.g. openai.embeddings. Omit to leave unchanged.")
-            var api: String?
+            var interface: String?
 
             func run() throws {
                 if enable && disable { throw ValidationError("Pass only one of --enable and --disable.") }
@@ -552,21 +557,10 @@ extension TknetPeerCLI {
                     parsed = nil
                 }
                 let isEnabled: Bool? = enable ? true : (disable ? false : nil)
-                let apiContract: APIContract?
-                let setApi: Bool
-                if let api {
-                    do { apiContract = try PeerAdmin.apiContract(api) }
-                    catch let error as PeerAdminError { throw ValidationError(error.message) }
-                    setApi = true
-                } else {
-                    apiContract = nil
-                    setApi = false
-                }
                 do {
                     try PeerAdmin.updatePool(
                         &peerConfig, id: id, name: name, strategy: parsed, maxRetries: maxRetries,
-                        addMembers: addMember, removeMembers: removeMember, isEnabled: isEnabled,
-                        api: apiContract, setApi: setApi)
+                        addMembers: addMember, removeMembers: removeMember, isEnabled: isEnabled)
                 } catch let error as PeerAdminError {
                     throw ValidationError(error.message)
                 }

@@ -59,6 +59,8 @@ struct NovaDBSnapshotReaderTests {
         #expect(input.members.first?.lbSlug == "coding")
         let result = NovaConfigMigrator.migrate(input, existing: PeerConfig.defaultConfig())
         #expect(result.config.pool(id: "coding")?.memberIds == ["th-openai"])
-        #expect(result.secrets["src/th-openai"] == "sk-test")
+        let member = result.config.member(id: "th-openai")!
+        let ref = result.config.factory(ofInterface: member.interfaceId)!.apiKeyRef!
+        #expect(result.secrets[ref] == "sk-test")
     }
 }

@@ -5,11 +5,13 @@ import Testing
 /// MemberProbe: URL joining, model-list parsing, and a real HTTP round trip
 /// against MockSourceServer's `/v1/models` route.
 @Suite struct MemberProbeTests {
-    @Test func modelsURLJoinsWithoutDoubleSlash() {
-        let plain = URL(string: "http://127.0.0.1:6590/v1")!
-        #expect(MemberProbe.modelsURL(endpoint: plain) == "http://127.0.0.1:6590/v1/models")
-        let trailing = URL(string: "http://127.0.0.1:6590/v1/")!
-        #expect(MemberProbe.modelsURL(endpoint: trailing) == "http://127.0.0.1:6590/v1/models")
+    @Test func modelsBaseNormalizes() {
+        #expect(MemberProbe.modelsBase(URL(string: "http://127.0.0.1:6590")!).absoluteString
+            == "http://127.0.0.1:6590/v1")
+        #expect(MemberProbe.modelsBase(URL(string: "http://127.0.0.1:6590/")!).absoluteString
+            == "http://127.0.0.1:6590/v1")
+        #expect(MemberProbe.modelsBase(URL(string: "http://127.0.0.1:6590/v1")!).absoluteString
+            == "http://127.0.0.1:6590/v1")
     }
 
     @Test func parseModelsOpenAIShape() throws {
@@ -34,7 +36,7 @@ import Testing
         defer { Task { await server.stop() } }
         let endpoint = URL(string: "http://127.0.0.1:\(server.port)/v1")!
 
-        let result = await MemberProbe.probe(endpoint: endpoint, apiKey: "sk-test")
+        let result = await MemberProbe.discoverModels(base: URL(string: "http://127.0.0.1:\(server.port)")!, apiKey: "sk-test")
 
         #expect(result.ok)
         #expect(result.httpStatus == 200)
@@ -50,7 +52,7 @@ import Testing
         try await server.start()
         let endpoint = URL(string: "http://127.0.0.1:\(server.port)/v1")!
 
-        _ = await MemberProbe.probe(endpoint: endpoint, apiKey: nil)
+        _ = await MemberProbe.discoverModels(base: URL(string: "http://127.0.0.1:\(server.port)")!, apiKey: nil)
 
         #expect(server.lastProbeAuthorization == nil)
         await server.stop()
@@ -58,8 +60,8 @@ import Testing
 
     @Test func probeUnreachableEndpointFails() async {
         // Port 1 on loopback: reserved, nothing listens there.
-        let endpoint = URL(string: "http://127.0.0.1:1/v1")!
-        let result = await MemberProbe.probe(endpoint: endpoint, apiKey: nil, timeoutSeconds: 2)
+        let result = await MemberProbe.discoverModels(
+            base: URL(string: "http://127.0.0.1:1")!, apiKey: nil)
         #expect(!result.ok)
         #expect(result.httpStatus == 0)
         #expect(!result.message.isEmpty)

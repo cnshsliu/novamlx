@@ -4,14 +4,23 @@ import Testing
 
 @Suite("PoolForwarder")
 struct PoolForwarderTests {
-    private func endpoint(_ server: MockSourceServer) -> URL {
-        URL(string: "http://127.0.0.1:\(server.port)/v1")!
-    }
-
+    /// One mock upstream = one factory (loopback base) with a chat interface.
     private func member(_ id: String, _ server: MockSourceServer, upstream: String) -> MemberConfig {
         MemberConfig(
-            id: id, name: id, type: .openaiCompatible, endpoint: endpoint(server),
-            apiKeyRef: "src/\(id)", upstreamModel: upstream)
+            id: id, name: id, interfaceId: id == "a" ? "fa-chat" : "fb-chat", upstreamModel: upstream)
+    }
+
+    private func factories(_ a: MockSourceServer, _ b: MockSourceServer) -> [FactoryConfig] {
+        [
+            FactoryConfig(
+                id: "fa", name: "a", baseUrl: URL(string: "http://127.0.0.1:\(a.port)")!,
+                apiKeyRef: "src/a",
+                interfaces: [InterfaceConfig(id: "fa-chat", kind: .openaiChat)]),
+            FactoryConfig(
+                id: "fb", name: "b", baseUrl: URL(string: "http://127.0.0.1:\(b.port)")!,
+                apiKeyRef: "src/b",
+                interfaces: [InterfaceConfig(id: "fb-chat", kind: .openaiChat)]),
+        ]
     }
 
     private func withForwarder(
@@ -26,10 +35,11 @@ struct PoolForwarderTests {
         secrets.save("k-a", for: "src/a")
         secrets.save("k-b", for: "src/b")
         var config = PeerConfig.defaultConfig()
+        config.factories = factories(a, b)
         config.members = [member("a", a, upstream: "ua"), member("b", b, upstream: "ub")]
         config.pools = [PoolConfig(
-            id: "coding", name: "coding", strategy: .roundRobin, memberIds: ["a", "b"], maxRetries: 3,
-            api: SupplyAPI.chat)]
+            id: "coding", name: "coding", strategy: .roundRobin, kind: .openaiChat,
+            memberIds: ["a", "b"], maxRetries: 3)]
         let forwarder = PoolForwarder(config: config, secrets: secrets)
         do {
             try await body(forwarder, a, b)
@@ -131,12 +141,14 @@ struct PoolForwarderTests {
     func embeddingsPath() async throws {
         try await withForwarder { forwarder, a, _ in
             var config = forwarder.currentConfig
-            config.pools[0].api = SupplyAPI.embeddings
+            config.pools[0].kind = .openaiEmbeddings
+            config.members[0].interfaceId = "fa-emb"
+            config.factories[0].interfaces.append(InterfaceConfig(id: "fa-emb", kind: .openaiEmbeddings))
             forwarder.updateConfig(config)
             let body = Data(#"{"model":"coding","input":"hello"}"#.utf8)
             let outcome = await forwarder.forward(
                 poolName: "coding", body: body, timeoutSeconds: 30,
-                upstreamPath: "embeddings", contentType: "application/json")
+                gatewayPath: "/v1/embeddings", contentType: "application/json")
             guard case .success(let upstream) = outcome else {
                 Issue.record("expected success, got \(outcome)")
                 return
@@ -152,11 +164,11 @@ struct PoolForwarderTests {
     func pathRejectedBeforePick() async throws {
         try await withForwarder { forwarder, a, b in
             var config = forwarder.currentConfig
-            config.pools[0].api = SupplyAPI.embeddings
+            config.pools[0].kind = .openaiEmbeddings
             forwarder.updateConfig(config)
             let outcome = await forwarder.forward(
                 poolName: "coding", body: chatBody(), timeoutSeconds: 30,
-                upstreamPath: "chat/completions")
+                gatewayPath: "/v1/chat/completions")
             guard case .pathNotAllowed(let path) = outcome else {
                 Issue.record("expected pathNotAllowed, got \(outcome)")
                 return
@@ -171,12 +183,14 @@ struct PoolForwarderTests {
     func generationsRejectsEdits() async throws {
         try await withForwarder { forwarder, a, _ in
             var config = forwarder.currentConfig
-            config.pools[0].api = SupplyAPI.imageGenerations
+            config.pools[0].kind = .openaiImages
+            config.factories[0].interfaces.append(InterfaceConfig(id: "fa-gen", kind: .openaiImages))
+            config.members[0].interfaceId = "fa-gen"
             forwarder.updateConfig(config)
             let body = Data(#"{"model":"coding","prompt":"hi"}"#.utf8)
             let bad = await forwarder.forward(
                 poolName: "coding", body: body, timeoutSeconds: 30,
-                upstreamPath: "images/edits", contentType: "application/json")
+                gatewayPath: "/v1/images/edits", contentType: "application/json")
             guard case .pathNotAllowed = bad else {
                 Issue.record("expected pathNotAllowed, got \(bad)")
                 return
@@ -184,7 +198,7 @@ struct PoolForwarderTests {
             #expect(a.hitCount == 0)
             let ok = await forwarder.forward(
                 poolName: "coding", body: body, timeoutSeconds: 30,
-                upstreamPath: "images/generations", contentType: "application/json")
+                gatewayPath: "/v1/images/generations", contentType: "application/json")
             guard case .success = ok else {
                 Issue.record("expected success, got \(ok)")
                 return
@@ -193,37 +207,29 @@ struct PoolForwarderTests {
         }
     }
 
-    @Test("member without its own key inherits the factory key; own key wins")
-    func factoryKeyInheritance() async throws {
+    @Test("members authenticate with the factory key")
+    func factoryKeyUsed() async throws {
         let server = MockSourceServer()
         try await server.start()
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-fwd-\(UUID().uuidString)"))
         secrets.save("k-f", for: "factory/f1")
-        secrets.save("k-own", for: "src/own")
-        let base = endpoint(server)
         var config = PeerConfig.defaultConfig()
         config.factories = [FactoryConfig(
             id: "f1", name: "F1",
-            baseUrl: URL(string: "http://127.0.0.1:9")!,
-            apiKeyRef: "factory/f1")]
-        // "inh" has no secret stored at src/inh; "own" has k-own.
+            baseUrl: URL(string: "http://127.0.0.1:\(server.port)")!,
+            apiKeyRef: "factory/f1",
+            interfaces: [InterfaceConfig(id: "f1-chat", kind: .openaiChat)])]
         config.members = [
-            MemberConfig(id: "inh", name: "inh", type: .openaiCompatible, endpoint: base,
-                         apiKeyRef: "src/inh", upstreamModel: "u", factoryId: "f1"),
-            MemberConfig(id: "own", name: "own", type: .openaiCompatible, endpoint: base,
-                         apiKeyRef: "src/own", upstreamModel: "u", factoryId: "f1"),
+            MemberConfig(id: "m", name: "m", interfaceId: "f1-chat", upstreamModel: "u"),
         ]
         config.pools = [
-            PoolConfig(id: "p-inh", name: "p-inh", memberIds: ["inh"], api: SupplyAPI.chat),
-            PoolConfig(id: "p-own", name: "p-own", memberIds: ["own"], api: SupplyAPI.chat),
+            PoolConfig(id: "p", name: "p", kind: .openaiChat, memberIds: ["m"]),
         ]
         let forwarder = PoolForwarder(config: config, secrets: secrets)
         do {
-            _ = await forwarder.forward(poolName: "p-inh", body: chatBody(), timeoutSeconds: 30)
+            _ = await forwarder.forward(poolName: "p", body: chatBody(), timeoutSeconds: 30)
             #expect(server.lastAuthorizationHeader == "Bearer k-f")
-            _ = await forwarder.forward(poolName: "p-own", body: chatBody(), timeoutSeconds: 30)
-            #expect(server.lastAuthorizationHeader == "Bearer k-own")
         } catch {
             try? await forwarder.shutdown()
             await server.stop()
@@ -233,7 +239,7 @@ struct PoolForwarderTests {
         await server.stop()
     }
 
-    @Test("ALL-UPPERCASE key resolves from the env file; missing reference fails the member")
+    @Test("ALL-UPPERCASE factory key resolves from the env file; missing reference fails the member")
     func envFileKeyReference() async throws {
         let server = MockSourceServer()
         try await server.start()
@@ -243,25 +249,24 @@ struct PoolForwarderTests {
         let envURL = dir.appendingPathComponent("env")
         try Data("FACTORY_LIVE=sk-env-live\n".utf8).write(to: envURL)
         let secrets = FileSecretStore(directory: dir)
-        // "env" member's stored key is the reference name; "missing" points at
-        // an undefined variable.
+        // f1's key is a resolvable reference; f2's points at nothing.
         secrets.save("FACTORY_LIVE", for: "factory/f1")
-        secrets.save("NOPE_KEY", for: "src/missing")
+        secrets.save("NOPE_KEY", for: "factory/f2")
+        let base = URL(string: "http://127.0.0.1:\(server.port)")!
         var config = PeerConfig.defaultConfig()
-        config.factories = [FactoryConfig(
-            id: "f1", name: "F1",
-            baseUrl: URL(string: "http://127.0.0.1:9")!,
-            apiKeyRef: "factory/f1")]
-        let base = endpoint(server)
+        config.factories = [
+            FactoryConfig(id: "f1", name: "live", baseUrl: base, apiKeyRef: "factory/f1",
+                          interfaces: [InterfaceConfig(id: "f1-chat", kind: .openaiChat)]),
+            FactoryConfig(id: "f2", name: "missing", baseUrl: base, apiKeyRef: "factory/f2",
+                          interfaces: [InterfaceConfig(id: "f2-chat", kind: .openaiChat)]),
+        ]
         config.members = [
-            MemberConfig(id: "env", name: "env", type: .openaiCompatible, endpoint: base,
-                         apiKeyRef: "src/env", upstreamModel: "u", factoryId: "f1"),
-            MemberConfig(id: "missing", name: "missing", type: .openaiCompatible, endpoint: base,
-                         apiKeyRef: "src/missing", upstreamModel: "u", factoryId: "f1"),
+            MemberConfig(id: "env", name: "env", interfaceId: "f1-chat", upstreamModel: "u"),
+            MemberConfig(id: "missing", name: "missing", interfaceId: "f2-chat", upstreamModel: "u"),
         ]
         config.pools = [
-            PoolConfig(id: "p-env", name: "p-env", memberIds: ["env"], api: SupplyAPI.chat),
-            PoolConfig(id: "p-missing", name: "p-missing", memberIds: ["missing"], api: SupplyAPI.chat),
+            PoolConfig(id: "p-env", name: "p-env", kind: .openaiChat, memberIds: ["env"]),
+            PoolConfig(id: "p-missing", name: "p-missing", kind: .openaiChat, memberIds: ["missing"]),
         ]
         let forwarder = PoolForwarder(config: config, secrets: secrets, envFile: envURL)
         do {

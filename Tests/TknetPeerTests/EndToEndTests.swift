@@ -68,20 +68,23 @@ struct EndToEndTests {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-e2e-\(UUID().uuidString)")
         let secrets = FileSecretStore(directory: dir.appendingPathComponent("secrets"))
-        secrets.save("k", for: "s1")
+        secrets.save("k", for: "factory/fx")
         secrets.save("tok", for: "peer/token")
 
         var config = PeerConfig.defaultConfig()
         config.peerId = "peer-1"
         config.gatewayPort = 0
         config.serverURL = URL(string: "ws://127.0.0.1:\(tunnel.port)")!
+        config.factories = [FactoryConfig(
+            id: "fx", name: "mock", baseUrl: URL(string: "http://127.0.0.1:\(source.port)")!,
+            apiKeyRef: "factory/fx",
+            interfaces: [InterfaceConfig(id: "fx-chat", kind: .openaiChat)])]
         config.members = [MemberConfig(
-            id: "s1", name: "mock", type: .openaiCompatible,
-            endpoint: URL(string: "http://127.0.0.1:\(source.port)/v1")!,
-            apiKeyRef: "s1", upstreamModel: "u")]
+            id: "s1", name: "mock", interfaceId: "fx-chat", upstreamModel: "u")]
         config.capabilities = [Capability(
             demandId: "d1", model: "m", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
+        config.pools = [PoolConfig(id: "s1", name: "m", kind: .openaiChat, memberIds: ["s1"])]
 
         let service = PeerService(
             config: config, secrets: secrets,

@@ -72,17 +72,14 @@ struct SupplyAPITests {
         #expect(caps.first?.api == nil)
     }
 
-    @Test("wireCapabilities uses pool.api and defaults missing to chat")
+    @Test("wireCapabilities uses the pool interface kind and defaults missing to chat")
     func wireCapabilities() {
         var config = PeerConfig.defaultConfig()
         config.members = [
-            MemberConfig(
-                id: "s1", name: "emb", type: .openaiCompatible,
-                endpoint: URL(string: "http://127.0.0.1:9/v1")!,
-                apiKeyRef: "src/s1", upstreamModel: "u"),
+            MemberConfig(id: "s1", name: "emb", interfaceId: "fx-i0", upstreamModel: "u"),
         ]
         config.pools = [
-            PoolConfig(id: "s1", name: "emb", memberIds: ["s1"], api: SupplyAPI.embeddings),
+            PoolConfig(id: "s1", name: "emb", kind: .openaiEmbeddings, memberIds: ["s1"]),
             PoolConfig(id: "chat-pool", name: "chatty", memberIds: ["s1"]),
         ]
         config.capabilities = [

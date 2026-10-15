@@ -9,7 +9,6 @@ struct RelayTests {
     /// down — AsyncHTTPClient asserts in debug builds if it is dropped without
     /// shutdown, so cleanup must run even when test assertions throw.
     private func withRelay(
-        sourceType: SourceType = .openaiCompatible,
         requestTimeoutSeconds: Double = 300,
         _ body: (Relay, MockSourceServer) async throws -> Void
     ) async throws {
@@ -17,17 +16,20 @@ struct RelayTests {
         try await server.start()
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-relay-\(UUID().uuidString)"))
-        secrets.save("sk-source-key", for: "s1")
+        secrets.save("sk-source-key", for: "factory/fx")
         var config = PeerConfig.defaultConfig()
         config.requestTimeoutSeconds = requestTimeoutSeconds
+        config.factories = [FactoryConfig(
+            id: "fx", name: "mock", baseUrl: URL(string: "http://127.0.0.1:\(server.port)")!,
+            apiKeyRef: "factory/fx",
+            interfaces: [InterfaceConfig(id: "fx-chat", kind: .openaiChat)])]
         config.members = [MemberConfig(
-            id: "s1", name: "mock", type: sourceType,
-            endpoint: URL(string: "http://127.0.0.1:\(server.port)/v1")!,
-            apiKeyRef: "s1", upstreamModel: "upstream-model-x"
+            id: "s1", name: "mock", interfaceId: "fx-chat", upstreamModel: "upstream-model-x"
         )]
+        config.pools = [PoolConfig(id: "s1", name: "demand-model", kind: .openaiChat, memberIds: ["s1"])]
         config.capabilities = [Capability(
             demandId: "d1", model: "demand-model", sourceId: "s1",
-            sourceType: sourceType, priceIn: 0, priceOut: 0
+            sourceType: .openaiCompatible, priceIn: 0, priceOut: 0
         )]
         let relay = Relay(config: config, secrets: secrets)
         do {
@@ -145,9 +147,9 @@ struct RelayTests {
         }
     }
 
-    @Test("anthropic source is rejected outright in Phase 1")
-    func anthropicSourceRejected() async throws {
-        try await withRelay(sourceType: .anthropic) { relay, server in
+    @Test("anthropic-format tunnel requests are rejected in Phase 1")
+    func anthropicFormatRejected() async throws {
+        try await withRelay { relay, server in
             let frames = await collect(relay.handle(makeRequest(apiFormat: .anthropic)))
             #expect(frames.count == 1)
             let result = try endResult(frames.first)
@@ -159,16 +161,30 @@ struct RelayTests {
         }
     }
 
-    @Test("non-loopback members do not receive X-No-Autoload")
+    @Test("non-loopback factories do not receive X-No-Autoload")
     func nonLoopbackOmitsNoAutoload() throws {
-        let member = MemberConfig(
-            id: "remote", name: "remote", type: .openaiCompatible,
-            endpoint: URL(string: "http://10.1.2.3:8080/v1")!,
-            apiKeyRef: "src/remote", upstreamModel: "upstream-model-x")
+        let route = MemberRoute(
+            url: URL(string: "http://10.1.2.3:8080/v1/chat/completions")!,
+            kind: .openaiChat, isLocal: false)
         let body = Data(#"{"model":"demand-model","messages":[]}"#.utf8)
-        let request = try PoolForwarder.makeUpstreamRequest(member: member, body: body, apiKey: "sk")
+        let request = try PoolForwarder.makeUpstreamRequest(
+            route: route, body: body, upstreamModel: "upstream-model-x", apiKey: "sk")
         #expect(request.headers.first(name: "X-No-Autoload") == nil)
         #expect(request.headers.first(name: "authorization") == "Bearer sk")
+        #expect(request.url == "http://10.1.2.3:8080/v1/chat/completions")
+    }
+
+    @Test("anthropic interfaces use x-api-key, not Bearer")
+    func anthropicAuthStyle() throws {
+        let route = MemberRoute(
+            url: URL(string: "https://api.anthropic.com/v1/messages")!,
+            kind: .anthropicMessages, isLocal: false)
+        let body = Data(#"{"model":"claude-x","messages":[]}"#.utf8)
+        let request = try PoolForwarder.makeUpstreamRequest(
+            route: route, body: body, upstreamModel: "claude-x", apiKey: "sk-ant")
+        #expect(request.headers.first(name: "x-api-key") == "sk-ant")
+        #expect(request.headers.first(name: "anthropic-version") == "2023-06-01")
+        #expect(request.headers.first(name: "authorization") == nil)
     }
 
     @Test("deadline exceeded becomes a timeout end frame, not a failure")

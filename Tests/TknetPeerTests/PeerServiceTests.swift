@@ -55,12 +55,15 @@ struct PeerServiceTests {
         var config = PeerConfig.defaultConfig()
         config.peerId = peerId
         config.gatewayPort = 0
+        config.factories = [FactoryConfig(
+            id: "fx", name: "mock", baseUrl: sourceEndpoint,
+            interfaces: [InterfaceConfig(id: "fx-chat", kind: .openaiChat)])]
         config.members = [MemberConfig(
-            id: "s1", name: "mock", type: .openaiCompatible,
-            endpoint: sourceEndpoint, apiKeyRef: "s1", upstreamModel: "u")]
+            id: "s1", name: "mock", interfaceId: "fx-chat", upstreamModel: "u")]
         config.capabilities = [Capability(
             demandId: "d1", model: "m", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0)]
+        config.pools = [PoolConfig(id: "s1", name: "m", kind: .openaiChat, memberIds: ["s1"])]
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-ns-\(UUID().uuidString)"))
         secrets.save("k", for: "s1")
