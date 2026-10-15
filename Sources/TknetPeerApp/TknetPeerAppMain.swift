@@ -164,11 +164,19 @@ final class PeerAppDelegate: NSObject, NSApplicationDelegate {
         )
         let state = Self.appState
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            await state?.launch()
+        }
+        // Auto-open at launch: the menu-bar label publishes `openWindow` a
+        // moment after the status item mounts — a fixed delay raced it and
+        // sometimes dropped the window. Poll briefly instead.
+        Task { @MainActor in
+            for _ in 0..<25 {
+                if PeerWindowActivation.openWindow != nil { break }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
             PeerWindowActivation.show {
                 PeerWindowActivation.openWindow?()
             }
-            await state?.launch()
         }
     }
 

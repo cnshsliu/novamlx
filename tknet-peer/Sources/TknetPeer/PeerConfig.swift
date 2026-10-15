@@ -7,24 +7,27 @@ public struct ServerMemory: Codable, Equatable, Sendable, Identifiable {
     public var server: String
     public var peerName: String
     public var members: [MemberConfig]
+    public var factories: [FactoryConfig]
     public var pools: [PoolConfig]
     public var capabilities: [Capability]
     public var retiredDemandIds: [String]
     public var id: String { server }
 
     public init(server: String, peerName: String, members: [MemberConfig] = [],
+                factories: [FactoryConfig] = [],
                 pools: [PoolConfig] = [], capabilities: [Capability] = [],
                 retiredDemandIds: [String] = []) {
         self.server = server
         self.peerName = peerName
         self.members = members
+        self.factories = factories
         self.pools = pools
         self.capabilities = capabilities
         self.retiredDemandIds = retiredDemandIds
     }
 
     private enum CodingKeys: String, CodingKey {
-        case server, peerName, sources, members, pools, capabilities, retiredDemandIds
+        case server, peerName, sources, members, factories, pools, capabilities, retiredDemandIds
     }
 
     public init(from decoder: Decoder) throws {
@@ -36,6 +39,7 @@ public struct ServerMemory: Codable, Equatable, Sendable, Identifiable {
         } else {
             self.members = try c.decodeIfPresent([MemberConfig].self, forKey: .sources) ?? []
         }
+        factories = try c.decodeIfPresent([FactoryConfig].self, forKey: .factories) ?? []
         capabilities = try c.decodeIfPresent([Capability].self, forKey: .capabilities) ?? []
         retiredDemandIds = try c.decodeIfPresent([String].self, forKey: .retiredDemandIds) ?? []
         pools = try c.decodeIfPresent([PoolConfig].self, forKey: .pools) ?? []
@@ -47,9 +51,19 @@ public struct ServerMemory: Codable, Equatable, Sendable, Identifiable {
         try c.encode(server, forKey: .server)
         try c.encode(peerName, forKey: .peerName)
         try c.encode(members, forKey: .members)
+        try c.encode(factories, forKey: .factories)
         try c.encode(pools, forKey: .pools)
         try c.encode(capabilities, forKey: .capabilities)
         try c.encode(retiredDemandIds, forKey: .retiredDemandIds)
+    }
+
+    /// One-time upgrade for files written before factories existed: group
+    /// members by endpoint `scheme://host:port`. Local NovaMLX members stay
+    /// ungrouped (nil factoryId) — they are special-cased elsewhere and only
+    /// appear under "All". Idempotent: skipped once any factory is present.
+    public mutating func migrateFactoriesIfNeeded() {
+        guard factories.isEmpty, !members.isEmpty else { return }
+        factories = PeerConfig.deriveFactories(from: &members)
     }
 
     /// Fill `pools` from capabilities when a row still has only members.
@@ -77,6 +91,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     /// registration, or after migrating an older registrations map.
     public var serverMemory: [ServerMemory] = []
     public var members: [MemberConfig]
+    public var factories: [FactoryConfig] = []
     public var pools: [PoolConfig]
     public var capabilities: [Capability]
     public var concurrencyLimit: Int
@@ -94,7 +109,8 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     private var retiredDemandIds: Set<String> = []
 
     public init(peerId: String? = nil, serverURL: URL, registrations: [String: String] = [:],
-                members: [MemberConfig] = [], pools: [PoolConfig] = [],
+                members: [MemberConfig] = [], factories: [FactoryConfig] = [],
+                pools: [PoolConfig] = [],
                 capabilities: [Capability] = [],
                 concurrencyLimit: Int = 1, requestTimeoutSeconds: Double = 300,
                 idleMinutesBeforeSlowPoll: Double = 5) {
@@ -102,6 +118,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         self.serverURL = serverURL
         self.registrations = registrations
         self.members = members
+        self.factories = factories
         self.pools = pools
         self.capabilities = capabilities
         self.concurrencyLimit = concurrencyLimit
@@ -110,7 +127,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case peerId, serverURL, sources, members, pools, capabilities, concurrencyLimit, registrations
+        case peerId, serverURL, sources, members, factories, pools, capabilities, concurrencyLimit, registrations
         case requestTimeoutSeconds, idleMinutesBeforeSlowPoll, retiredDemandIds, serverMemory
         case gatewayHost, gatewayPort, migratedFromNovaAt
     }
@@ -137,6 +154,18 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         gatewayHost = try c.decodeIfPresent(String.self, forKey: .gatewayHost) ?? "127.0.0.1"
         gatewayPort = try c.decodeIfPresent(Int.self, forKey: .gatewayPort) ?? 6600
         migratedFromNovaAt = Self.decodeMigrationStamp(c)
+        // One-time upgrade: pre-factory files carry no `factories` key, so
+        // derive factories from endpoint host:port groups on first load. The
+        // key is always written after that (even empty), so a deliberate
+        // delete-the-last-factory is never resurrected.
+        if let decoded = try? c.decodeIfPresent([FactoryConfig].self, forKey: .factories) {
+            factories = decoded
+        } else {
+            migrateFactoriesIfNeeded()
+            for index in serverMemory.indices {
+                serverMemory[index].migrateFactoriesIfNeeded()
+            }
+        }
         migrateLegacyPoolsIfNeeded()
     }
 
@@ -147,6 +176,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         try c.encode(registrations, forKey: .registrations)
         try c.encode(serverMemory, forKey: .serverMemory)
         try c.encode(members, forKey: .members)
+        try c.encode(factories, forKey: .factories)
         try c.encode(pools, forKey: .pools)
         try c.encode(capabilities, forKey: .capabilities)
         try c.encode(concurrencyLimit, forKey: .concurrencyLimit)
@@ -192,6 +222,53 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         for index in serverMemory.indices {
             serverMemory[index].migrateLegacyPoolsIfNeeded()
         }
+    }
+
+    /// One-time upgrade for files written before factories existed: group
+    /// members by endpoint `scheme://host:port`. Local NovaMLX members stay
+    /// ungrouped (nil factoryId) — they are special-cased elsewhere and only
+    /// appear under "All". Idempotent: skipped once any factory is present.
+    public mutating func migrateFactoriesIfNeeded() {
+        guard factories.isEmpty, !members.isEmpty else { return }
+        factories = Self.deriveFactories(from: &members)
+    }
+
+    /// Group `members` by endpoint base, assigning `factoryId` in place.
+    /// Local NovaMLX members are left ungrouped.
+    public static func deriveFactories(from members: inout [MemberConfig]) -> [FactoryConfig] {
+        var byBase: [String: FactoryConfig] = [:]
+        for index in members.indices {
+            guard members[index].type != .localNovaMLX,
+                  let base = factoryBase(of: members[index].endpoint) else { continue }
+            let factory = byBase[base] ?? FactoryConfig(
+                id: UUID().uuidString, name: factoryName(for: base),
+                baseUrl: members[index].endpoint)
+            byBase[base] = factory
+            members[index].factoryId = factory.id
+        }
+        return byBase.values.sorted { $0.name < $1.name }
+    }
+
+    /// Canonical `scheme://host[:port]` of an endpoint, or nil when not http(s).
+    public static func factoryBase(of url: URL) -> String? {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = parts.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = parts.host, !host.isEmpty else { return nil }
+        parts.path = ""
+        parts.query = nil
+        parts.fragment = nil
+        return parts.url?.absoluteString
+    }
+
+    private static func factoryName(for base: String) -> String {
+        guard let parts = URLComponents(string: base), let host = parts.host else { return base }
+        if let port = parts.port,
+           !((parts.scheme?.lowercased() == "https" && port == 443)
+             || (parts.scheme?.lowercased() == "http" && port == 80)) {
+            return "\(host):\(port)"
+        }
+        return host
     }
 
     public static func defaultConfig() -> PeerConfig {
@@ -245,9 +322,11 @@ public struct PeerConfig: Codable, Equatable, Sendable {
 
     public func retiredDemandIdList() -> [String] { retiredDemandIds.sorted() }
 
-    public mutating func setBindings(members: [MemberConfig], pools: [PoolConfig] = [],
+    public mutating func setBindings(members: [MemberConfig], factories: [FactoryConfig] = [],
+                                     pools: [PoolConfig] = [],
                                      capabilities: [Capability], retiredDemandIds: [String]) {
         self.members = members
+        self.factories = factories
         self.pools = pools
         self.capabilities = capabilities
         self.retiredDemandIds = Set(retiredDemandIds)
@@ -255,6 +334,38 @@ public struct PeerConfig: Codable, Equatable, Sendable {
 
     public func member(id: String) -> MemberConfig? {
         members.first { $0.id == id }
+    }
+
+    public func factory(id: String) -> FactoryConfig? {
+        factories.first { $0.id == id }
+    }
+
+    public func members(in factory: FactoryConfig) -> [MemberConfig] {
+        members.filter { $0.factoryId == factory.id }
+    }
+
+    public mutating func upsertFactory(_ factory: FactoryConfig) {
+        if let index = factories.firstIndex(where: { $0.id == factory.id }) {
+            factories[index] = factory
+        } else {
+            factories.append(factory)
+        }
+    }
+
+    /// Drop the factory. `deleteMembers` false (default) keeps its members,
+    /// orphaned (nil factoryId); true removes them and strips pool ids.
+    public mutating func removeFactory(id: String, deleteMembers: Bool = false) {
+        guard factories.contains(where: { $0.id == id }) else { return }
+        factories.removeAll { $0.id == id }
+        if deleteMembers {
+            for member in members where member.factoryId == id {
+                removeMember(id: member.id)
+            }
+        } else {
+            for index in members.indices where members[index].factoryId == id {
+                members[index].factoryId = nil
+            }
+        }
     }
 
     public func pool(id: String) -> PoolConfig? {
@@ -318,6 +429,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
             upsertServerMemory(ServerMemory(
                 server: rest, peerName: "",
                 members: active ? members : [],
+                factories: active ? factories : [],
                 pools: active ? pools : [],
                 capabilities: active ? capabilities : [],
                 retiredDemandIds: active ? retiredDemandIdList() : []
@@ -339,11 +451,11 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         serverURL = tunnel
         peerId = registrations[Self.tunnelKey(tunnel)]
         if let saved = serverMemory.first(where: { $0.server == rest }) {
-            setBindings(members: saved.members, pools: saved.pools,
+            setBindings(members: saved.members, factories: saved.factories, pools: saved.pools,
                         capabilities: saved.capabilities,
                         retiredDemandIds: saved.retiredDemandIds)
         } else {
-            setBindings(members: [], pools: [], capabilities: [], retiredDemandIds: [])
+            setBindings(members: [], factories: [], pools: [], capabilities: [], retiredDemandIds: [])
         }
         return true
     }
@@ -362,13 +474,13 @@ public struct PeerConfig: Codable, Equatable, Sendable {
             let tunnel = Self.tunnelURL(fromREST: nextURL)
             serverURL = tunnel
             peerId = registrations[Self.tunnelKey(tunnel)]
-            setBindings(members: next.members, pools: next.pools,
+            setBindings(members: next.members, factories: next.factories, pools: next.pools,
                         capabilities: next.capabilities,
                         retiredDemandIds: next.retiredDemandIds)
         } else {
             peerId = nil
             serverURL = URL(string: "wss://tknet.ai")!
-            setBindings(members: [], pools: [], capabilities: [], retiredDemandIds: [])
+            setBindings(members: [], factories: [], pools: [], capabilities: [], retiredDemandIds: [])
         }
     }
 
@@ -380,6 +492,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         row.peerName = name
         if Self.normalizedREST(serverURL) == canonical {
             row.members = members
+            row.factories = factories
             row.pools = pools
             row.capabilities = capabilities
             row.retiredDemandIds = retiredDemandIdList()
@@ -391,6 +504,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         guard let current = Self.normalizedREST(serverURL),
               var row = serverMemory.first(where: { $0.server == current }) else { return }
         row.members = members
+        row.factories = factories
         row.pools = pools
         row.capabilities = capabilities
         row.retiredDemandIds = retiredDemandIdList()

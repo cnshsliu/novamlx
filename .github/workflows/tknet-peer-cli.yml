@@ -1,6 +1,6 @@
-# Linux + Windows CLI for the standalone tknet-peer package.
-# Does not clone MLX or build NovaMLX. The Windows job is allowed to fail
-# until that toolchain is proven (Segment 4: CLI first, GUI later).
+# Linux CLI for the standalone tknet-peer package.
+# Does not clone MLX or build NovaMLX. Windows is not a supported platform
+# (macOS + Linux only, user decision 2026-10-15).
 name: tknet-peer CLI
 
 on:
@@ -41,28 +41,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tknet-peer-linux
-          path: tknet-peer/dist/*.tar.gz
-
-  windows:
-    name: Windows CLI
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.2"
-      - name: Build release CLI
-        working-directory: tknet-peer
-        shell: bash
-        run: |
-          bash Scripts/prepare-build.sh
-          swift build -c release --product tknet-peer
-      - name: Package
-        working-directory: tknet-peer
-        shell: bash
-        run: bash Scripts/package-cli.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tknet-peer-windows
           path: tknet-peer/dist/*.tar.gz

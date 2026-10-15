@@ -2,7 +2,15 @@ import SwiftUI
 
 struct PeerRootView: View {
     @EnvironmentObject private var state: PeerAppState
-    @State private var tab = PeerTab.tunnel
+    // UI-test hook: `--start-tab=members` lands directly on a section so
+    // read-only GUI verification needs no synthetic clicks. Case-insensitive
+    // against the tab raw values ("Members", "Pools", ...).
+    @State private var tab: PeerTab = {
+        guard let arg = ProcessInfo.processInfo.arguments
+            .first(where: { $0.hasPrefix("--start-tab=") }) else { return .tunnel }
+        let raw = String(arg.dropFirst("--start-tab=".count))
+        return PeerTab.allCases.first { $0.rawValue.lowercased() == raw.lowercased() } ?? .tunnel
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
