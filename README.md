@@ -78,13 +78,13 @@ bash Scripts/verify-standalone.sh
 
 ## Publish this tree as its own repository
 
-This checkout cannot create `github.com/cnshsliu/tknet-peer` by itself. From the novamlx repository, after that empty remote exists:
+From the novamlx repository, with `gh` logged in:
 
 ```bash
 bash tknet-peer/Scripts/publish-repo.sh git@github.com:cnshsliu/tknet-peer.git
 ```
 
-That runs `git subtree split --prefix=tknet-peer` and pushes the result to `main`. novamlx can then replace `.package(path: "tknet-peer")` with a URL dependency. Until that push, the Mac app builds against the path package.
+That runs `git subtree split --prefix=tknet-peer`. If `github.com/cnshsliu/tknet-peer` does not exist, `gh repo create` makes a public repository with no README, then the script pushes the split history to `main`. novamlx can then replace `.package(path: "tknet-peer")` with a URL dependency. Until that push, the Mac app builds against the path package.
 
 ## Layout
 
