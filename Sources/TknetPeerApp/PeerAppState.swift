@@ -53,6 +53,7 @@ final class PeerAppState: ObservableObject {
     @Published private(set) var claimedPeerId: String?
 
     private let configURL: URL
+    private let configDirectory: URL
     private let secrets: any SecretStore
     private let defaults: UserDefaults
     private let serverBox: TunnelServerBox
@@ -76,6 +77,7 @@ final class PeerAppState: ObservableObject {
                 .appendingPathComponent(".config/tknet-peer", isDirectory: true)
         let configURL = directory.appendingPathComponent("peer.json")
         self.configURL = configURL
+        self.configDirectory = directory
         let secretsResult = Self.makeSecrets(in: directory)
         self.secrets = secretsResult.store
         self.defaults = defaults
@@ -501,20 +503,49 @@ final class PeerAppState: ObservableObject {
         return await persist(config)
     }
 
+    // MARK: - Env-file key references
+
+    /// The `env` file beside `peer.json` (`KEY=VALUE` lines). An ALL-UPPERCASE
+    /// stored key names a variable in this file.
+    var envFileURL: URL { configDirectory.appendingPathComponent("env") }
+
+    /// Nil when `value` is fine as a key. Non-nil when it is an ALL-UPPERCASE
+    /// reference the env file does not define — the message is user-facing.
+    func envKeyProblem(_ value: String) -> String? {
+        guard EnvKeyFile.isReference(value) else { return nil }
+        guard let resolved = EnvKeyFile.load(url: envFileURL)[value], !resolved.isEmpty else {
+            return "\(value) is not defined in \(envFileURL.path)"
+        }
+        return nil
+    }
+
+    /// Resolves an env reference to its value; literal keys pass through.
+    private func resolveKey(_ value: String) -> String? {
+        EnvKeyFile.resolve(value, url: envFileURL)
+    }
+
     /// The key stored on a factory, pre-filled into new member forms.
     func factoryDefaultKey(_ factory: FactoryConfig) -> String? {
-        factory.apiKeyRef.flatMap { readSecret($0) }
+        factory.apiKeyRef.flatMap { readSecret($0) }.flatMap { resolveKey($0) }
     }
 
     // MARK: - Member testing
 
     /// Key used for a member's requests: its own stored key, else its
-    /// factory's shared key when the member has none.
+    /// factory's shared key when the member has none. Env references are
+    /// resolved; an undefined reference yields no key.
     func memberAPIKey(_ member: MemberConfig) -> String? {
-        if let own = readSecret(member.apiKeyRef) { return own }
-        guard let factoryId = member.factoryId,
-              let ref = config.factory(id: factoryId)?.apiKeyRef else { return nil }
-        return readSecret(ref)
+        let stored: String?
+        if let own = readSecret(member.apiKeyRef) {
+            stored = own
+        } else if let factoryId = member.factoryId,
+                  let ref = config.factory(id: factoryId)?.apiKeyRef,
+                  let shared = readSecret(ref) {
+            stored = shared
+        } else {
+            stored = nil
+        }
+        return stored.flatMap { resolveKey($0) }
     }
 
     /// Test a saved member: GET its `/models` with its own key.
@@ -525,7 +556,8 @@ final class PeerAppState: ObservableObject {
     /// Test an unsaved endpoint from the member form. A blank key probes
     /// anonymously — the form pre-fills the factory default already.
     func probeEndpoint(_ endpoint: URL, apiKey: String?) async -> MemberProbeResult {
-        await MemberProbe.probe(endpoint: endpoint, apiKey: apiKey)
+        await MemberProbe.probe(
+            endpoint: endpoint, apiKey: apiKey.flatMap { resolveKey($0) })
     }
 
     /// Adds one enabled member per model the factory advertises on

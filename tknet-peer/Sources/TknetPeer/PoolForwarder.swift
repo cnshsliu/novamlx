@@ -62,15 +62,20 @@ public final class PoolForwarder: Sendable {
     private let secrets: any SecretStore
     private let client: HTTPClient
     private let stats: MemberStatsStore
+    private let envFile: URL
     private let shutDown = PeerLock(initialState: false)
     private let logger = Logger(label: "TknetPeer.PoolForwarder")
 
-    public init(config: PeerConfig, secrets: any SecretStore, stats: MemberStatsStore = MemberStatsStore()) {
+    public init(
+        config: PeerConfig, secrets: any SecretStore, stats: MemberStatsStore = MemberStatsStore(),
+        envFile: URL = EnvKeyFile.defaultURL
+    ) {
         var config = config
         config.migrateLegacyPoolsIfNeeded()
         self.holder = Relay.ConfigHolder(config)
         self.secrets = secrets
         self.stats = stats
+        self.envFile = envFile
         self.client = HTTPClient(eventLoopGroupProvider: .singleton)
     }
 
@@ -138,14 +143,28 @@ public final class PoolForwarder: Sendable {
         return request
     }
 
-    /// The member's own key, falling back to its factory's shared key when
-    /// the member has none stored. Empty strings count as absent.
-    func apiKey(for member: MemberConfig, config: PeerConfig) -> String? {
-        if let own = try? secrets.load(member.apiKeyRef), !own.isEmpty { return own }
-        guard let factoryId = member.factoryId,
-              let ref = config.factory(id: factoryId)?.apiKeyRef else { return nil }
-        if let shared = try? secrets.load(ref), !shared.isEmpty { return shared }
-        return nil
+    /// Stored-key resolution: own key, else the factory's shared key. An
+    /// ALL-UPPERCASE stored value names a variable in the env file.
+    enum KeyResolution: Equatable {
+        case key(String?)
+        case missingReference(String)
+    }
+
+    func apiKey(for member: MemberConfig, config: PeerConfig) -> KeyResolution {
+        var stored: String?
+        if let own = try? secrets.load(member.apiKeyRef), !own.isEmpty {
+            stored = own
+        } else if let factoryId = member.factoryId,
+                  let ref = config.factory(id: factoryId)?.apiKeyRef,
+                  let shared = try? secrets.load(ref), !shared.isEmpty {
+            stored = shared
+        }
+        guard let stored else { return .key(nil) }
+        guard EnvKeyFile.isReference(stored) else { return .key(stored) }
+        guard let value = EnvKeyFile.load(url: envFile)[stored], !value.isEmpty else {
+            return .missingReference(stored)
+        }
+        return .key(value)
     }
 
     // MARK: - Dispatch
@@ -190,10 +209,21 @@ public final class PoolForwarder: Sendable {
             }
 
             let started = ContinuousClock.now
-            let apiKey = apiKey(for: member, config: config)
+            let resolvedKey: String?
+            switch apiKey(for: member, config: config) {
+            case .key(let value):
+                resolvedKey = value
+            case .missingReference(let name):
+                lastError = "API key \(name) is not defined in \(envFile.path)"
+                lastStatus = 0
+                timedOut = false
+                await record(memberId: member.id, succeeded: false, latencyMs: 0,
+                             httpStatus: 0, errorMessage: lastError)
+                continue
+            }
             do {
                 let request = try Self.makeUpstreamRequest(
-                    member: member, body: body, apiKey: apiKey,
+                    member: member, body: body, apiKey: resolvedKey,
                     upstreamPath: upstreamPath, contentType: contentType)
                 let response = try await client.execute(request, timeout: timeout)
                 let status = Int(response.status.code)

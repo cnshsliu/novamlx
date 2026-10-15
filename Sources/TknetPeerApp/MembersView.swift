@@ -419,6 +419,9 @@ private struct FactoryForm: View {
             TextField("Name", text: $name)
             TextField("URL (host:port)", text: $url)
             SecureField(draft.isNew ? "API key (optional)" : "API key (blank keeps the current key)", text: $apiKey)
+            Text("ALL-UPPERCASE values are looked up in \(state.envFileURL.path).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             if let formError {
                 Text(formError).foregroundStyle(.red).font(.callout)
             }
@@ -442,7 +445,12 @@ private struct FactoryForm: View {
             formError = "Factory URL must be an http(s) host[:port]."
             return
         }
-        let key = apiKey.isEmpty ? nil : apiKey
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let problem = state.envKeyProblem(trimmedKey) {
+            formError = problem
+            return
+        }
+        let key = trimmedKey.isEmpty ? nil : trimmedKey
         let saved = await state.saveFactory(
             id: draft.factoryId, name: trimmedName, baseUrl: base, apiKey: key)
         if saved {
@@ -613,6 +621,9 @@ private struct MemberForm: View {
             }
             SecureField(keyPlaceholder, text: $apiKey)
                 .onChange(of: apiKey) { _, _ in testResult = nil }
+            Text("ALL-UPPERCASE values are looked up in \(state.envFileURL.path).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
                     Text("Type")
@@ -746,10 +757,18 @@ private struct MemberForm: View {
                 message: "Endpoint must be an http(s) URL.")
             return
         }
+        if let problem = envKeyProblem { formError = problem; return }
         isTesting = true
         defer { isTesting = false }
         testResult = await state.probeEndpoint(url, apiKey: effectiveAPIKey())
         formError = nil
+    }
+
+    /// Nil, or the reason the typed key is an undefined env reference.
+    private var envKeyProblem: String? {
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return state.envKeyProblem(trimmed)
     }
 
     private func save() async {
@@ -764,6 +783,7 @@ private struct MemberForm: View {
                 : "Endpoint must be an http(s) URL."
             return
         }
+        if let problem = envKeyProblem { formError = problem; return }
         let weightValue: Int?
         let trimmedWeight = weight.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedWeight.isEmpty {
