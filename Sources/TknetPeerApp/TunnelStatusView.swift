@@ -28,9 +28,15 @@ struct TunnelStatusView: View {
 
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(state.connectionLabel, systemImage: state.connectionSymbol)
-                .font(.headline)
-                .foregroundStyle(connectionColor)
+            HStack(alignment: .firstTextBaseline) {
+                Label(state.connectionLabel, systemImage: state.connectionSymbol)
+                    .font(.headline)
+                    .foregroundStyle(connectionColor)
+                Spacer()
+                Text(state.tunnelWanted ? "Auto-dials on launch" : "No auto-dial on launch")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 8) {
                 Circle()
                     .fill(state.isGatewayUp ? Color.green : Color.red)
@@ -45,11 +51,6 @@ struct TunnelStatusView: View {
             }
             Text("Active requests \(state.status?.activeRequests ?? 0)")
                 .font(.callout)
-                .foregroundStyle(.secondary)
-            Text(state.tunnelWanted
-                 ? "Tunnel auto-dials on launch."
-                 : "Tunnel stays down on the next launch. The gateway still listens.")
-                .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(12)
@@ -90,24 +91,27 @@ struct TunnelStatusView: View {
                 Text(peerId)
                     .font(.body.monospaced())
                     .textSelection(.enabled)
-                Text("连接密钥")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(revealKey ? key : String(repeating: "•", count: min(key.count, 24)))
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
                 HStack {
-                    Button(revealKey ? "Hide connection key" : "Show connection key") {
+                    Text("连接密钥")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(revealKey ? "hide" : "show") {
                         revealKey.toggle()
                     }
-                    Button("Copy connection key") {
+                    Button("copy") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(key, forType: .string)
                     }
                 }
+                .buttonStyle(.link)
+                .controlSize(.small)
+                Text(revealKey ? key : String(repeating: "•", count: min(key.count, 24)))
+                    .font(.body.monospaced())
+                    .textSelection(.enabled)
                 backupControls
             } else {
-                Text("Register once. The connection key stays in ~/.config/tknet-peer. If this Mac already has an identity, restore the backup instead of registering again.")
+                Text("Register once. The identity key stays in ~/.config/tknet-peer. If this Mac already has an identity, restore the backup instead of registering again.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 TextField("Server", text: $serverText)
@@ -145,7 +149,7 @@ struct TunnelStatusView: View {
             }
             Button("Cancel", role: .cancel) { pendingRestore = nil }
         } message: {
-            Text("The peer id and connection key now stored on this Mac will be overwritten.")
+            Text("The peer id and identity key now stored on this Mac will be overwritten.")
         }
     }
 
