@@ -4,19 +4,6 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
 # ─────────────────────────────────────────────────────────────────────────
-# ./build.sh peer | ./build.sh test-peer
-# The CLI and its tests live in tknet-peer/ and must not pull MLX.
-# ─────────────────────────────────────────────────────────────────────────
-if [ "${1:-}" = "peer" ] || [ "${1:-}" = "test-peer" ]; then
-	mode="$1"
-	shift
-	if [ "$mode" = "test-peer" ]; then
-		exec swift test --package-path tknet-peer "$@"
-	fi
-	exec swift build --package-path tknet-peer "$@"
-fi
-
-# ─────────────────────────────────────────────────────────────────────────
 # ./build.sh test — run tests with metallib fix
 # SwiftPM's test runner puts the binary inside a .xctest bundle, but MLX
 # expects mlx.metallib colocated with the binary. This copies it in.

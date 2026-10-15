@@ -6,7 +6,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
-VERSION="${1:-$(grep 'public static let version' tknet-peer/Sources/TknetPeer/Version.swift | sed 's/.*"\(.*\)".*/\1/' || echo '0.2.0')}"
+VERSION="${1:-$(python3 -c 'import json; pins=json.load(open("Package.resolved"))["pins"]; print(next(p["state"]["version"] for p in pins if p["identity"]=="tknet-peer"))' 2>/dev/null || echo '0.2.0')}"
 ARCH="$(uname -m)"
 DIST_DIR="dist"
 APP_NAME="TknetPeer.app"
@@ -46,7 +46,7 @@ chmod u+w "$TMP" 2>/dev/null || true
 mv -f "$TMP" "$APP_CONTENTS/MacOS/TknetPeerApp"
 chmod 755 "$APP_CONTENTS/MacOS/TknetPeerApp"
 
-ICON_SRC="tknet-peer/Assets/AppIcon.icns"
+ICON_SRC="Sources/TknetPeerApp/AppIcon.icns"
 if [ -f "$ICON_SRC" ]; then
 	cp -p "$ICON_SRC" "$APP_CONTENTS/Resources/AppIcon.icns"
 	echo "→ Installed $ICON_SRC"

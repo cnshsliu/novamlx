@@ -7,7 +7,6 @@ The project is organized as a Swift 6.0 package with three executable targets an
 | Path | Purpose |
 |------|---------|
 | `Sources/NovaMLX{Core,Utils,Engine,…}/` | Library modules (see below) |
-| `tknet-peer/` | Standalone Swift package: Peer library, `tknet-peer` CLI, and tests |
 | `Sources/NovaMLXApp/` | Host process — menu bar app entry point |
 | `Sources/NovaMLXWorker/` | Worker subprocess spawned by the host |
 | `Sources/NovaMLXCLI/` | `nova` CLI tool |
@@ -30,7 +29,7 @@ Key library targets:
 - **NovaMLXPrefixCache** — KV-cache prefix caching
 - **NovaMLXAudio** / **NovaMLXImage** — modality support
 - **NovaMLXMenuBar** — macOS menu bar UI
-- **TknetPeer** (`tknet-peer/`) — peer gateway library and `tknet-peer` CLI. `TknetPeer.app` stays in `Sources/TknetPeerApp` and links this package. Build the CLI with `./build.sh peer` or `swift build --package-path tknet-peer --product tknet-peer`.
+- **TknetPeerApp** (`Sources/TknetPeerApp/`) — macOS menu-bar app. It links the library from `https://github.com/cnshsliu/tknet-peer` (`from: "0.2.0"` in `Package.swift`). The CLI and the library source are that repository, not this one.
 
 ## Build, Test, and Development Commands
 

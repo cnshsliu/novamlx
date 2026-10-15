@@ -38,7 +38,7 @@ Tknet Peer 是用户这边的本地网关。tknet 只跟这个网关打交道。
 
 隧道和本机端口进同一套挑选。发给 tknet 的帧里没有成员地址。Mac 菜单栏应用有隧道、成员、池、账号（认领和收益）。命令行和这个应用共用 `~/.config/tknet-peer`，密钥在该目录下收紧权限的文件里，不在钥匙串。同一时间只跑一个 Peer 进程。
 
-库和命令行在 `tknet-peer/`，不链接 MLX，可以脱离 NovaMLX 源码编译。Mac 应用留在本仓库，只依赖这个包。独立的 GitHub 仓库还没建。
+库和命令行在公开仓库 `https://github.com/cnshsliu/tknet-peer`，不链接 MLX。Mac 应用留在本仓库，按 `Package.swift` 里的版本号依赖那个包。
 
 ## 用户能看到什么
 
@@ -104,7 +104,7 @@ NovaMLX 的端口只回答本机已加载的模型。请求里出现 `lb:` 或�
 3. NovaMLX 收到 `lb:` 或 Tokenhub 供应商名时返回 404，侧边栏没有 Load Balancers、Tokenhub、Tknet Peer 这三页。
 4. 隧道连上时，tknet 的一次请求进同一个池，成员地址不出现在发给 tknet 的帧里。
 5. 用户按停止之后，下次启动不拨隧道，本机 6600 仍然可用。
-6. 只拷贝 `tknet-peer/` 也能编出 `tknet-peer`，依赖图里没有 MLX。
+6. `github.com/cnshsliu/tknet-peer` 单独能编出 `tknet-peer`，依赖图里没有 MLX。
 
 还没做的能力、以及当初写明不做、现在要再决定的事项，见 `TODO.md`。
 

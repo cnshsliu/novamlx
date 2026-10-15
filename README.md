@@ -557,23 +557,13 @@ Use provider catalog presets for popular services (OpenAI, Anthropic, Groq, Toge
 
 ## Tknet Peer
 
-Tknet Peer is the local gateway in front of one or more inference servers. Clients send a **pool** name. The peer picks a member. The Mac menu-bar app is `dist/TknetPeer.app` (built with `./build.sh`). The CLI is a separate Swift package that does not need this repository:
-
-```bash
-swift build -c release --package-path tknet-peer --product tknet-peer
-# or, with no NovaMLX checkout, inside a tknet-peer clone:
-swift build -c release --product tknet-peer
-```
-
-Then `tknet-peer setup` and `tknet-peer serve`. Linux and Windows use that CLI. Build and LAN-pool checks: `tknet-peer/README.md`.
-
-The menu-bar app keeps connection keys and member keys in the login Keychain and mirrors them to `~/.config/tknet-peer/secrets`, which the CLI still reads. The Account tab claims the token factory and shows earnings.
+Tknet Peer is the local gateway in front of one or more inference servers. Clients send a **pool** name. The peer picks a member. This repository builds the Mac menu-bar app, `dist/TknetPeer.app`. The library and the `tknet-peer` CLI are [github.com/cnshsliu/tknet-peer](https://github.com/cnshsliu/tknet-peer), pinned at `0.2.0`.
 
 ```bash
 swift build -c release --product TknetPeerApp
-swift test --package-path tknet-peer --filter SecretStoreMigrationTests
-swift test --package-path tknet-peer --filter earnings
 ```
+
+Clone that repository to build the CLI. Linux uses the CLI. The menu-bar app keeps connection keys and member keys in the login Keychain and mirrors them to `~/.config/tknet-peer/secrets`, which the CLI still reads. The Account tab claims the token factory and shows earnings.
 
 Design: `docs/superpowers/specs/2026-10-11-tknet-peer-gateway-design.md`.
 
