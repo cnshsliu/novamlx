@@ -20,6 +20,7 @@ struct MembersView: View {
     @State private var memberDraft: MemberDraft?
     @State private var pendingDeleteFactory: FactoryConfig?
     @State private var pendingDeleteMember: MemberConfig?
+    @State private var importNotice: String?
 
     private var factories: [FactoryConfig] { state.config.factories }
 
@@ -168,31 +169,33 @@ struct MembersView: View {
                 plusAction: { openMemberDraft() },
                 // "+" only when a concrete factory (not All) is selected.
                 plusEnabled: selectedFactory.factoryId != nil && state.lockError == nil,
-                minusID: "member-remove", plusID: "member-add")
+                minusID: "member-remove", plusID: "member-add",
+                importAction: selectedFactory.factoryId == nil ? nil : { importModels() },
+                importNotice: importNotice)
+        }
+    }
+
+    /// Bulk-add one member per model the selected factory advertises.
+    private func importModels() {
+        guard let id = selectedFactory.factoryId,
+              let factory = factories.first(where: { $0.id == id }) else { return }
+        importNotice = "Importing…"
+        Task {
+            if let added = await state.importMembersFromFactory(factory) {
+                importNotice = added == 0
+                    ? "No new models."
+                    : "Added \(added) models."
+            } else {
+                importNotice = state.lastError ?? "Import failed."
+            }
         }
     }
 
     @ViewBuilder
     private func memberRow(_ member: MemberConfig) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(MemberLabel.title(member, among: state.config.members))
-                    .font(.body.bold())
-                Text(member.endpoint.absoluteString)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                Text(detailLine(member))
-                    .font(.caption)
-                Text(member.isEnabled ? "Enabled" : "Disabled")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Edit") { memberDraft = MemberDraft(member, factories: factories) }
-                .buttonStyle(.link)
+        MemberRowView(member: member, factories: factories) {
+            memberDraft = MemberDraft(member, factories: factories)
         }
-        .padding(.vertical, 4)
     }
 
     private var emptyMembersText: String {
@@ -210,7 +213,9 @@ struct MembersView: View {
     private func paneControls(
         minusAction: @escaping () -> Void, minusEnabled: Bool,
         plusAction: @escaping () -> Void, plusEnabled: Bool,
-        minusID: String, plusID: String
+        minusID: String, plusID: String,
+        importAction: (() -> Void)? = nil,
+        importNotice: String? = nil
     ) -> some View {
         HStack(spacing: 4) {
             Button(action: minusAction) {
@@ -223,6 +228,20 @@ struct MembersView: View {
             }
             .disabled(!plusEnabled)
             .accessibilityIdentifier(plusID)
+            if let importAction {
+                Button("Import models", action: importAction)
+                    .buttonStyle(.link)
+                    .controlSize(.small)
+                    .disabled(state.lockError != nil || importNotice == "Importing…")
+                    .accessibilityIdentifier("member-import")
+            }
+            if let importNotice {
+                Text(importNotice)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer()
         }
         .padding(.horizontal, 8)
@@ -245,15 +264,6 @@ struct MembersView: View {
         pendingDeleteFactory = nil
         Task { await state.deleteFactory(id: factory.id, deleteMembers: deleteMembers) }
     }
-
-    private func detailLine(_ member: MemberConfig) -> String {
-        let model = PeerAdmin.publicModel(member)
-        let type = typeLabel(member.type)
-        if member.upstreamModel != model {
-            return "\(type) · upstream \(member.upstreamModel)"
-        }
-        return type
-    }
 }
 
 enum MemberLabel {
@@ -264,6 +274,83 @@ enum MemberLabel {
             return "\(model) · \(host)"
         }
         return model
+    }
+}
+
+/// One member row: identity lines on the left, Test/Edit links on the right.
+/// Test state is per-row so several members can be checked independently.
+private struct MemberRowView: View {
+    @EnvironmentObject private var state: PeerAppState
+    let member: MemberConfig
+    let factories: [FactoryConfig]
+    let onEdit: () -> Void
+
+    private enum TestState {
+        case idle
+        case running
+        case done(MemberProbeResult)
+    }
+
+    @State private var testState: TestState = .idle
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(MemberLabel.title(member, among: state.config.members))
+                    .font(.body.bold())
+                Text(member.endpoint.absoluteString)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text(detailLine)
+                    .font(.caption)
+                Text(member.isEnabled ? "Enabled" : "Disabled")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                switch testState {
+                case .idle:
+                    EmptyView()
+                case .running:
+                    Text("Testing…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                case .done(let result):
+                    Text(result.ok ? "Test ✓ \(result.message)" : "Test ✗ \(result.message)")
+                        .font(.caption2)
+                        .foregroundStyle(result.ok ? Color.green : Color.red)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer()
+            HStack(spacing: 10) {
+                Button("Test") { Task { await runTest() } }
+                    .buttonStyle(.link)
+                    .disabled(isRunning)
+                    .accessibilityIdentifier("member-test")
+                Button("Edit", action: onEdit)
+                    .buttonStyle(.link)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var isRunning: Bool {
+        if case .running = testState { return true }
+        return false
+    }
+
+    private var detailLine: String {
+        let model = PeerAdmin.publicModel(member)
+        let type = typeLabel(member.type)
+        if member.upstreamModel != model {
+            return "\(type) · upstream \(member.upstreamModel)"
+        }
+        return type
+    }
+
+    private func runTest() async {
+        testState = .running
+        testState = .done(await state.probeMember(member))
     }
 }
 
@@ -425,6 +512,9 @@ private struct MemberForm: View {
     @State private var isEnabled: Bool
     @State private var showMore: Bool
     @State private var formError: String?
+    /// Test outcome for the endpoint as currently entered. Nil = not tested.
+    @State private var testResult: MemberProbeResult?
+    @State private var isTesting = false
 
     init(draft: MemberDraft) {
         self.draft = draft
@@ -445,11 +535,25 @@ private struct MemberForm: View {
         draft.factories.first { $0.id == factoryId }
     }
 
+    /// New members may only be saved after a passing endpoint test; edits
+    /// stay open so an offline factory never blocks unrelated changes.
+    private var saveDisabled: Bool {
+        draft.isNew && testResult?.ok != true
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(draft.isNew ? "Add member" : "Edit member")
                 .font(.title3.bold())
             TextField("Model", text: $model)
+            if let models = testResult?.models, !models.isEmpty {
+                Menu("Choose advertised model…") {
+                    ForEach(models, id: \.self) { id in
+                        Button(id) { model = id }
+                    }
+                }
+                .controlSize(.small)
+            }
             if draft.isNew {
                 // Adding from a factory pane: the factory is fixed.
                 if let factory = selectedFactory {
@@ -470,14 +574,17 @@ private struct MemberForm: View {
             }
             if selectedFactory != nil {
                 TextField("Path (e.g. /v1)", text: $endpoint)
+                    .onChange(of: endpoint) { _, _ in testResult = nil }
             } else {
                 TextField("Endpoint URL", text: $endpoint)
                     .onChange(of: endpoint) { _, newValue in
+                        testResult = nil
                         guard !typeEdited, factoryId == nil else { return }
                         type = inferredType(newValue)
                     }
             }
             SecureField(draft.isNew ? "API key" : "API key (blank keeps the current key)", text: $apiKey)
+                .onChange(of: apiKey) { _, _ in testResult = nil }
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
                     Text("Type")
@@ -505,10 +612,26 @@ private struct MemberForm: View {
             if let formError {
                 Text(formError).foregroundStyle(.red).font(.callout)
             }
+            if let testResult {
+                Text(testResult.ok
+                     ? "Test ✓ \(testResult.message)"
+                     : "Test ✗ \(testResult.message)")
+                    .font(.callout)
+                    .foregroundStyle(testResult.ok ? Color.green : Color.red)
+            }
             HStack {
+                Button("Test") { Task { await runTest() } }
+                    .disabled(isTesting || resolvedEndpoint() == nil)
+                    .accessibilityIdentifier("member-form-test")
+                if draft.isNew && saveDisabled {
+                    Text("Test the endpoint to enable Save.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }
                 Button("Save") { Task { await save() } }
+                    .disabled(saveDisabled)
             }
         }
         .padding(20)
@@ -519,6 +642,7 @@ private struct MemberForm: View {
     private func reassign(_ newId: String?) {
         let oldFactory = selectedFactory
         factoryId = newId
+        testResult = nil
         let newFactory = draft.factories.first { $0.id == newId }
         let text = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         if oldFactory != nil, newFactory == nil {
@@ -553,30 +677,55 @@ private struct MemberForm: View {
         }
     }
 
+    /// Endpoint URL exactly as `save()` would build it, or nil when invalid.
+    private func resolvedEndpoint() -> URL? {
+        if let factory = selectedFactory {
+            var path = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            if path.isEmpty { path = "/" }
+            if !path.hasPrefix("/") { path = "/" + path }
+            return URL(string: factory.baseUrl.absoluteString + path)
+        }
+        guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host != nil else { return nil }
+        return url
+    }
+
+    /// Key used for the test: the field, else the member's stored key when
+    /// editing with a blank field ("blank keeps the current key").
+    private func effectiveAPIKey() -> String? {
+        if !apiKey.isEmpty { return apiKey }
+        if !draft.isNew, let id = draft.memberId,
+           let member = state.config.member(id: id) {
+            return state.memberAPIKey(member)
+        }
+        return nil
+    }
+
+    private func runTest() async {
+        guard let url = resolvedEndpoint() else {
+            testResult = MemberProbeResult(
+                ok: false, httpStatus: 0, models: [],
+                message: "Endpoint must be an http(s) URL.")
+            return
+        }
+        isTesting = true
+        defer { isTesting = false }
+        testResult = await state.probeEndpoint(url, apiKey: effectiveAPIKey())
+        formError = nil
+    }
+
     private func save() async {
         let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModel.isEmpty else {
             formError = "Model name is required."
             return
         }
-        var endpointURL: URL
-        if let factory = selectedFactory {
-            var path = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-            if path.isEmpty { path = "/" }
-            if !path.hasPrefix("/") { path = "/" + path }
-            guard let url = URL(string: factory.baseUrl.absoluteString + path) else {
-                formError = "Path is not valid."
-                return
-            }
-            endpointURL = url
-        } else {
-            guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)),
-                  let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-                  url.host != nil else {
-                formError = "Endpoint must be an http(s) URL."
-                return
-            }
-            endpointURL = url
+        guard let endpointURL = resolvedEndpoint() else {
+            formError = selectedFactory != nil
+                ? "Path is not valid."
+                : "Endpoint must be an http(s) URL."
+            return
         }
         let weightValue: Int?
         let trimmedWeight = weight.trimmingCharacters(in: .whitespacesAndNewlines)
