@@ -10,7 +10,7 @@ struct PeerRootView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tknet Peer")
                         .font(.title2.bold())
-                    Text("token 工厂")
+                    Text("连接 token 工厂与市场")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
