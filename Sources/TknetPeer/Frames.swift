@@ -123,8 +123,13 @@ public struct RequestFrame: Codable, Equatable, Sendable {
         self.path = path
     }
 
-    /// Path used for gating and upstream forwarding. Pathless frames are chat.
-    public var effectivePath: String { path ?? "/v1/chat/completions" }
+    /// Path used for gating and upstream forwarding. A pathless OpenAI frame
+    /// is chat. A pathless Anthropic frame is Messages. An explicit path wins.
+    public var effectivePath: String {
+        if let path, !path.isEmpty { return path }
+        if apiFormat == .anthropic { return InterfaceKind.anthropicMessages.path }
+        return InterfaceKind.openaiChat.path
+    }
 }
 
 public enum RelayStatus: String, Codable, Equatable, Sendable {

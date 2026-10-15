@@ -10,6 +10,7 @@ struct RelayTests {
     /// shutdown, so cleanup must run even when test assertions throw.
     private func withRelay(
         requestTimeoutSeconds: Double = 300,
+        interfaceKind: InterfaceKind = .openaiChat,
         _ body: (Relay, MockSourceServer) async throws -> Void
     ) async throws {
         let server = MockSourceServer()
@@ -22,11 +23,11 @@ struct RelayTests {
         config.factories = [FactoryConfig(
             id: "fx", name: "mock", baseUrl: URL(string: "http://127.0.0.1:\(server.port)")!,
             apiKeyRef: "factory/fx",
-            interfaces: [InterfaceConfig(id: "fx-chat", kind: .openaiChat)])]
+            interfaces: [InterfaceConfig(id: "fx-chat", kind: interfaceKind)])]
         config.members = [MemberConfig(
             id: "s1", name: "mock", interfaceId: "fx-chat", upstreamModel: "upstream-model-x"
         )]
-        config.pools = [PoolConfig(id: "s1", name: "demand-model", kind: .openaiChat, memberIds: ["s1"])]
+        config.pools = [PoolConfig(id: "s1", name: "demand-model", kind: interfaceKind, memberIds: ["s1"])]
         config.capabilities = [Capability(
             demandId: "d1", model: "demand-model", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0
@@ -147,16 +148,29 @@ struct RelayTests {
         }
     }
 
-    @Test("anthropic-format tunnel requests are rejected in Phase 1")
-    func anthropicFormatRejected() async throws {
+    @Test("a chat pool rejects an anthropic messages path before upstream")
+    func chatPoolRejectsAnthropicPath() async throws {
         try await withRelay { relay, server in
             let frames = await collect(relay.handle(makeRequest(apiFormat: .anthropic)))
             #expect(frames.count == 1)
             let result = try endResult(frames.first)
             #expect(result.status == .failed)
-            #expect(result.upstreamStatus == 0)
-            // Rejected before any upstream contact: nothing recorded server-side.
+            #expect(result.upstreamStatus == 400)
+            #expect(result.errorMessage?.contains("/v1/messages") == true)
             #expect(server.lastBodyModel == nil)
+            #expect(server.lastAuthorizationHeader == nil)
+        }
+    }
+
+    @Test("anthropic tunnel frames go to /v1/messages with x-api-key")
+    func anthropicFormatForwarded() async throws {
+        try await withRelay(interfaceKind: .anthropicMessages) { relay, server in
+            let frames = await collect(relay.handle(makeRequest(apiFormat: .anthropic)))
+            #expect(frames.last?.isCompletedEnd == true)
+            #expect(server.lastPath == "/v1/messages")
+            #expect(server.lastBodyModel == "upstream-model-x")
+            #expect(server.lastXAPIKey == "sk-source-key")
+            #expect(server.lastAnthropicVersion == "2023-06-01")
             #expect(server.lastAuthorizationHeader == nil)
         }
     }

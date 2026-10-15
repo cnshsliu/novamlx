@@ -97,11 +97,9 @@ public final class Relay: Sendable {
             fail("no pool \(capability.sourceId) for model \(request.model)")
             return
         }
-        guard request.apiFormat == .openai else {
-            fail("api format \(request.apiFormat.rawValue) unsupported by source \(pool.id)")
-            return
-        }
 
+        // OpenAI and Anthropic both forward. The pool contract decides which
+        // path is legal; a chat pool does not accept /v1/messages.
         // The pool's interface kind owns the target URL; the gateway path is
         // only the routing key, checked inside the forwarder.
         let outcome = await forwarder.forward(
@@ -236,12 +234,21 @@ public final class Relay: Sendable {
             let payload = line.hasPrefix("data: ") ? String(line.dropFirst(6)) : String(line)
             guard payload != "[DONE]",
                   let chunk = payload.data(using: .utf8),
-                  let json = (try? JSONSerialization.jsonObject(with: chunk)) as? [String: Any],
-                  let usage = json["usage"] as? [String: Any] else { continue }
-            result.prompt = usage["prompt_tokens"] as? Int ?? result.prompt
-            result.completion = usage["completion_tokens"] as? Int ?? result.completion
+                  let json = (try? JSONSerialization.jsonObject(with: chunk)) as? [String: Any] else { continue }
+            let message = json["message"] as? [String: Any]
+            guard let usage = (json["usage"] as? [String: Any]) ?? (message?["usage"] as? [String: Any]) else {
+                continue
+            }
+            if let prompt = usage["prompt_tokens"] as? Int ?? usage["input_tokens"] as? Int {
+                result.prompt = prompt
+            }
+            if let completion = usage["completion_tokens"] as? Int ?? usage["output_tokens"] as? Int {
+                result.completion = completion
+            }
             if let details = usage["prompt_tokens_details"] as? [String: Any],
                let cached = details["cached_tokens"] as? Int {
+                result.cached = cached
+            } else if let cached = usage["cache_read_input_tokens"] as? Int {
                 result.cached = cached
             }
             found = true

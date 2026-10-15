@@ -84,7 +84,8 @@ public final class LocalGateway: @unchecked Sendable {
                 let timeout = forwarder.currentConfig.requestTimeoutSeconds
                 let outcome = await forwarder.forward(
                     poolName: model, body: raw, timeoutSeconds: timeout,
-                    gatewayPath: route.gatewayPath, contentType: contentType)
+                    gatewayPath: route.gatewayPath, contentType: contentType,
+                    extraHeaders: Self.anthropicHeaders(from: request.headers))
                 return response(for: outcome, model: model)
             }
         }
@@ -95,6 +96,7 @@ public final class LocalGateway: @unchecked Sendable {
     /// pool's kind owns the upstream URL, the gateway path is the routing key.
     private static let forwardedPosts: [(gatewayPath: String, upstreamPath: String)] = [
         ("/v1/chat/completions", "chat/completions"),
+        ("/v1/messages", "messages"),
         ("/v1/embeddings", "embeddings"),
         ("/v1/images/generations", "images/generations"),
         ("/v1/images/edits", "images/edits"),
@@ -103,6 +105,20 @@ public final class LocalGateway: @unchecked Sendable {
         ("/v1/audio/transcriptions", "audio/transcriptions"),
         ("/v1/decisions", "decisions"),
     ]
+
+    /// Client protocol headers for an Anthropic upstream. Absent headers stay
+    /// absent here; the forwarder fills `anthropic-version` when the route
+    /// needs it.
+    private static func anthropicHeaders(from headers: HTTPFields) -> [String: String] {
+        var extra: [String: String] = [:]
+        if let version = headers[values: .init("anthropic-version")!].first, !version.isEmpty {
+            extra["anthropic-version"] = version
+        }
+        if let beta = headers[values: .init("anthropic-beta")!].first, !beta.isEmpty {
+            extra["anthropic-beta"] = beta
+        }
+        return extra
+    }
 
     private static func response(for outcome: PoolForwardOutcome, model: String) -> Response {
         switch outcome {

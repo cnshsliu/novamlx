@@ -21,13 +21,14 @@ public enum SupplyAPI {
 
     /// Presets operators can assign to a pool (same kinds as tknet).
     public static var allContracts: [APIContract] {
-        [chat, imageGenerations, imageEdits, speech, transcription,
+        [chat, anthropicMessages, imageGenerations, imageEdits, speech, transcription,
          embeddings, decision, backgroundRemovalContract]
     }
 
-        public static func contract(kind: String) -> APIContract? {
+    public static func contract(kind: String) -> APIContract? {
         switch kind {
         case chat.kind: return chat
+        case anthropicMessages.kind: return anthropicMessages
         case imageGenerations.kind: return imageGenerations
         case imageEdits.kind: return imageEdits
         case speech.kind: return speech
@@ -86,6 +87,17 @@ public enum SupplyAPI {
         "u2net", "u2netp", "u2net_human_seg", "isnet-general-use",
         "silueta", "birefnet-portrait", "bria-rmbg",
     ]
+
+    /// Anthropic Messages. One path, `x-api-key`, not a chat-completions alias.
+    public static let anthropicMessages = APIContract(
+        kind: "anthropic.messages",
+        summary: "Anthropic Messages.",
+        operations: [
+            APIOperation(
+                method: "POST", path: "/v1/messages",
+                contentType: "application/json",
+                summary: "JSON body: model, messages, max_tokens. Auth is x-api-key plus anthropic-version.")
+        ])
 
     public static let chat = APIContract(
         kind: "openai.chat",

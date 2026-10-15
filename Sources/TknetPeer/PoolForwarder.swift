@@ -110,24 +110,26 @@ public final class PoolForwarder: Sendable {
 
     public func forward(
         poolId: String, body: Data, timeoutSeconds: Double,
-        gatewayPath: String = InterfaceKind.openaiChat.gatewayPath, contentType: String? = nil
+        gatewayPath: String = InterfaceKind.openaiChat.gatewayPath, contentType: String? = nil,
+        extraHeaders: [String: String] = [:]
     ) async -> PoolForwardOutcome {
         let config = holder.value
         guard let pool = config.pool(id: poolId) else { return .unknownPool }
         return await dispatch(
             pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds,
-            gatewayPath: gatewayPath, contentType: contentType)
+            gatewayPath: gatewayPath, contentType: contentType, extraHeaders: extraHeaders)
     }
 
     public func forward(
         poolName: String, body: Data, timeoutSeconds: Double,
-        gatewayPath: String = InterfaceKind.openaiChat.gatewayPath, contentType: String? = nil
+        gatewayPath: String = InterfaceKind.openaiChat.gatewayPath, contentType: String? = nil,
+        extraHeaders: [String: String] = [:]
     ) async -> PoolForwardOutcome {
         let config = holder.value
         guard let pool = config.pool(named: poolName) else { return .unknownPool }
         return await dispatch(
             pool: pool, config: config, body: body, timeoutSeconds: timeoutSeconds,
-            gatewayPath: gatewayPath, contentType: contentType)
+            gatewayPath: gatewayPath, contentType: contentType, extraHeaders: extraHeaders)
     }
 
     /// Resolve one member into its full forward target. Nil when the member's
@@ -146,7 +148,7 @@ public final class PoolForwarder: Sendable {
     /// header, never logged.
     static func makeUpstreamRequest(
         route: MemberRoute, body: Data, upstreamModel: String, apiKey: String?,
-        contentType: String? = nil
+        contentType: String? = nil, extraHeaders: [String: String] = [:]
     ) throws -> HTTPClientRequest {
         let (rewritten, sendType) = try UpstreamBodyCodec.prepare(
             body: body, contentType: contentType, upstreamModel: upstreamModel)
@@ -156,13 +158,17 @@ public final class PoolForwarder: Sendable {
         if route.isLocal {
             request.headers.add(name: "X-No-Autoload", value: "1")
         }
-        if let apiKey, !apiKey.isEmpty {
-            if route.kind.usesXAPIKey {
+        if route.kind.usesXAPIKey {
+            if let apiKey, !apiKey.isEmpty {
                 request.headers.add(name: "x-api-key", value: apiKey)
-                request.headers.add(name: "anthropic-version", value: "2023-06-01")
-            } else {
-                request.headers.add(name: "authorization", value: "Bearer \(apiKey)")
             }
+            let version = extraHeaders["anthropic-version"] ?? "2023-06-01"
+            request.headers.add(name: "anthropic-version", value: version)
+            if let beta = extraHeaders["anthropic-beta"], !beta.isEmpty {
+                request.headers.add(name: "anthropic-beta", value: beta)
+            }
+        } else if let apiKey, !apiKey.isEmpty {
+            request.headers.add(name: "authorization", value: "Bearer \(apiKey)")
         }
         request.body = .bytes(rewritten)
         return request
@@ -193,7 +199,7 @@ public final class PoolForwarder: Sendable {
 
     private func dispatch(
         pool: PoolConfig, config: PeerConfig, body: Data, timeoutSeconds: Double,
-        gatewayPath: String, contentType: String?
+        gatewayPath: String, contentType: String?, extraHeaders: [String: String] = [:]
     ) async -> PoolForwardOutcome {
         let kind = pool.kind ?? .openaiChat
         // Interface homogeneity is the pool's contract: the gateway path must
@@ -247,7 +253,7 @@ public final class PoolForwarder: Sendable {
             do {
                 let request = try Self.makeUpstreamRequest(
                     route: route, body: body, upstreamModel: member.upstreamModel,
-                    apiKey: resolvedKey, contentType: contentType)
+                    apiKey: resolvedKey, contentType: contentType, extraHeaders: extraHeaders)
                 let response = try await client.execute(request, timeout: timeout)
                 let status = Int(response.status.code)
                 let latency = Self.latencyMs(since: started)
