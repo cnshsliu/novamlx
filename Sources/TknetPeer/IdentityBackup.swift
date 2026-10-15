@@ -1,4 +1,11 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 /// A copy of this machine's tknet identity: `peer.json` plus `secrets/secrets.json`.
 ///
@@ -157,21 +164,74 @@ public enum IdentityBackup {
         try replace(snapshot.configData, at: configFile)
     }
 
+    /// Writes `data` to `url`, creating any missing parent (for example
+    /// `secrets/` under a new backup folder). The directory is `0700` and the
+    /// file is `0600`.
+    ///
+    /// The bytes are staged next to the destination and published with
+    /// `rename(2)`. Linux Foundation's `replaceItemAt` renames the destination
+    /// onto the temporary file, then fails with `NSCocoaErrorDomain` Code=4.
     private static func replace(_ data: Data, at url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
-        try data.write(to: temporary, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
-        if FileManager.default.fileExists(atPath: url.path) {
-            _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
-        } else {
-            try FileManager.default.moveItem(at: temporary, to: url)
+        let temporary = directory.appendingPathComponent(
+            ".\(url.lastPathComponent).\(UUID().uuidString).tmp",
+            isDirectory: false
+        )
+        do {
+            try data.write(to: temporary)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+            try renameReplacing(temporary, to: url)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
+
+    /// `rename(2)` replaces an existing destination on the same volume and
+    /// keeps the temporary file's mode. Windows `rename` will not overwrite,
+    /// so that path removes the destination first.
+    private static func renameReplacing(_ source: URL, to destination: URL) throws {
+        #if os(Windows)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: source, to: destination)
+        #else
+        let outcome: (rc: Int32, err: Int32) = source.withUnsafeFileSystemRepresentation { src in
+            destination.withUnsafeFileSystemRepresentation { dst in
+                guard let src, let dst else { return (-1, EINVAL) }
+                let rc = platformRename(src, dst)
+                return (rc, rc == 0 ? 0 : errno)
+            }
+        }
+        guard outcome.rc == 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(outcome.err),
+                userInfo: [NSFilePathErrorKey: destination.path]
+            )
+        }
+        #endif
+    }
+
+    #if !os(Windows)
+    private static func platformRename(
+        _ source: UnsafePointer<CChar>,
+        _ destination: UnsafePointer<CChar>
+    ) -> Int32 {
+        #if canImport(Darwin)
+        Darwin.rename(source, destination)
+        #elseif canImport(Glibc)
+        Glibc.rename(source, destination)
+        #else
+        Musl.rename(source, destination)
+        #endif
+    }
+    #endif
 
     private static func secretsFolderFile(_ folder: URL) -> URL {
         folder.appendingPathComponent("secrets", isDirectory: true).appendingPathComponent("secrets.json")
