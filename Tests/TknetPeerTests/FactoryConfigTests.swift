@@ -225,4 +225,35 @@ struct FactoryConfigTests {
         #expect(config.factories.map(\.name) == ["One"])
         #expect(config.member(id: "oa1")?.factoryId == "f1")
     }
+
+    @Test("selecting a factory adopts ungrouped members on the same base")
+    func adoptMembersAssignsUngroupedMatches() {
+        var config = PeerConfig.defaultConfig()
+        config.factories = [
+            FactoryConfig(id: "f1", name: "One", baseUrl: URL(string: "https://api.one.com")!),
+            FactoryConfig(id: "f2", name: "Two", baseUrl: URL(string: "http://127.0.0.1:6590")!),
+        ]
+        config.members = [
+            member("u1", endpoint: "https://api.one.com/v1"),      // ungrouped, matches f1
+            member("u2", endpoint: "https://api.one.com/api"),     // ungrouped, matches f1 (path irrelevant)
+            member("u3", endpoint: "http://127.0.0.1:6590/v1"),    // ungrouped, matches f2
+            member("u4", endpoint: "https://api.other.com/v1"),    // ungrouped, no match
+            member("g1", endpoint: "https://api.one.com/v1"),      // already in f2: not stolen
+        ]
+        config.members[4].factoryId = "f2"
+
+        let adopted = PeerAdmin.adoptMembers(&config, factoryId: "f1")
+
+        #expect(adopted == 2)
+        #expect(config.member(id: "u1")?.factoryId == "f1")
+        #expect(config.member(id: "u2")?.factoryId == "f1")
+        #expect(config.member(id: "u3")?.factoryId == nil)
+        #expect(config.member(id: "u4")?.factoryId == nil)
+        #expect(config.member(id: "g1")?.factoryId == "f2")
+        // Endpoints are untouched — adoption only assigns the group.
+        #expect(config.member(id: "u1")?.endpoint.absoluteString == "https://api.one.com/v1")
+
+        // Re-running is a no-op.
+        #expect(PeerAdmin.adoptMembers(&config, factoryId: "f1") == 0)
+    }
 }
