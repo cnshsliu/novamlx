@@ -65,3 +65,11 @@ public struct FileSecretStore: SecretStore {
         return "fnv64:\(String(hash, radix: 16))"
     }
 }
+
+/// No-op store for call sites that never persist a member key.
+public struct NullSecretStore: SecretStore {
+    public init() {}
+    public func save(_ value: String, for ref: String) {}
+    public func load(_ ref: String) -> String? { nil }
+    public func delete(_ ref: String) {}
+}

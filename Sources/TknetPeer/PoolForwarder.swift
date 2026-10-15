@@ -168,16 +168,17 @@ public final class PoolForwarder: Sendable {
         return request
     }
 
-    /// Factory-key resolution. An ALL-UPPERCASE stored value names a variable
-    /// in the env file.
+    /// Key resolution: the member's own key when set, else the factory's.
+    /// An ALL-UPPERCASE stored value names a variable in the env file.
     enum KeyResolution: Equatable {
         case key(String?)
         case missingReference(String)
     }
 
     func apiKey(for member: MemberConfig, config: PeerConfig) -> KeyResolution {
-        guard let factory = config.factory(ofInterface: member.interfaceId),
-              let ref = factory.apiKeyRef,
+        let ref = member.apiKeyRef
+            ?? config.factory(ofInterface: member.interfaceId)?.apiKeyRef
+        guard let ref,
               let stored = try? secrets.load(ref), !stored.isEmpty else {
             return .key(nil)
         }

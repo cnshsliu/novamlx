@@ -138,21 +138,25 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
     public var interfaceId: String
     /// Model name this member expects on the wire.
     public var upstreamModel: String
+    /// The member's own key, overriding the factory's. Nil = inherit.
+    public var apiKeyRef: String?
     public var weight: Int?
     public var isEnabled: Bool
 
     public init(id: String, name: String, interfaceId: String,
-                upstreamModel: String, weight: Int? = nil, isEnabled: Bool = true) {
+                upstreamModel: String, apiKeyRef: String? = nil,
+                weight: Int? = nil, isEnabled: Bool = true) {
         self.id = id
         self.name = name
         self.interfaceId = interfaceId
         self.upstreamModel = upstreamModel
+        self.apiKeyRef = apiKeyRef
         self.weight = weight
         self.isEnabled = isEnabled
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, interfaceId, upstreamModel, weight, isEnabled
+        case id, name, interfaceId, upstreamModel, apiKeyRef, weight, isEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -163,6 +167,7 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         // interfaceId; PeerConfig.migrateToInterfaceSchemaIfNeeded wipes them.
         interfaceId = try c.decodeIfPresent(String.self, forKey: .interfaceId) ?? ""
         upstreamModel = try c.decodeIfPresent(String.self, forKey: .upstreamModel) ?? name
+        apiKeyRef = try c.decodeIfPresent(String.self, forKey: .apiKeyRef)
         weight = try c.decodeIfPresent(Int.self, forKey: .weight)
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
     }
@@ -173,6 +178,7 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
         try c.encode(name, forKey: .name)
         try c.encode(interfaceId, forKey: .interfaceId)
         try c.encode(upstreamModel, forKey: .upstreamModel)
+        try c.encodeIfPresent(apiKeyRef, forKey: .apiKeyRef)
         try c.encodeIfPresent(weight, forKey: .weight)
         try c.encode(isEnabled, forKey: .isEnabled)
     }
