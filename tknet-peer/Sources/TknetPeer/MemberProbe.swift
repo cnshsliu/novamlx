@@ -156,7 +156,7 @@ public enum MemberProbe {
     ) async -> MemberProbeResult {
         let depth: Depth = (deep || !route.kind.defaultsToLightProbe) ? .full : .light
         if depth == .light {
-            var result = await discoverModels(base: route.url, apiKey: apiKey)
+            var result = await discoverModels(base: Self.factoryBase(of: route), apiKey: apiKey)
             result = MemberProbeResult(
                 ok: result.ok, httpStatus: result.httpStatus, models: [],
                 message: result.ok
@@ -206,14 +206,30 @@ public enum MemberProbe {
         }
     }
 
+    /// Factory base behind one route: the full interface URL minus the
+    /// canonical kind path.
+    public static func factoryBase(of route: MemberRoute) -> URL {
+        var text = route.url.absoluteString
+        let path = route.kind.path
+        if text.hasSuffix(path) {
+            text.removeLast(path.count)
+        }
+        while text.hasSuffix("/") { text.removeLast() }
+        return URL(string: text) ?? route.url
+    }
+
     /// Minimal real-invocation body per kind. `max_tokens`/`max_output_tokens`
     /// of 1 keeps the cost at a single token.
     static func barePayload(kind: InterfaceKind, model: String) -> String? {
         let encoded = model.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         switch kind {
-        case .openaiChat, .novaDecision:
+        case .openaiChat:
             return #"{"model":"\#(encoded)","messages":[{"role":"user","content":"ping"}],"max_tokens":1,"stream":false}"#
+        case .novaDecision:
+            // /v1/decisions wants {model, state, questions}; a no-label
+            // ("noul") question is the minimal valid spec.
+            return #"{"model":"\#(encoded)","state":"ping","questions":{"q1":{"type":"noul","instructions":"ping"}}}"#
         case .anthropicMessages:
             return #"{"model":"\#(encoded)","messages":[{"role":"user","content":"ping"}],"max_tokens":1}"#
         case .openaiResponses:
