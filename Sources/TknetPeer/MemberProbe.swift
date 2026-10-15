@@ -154,7 +154,13 @@ public enum MemberProbe {
         route: MemberRoute, model: String, apiKey: String?,
         deep: Bool = false, timeoutSeconds: Double = 30
     ) async -> MemberProbeResult {
-        let depth: Depth = (deep || !route.kind.defaultsToLightProbe) ? .full : .light
+        // Local factories cost nothing: go full whenever a bare template
+        // exists. Light probing stays for remote, quota-metered APIs — and
+        // is not an auth check when the discovery endpoint is public
+        // (NovaMLX serves /v1/models unauthenticated).
+        let hasTemplate = barePayload(kind: route.kind, model: model) != nil
+        let depth: Depth = (deep || !route.kind.defaultsToLightProbe
+                            || (route.isLocal && hasTemplate)) ? .full : .light
         if depth == .light {
             var result = await discoverModels(base: Self.factoryBase(of: route), apiKey: apiKey)
             result = MemberProbeResult(
@@ -237,6 +243,8 @@ public enum MemberProbe {
             return #"{"model":"\#(encoded)","input":"ping","max_output_tokens":16}"#
         case .openaiEmbeddings:
             return #"{"model":"\#(encoded)","input":"ping"}"#
+        case .openaiSpeech:
+            return #"{"model":"\#(encoded)","input":"ping","voice":"alloy"}"#
         default:
             return nil
         }
@@ -245,6 +253,8 @@ public enum MemberProbe {
     /// 2xx is not enough (peer-bot's standard): the body must carry real
     /// content for the kind — a choice, a vector, or output text.
     static func responseLooksComplete(kind: InterfaceKind, body: Data) -> Bool {
+        // Audio replies are raw bytes, not JSON.
+        if kind == .openaiSpeech { return !body.isEmpty }
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             return false
         }
