@@ -57,7 +57,9 @@ struct MembersView: View {
             FactoryForm(draft: draft)
         }
         .sheet(item: $memberDraft) { draft in
-            MemberForm(draft: draft)
+            MemberForm(draft: draft) { memberId, result in
+                memberTestResults[memberId] = result
+            }
         }
         .confirmationDialog(
             "Delete member \(pendingDeleteMember.map { MemberLabel.title($0, among: state.config.members, config: state.config) } ?? "member")?",
@@ -638,6 +640,9 @@ private struct MemberForm: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var state: PeerAppState
     let draft: MemberDraft
+    /// Test results flow back to the member list so the row's status stays
+    /// in sync with whatever this dialog last measured.
+    let onTestResult: (String, MemberProbeResult) -> Void
 
     @State private var model: String
     @State private var upstreamOverride: String
@@ -655,8 +660,9 @@ private struct MemberForm: View {
     @State private var revealKey = false
     @State private var originalKey: String?
 
-    init(draft: MemberDraft) {
+    init(draft: MemberDraft, onTestResult: @escaping (String, MemberProbeResult) -> Void) {
         self.draft = draft
+        self.onTestResult = onTestResult
         _model = State(initialValue: draft.model)
         _upstreamOverride = State(initialValue: draft.upstreamOverride)
         _factoryId = State(initialValue: draft.factoryId)
@@ -803,7 +809,9 @@ private struct MemberForm: View {
             formError = "The member vanished before it could be tested."
             return
         }
-        testResult = await state.probeMember(member)
+        let result = await state.probeMember(member)
+        testResult = result
+        onTestResult(memberId, result)
         formError = nil
     }
 
