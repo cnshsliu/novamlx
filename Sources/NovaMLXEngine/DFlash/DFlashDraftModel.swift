@@ -3,6 +3,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 import NovaMLXCore
+import NovaMLXUtils
 
 // Full DFlash2 block drafter. The public selector and grouped-conv types in
 // `DFlashPath` stay for the speed-gate tests and the weightless install hook.
@@ -15,6 +16,18 @@ public final class DFlashCtxCache {
     public internal(set) var offset: Int = 0
 
     public init() {}
+
+    /// Append one context block. The setters stay on this type so other
+    /// modules in the file can grow the cache without a public setter.
+    func append(keys newKeys: MLXArray, values newValues: MLXArray) {
+        if let keys, let values {
+            self.keys = concatenated([keys, newKeys], axis: 2)
+            self.values = concatenated([values, newValues], axis: 2)
+        } else {
+            self.keys = newKeys
+            self.values = newValues
+        }
+    }
 }
 
 /// Per-layer conv. `base_kernel` is `[2, taps, hidden]` (input side, output side).
@@ -187,13 +200,7 @@ final class DFlashBlockAttention: Module {
         ctxKeys = kNorm(ctxKeys.reshaped(batch, rows, nKVHeads, -1)).transposed(0, 2, 1, 3)
         ctxValues = ctxValues.reshaped(batch, rows, nKVHeads, -1).transposed(0, 2, 1, 3)
         ctxKeys = applyRotaryPosition(rope, to: ctxKeys, offset: .scalar(cache.offset))
-        if let prevK = cache.keys, let prevV = cache.values {
-            cache.keys = concatenated([prevK, ctxKeys], axis: 2)
-            cache.values = concatenated([prevV, ctxValues], axis: 2)
-        } else {
-            cache.keys = ctxKeys
-            cache.values = ctxValues
-        }
+        cache.append(keys: ctxKeys, values: ctxValues)
         cache.offset += rows
         return (cache.keys!, cache.values!)
     }

@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLLM
 import MLXLMCommon
+import MLXNN
 import MLXVLM
 
 /// Calls installed on Qwen3.5 text and VLM backbones by `Scripts/install-dflash-hooks.py`.

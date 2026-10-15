@@ -296,33 +296,16 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         parameters: GenerateParameters,
         processor: LogitProcessor? = nil
     ) throws {
-        guard drafter.hasSpeculativeWeights else {
-            throw DFlashError.invalidConfig(
-                "DFlash2 path selector and local conv are not loaded; refusing to claim a boost for plain decode"
-            )
-        }
-        if drafter.hasBlockWeights {
-            drafter.bind(
-                embed: target.dflashEmbedding,
-                lmHead: { target.dflashLmHead($0) }
-            )
-        }
-        self.target = target
-        self.hooks = nil
-        self.drafter = drafter
-        self.mainCache = try mainCache ?? target.newCache(parameters: parameters)
-        self.processor = processor ?? parameters.processor()
-        self.maxTokens = parameters.maxTokens
-        self.tap = drafter.config.targetLayerIds.isEmpty ? [0] : drafter.config.targetLayerIds
-        let maxCap = Swift.max(1, drafter.config.blockSize - 1)
-        self.capPolicy = DFlashCapPolicy(maxCap: maxCap)
-        self.draftCache = []
-        self.cacheBackup = []
-        self.lastLogits = MLXArray.zeros([1, 1])
-        self.lastHidden = MLXArray.zeros([1, 1, 1])
-        let start = Date()
-        try prepare(input: input)
-        self.promptPrefillTime = Date().timeIntervalSince(start)
+        try self.init(
+            input: input,
+            target: target,
+            hooks: nil,
+            drafter: drafter,
+            mainCache: mainCache,
+            parameters: parameters,
+            processor: processor,
+            cacheModel: target
+        )
     }
 
     /// Same loop as the `DFlashTarget` init. Uses installed `novamlxDFlash*` taps when
@@ -344,18 +327,49 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         guard let hooks = DFlashHooks.make(model: model) else {
             throw DFlashError.invalidConfig("target has no DFlash hidden-state taps")
         }
+        try self.init(
+            input: input,
+            target: nil,
+            hooks: hooks,
+            drafter: drafter,
+            mainCache: mainCache,
+            parameters: parameters,
+            processor: processor,
+            cacheModel: model
+        )
+    }
+
+    /// Both public inits delegate here. A delegating init cannot assign `let`
+    /// properties on another path, which is what the Apple Silicon compiler rejected.
+    private init(
+        input: LMInput,
+        target: (any DFlashTarget)?,
+        hooks: DFlashHooks?,
+        drafter: DFlashDraftModel,
+        mainCache: [KVCache]?,
+        parameters: GenerateParameters,
+        processor: LogitProcessor?,
+        cacheModel: any LanguageModel
+    ) throws {
         guard drafter.hasSpeculativeWeights else {
             throw DFlashError.invalidConfig(
                 "DFlash2 path selector and local conv are not loaded; refusing to claim a boost for plain decode"
             )
         }
         if drafter.hasBlockWeights {
-            drafter.bind(embed: hooks.embedding, lmHead: hooks.lmHead)
+            if let target {
+                drafter.bind(
+                    embed: target.dflashEmbedding,
+                    lmHead: { target.dflashLmHead($0) }
+                )
+            } else if let hooks {
+                drafter.bind(embed: hooks.embedding, lmHead: hooks.lmHead)
+            }
         }
-        self.target = nil
+        self.target = target
         self.hooks = hooks
         self.drafter = drafter
-        self.mainCache = try mainCache ?? model.newCache(parameters: parameters)
+        self.mainCache = try mainCache ?? cacheModel.newCache(parameters: parameters)
         self.processor = processor ?? parameters.processor()
         self.maxTokens = parameters.maxTokens
         self.tap = drafter.config.targetLayerIds.isEmpty ? [0] : drafter.config.targetLayerIds
@@ -565,9 +579,14 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
 
     private mutating func restoreMainCache() {
         guard cacheBackup.count == mainCache.count else { return }
-        for (live, saved) in zip(mainCache, cacheBackup) {
+        for index in mainCache.indices {
+            var live = mainCache[index]
+            let saved = cacheBackup[index]
             live.state = saved.state
-            if let liveBase = live as? BaseKVCache, let savedBase = saved as? BaseKVCache {
+            mainCache[index] = live
+            if let liveBase = mainCache[index] as? BaseKVCache,
+               let savedBase = saved as? BaseKVCache
+            {
                 liveBase.offset = savedBase.offset
             }
         }
