@@ -488,6 +488,9 @@ private struct FactoryForm: View {
     @State private var url: String
     @State private var apiKey: String
     @State private var formError: String?
+    @State private var revealKey = false
+    /// The stored key as loaded, so Save can skip a no-op rewrite.
+    @State private var originalKey = ""
 
     init(draft: FactoryDraft) {
         self.draft = draft
@@ -502,7 +505,31 @@ private struct FactoryForm: View {
                 .font(.title3.bold())
             TextField("Name", text: $name)
             TextField("URL (host:port)", text: $url)
-            SecureField(draft.isNew ? "API key (optional)" : "API key (blank keeps the current key)", text: $apiKey)
+            HStack(spacing: 6) {
+                Group {
+                    if revealKey {
+                        TextField("API key", text: $apiKey)
+                    } else {
+                        SecureField("API key (optional)", text: $apiKey)
+                    }
+                }
+                Button {
+                    revealKey.toggle()
+                } label: {
+                    Image(systemName: revealKey ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.link)
+                .help(revealKey ? "Hide the key" : "Reveal the key")
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(apiKey, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.link)
+                .disabled(apiKey.isEmpty)
+                .help("Copy the key")
+            }
             Text("ALL-UPPERCASE values are looked up in \(state.envFileURL.path).")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -517,6 +544,14 @@ private struct FactoryForm: View {
         }
         .padding(20)
         .frame(width: 420)
+        .onAppear {
+            guard !draft.isNew, let id = draft.factoryId,
+                  let factory = state.config.factory(id: id) else { return }
+            if let stored = state.factoryStoredKey(factory) {
+                apiKey = stored
+                originalKey = stored
+            }
+        }
     }
 
     private func save() async {
@@ -534,7 +569,8 @@ private struct FactoryForm: View {
             formError = problem
             return
         }
-        let key = trimmedKey.isEmpty ? nil : trimmedKey
+        // Unchanged (or untouched new) key: keep the stored one.
+        let key: String? = (apiKey == originalKey) ? nil : trimmedKey
         let saved = await state.saveFactory(
             id: draft.factoryId, name: trimmedName, baseUrl: base, apiKey: key)
         if saved {

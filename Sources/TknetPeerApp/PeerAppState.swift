@@ -530,6 +530,12 @@ final class PeerAppState: ObservableObject {
         EnvKeyFile.resolve(value, url: envFileURL)
     }
 
+    /// The raw stored factory key — env reference names stay unresolved so
+    /// the edit form shows exactly what is persisted.
+    func factoryStoredKey(_ factory: FactoryConfig) -> String? {
+        factory.apiKeyRef.flatMap { readSecret($0) }
+    }
+
     /// The key stored on a factory, pre-filled into new member forms.
     func factoryDefaultKey(_ factory: FactoryConfig) -> String? {
         factory.apiKeyRef.flatMap { readSecret($0) }.flatMap { resolveKey($0) }
