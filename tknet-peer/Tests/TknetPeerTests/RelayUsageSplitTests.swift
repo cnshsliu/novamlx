@@ -58,4 +58,21 @@ struct RelayUsageSplitTests {
         #expect(tail.usage?.prompt == 5)
         #expect(tail.usage?.completion == 2)
     }
+
+    @Test("anthropic message_start and message_delta usage count")
+    func anthropicUsage() {
+        let start = Relay.consumeUsage(
+            incoming: Data("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":11,\"cache_read_input_tokens\":4,\"output_tokens\":1}}}\n".utf8),
+            remainder: "",
+            previous: nil)
+        #expect(start.usage?.prompt == 11)
+        #expect(start.usage?.cached == 4)
+        let delta = Relay.consumeUsage(
+            incoming: Data("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":6}}\n".utf8),
+            remainder: "",
+            previous: start.usage)
+        #expect(delta.usage?.prompt == 11)
+        #expect(delta.usage?.completion == 6)
+        #expect(delta.usage?.cached == 4)
+    }
 }

@@ -38,6 +38,10 @@ struct SupplyAPITests {
         #expect(!SupplyAPI.allows(SupplyAPI.embeddings, gatewayPath: "/v1/chat/completions"))
         #expect(SupplyAPI.allows(SupplyAPI.imageGenerations, gatewayPath: "/v1/images/generations"))
         #expect(!SupplyAPI.allows(SupplyAPI.imageGenerations, gatewayPath: "/v1/images/edits"))
+        #expect(SupplyAPI.contract(kind: "anthropic.messages")?.operations.map(\.path) == ["/v1/messages"])
+        #expect(SupplyAPI.allows(SupplyAPI.anthropicMessages, gatewayPath: "/v1/messages"))
+        #expect(!SupplyAPI.allows(SupplyAPI.anthropicMessages, gatewayPath: "/v1/chat/completions"))
+        #expect(PeerConfig.apiContract(of: .anthropicMessages).kind == "anthropic.messages")
     }
 
     @Test("background removal is chosen from the model id")

@@ -14,6 +14,9 @@ final class MockSourceServer: @unchecked Sendable {
     private var _lastAuthorizationHeader: String?
     private var _lastBodyModel: String?
     private var _lastPath: String?
+    private var _lastXAPIKey: String?
+    private var _lastAnthropicVersion: String?
+    private var _lastAnthropicBeta: String?
     private var _lastProbeAuthorization: String?
     private var _lastProbePath: String?
     private var serverTask: Task<Void, Never>?
@@ -61,6 +64,15 @@ final class MockSourceServer: @unchecked Sendable {
     var lastPath: String? {
         lock.lock(); defer { lock.unlock() }; return _lastPath
     }
+    var lastXAPIKey: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastXAPIKey
+    }
+    var lastAnthropicVersion: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastAnthropicVersion
+    }
+    var lastAnthropicBeta: String? {
+        lock.lock(); defer { lock.unlock() }; return _lastAnthropicBeta
+    }
     /// Last `authorization` header seen on a GET (models probe).
     var lastProbeAuthorization: String? {
         lock.lock(); defer { lock.unlock() }; return _lastProbeAuthorization
@@ -82,7 +94,7 @@ final class MockSourceServer: @unchecked Sendable {
     func start() async throws {
         let router = Router()
         let paths = [
-            "/v1/chat/completions", "/v1/embeddings",
+            "/v1/chat/completions", "/v1/messages", "/v1/embeddings",
             "/v1/images/generations", "/v1/images/edits",
             "/v1/images/background-removals",
             "/v1/audio/speech", "/v1/audio/transcriptions",
@@ -106,7 +118,10 @@ final class MockSourceServer: @unchecked Sendable {
                     authorization: request.headers[.authorization],
                     model: model,
                     noAutoload: request.headers[values: .init("X-No-Autoload")!].first,
-                    path: request.uri.path)
+                    path: request.uri.path,
+                    xAPIKey: request.headers[values: .init("x-api-key")!].first,
+                    anthropicVersion: request.headers[values: .init("anthropic-version")!].first,
+                    anthropicBeta: request.headers[values: .init("anthropic-beta")!].first)
                 return self.respond()
             }
         }
@@ -175,12 +190,18 @@ final class MockSourceServer: @unchecked Sendable {
         }
     }
 
-    private func record(authorization: String?, model: String?, noAutoload: String?, path: String) {
+    private func record(
+        authorization: String?, model: String?, noAutoload: String?, path: String,
+        xAPIKey: String?, anthropicVersion: String?, anthropicBeta: String?
+    ) {
         lock.lock(); defer { lock.unlock() }
         _lastAuthorizationHeader = authorization
         _lastBodyModel = model
         _lastNoAutoloadHeader = noAutoload
         _lastPath = path
+        _lastXAPIKey = xAPIKey
+        _lastAnthropicVersion = anthropicVersion
+        _lastAnthropicBeta = anthropicBeta
         _hitCount += 1
     }
 

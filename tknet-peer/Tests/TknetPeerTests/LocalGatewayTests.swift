@@ -17,6 +17,7 @@ struct LocalGatewayTests {
         try await b.start()
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-lgw-\(UUID().uuidString)"))
+        secrets.save("sk-ant", for: "factory/fa")
         var config = PeerConfig.defaultConfig()
         let interfaces: (String) -> [InterfaceConfig] = { prefix in
             [InterfaceConfig(id: "\(prefix)-chat", kind: .openaiChat),
@@ -26,7 +27,7 @@ struct LocalGatewayTests {
         }
         config.factories = [
             FactoryConfig(id: "fa", name: "a", baseUrl: URL(string: "http://127.0.0.1:\(a.port)")!,
-                          interfaces: interfaces("fa")),
+                          apiKeyRef: "factory/fa", interfaces: interfaces("fa")),
             FactoryConfig(id: "fb", name: "b", baseUrl: URL(string: "http://127.0.0.1:\(b.port)")!,
                           interfaces: interfaces("fb")),
         ]
@@ -157,6 +158,42 @@ struct LocalGatewayTests {
             variations.httpBody = Data(#"{"model":"gen"}"#.utf8)
             let (_, varRes) = try await URLSession.shared.data(for: variations)
             #expect((varRes as? HTTPURLResponse)?.statusCode == 404)
+        }
+    }
+
+    @Test("anthropic messages forwards with x-api-key and rejects chat")
+    func anthropicMessages() async throws {
+        try await withGateway { gateway, forwarder, a, _ in
+            var config = forwarder.currentConfig
+            config.factories[0].interfaces.append(
+                InterfaceConfig(id: "fa-ant", kind: .anthropicMessages))
+            config.members[0].interfaceId = "fa-ant"
+            config.pools = [
+                PoolConfig(id: "claude", name: "claude", kind: .anthropicMessages, memberIds: ["a"]),
+            ]
+            forwarder.updateConfig(config)
+
+            var chat = URLRequest(url: URL(string: "http://127.0.0.1:\(gateway.port)/v1/chat/completions")!)
+            chat.httpMethod = "POST"
+            chat.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            chat.httpBody = Data(#"{"model":"claude","messages":[{"role":"user","content":"hi"}]}"#.utf8)
+            let (_, chatRes) = try await URLSession.shared.data(for: chat)
+            #expect((chatRes as? HTTPURLResponse)?.statusCode == 400)
+            #expect(a.hitCount == 0)
+
+            var messages = URLRequest(url: URL(string: "http://127.0.0.1:\(gateway.port)/v1/messages")!)
+            messages.httpMethod = "POST"
+            messages.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            messages.setValue("prompt-caching-2024-07-31", forHTTPHeaderField: "anthropic-beta")
+            messages.httpBody = Data(#"{"model":"claude","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#.utf8)
+            let (_, msgRes) = try await URLSession.shared.data(for: messages)
+            #expect((msgRes as? HTTPURLResponse)?.statusCode == 200)
+            #expect(a.lastPath == "/v1/messages")
+            #expect(a.lastBodyModel == "ua")
+            #expect(a.lastXAPIKey == "sk-ant")
+            #expect(a.lastAnthropicVersion == "2023-06-01")
+            #expect(a.lastAnthropicBeta == "prompt-caching-2024-07-31")
+            #expect(a.lastAuthorizationHeader == nil)
         }
     }
 }

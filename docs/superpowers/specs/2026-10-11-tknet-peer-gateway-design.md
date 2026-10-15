@@ -23,6 +23,8 @@ Tknet Peer 是用户这边的本地网关。tknet 只跟这个网关打交道。
 3. **成员名单跟着 Peer。** 今天远程成员存在 NovaMLX 的 Tokenhub 里（地址、密钥、上游模型名）。这份名单搬到 Peer。NovaMLX 不再代理到别的引擎，也不再代理到 tknet。
 4. **沿用现有身份。** 不重新注册。这台机器已有的 peer 和连接密钥继续用。密钥仍然只留在本机。
 5. **NovaMLX 自己的分布式切层不动。** 那是一个模型拆到多台 Mac 上算，不是网关在多个引擎之间挑一台。它留在 NovaMLX。
+6. **完整支持 Anthropic Messages API。** 2026-10-15 定。成员类型保留。本机端口和隧道都按该协议转发：路径 `/v1/messages`，认证用 `x-api-key` 和 `anthropic-version`。2026-10-14「先从表单拿掉、转发一律拒绝」作废，以后不再执行。
+7. **上游请求不预检密钥。** 2026-10-15 定。`PoolForwarder.makeUpstreamRequest` 保持现状。成员 key 为空时用 factory 的 key。两边都空就发出去，失败就失败。这是管理员配置，不在转发层拦。2026-10-14「缺密钥直接失败、不要空认证打出 401」作废。
 
 ## 现在的行为
 
@@ -32,7 +34,7 @@ Tknet Peer 是用户这边的本地网关。tknet 只跟这个网关打交道。
 
 失败时换下一台，次数是 `maxRetries`（默认 3）。成员返回 4xx 时把状态和正文交回调用方，不换下一台。连接失败、超时或 5xx 才换。池名不存在是 404。池停用或没有可转发的成员是 503。全部尝试都失败是 502。
 
-本机端口默认 `127.0.0.1:6600`。提供 `GET /v1/models`，以及这些 POST：`/v1/chat/completions`、`/v1/embeddings`、`/v1/images/generations`、`/v1/images/edits`、`/v1/images/background-removals`、`/v1/audio/speech`、`/v1/audio/transcriptions`、`/v1/decisions`。不做 `/v1/images/variations`。池子带接口字段；路径不在接口里时直接拒绝，不打到上游。图像生成与图像编辑是两种独立接口。`model` 是池的名字。转发时改成该成员的上游模型名，上游路径与进来的路径相同。图像编辑、去背景和转写可以是 multipart，只改 `model` 字段。回环地址或类型为 Local NovaMLX 的成员会带 `X-No-Autoload: 1`，避免本机 NovaMLX 为一次失败排队加载。Anthropic 类型可以保存，转发时会被拒绝。隧道请求帧可带路径；没有路径的旧帧只当作对话。详见 `docs/superpowers/specs/2026-10-14-peer-api-consistency.md`。
+本机端口默认 `127.0.0.1:6600`。提供 `GET /v1/models`，以及这些 POST：`/v1/chat/completions`、`/v1/messages`、`/v1/embeddings`、`/v1/images/generations`、`/v1/images/edits`、`/v1/images/background-removals`、`/v1/audio/speech`、`/v1/audio/transcriptions`、`/v1/decisions`。不做 `/v1/images/variations`。池子带接口字段；路径不在接口里时直接拒绝，不打到上游。图像生成与图像编辑是两种独立接口。Anthropic Messages 只走 `/v1/messages`，认证是 `x-api-key` 加 `anthropic-version`，客户端带来的 `anthropic-beta` 原样转给上游。`model` 是池的名字。转发时改成该成员的上游模型名，上游路径与进来的路径相同。图像编辑、去背景和转写可以是 multipart，只改 `model` 字段。回环地址或类型为 Local NovaMLX 的成员会带 `X-No-Autoload: 1`，避免本机 NovaMLX 为一次失败排队加载。隧道接受 `apiFormat: openai` 和 `apiFormat: anthropic`。没有路径的 OpenAI 帧只当作对话；没有路径的 Anthropic 帧当作 `/v1/messages`。详见 `docs/superpowers/specs/2026-10-14-peer-api-consistency.md`。
 
 隧道和本机端口进同一套挑选。发给 tknet 的帧里没有成员地址。Mac 菜单栏应用有隧道、成员、池、账号（认领和收益）。命令行和这个应用共用 `~/.config/tknet-peer`，密钥在该目录下收紧权限的文件里，不在钥匙串。同一时间只跑一个 Peer 进程。
 
