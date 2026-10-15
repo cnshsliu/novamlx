@@ -64,4 +64,13 @@ import Testing
         #expect(result.httpStatus == 0)
         #expect(!result.message.isEmpty)
     }
+
+    @Test func draftModelDetection() {
+        #expect(MemberProbe.isDraftModel("RedHatAI/Qwen3.8-27B-speculator.dspark"))
+        #expect(MemberProbe.isDraftModel("deepseek-ai/dspark_qwen3_14b_block7"))
+        #expect(MemberProbe.isDraftModel("deepseek-ai/DSPARK_qwen3_8b_block7_novamlx"))
+        #expect(!MemberProbe.isDraftModel("mlx-community/Qwen3-8B-8bit"))
+        #expect(!MemberProbe.isDraftModel("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"))
+        #expect(!MemberProbe.isDraftModel("rufang/laya-hknews-tags-v4"))
+    }
 }

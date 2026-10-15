@@ -215,10 +215,14 @@ struct MembersView: View {
               let factory = factories.first(where: { $0.id == id }) else { return }
         importNotice = "Importing…"
         Task {
-            if let added = await state.importMembersFromFactory(factory) {
-                importNotice = added == 0
+            if let outcome = await state.importMembersFromFactory(factory) {
+                var text = outcome.added == 0
                     ? "No new models."
-                    : "Added \(added) models."
+                    : "Added \(outcome.added) models."
+                if outcome.skipped > 0 {
+                    text += " Skipped \(outcome.skipped) draft models."
+                }
+                importNotice = text
             } else {
                 importNotice = state.lastError ?? "Import failed."
             }

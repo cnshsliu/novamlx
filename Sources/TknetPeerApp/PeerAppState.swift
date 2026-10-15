@@ -577,7 +577,7 @@ final class PeerAppState: ObservableObject {
     /// `path` defaults to the path of the factory's first member, else `/v1`.
     /// Returns the number added, or nil with `lastError` set on failure.
     @discardableResult
-    func importMembersFromFactory(_ factory: FactoryConfig) async -> Int? {
+    func importMembersFromFactory(_ factory: FactoryConfig) async -> (added: Int, skipped: Int)? {
         guard lockError == nil else { return nil }
         let members = config.members(in: factory)
         let path: String
@@ -611,7 +611,13 @@ final class PeerAppState: ObservableObject {
         let existing = Set(config.members(in: factory).map(\.upstreamModel))
         let type: SourceType = MemberAddress.isLoopback(endpoint) ? .localNovaMLX : .openaiCompatible
         var added = 0
+        var skipped = 0
         for model in result.models where !existing.contains(model) {
+            // DSpark draft blocks are companions of a main model, never members.
+            if MemberProbe.isDraftModel(model) {
+                skipped += 1
+                continue
+            }
             let id = Self.freshMemberId(in: config)
             do {
                 try PeerAdmin.addMember(
@@ -627,7 +633,7 @@ final class PeerAppState: ObservableObject {
             }
         }
         guard await persist(config) else { return nil }
-        return added
+        return (added, skipped)
     }
 
     func savePool(
