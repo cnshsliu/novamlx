@@ -35,4 +35,11 @@ echo "→ MLX-free dependency check"
 bash Scripts/check-mlx-free.sh
 echo "→ LAN pool acceptance"
 bash Scripts/accept-lan-pool.sh
+echo "→ package the release binary"
+bash Scripts/package-cli.sh
+if [ -n "${TKNET_PEER_ARTIFACT_DIR:-}" ]; then
+    mkdir -p "$TKNET_PEER_ARTIFACT_DIR"
+    cp dist/*.tar.gz "$TKNET_PEER_ARTIFACT_DIR/"
+    echo "→ tarball copied to ${TKNET_PEER_ARTIFACT_DIR}"
+fi
 echo "✓ standalone tknet-peer verified in ${DEST}"
