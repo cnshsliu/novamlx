@@ -34,6 +34,13 @@ public enum MemberProbe {
         UpstreamBodyCodec.upstreamURL(endpoint: endpoint, path: "models")
     }
 
+    /// True for NovaMLX DSpark draft/companion blocks (speculators, `_block7`
+    /// companions, `…_novamlx` draft variants). They ride along with a main
+    /// model and are never standalone members, so imports skip them.
+    public static func isDraftModel(_ modelId: String) -> Bool {
+        modelId.lowercased().contains("dspark")
+    }
+
     /// OpenAI-style `{"data":[{"id":…}]}` (Anthropic uses the same shape).
     /// Unknown or malformed bodies yield `[]`, never a throw.
     public static func parseModels(_ data: Data) -> [String] {
