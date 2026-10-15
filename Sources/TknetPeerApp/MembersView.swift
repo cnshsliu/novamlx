@@ -269,11 +269,15 @@ struct MembersView: View {
 enum MemberLabel {
     static func title(_ member: MemberConfig, among members: [MemberConfig]) -> String {
         let model = PeerAdmin.publicModel(member)
-        let shared = members.filter { PeerAdmin.publicModel($0) == model }.count > 1
-        if shared, let host = member.endpoint.host, !host.isEmpty {
-            return "\(model) · \(host)"
-        }
-        return model
+        let sharers = members.filter { PeerAdmin.publicModel($0) == model }
+        guard sharers.count > 1 else { return model }
+        // The host suffix exists to tell the same model apart across different
+        // hosts. When every sharer sits on one host (duplicate entries of one
+        // endpoint) it disambiguates nothing — every row would grow a
+        // "· 127.0.0.1" that just wraps and reads like a broken URL.
+        let hosts = Set(sharers.compactMap(\.endpoint.host))
+        guard hosts.count > 1, let host = member.endpoint.host, !host.isEmpty else { return model }
+        return "\(model) · \(host)"
     }
 }
 
