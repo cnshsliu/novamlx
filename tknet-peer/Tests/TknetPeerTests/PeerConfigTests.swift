@@ -15,16 +15,17 @@ struct PeerConfigTests {
         defer { try? FileManager.default.removeItem(at: url) }
         var config = PeerConfig.defaultConfig()
         config.peerId = "peer-9"
+        config.factories = [FactoryConfig(
+            id: "fx", name: "Local NovaMLX", baseUrl: URL(string: "http://127.0.0.1:6590")!,
+            interfaces: [InterfaceConfig(id: "fx-chat", kind: .openaiChat)])]
         config.members = [MemberConfig(
-            id: "s1", name: "Local NovaMLX", type: .localNovaMLX,
-            endpoint: URL(string: "http://127.0.0.1:6590/v1")!,
-            apiKeyRef: "src/s1", upstreamModel: "Qwen/Qwen-Image-2.1"
+            id: "s1", name: "Local NovaMLX", interfaceId: "fx-chat",
+            upstreamModel: "Qwen/Qwen-Image-2.1"
         )]
         config.capabilities = [Capability(
             demandId: "d1", model: "qwen", sourceId: "s1",
             sourceType: .openaiCompatible, priceIn: 0, priceOut: 0
         )]
-        config.migrateLegacyPoolsIfNeeded()
         try ConfigStore.save(config, to: url)
         let loaded = try ConfigStore.load(from: url)
         #expect(loaded == config)
@@ -103,9 +104,7 @@ struct PeerConfigTests {
         config.registrations["wss://other.example:8443"] = "peer-b"
         config.peerId = "peer-a"
         let source = MemberConfig(
-            id: "s1", name: "Local", type: .localNovaMLX,
-            endpoint: URL(string: "http://127.0.0.1:6590/v1")!,
-            apiKeyRef: "src/s1", upstreamModel: "m")
+            id: "s1", name: "Local", interfaceId: "fx-chat", upstreamModel: "m")
         config.serverMemory = [
             ServerMemory(server: "https://tknet.ai", peerName: "alpha", members: [source]),
             ServerMemory(server: "https://other.example:8443", peerName: "beta"),

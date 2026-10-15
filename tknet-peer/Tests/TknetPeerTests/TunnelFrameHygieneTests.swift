@@ -37,9 +37,11 @@ struct TunnelFrameHygieneTests {
         var config = PeerConfig.defaultConfig()
         config.peerId = "peer-1"
         config.gatewayPort = 0
+        config.factories = [FactoryConfig(
+            id: "fx", name: "hidden", baseUrl: URL(string: endpoint)!,
+            interfaces: [InterfaceConfig(id: "fx-chat", kind: .openaiChat)])]
         config.members = [MemberConfig(
-            id: "member-1", name: "hidden", type: .openaiCompatible,
-            endpoint: URL(string: endpoint)!, apiKeyRef: "src/member-1",
+            id: "member-1", name: "hidden", interfaceId: "fx-chat",
             upstreamModel: "upstream-hidden")]
         config.pools = [PoolConfig(
             id: poolId, name: "coding", memberIds: ["member-1"])]

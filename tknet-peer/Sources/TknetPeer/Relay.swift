@@ -20,7 +20,6 @@ public final class Relay: Sendable {
         public func update(_ config: PeerConfig) {
             lock.lock(); defer { lock.unlock() }
             var incoming = config
-            incoming.migrateLegacyPoolsIfNeeded()
             let previous = Dictionary(uniqueKeysWithValues: self.config.pools.map { ($0.id, $0.requestCount) })
             for index in incoming.pools.indices {
                 let id = incoming.pools[index].id
@@ -98,28 +97,16 @@ public final class Relay: Sendable {
             fail("no pool \(capability.sourceId) for model \(request.model)")
             return
         }
-        // Anthropic forwarding needs a different wire path. Reject when every
-        // enabled member is anthropic so an OpenAI-shaped request is not
-        // mis-forwarded. Mixed pools skip anthropic members inside the forwarder.
-        let enabled = config.members(in: pool).filter(\.isEnabled)
-        if !enabled.isEmpty, enabled.allSatisfy({ $0.type == .anthropic }) {
-            fail("anthropic source forwarding not yet supported")
-            return
-        }
         guard request.apiFormat == .openai else {
             fail("api format \(request.apiFormat.rawValue) unsupported by source \(pool.id)")
             return
         }
 
-        let gatewayPath = request.effectivePath
-        let interface = pool.api ?? capability.api
-        guard let upstreamPath = SupplyAPI.upstreamSuffix(gatewayPath: gatewayPath) else {
-            fail("invalid path \(gatewayPath)", upstreamStatus: 400)
-            return
-        }
+        // The pool's interface kind owns the target URL; the gateway path is
+        // only the routing key, checked inside the forwarder.
         let outcome = await forwarder.forward(
             poolId: pool.id, body: request.body, timeoutSeconds: config.requestTimeoutSeconds,
-            upstreamPath: upstreamPath, interface: interface)
+            gatewayPath: request.effectivePath)
         switch outcome {
         case .cancelled:
             emit(.responseEnd(reqId: request.reqId, result: RequestResult(

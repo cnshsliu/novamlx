@@ -21,74 +21,168 @@ public enum PoolStrategy: String, Codable, Sendable, CaseIterable, Equatable {
     }
 }
 
-/// One upstream the gateway can forward to. Evolved from `SourceConfig`:
-/// the key itself never lives here, only `apiKeyRef`.
+/// The calling template a member is invoked through (2026-10-15 redesign).
+///
+/// An interface is the pair (full endpoint URL, calling template). The
+/// template half is this enum; the URL half is a factory base plus the
+/// canonical `path`. Raw values match tknet `APIContract.kind` strings so
+/// gateway routing and pool membership never drift apart.
+public enum InterfaceKind: String, Codable, CaseIterable, Sendable, Equatable, Identifiable {
+    case openaiChat = "openai.chat"
+    case openaiResponses = "openai.responses"
+    case anthropicMessages = "anthropic.messages"
+    case openaiEmbeddings = "openai.embeddings"
+    case openaiImages = "openai.image.generations"
+    case openaiImageEdits = "openai.image.edits"
+    case openaiSpeech = "openai.audio.speech"
+    case openaiTranscription = "openai.audio.transcription"
+    case novaDecision = "novamlx.decision"
+    case novaBackgroundRemoval = "novamlx.background-removal"
+
+    public var id: String { rawValue }
+
+    /// Canonical request path under a factory base, no trailing slash. The
+    /// single source of truth for turning a base into a full endpoint URL.
+    public var path: String {
+        switch self {
+        case .openaiChat: return "/v1/chat/completions"
+        case .openaiResponses: return "/v1/responses"
+        case .anthropicMessages: return "/v1/messages"
+        case .openaiEmbeddings: return "/v1/embeddings"
+        case .openaiImages: return "/v1/images/generations"
+        case .openaiImageEdits: return "/v1/images/edits"
+        case .openaiSpeech: return "/v1/audio/speech"
+        case .openaiTranscription: return "/v1/audio/transcriptions"
+        case .novaDecision: return "/v1/decisions"
+        case .novaBackgroundRemoval: return "/v1/images/background-removals"
+        }
+    }
+
+    /// The gateway-path form of the same route (identical today; kept
+    /// separate so a future divergence is explicit).
+    public var gatewayPath: String { path }
+
+    public var displayName: String {
+        switch self {
+        case .openaiChat: return "OpenAI Chat"
+        case .openaiResponses: return "OpenAI Responses"
+        case .anthropicMessages: return "Anthropic Messages"
+        case .openaiEmbeddings: return "Embeddings"
+        case .openaiImages: return "Image Generations"
+        case .openaiImageEdits: return "Image Edits"
+        case .openaiSpeech: return "Speech (TTS)"
+        case .openaiTranscription: return "Transcription (ASR)"
+        case .novaDecision: return "Decision"
+        case .novaBackgroundRemoval: return "Background Removal"
+        }
+    }
+
+    /// Anthropic wire auth (`x-api-key` + version header) vs OpenAI Bearer.
+    public var usesXAPIKey: Bool { self == .anthropicMessages }
+
+    /// Bare-call probing that would burn quota or take seconds (real image
+    /// generation, audio synthesis) defaults to a light check: authed
+    /// `GET {base-with-/v1}/models`. Everything else is invoked for real.
+    public var defaultsToLightProbe: Bool {
+        switch self {
+        case .openaiImages, .openaiImageEdits, .openaiSpeech,
+             .novaBackgroundRemoval, .openaiTranscription:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Kinds worth offering in the member form picker.
+    public static var memberSelectable: [InterfaceKind] {
+        [.openaiChat, .anthropicMessages, .openaiResponses, .openaiEmbeddings,
+         .openaiImages, .openaiSpeech, .openaiTranscription, .novaDecision]
+    }
+}
+
+/// The URL half of an interface, owned by a factory: the factory base plus
+/// `InterfaceKind.path` is the member's full endpoint URL. Members reference
+/// this id — the URL itself is never duplicated onto a member.
+public struct InterfaceConfig: Codable, Equatable, Sendable, Identifiable {
+    public var id: String
+    public var kind: InterfaceKind
+
+    public init(id: String, kind: InterfaceKind) {
+        self.id = id
+        self.kind = kind
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, kind }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = (try? c.decode(InterfaceKind.self, forKey: .kind)) ?? .openaiChat
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(kind, forKey: .kind)
+    }
+}
+
+/// One callable unit: an interface (full endpoint URL + calling template)
+/// plus a model name. The endpoint, protocol, and auth style all resolve
+/// through `interfaceId` — a member carries no URL of its own.
 public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
     public var id: String
+    /// Name clients see (the pool name comes from this).
     public var name: String
-    public var type: SourceType
-    public var endpoint: URL
-    /// Reference into the SecretStore — the key itself never lives here.
-    public var apiKeyRef: String
+    /// The interface this member is invoked through.
+    public var interfaceId: String
     /// Model name this member expects on the wire.
     public var upstreamModel: String
     public var weight: Int?
     public var isEnabled: Bool
-    /// The factory (`FactoryConfig.id`) this member belongs to, when grouped.
-    /// `endpoint` stays the absolute source of truth either way.
-    public var factoryId: String?
 
-    public init(id: String, name: String, type: SourceType, endpoint: URL,
-                apiKeyRef: String, upstreamModel: String,
-                weight: Int? = nil, isEnabled: Bool = true,
-                factoryId: String? = nil) {
+    public init(id: String, name: String, interfaceId: String,
+                upstreamModel: String, weight: Int? = nil, isEnabled: Bool = true) {
         self.id = id
         self.name = name
-        self.type = type
-        self.endpoint = endpoint
-        self.apiKeyRef = apiKeyRef
+        self.interfaceId = interfaceId
         self.upstreamModel = upstreamModel
         self.weight = weight
         self.isEnabled = isEnabled
-        self.factoryId = factoryId
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, type, endpoint, apiKeyRef, upstreamModel, weight, isEnabled
-        case factoryId
+        case id, name, interfaceId, upstreamModel, weight, isEnabled
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
-        name = try c.decode(String.self, forKey: .name)
-        type = try c.decode(SourceType.self, forKey: .type)
-        endpoint = try c.decode(URL.self, forKey: .endpoint)
-        apiKeyRef = try c.decode(String.self, forKey: .apiKeyRef)
-        upstreamModel = try c.decode(String.self, forKey: .upstreamModel)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? id
+        // Legacy members (pre-interface schema) decode with an empty
+        // interfaceId; PeerConfig.migrateToInterfaceSchemaIfNeeded wipes them.
+        interfaceId = try c.decodeIfPresent(String.self, forKey: .interfaceId) ?? ""
+        upstreamModel = try c.decodeIfPresent(String.self, forKey: .upstreamModel) ?? name
         weight = try c.decodeIfPresent(Int.self, forKey: .weight)
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
-        factoryId = try c.decodeIfPresent(String.self, forKey: .factoryId)
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
-        try c.encode(type, forKey: .type)
-        try c.encode(endpoint, forKey: .endpoint)
-        try c.encode(apiKeyRef, forKey: .apiKeyRef)
+        try c.encode(interfaceId, forKey: .interfaceId)
         try c.encode(upstreamModel, forKey: .upstreamModel)
         try c.encodeIfPresent(weight, forKey: .weight)
         try c.encode(isEnabled, forKey: .isEnabled)
-        try c.encodeIfPresent(factoryId, forKey: .factoryId)
     }
 }
 
-/// A group of members sharing one `scheme://host:port` base. The user-facing
-/// word is "Factory" (2026-10-15) — unrelated to the "token factory" peer
-/// identity used elsewhere in the app. `baseUrl` carries scheme + host +
-/// port only; a member's `endpoint` is this base plus the member's path.
+/// A host that provides interfaces (endpoint templates) and, through them,
+/// models. The user-facing word is "Factory" (2026-10-15) — unrelated to the
+/// "token factory" peer identity used elsewhere in the app. `baseUrl`
+/// carries scheme + host + port only; every full endpoint URL is
+/// `baseUrl + interface.kind.path`.
 public struct FactoryConfig: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var name: String
@@ -96,18 +190,22 @@ public struct FactoryConfig: Codable, Equatable, Sendable, Identifiable {
     /// dropped before saving.
     public var baseUrl: URL
     /// Reference into the SecretStore for the key shared by this factory's
-    /// members. Pre-fills new member forms; each member keeps its own ref.
+    /// members. An ALL-UPPERCASE value names a variable in the env file.
     public var apiKeyRef: String?
+    /// The calling templates this factory serves.
+    public var interfaces: [InterfaceConfig]
 
-    public init(id: String, name: String, baseUrl: URL, apiKeyRef: String? = nil) {
+    public init(id: String, name: String, baseUrl: URL, apiKeyRef: String? = nil,
+                interfaces: [InterfaceConfig] = []) {
         self.id = id
         self.name = name
         self.baseUrl = baseUrl
         self.apiKeyRef = apiKeyRef
+        self.interfaces = interfaces
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, baseUrl, apiKeyRef
+        case id, name, baseUrl, apiKeyRef, interfaces
     }
 
     public init(from decoder: Decoder) throws {
@@ -116,6 +214,7 @@ public struct FactoryConfig: Codable, Equatable, Sendable, Identifiable {
         name = try c.decode(String.self, forKey: .name)
         baseUrl = try c.decode(URL.self, forKey: .baseUrl)
         apiKeyRef = try c.decodeIfPresent(String.self, forKey: .apiKeyRef)
+        interfaces = try c.decodeIfPresent([InterfaceConfig].self, forKey: .interfaces) ?? []
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -124,6 +223,7 @@ public struct FactoryConfig: Codable, Equatable, Sendable, Identifiable {
         try c.encode(name, forKey: .name)
         try c.encode(baseUrl, forKey: .baseUrl)
         try c.encodeIfPresent(apiKeyRef, forKey: .apiKeyRef)
+        try c.encode(interfaces, forKey: .interfaces)
     }
 
     /// `scheme://host[:port]` with the port kept only when non-default.
@@ -138,38 +238,57 @@ public struct FactoryConfig: Codable, Equatable, Sendable, Identifiable {
         }
         return parts.url?.absoluteString ?? baseUrl.absoluteString
     }
+
+    public func interface(of kind: InterfaceKind) -> InterfaceConfig? {
+        interfaces.first { $0.kind == kind }
+    }
+
+    /// Full endpoint URL of one interface on this factory.
+    public func endpointURL(of kind: InterfaceKind) -> URL? {
+        guard var parts = URLComponents(url: baseUrl, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        var path = kind.path
+        if !path.hasPrefix("/") { path = "/" + path }
+        parts.path = path
+        parts.query = nil
+        parts.fragment = nil
+        return parts.url
+    }
 }
 
-/// A named set of members plus the strategy used to order them.
-/// `api` is the interface this pool serves. Absent means chat only
-/// (legacy configs and pathless tunnel frames).
+/// A named, interface-homogeneous set of members. `kind` is the calling
+/// template every member must share — cross-factory load balancing across
+/// providers with the same template is the pool's core value. Nil kind
+/// decodes as chat (legacy configs and pathless tunnel frames).
 public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var name: String
     public var strategy: PoolStrategy
+    /// Every member's interface must resolve to `kind`.
+    public var kind: InterfaceKind?
     public var memberIds: [String]
     public var maxRetries: Int
     public var isEnabled: Bool
     /// Bumped once per accepted request, not once per retry.
     public var requestCount: Int
-    /// Interface paths this pool accepts. Nil → chat completions only.
-    public var api: APIContract?
 
     public init(id: String, name: String, strategy: PoolStrategy = .roundRobin,
+                kind: InterfaceKind? = .openaiChat,
                 memberIds: [String], maxRetries: Int = 3, isEnabled: Bool = true,
-                requestCount: Int = 0, api: APIContract? = nil) {
+                requestCount: Int = 0) {
         self.id = id
         self.name = name
         self.strategy = strategy
+        self.kind = kind
         self.memberIds = memberIds
         self.maxRetries = maxRetries
         self.isEnabled = isEnabled
         self.requestCount = requestCount
-        self.api = api
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, strategy, memberIds, maxRetries, isEnabled, requestCount, api
+        case id, name, strategy, kind, memberIds, maxRetries, isEnabled, requestCount
     }
 
     public init(from decoder: Decoder) throws {
@@ -177,11 +296,11 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
         id = try c.decode(String.self, forKey: .id)
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? id
         strategy = PoolStrategy.resolved(try c.decodeIfPresent(String.self, forKey: .strategy))
+        kind = try? c.decodeIfPresent(InterfaceKind.self, forKey: .kind)
         memberIds = try c.decodeIfPresent([String].self, forKey: .memberIds) ?? []
         maxRetries = try c.decodeIfPresent(Int.self, forKey: .maxRetries) ?? 3
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         requestCount = try c.decodeIfPresent(Int.self, forKey: .requestCount) ?? 0
-        api = try c.decodeIfPresent(APIContract.self, forKey: .api)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -189,11 +308,11 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(strategy, forKey: .strategy)
+        try c.encodeIfPresent(kind, forKey: .kind)
         try c.encode(memberIds, forKey: .memberIds)
         try c.encode(maxRetries, forKey: .maxRetries)
         try c.encode(isEnabled, forKey: .isEnabled)
         try c.encode(requestCount, forKey: .requestCount)
-        try c.encodeIfPresent(api, forKey: .api)
     }
 }
 
@@ -205,57 +324,9 @@ public enum MemberAddress {
         return host == "127.0.0.1" || host == "localhost" || host == "::1"
     }
 
-    /// NovaMLX on this machine: an explicit preset, or any loopback endpoint.
-    /// Used only to send `X-No-Autoload`, not to rank the member.
-    public static func isLocalTier(_ member: MemberConfig) -> Bool {
-        member.type == .localNovaMLX || isLoopback(member.endpoint)
-    }
-}
-
-/// Legacy `sources` + `capabilities` → one pool per published model name.
-///
-/// Lucas (2026-10-11): one `capability.model` → one pool. Pools may share a
-/// member id when they use the same upstream. When the preferred pool id
-/// (`first member id`) is already taken, the id becomes
-/// `memberId-model` so each published name still gets its own pool.
-public enum PoolMigration {
-    public static func build(_ capabilities: [Capability]) -> (pools: [PoolConfig], poolIds: [String]) {
-        var modelOrder: [String] = []
-        var memberIdsByModel: [String: [String]] = [:]
-        var indexesByModel: [String: [Int]] = [:]
-        for (index, capability) in capabilities.enumerated() {
-            if memberIdsByModel[capability.model] == nil {
-                modelOrder.append(capability.model)
-                memberIdsByModel[capability.model] = []
-                indexesByModel[capability.model] = []
-            }
-            indexesByModel[capability.model, default: []].append(index)
-            if !memberIdsByModel[capability.model, default: []].contains(capability.sourceId) {
-                memberIdsByModel[capability.model, default: []].append(capability.sourceId)
-            }
-        }
-
-        var used: Set<String> = []
-        var pools: [PoolConfig] = []
-        var poolIds = Array(repeating: "", count: capabilities.count)
-        for model in modelOrder {
-            let memberIds = memberIdsByModel[model] ?? []
-            guard let first = memberIds.first else { continue }
-            var id = first
-            if used.contains(id) {
-                id = "\(first)-\(model)"
-                var suffix = 2
-                while used.contains(id) {
-                    id = "\(first)-\(model)-\(suffix)"
-                    suffix += 1
-                }
-            }
-            used.insert(id)
-            pools.append(PoolConfig(id: id, name: model, memberIds: memberIds))
-            for index in indexesByModel[model] ?? [] {
-                poolIds[index] = id
-            }
-        }
-        return (pools, poolIds)
+    /// NovaMLX on this machine: any loopback factory base. Used only to send
+    /// `X-No-Autoload`, not to rank the member.
+    public static func isLocalTier(factoryBase: URL) -> Bool {
+        isLoopback(factoryBase)
     }
 }

@@ -114,34 +114,42 @@ public enum NovaConfigMigrator {
         var warnings: [String] = []
         var secrets: [String: String] = [:]
         var producedMembers: [String: MemberConfig] = [:]
-        var providerByName: [String: MemberConfig] = [:]
+        var providerByName: [String: PendingMember] = [:]
         // Pre-existing members stay as the peer wrote them unless --force.
         let frozen = Set(options.force ? [] : config.members.map(\.id))
 
-        func publish(_ member: MemberConfig, apiKey: String? = nil) {
-            var merged = producedMembers[member.id] ?? member
-            if producedMembers[member.id] == nil {
-                merged = member
-            } else {
-                if member.isEnabled { merged.isEnabled = true }
-                if merged.weight == nil { merged.weight = member.weight }
+        // Factory per host: the migrator only knows OpenAI-shaped endpoints,
+        // so every member lands on a chat interface of its host's factory.
+        func publish(_ pending: PendingMember) {
+            var merged = pending
+            if let earlier = producedPending[pending.id] {
+                if pending.isEnabled { merged.isEnabled = true }
+                if earlier.weight == nil { merged.weight = pending.weight }
             }
-            producedMembers[merged.id] = merged
-            if let apiKey, !apiKey.isEmpty, !frozen.contains(merged.id) {
-                secrets[merged.apiKeyRef] = apiKey
-            }
-            if !frozen.contains(merged.id) {
-                config.upsertMember(merged)
+            producedPending[merged.id] = merged
+            guard !frozen.contains(merged.id) else { return }
+            let factoryId = ensureFactory(base: merged.baseUrl, in: &config)
+            let interfaceId = (try? PeerAdmin.ensureInterface(&config, factoryId: factoryId, kind: .openaiChat)) ?? ""
+            let member = MemberConfig(
+                id: merged.id, name: merged.name, interfaceId: interfaceId,
+                upstreamModel: merged.model, weight: merged.weight, isEnabled: merged.isEnabled)
+            producedMembers[merged.id] = member
+            config.upsertMember(member)
+            if let apiKey = merged.apiKey, !apiKey.isEmpty {
+                if let ref = config.factory(id: factoryId)?.apiKeyRef {
+                    secrets[ref] = apiKey
+                }
             }
         }
+        var producedPending: [String: PendingMember] = [:]
 
         for provider in input.providers {
-            guard let member = member(from: provider, warnings: &warnings) else { continue }
-            providerByName[provider.name.lowercased()] = member
+            guard let pending = pendingMember(from: provider, warnings: &warnings) else { continue }
+            providerByName[provider.name.lowercased()] = pending
             if !provider.id.isEmpty {
-                providerByName[provider.id.lowercased()] = member
+                providerByName[provider.id.lowercased()] = pending
             }
-            publish(member, apiKey: provider.apiKey.nilIfBlank)
+            publish(pending)
         }
 
         var producedPools: [PoolConfig] = []
@@ -155,7 +163,7 @@ public enum NovaConfigMigrator {
             let rows = input.members.filter { belongs($0, to: lb) }
             var memberIds: [String] = []
             for row in rows {
-                guard let built = member(
+                guard let built = pendingMember(
                     from: row, providers: providerByName, localBase: options.localNovaBaseURL,
                     warnings: &warnings, lb: lb)
                 else { continue }
@@ -187,6 +195,7 @@ public enum NovaConfigMigrator {
                 id: poolId,
                 name: lb.slug.nilIfBlank ?? poolId,
                 strategy: strategy,
+                kind: .openaiChat,
                 memberIds: memberIds,
                 maxRetries: max(1, lb.maxRetries),
                 isEnabled: lb.isEnabled)
@@ -207,34 +216,55 @@ public enum NovaConfigMigrator {
             warnings: warnings)
     }
 
-    /// OpenAI-compatible base. Strips a pasted `/v1/chat/completions` and appends `/v1` to a bare host.
+    /// Factory base from a pasted endpoint: scheme + host + port, any path
+    /// (including `/v1/chat/completions`) stripped. The path lives on the
+    /// interface, never on the member.
     public static func normalizeOpenAIBase(_ raw: String) -> URL? {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return nil }
         if !text.contains("://") { text = "https://" + text }
-        guard var comps = URLComponents(string: text),
-              let host = comps.host, !host.isEmpty,
-              let scheme = comps.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else { return nil }
-        var path = comps.path
-        while path.hasSuffix("/") { path.removeLast() }
-        let completions = "/v1/chat/completions"
-        if path.hasSuffix(completions) {
-            path = String(path.dropLast("/chat/completions".count))
-        }
-        while path.hasSuffix("/") { path.removeLast() }
-        if path.isEmpty {
-            path = "/v1"
-        } else if !path.hasSuffix("/v1") {
-            path += "/v1"
-        }
-        comps.path = path
-        return comps.url
+        guard let url = URL(string: text) else { return nil }
+        return PeerAdmin.normalizeFactoryBase(url)
     }
 
-    // MARK: - Members
+    // MARK: - Pending members (factory + interface resolved at publish)
 
-    private static func member(from provider: NovaProviderSnapshot, warnings: inout [String]) -> MemberConfig? {
+    /// A member-to-be: a model plus the factory base it is reached through.
+    /// The interface (chat, for every endpoint this migrator understands) is
+    /// attached when the member is published.
+    private struct PendingMember {
+        var id: String
+        var name: String
+        var model: String
+        var baseUrl: URL
+        var apiKey: String?
+        var weight: Int?
+        var isEnabled: Bool
+    }
+
+    /// Factory per host, named `m-<host>`. Deterministic so a re-run lands on
+    /// the same factory.
+    public static func ensureFactory(base: URL, in config: inout PeerConfig) -> String {
+        let canonical = PeerConfig.normalizedBase(base) ?? base.absoluteString
+        if let existing = config.factories.first(where: {
+            PeerConfig.normalizedBase($0.baseUrl) == canonical
+        }) {
+            return existing.id
+        }
+        let host = URLComponents(string: canonical)?.host ?? canonical
+        let factoryId = "m-\(slug(host))"
+        var unique = factoryId
+        var n = 2
+        while config.factory(id: unique) != nil {
+            unique = "\(factoryId)-\(n)"
+            n += 1
+        }
+        config.upsertFactory(FactoryConfig(
+            id: unique, name: host, baseUrl: base, apiKeyRef: "factory/\(unique)"))
+        return unique
+    }
+
+    private static func pendingMember(from provider: NovaProviderSnapshot, warnings: inout [String]) -> PendingMember? {
         let openAI = provider.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         let anthropic = provider.anthropicEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if openAI.isEmpty {
@@ -245,30 +275,29 @@ public enum NovaConfigMigrator {
             }
             return nil
         }
-        guard let endpoint = normalizeOpenAIBase(openAI) else {
+        guard let base = normalizeOpenAIBase(openAI) else {
             warnings.append("skipped \(provider.name): endpoint \(provider.endpoint) is not an HTTP URL")
             return nil
         }
         let stable = provider.id.nilIfBlank ?? slug(provider.name)
         let id = stable.hasPrefix("th-") ? stable : "th-\(stable)"
-        return MemberConfig(
+        return PendingMember(
             id: id,
             name: provider.name.nilIfBlank ?? id,
-            type: .openaiCompatible,
-            endpoint: endpoint,
-            apiKeyRef: "src/\(id)",
-            upstreamModel: provider.remoteModel,
+            model: provider.remoteModel,
+            baseUrl: base,
+            apiKey: provider.apiKey.nilIfBlank,
             weight: nil,
             isEnabled: provider.isEnabled)
     }
 
-    private static func member(
+    private static func pendingMember(
         from row: NovaLBMemberSnapshot,
-        providers: [String: MemberConfig],
+        providers: [String: PendingMember],
         localBase: URL,
         warnings: inout [String],
         lb: NovaLBSnapshot
-    ) -> MemberConfig? {
+    ) -> PendingMember? {
         let ref = row.ref.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !ref.isEmpty else {
             warnings.append("skipped empty member ref on pool \(lb.slug)")
@@ -276,17 +305,19 @@ public enum NovaConfigMigrator {
         }
         switch row.kind.lowercased() {
         case "local":
+            guard let base = PeerAdmin.normalizeFactoryBase(localBase) else {
+                warnings.append("pool \(lb.slug) local member \(ref) has an invalid local base")
+                return nil
+            }
             let id = "local-\(ref)"
-            return MemberConfig(
-                id: id, name: ref, type: .localNovaMLX, endpoint: localBase,
-                apiKeyRef: "src/\(id)", upstreamModel: ref, weight: row.weight,
-                isEnabled: row.isEnabled)
+            return PendingMember(
+                id: id, name: ref, model: ref, baseUrl: base,
+                apiKey: nil, weight: row.weight, isEnabled: row.isEnabled)
         case "remote":
-            if let found = providers[ref.lowercased()] {
-                var copy = found
-                if let weight = row.weight, copy.weight == nil { copy.weight = weight }
-                if row.isEnabled { copy.isEnabled = true }
-                return copy
+            if var found = providers[ref.lowercased()] {
+                if let weight = row.weight, found.weight == nil { found.weight = weight }
+                if row.isEnabled { found.isEnabled = true }
+                return found
             }
             warnings.append("pool \(lb.slug) remote member \(ref) has no Tokenhub provider; skipped")
             return nil

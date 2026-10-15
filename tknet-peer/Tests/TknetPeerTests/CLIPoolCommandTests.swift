@@ -13,12 +13,15 @@ struct CLIPoolCommandTests {
     func addMemberHidesKey() throws {
         var config = PeerConfig.defaultConfig()
         let store = secrets()
+        try PeerAdmin.saveFactory(
+            &config, secrets: store, id: nil, name: "Ten",
+            baseUrl: URL(string: "http://10.0.0.2:8080")!, apiKey: "super-secret-key")
+        let factoryId = config.factories[0].id
+        let interfaceId = try PeerAdmin.ensureInterface(&config, factoryId: factoryId, kind: .openaiChat)
         try PeerAdmin.addMember(
-            &config, secrets: store, id: "m1", name: "alpha",
-            endpoint: URL(string: "http://10.0.0.2:8080/v1")!, upstreamModel: "u1",
-            apiKey: "super-secret-key", weight: 2, type: .openaiCompatible)
-        #expect(config.member(id: "m1")?.apiKeyRef == "src/m1")
-        #expect(store.load("src/m1") == "super-secret-key")
+            &config, id: "m1", name: "alpha", interfaceId: interfaceId,
+            upstreamModel: "u1", weight: 2)
+        #expect(store.load(config.factory(id: factoryId)!.apiKeyRef!) == "super-secret-key")
         let text = PeerAdmin.memberList(config)
         #expect(text.contains("m1"))
         #expect(text.contains("upstream=u1"))
@@ -29,14 +32,18 @@ struct CLIPoolCommandTests {
     func removeMemberStripsPools() throws {
         var config = PeerConfig.defaultConfig()
         let store = secrets()
-        try PeerAdmin.addMember(
-            &config, secrets: store, id: "m1", name: "a",
-            endpoint: URL(string: "http://10.0.0.2:1/v1")!, upstreamModel: "u",
-            apiKey: nil, weight: nil, type: .openaiCompatible)
-        try PeerAdmin.addMember(
-            &config, secrets: store, id: "m2", name: "b",
-            endpoint: URL(string: "http://10.0.0.3:1/v1")!, upstreamModel: "u",
-            apiKey: nil, weight: nil, type: .openaiCompatible)
+        try PeerAdmin.saveFactory(
+            &config, secrets: store, id: nil, name: "two",
+            baseUrl: URL(string: "http://10.0.0.2:1")!, apiKey: nil)
+        let interface1 = try PeerAdmin.ensureInterface(
+            &config, factoryId: config.factories[0].id, kind: .openaiChat)
+        try PeerAdmin.addMember(&config, id: "m1", name: "a", interfaceId: interface1, upstreamModel: "u")
+        try PeerAdmin.saveFactory(
+            &config, secrets: store, id: nil, name: "three",
+            baseUrl: URL(string: "http://10.0.0.3:1")!, apiKey: nil)
+        let interface2 = try PeerAdmin.ensureInterface(
+            &config, factoryId: config.factories[1].id, kind: .openaiChat)
+        try PeerAdmin.addMember(&config, id: "m2", name: "b", interfaceId: interface2, upstreamModel: "u")
         try PeerAdmin.addPool(&config, id: nil, name: "coding", memberIds: ["m1", "m2"])
         try PeerAdmin.removeMember(&config, id: "m1")
         #expect(config.member(id: "m1") == nil)
@@ -47,11 +54,14 @@ struct CLIPoolCommandTests {
     func updatePoolMembership() throws {
         var config = PeerConfig.defaultConfig()
         let store = secrets()
+        try PeerAdmin.saveFactory(
+            &config, secrets: store, id: nil, name: "one",
+            baseUrl: URL(string: "http://10.0.0.2:1")!, apiKey: nil)
+        let shared = try PeerAdmin.ensureInterface(
+            &config, factoryId: config.factories[0].id, kind: .openaiChat)
         for id in ["m1", "m2"] {
             try PeerAdmin.addMember(
-                &config, secrets: store, id: id, name: id,
-                endpoint: URL(string: "http://10.0.0.2:1/v1")!, upstreamModel: "u",
-                apiKey: nil, weight: nil, type: .openaiCompatible)
+                &config, id: id, name: id, interfaceId: shared, upstreamModel: "u")
         }
         try PeerAdmin.addPool(
             &config, id: "coding", name: "coding", strategy: .roundRobin,
@@ -73,11 +83,15 @@ struct CLIPoolCommandTests {
     func ensureModelPoolSharesName() throws {
         var config = PeerConfig.defaultConfig()
         let store = secrets()
-        for (id, host) in [("m1", "10.0.0.2"), ("m2", "10.0.0.3")] {
+        try PeerAdmin.saveFactory(
+            &config, secrets: store, id: nil, name: "one",
+            baseUrl: URL(string: "http://10.0.0.2:1")!, apiKey: nil)
+        let shared = try PeerAdmin.ensureInterface(
+            &config, factoryId: config.factories[0].id, kind: .openaiChat)
+        for id in ["m1", "m2"] {
             try PeerAdmin.addMember(
-                &config, secrets: store, id: id, name: "Qwen3-8B",
-                endpoint: URL(string: "http://\(host):8080/v1")!, upstreamModel: "Qwen3-8B",
-                apiKey: nil, weight: nil, type: .openaiCompatible)
+                &config, id: id, name: "Qwen3-8B", interfaceId: shared,
+                upstreamModel: "Qwen3-8B")
             try PeerAdmin.ensureModelPool(&config, model: "Qwen3-8B", memberId: id)
         }
         #expect(config.pools.count == 1)

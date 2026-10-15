@@ -32,7 +32,7 @@ struct PoolsView: View {
                                 Text(pool.isEnabled ? "Enabled · retries \(pool.maxRetries)" : "Disabled")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
-                                Text(interfaceLabel(pool.api ?? SupplyAPI.chat))
+                                Text((pool.kind ?? .openaiChat).displayName)
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -68,7 +68,7 @@ struct PoolsView: View {
     private func memberSummary(_ pool: PoolConfig) -> String {
         let labels = pool.memberIds.map { id in
             guard let member = state.config.member(id: id) else { return id }
-            return MemberLabel.title(member, among: state.config.members)
+            return MemberLabel.title(member, among: state.config.members, config: state.config)
         }
         return labels.isEmpty ? "No members" : labels.joined(separator: ", ")
     }
@@ -84,7 +84,7 @@ private struct PoolDraft: Identifiable {
     var maxRetries: Int
     var isEnabled: Bool
     var isNew: Bool
-    var apiKind: String
+    var kind: InterfaceKind
 
     init() {
         poolId = ""
@@ -94,7 +94,7 @@ private struct PoolDraft: Identifiable {
         maxRetries = 3
         isEnabled = true
         isNew = true
-        apiKind = SupplyAPI.chat.kind
+        kind = .openaiChat
     }
 
     init(_ pool: PoolConfig) {
@@ -105,7 +105,7 @@ private struct PoolDraft: Identifiable {
         maxRetries = pool.maxRetries
         isEnabled = pool.isEnabled
         isNew = false
-        apiKind = (pool.api ?? SupplyAPI.chat).kind
+        kind = pool.kind ?? .openaiChat
     }
 }
 
@@ -121,7 +121,7 @@ private struct PoolForm: View {
     @State private var selected: Set<String>
     @State private var maxRetries: Int
     @State private var isEnabled: Bool
-    @State private var apiKind: String
+    @State private var kind: InterfaceKind
     @State private var formError: String?
 
     init(draft: PoolDraft, members: [MemberConfig]) {
@@ -133,7 +133,15 @@ private struct PoolForm: View {
         _selected = State(initialValue: Set(draft.memberIds))
         _maxRetries = State(initialValue: draft.maxRetries)
         _isEnabled = State(initialValue: draft.isEnabled)
-        _apiKind = State(initialValue: draft.apiKind)
+        _kind = State(initialValue: draft.kind)
+    }
+
+    /// A pool is interface-homogeneous: only members whose interface kind
+    /// matches can join. Editing keeps the pool's kind fixed.
+    private var eligibleMembers: [MemberConfig] {
+        members.filter {
+            PeerAdmin.interfaceKind(of: $0, in: state.config) == kind
+        }
     }
 
     var body: some View {
@@ -161,27 +169,36 @@ private struct PoolForm: View {
             }
             HStack(spacing: 6) {
                 Text("Interface")
-                Picker("Interface", selection: $apiKind) {
-                    ForEach(SupplyAPI.allContracts, id: \.kind) { contract in
-                        Text(interfaceLabel(contract)).tag(contract.kind)
+                if draft.isNew {
+                    Picker("Interface", selection: $kind) {
+                        ForEach(InterfaceKind.memberSelectable) { kind in
+                            Text(kind.displayName).tag(kind)
+                        }
                     }
+                    .labelsHidden()
+                    .fixedSize()
+                } else {
+                    Text(kind.displayName).foregroundStyle(.secondary)
                 }
-                .labelsHidden()
-                .fixedSize()
                 Spacer(minLength: 0)
             }
-            Text("Members")
+            Text("Members (\(kind.displayName) only)")
                 .font(.headline)
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(members) { member in
+                    if eligibleMembers.isEmpty {
+                        Text("No \(kind.displayName) members. Import or add members with this interface first.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(eligibleMembers) { member in
                         Toggle(isOn: Binding(
                             get: { selected.contains(member.id) },
                             set: { isOn in
                                 if isOn { selected.insert(member.id) } else { selected.remove(member.id) }
                             }
                         )) {
-                            Text(MemberLabel.title(member, among: members))
+                            Text(MemberLabel.title(member, among: members, config: state.config))
                         }
                     }
                 }
@@ -208,18 +225,14 @@ private struct PoolForm: View {
         }
         let idSource = poolId.trimmingCharacters(in: .whitespacesAndNewlines)
         let id = idSource.isEmpty ? trimmedName : idSource
-        let ordered = members.map(\.id).filter { selected.contains($0) }
+        let ordered = eligibleMembers.map(\.id).filter { selected.contains($0) }
         guard !ordered.isEmpty else {
-            formError = "A pool needs at least one member."
-            return
-        }
-        guard let api = SupplyAPI.contract(kind: apiKind) else {
-            formError = "Unknown interface."
+            formError = "A pool needs at least one \(kind.displayName) member."
             return
         }
         let saved = await state.savePool(
             id: id, name: trimmedName, strategy: strategy, memberIds: ordered,
-            maxRetries: maxRetries, isEnabled: isEnabled, isNew: draft.isNew, api: api)
+            maxRetries: maxRetries, isEnabled: isEnabled, isNew: draft.isNew)
         if saved {
             dismiss()
         } else {
@@ -234,19 +247,5 @@ private func strategyLabel(_ strategy: PoolStrategy) -> String {
     case .weighted: return "Weighted"
     case .lowestLatency: return "Lowest latency"
     case .random: return "Random"
-    }
-}
-
-private func interfaceLabel(_ api: APIContract) -> String {
-    switch api.kind {
-    case "openai.chat": return "Chat"
-    case "openai.image.generations": return "Image generation"
-    case "openai.image.edits": return "Image edits"
-    case "openai.audio.speech": return "Speech"
-    case "openai.audio.transcription": return "Transcription"
-    case "openai.embeddings": return "Embeddings"
-    case "novamlx.decision": return "Decision"
-    case "novamlx.background-removal": return "Background removal"
-    default: return api.kind
     }
 }

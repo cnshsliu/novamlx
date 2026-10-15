@@ -7,9 +7,6 @@ import Testing
 
 @Suite("Local gateway")
 struct LocalGatewayTests {
-    private func endpoint(_ server: MockSourceServer) -> URL {
-        URL(string: "http://127.0.0.1:\(server.port)/v1")!
-    }
 
     private func withGateway(
         _ body: (LocalGateway, PoolForwarder, MockSourceServer, MockSourceServer) async throws -> Void
@@ -21,16 +18,26 @@ struct LocalGatewayTests {
         let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("tknet-lgw-\(UUID().uuidString)"))
         var config = PeerConfig.defaultConfig()
+        let interfaces: (String) -> [InterfaceConfig] = { prefix in
+            [InterfaceConfig(id: "\(prefix)-chat", kind: .openaiChat),
+             InterfaceConfig(id: "\(prefix)-speech", kind: .openaiSpeech),
+             InterfaceConfig(id: "\(prefix)-emb", kind: .openaiEmbeddings),
+             InterfaceConfig(id: "\(prefix)-gen", kind: .openaiImages)]
+        }
+        config.factories = [
+            FactoryConfig(id: "fa", name: "a", baseUrl: URL(string: "http://127.0.0.1:\(a.port)")!,
+                          interfaces: interfaces("fa")),
+            FactoryConfig(id: "fb", name: "b", baseUrl: URL(string: "http://127.0.0.1:\(b.port)")!,
+                          interfaces: interfaces("fb")),
+        ]
         config.members = [
-            MemberConfig(id: "a", name: "a", type: .openaiCompatible, endpoint: endpoint(a),
-                         apiKeyRef: "src/a", upstreamModel: "ua"),
-            MemberConfig(id: "b", name: "b", type: .openaiCompatible, endpoint: endpoint(b),
-                         apiKeyRef: "src/b", upstreamModel: "ub"),
+            MemberConfig(id: "a", name: "a", interfaceId: "fa-chat", upstreamModel: "ua"),
+            MemberConfig(id: "b", name: "b", interfaceId: "fb-chat", upstreamModel: "ub"),
         ]
         config.pools = [
-            PoolConfig(id: "coding", name: "coding", strategy: .roundRobin, memberIds: ["a", "b"],
-                       api: SupplyAPI.chat),
-            PoolConfig(id: "off", name: "off", memberIds: ["a"], isEnabled: false, api: SupplyAPI.chat),
+            PoolConfig(id: "coding", name: "coding", strategy: .roundRobin, kind: .openaiChat,
+                       memberIds: ["a", "b"]),
+            PoolConfig(id: "off", name: "off", kind: .openaiChat, memberIds: ["a"], isEnabled: false),
         ]
         let forwarder = PoolForwarder(config: config, secrets: secrets)
         let gateway = LocalGateway()
@@ -93,8 +100,9 @@ struct LocalGatewayTests {
     func audioSpeech() async throws {
         try await withGateway { gateway, forwarder, a, _ in
             var config = forwarder.currentConfig
+            config.members[0].interfaceId = "fa-speech"
             config.pools = [
-                PoolConfig(id: "tts", name: "tts", memberIds: ["a"], api: SupplyAPI.speech),
+                PoolConfig(id: "tts", name: "tts", kind: .openaiSpeech, memberIds: ["a"]),
             ]
             forwarder.updateConfig(config)
             var request = URLRequest(url: URL(string: "http://127.0.0.1:\(gateway.port)/v1/audio/speech")!)
@@ -112,9 +120,10 @@ struct LocalGatewayTests {
     func pathGating() async throws {
         try await withGateway { gateway, forwarder, a, _ in
             var config = forwarder.currentConfig
+            config.members[0].interfaceId = "fa-emb"
             config.pools = [
-                PoolConfig(id: "emb", name: "emb", memberIds: ["a"], api: SupplyAPI.embeddings),
-                PoolConfig(id: "gen", name: "gen", memberIds: ["a"], api: SupplyAPI.imageGenerations),
+                PoolConfig(id: "emb", name: "emb", kind: .openaiEmbeddings, memberIds: ["a"]),
+                PoolConfig(id: "gen", name: "gen", kind: .openaiEmbeddings, memberIds: ["a"]),
             ]
             forwarder.updateConfig(config)
 

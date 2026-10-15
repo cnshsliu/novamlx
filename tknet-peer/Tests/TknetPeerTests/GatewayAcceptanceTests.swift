@@ -19,13 +19,15 @@ struct GatewayAcceptanceTests {
             .appendingPathComponent("tknet-acc-\(UUID().uuidString)"))
         var config = PeerConfig.defaultConfig()
         config.gatewayPort = 0
+        config.factories = [
+            FactoryConfig(id: "fa", name: "a", baseUrl: URL(string: "http://127.0.0.1:\(a.port)")!,
+                          interfaces: [InterfaceConfig(id: "fa-chat", kind: .openaiChat)]),
+            FactoryConfig(id: "fb", name: "b", baseUrl: URL(string: "http://127.0.0.1:\(b.port)")!,
+                          interfaces: [InterfaceConfig(id: "fb-chat", kind: .openaiChat)]),
+        ]
         config.members = [
-            MemberConfig(id: "a", name: "a", type: .openaiCompatible,
-                         endpoint: URL(string: "http://127.0.0.1:\(a.port)/v1")!,
-                         apiKeyRef: "src/a", upstreamModel: "ua"),
-            MemberConfig(id: "b", name: "b", type: .openaiCompatible,
-                         endpoint: URL(string: "http://127.0.0.1:\(b.port)/v1")!,
-                         apiKeyRef: "src/b", upstreamModel: "ub"),
+            MemberConfig(id: "a", name: "a", interfaceId: "fa-chat", upstreamModel: "ua"),
+            MemberConfig(id: "b", name: "b", interfaceId: "fb-chat", upstreamModel: "ub"),
         ]
         config.pools = [PoolConfig(id: "coding", name: "coding", memberIds: ["a", "b"])]
         let forwarder = PoolForwarder(config: config, secrets: secrets)

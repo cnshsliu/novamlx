@@ -22,7 +22,6 @@ struct MembersView: View {
     @State private var pendingDeleteFactory: FactoryConfig?
     @State private var pendingDeleteMember: MemberConfig?
     @State private var importNotice: String?
-    @State private var adoptNotice: String?
 
     private var factories: [FactoryConfig] { state.config.factories }
 
@@ -61,7 +60,7 @@ struct MembersView: View {
             MemberForm(draft: draft)
         }
         .confirmationDialog(
-            "Delete member \(pendingDeleteMember.map { MemberLabel.title($0, among: state.config.members) } ?? "member")?",
+            "Delete member \(pendingDeleteMember.map { MemberLabel.title($0, among: state.config.members, config: state.config) } ?? "member")?",
             isPresented: Binding(
                 get: { pendingDeleteMember != nil },
                 set: { if !$0 { pendingDeleteMember = nil } }),
@@ -77,17 +76,14 @@ struct MembersView: View {
             Button("Cancel", role: .cancel) { pendingDeleteMember = nil }
         }
         .confirmationDialog(
-            "Delete factory \(pendingDeleteFactory?.name ?? "")?",
+            "Delete factory \(pendingDeleteFactory?.name ?? "")? Its members go with it.",
             isPresented: Binding(
                 get: { pendingDeleteFactory != nil },
                 set: { if !$0 { pendingDeleteFactory = nil } }),
             titleVisibility: .visible
         ) {
-            Button("Keep members (ungrouped)", role: .destructive) {
-                deleteFactory(deleteMembers: false)
-            }
-            Button("Delete members too", role: .destructive) {
-                deleteFactory(deleteMembers: true)
+            Button("Delete", role: .destructive) {
+                deleteFactory()
             }
             Button("Cancel", role: .cancel) { pendingDeleteFactory = nil }
         }
@@ -102,7 +98,6 @@ struct MembersView: View {
                 set: {
                     selectedFactory = $0 ?? .all
                     selectedMemberId = nil
-                    if case .factory(let id) = selectedFactory { adoptMembers(id: id) }
                 })) {
                 Text("All")
                     .tag(FactorySelection.all)
@@ -160,8 +155,8 @@ struct MembersView: View {
 
     private var memberPane: some View {
         VStack(spacing: 0) {
-            if let adoptNotice {
-                Text(adoptNotice)
+            if let importNotice {
+                Text(importNotice)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -196,37 +191,6 @@ struct MembersView: View {
                 minusID: "member-remove", plusID: "member-add",
                 importAction: selectedFactory.factoryId == nil ? nil : { importModels() },
                 importNotice: importNotice)
-        }
-    }
-
-    /// Selecting a factory claims ungrouped members on the same base.
-    private func adoptMembers(id: String) {
-        Task {
-            if let count = await state.adoptMembersIntoFactory(id: id), count > 0 {
-                adoptNotice = "Adopted \(count) ungrouped member\(count == 1 ? "" : "s") matching this factory."
-                try? await Task.sleep(for: .seconds(4))
-                adoptNotice = nil
-            }
-        }
-    }
-
-    /// Bulk-add one member per model the selected factory advertises.
-    private func importModels() {
-        guard let id = selectedFactory.factoryId,
-              let factory = factories.first(where: { $0.id == id }) else { return }
-        importNotice = "Importing…"
-        Task {
-            if let outcome = await state.importMembersFromFactory(factory) {
-                var text = outcome.added == 0
-                    ? "No new models."
-                    : "Added \(outcome.added) models."
-                if outcome.skipped > 0 {
-                    text += " Skipped \(outcome.skipped) draft models."
-                }
-                importNotice = text
-            } else {
-                importNotice = state.lastError ?? "Import failed."
-            }
         }
     }
 
@@ -269,6 +233,44 @@ struct MembersView: View {
             onTest: { testMember(member) })
     }
 
+    // MARK: - Actions
+
+    /// Bulk-add one member per model the selected factory advertises.
+    private func importModels() {
+        guard let id = selectedFactory.factoryId,
+              let factory = factories.first(where: { $0.id == id }) else { return }
+        importNotice = "Importing…"
+        Task {
+            if let outcome = await state.importMembersFromFactory(factory) {
+                var text = outcome.added == 0
+                    ? "No new models."
+                    : "Added \(outcome.added) models."
+                if outcome.skipped > 0 {
+                    text += " Skipped \(outcome.skipped) draft models."
+                }
+                importNotice = text
+            } else {
+                importNotice = state.lastError ?? "Import failed."
+            }
+        }
+    }
+
+    private func openMemberDraft() {
+        guard let id = selectedFactory.factoryId,
+              let factory = factories.first(where: { $0.id == id }) else { return }
+        memberDraft = MemberDraft(factory: factory)
+    }
+
+    private func deleteFactory() {
+        guard let factory = pendingDeleteFactory else { return }
+        if selectedFactory == .factory(factory.id) {
+            selectedFactory = .all
+            selectedMemberId = nil
+        }
+        pendingDeleteFactory = nil
+        Task { await state.deleteFactory(id: factory.id) }
+    }
+
     private var emptyMembersText: String {
         switch selectedFactory {
         case .all:
@@ -277,7 +279,7 @@ struct MembersView: View {
                 : "No members yet."
         case .factory(let id):
             guard let factory = factories.first(where: { $0.id == id }) else { return "" }
-            return "No members in \(factory.name). Use + to add one."
+            return "No members in \(factory.name). Use + or Import models."
         }
     }
 
@@ -306,55 +308,31 @@ struct MembersView: View {
                     .disabled(state.lockError != nil || importNotice == "Importing…")
                     .accessibilityIdentifier("member-import")
             }
-            if let importNotice {
-                Text(importNotice)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
             Spacer()
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.bar)
     }
-
-    private func openMemberDraft() {
-        guard let id = selectedFactory.factoryId,
-              let factory = factories.first(where: { $0.id == id }) else { return }
-        memberDraft = MemberDraft(factory: factory)
-    }
-
-    private func deleteFactory(deleteMembers: Bool) {
-        guard let factory = pendingDeleteFactory else { return }
-        if selectedFactory == .factory(factory.id) {
-            selectedFactory = .all
-            selectedMemberId = nil
-        }
-        pendingDeleteFactory = nil
-        Task { await state.deleteFactory(id: factory.id, deleteMembers: deleteMembers) }
-    }
 }
 
+/// Title for a member. The host suffix only appears when the same model name
+/// is reachable through different factory hosts — otherwise it is noise.
 enum MemberLabel {
-    static func title(_ member: MemberConfig, among members: [MemberConfig]) -> String {
+    static func title(_ member: MemberConfig, among members: [MemberConfig], config: PeerConfig) -> String {
         let model = PeerAdmin.publicModel(member)
         let sharers = members.filter { PeerAdmin.publicModel($0) == model }
         guard sharers.count > 1 else { return model }
-        // The host suffix exists to tell the same model apart across different
-        // hosts. When every sharer sits on one host (duplicate entries of one
-        // endpoint) it disambiguates nothing — every row would grow a
-        // "· 127.0.0.1" that just wraps and reads like a broken URL.
-        let hosts = Set(sharers.compactMap(\.endpoint.host))
-        guard hosts.count > 1, let host = member.endpoint.host, !host.isEmpty else { return model }
+        let hosts = Set(sharers.compactMap { config.memberFactoryBase($0)?.host })
+        guard hosts.count > 1,
+              let host = config.memberFactoryBase(member)?.host, !host.isEmpty else { return model }
         return "\(model) · \(host)"
     }
 }
 
-/// One member row: identity lines on the left, Test/Edit links on the right.
-/// The probe result comes from the parent so the factory-wide test can fill
-/// it in too; a failed probe leaves a warning icon beside the model name.
+/// One member row: model + interface lines on the left, Test/Edit links on
+/// the right. The probe result comes from the parent so the factory-wide
+/// test can fill it in too; a failed probe leaves a warning icon.
 private struct MemberRowView: View {
     @EnvironmentObject private var state: PeerAppState
     let member: MemberConfig
@@ -368,12 +346,10 @@ private struct MemberRowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     // Click copies the model name (without any "· host" suffix).
-                    // A plain Button, not Text+onTapGesture: List row selection
-                    // swallows tap gestures on plain text.
                     Button {
                         copyToPasteboard(PeerAdmin.publicModel(member))
                     } label: {
-                        Text(PeerAdmin.publicModel(member))
+                        Text(MemberLabel.title(member, among: state.config.members, config: state.config))
                             .font(.body.bold())
                     }
                     .buttonStyle(.plain)
@@ -423,25 +399,23 @@ private struct MemberRowView: View {
         .padding(.vertical, 4)
     }
 
-    /// Full forward URL: the member's base plus the default upstream path.
+    /// Full forward URL: the factory base plus the interface's canonical path.
     private var fullEndpointURL: String {
-        var base = member.endpoint.absoluteString
-        while base.hasSuffix("/") { base.removeLast() }
-        return base + "/chat/completions"
+        state.config.memberEndpointURL(member)?.absoluteString ?? "(no interface)"
+    }
+
+    private var detailLine: String {
+        let model = PeerAdmin.publicModel(member)
+        let kind = PeerAdmin.interfaceKind(of: member, in: state.config)?.displayName ?? "?"
+        if member.upstreamModel != model {
+            return "\(kind) · upstream \(member.upstreamModel)"
+        }
+        return kind
     }
 
     private func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    private var detailLine: String {
-        let model = PeerAdmin.publicModel(member)
-        let type = typeLabel(member.type)
-        if member.upstreamModel != model {
-            return "\(type) · upstream \(member.upstreamModel)"
-        }
-        return type
     }
 }
 
@@ -538,17 +512,17 @@ private struct FactoryForm: View {
 
 // MARK: - Member form
 
+/// A member is (interface, model). The interface carries the full endpoint
+/// URL and calling template; the model names what to invoke on it.
 private struct MemberDraft: Identifiable {
     let token = UUID()
     var id: UUID { token }
     var memberId: String?
     var model: String
     var upstreamOverride: String
-    var type: SourceType
-    var factoryId: String?
-    /// Path on the factory base (leading "/"), or the full URL when ungrouped.
-    var endpoint: String
-    var apiKey: String
+    /// The (factory, kind) pair this member is invoked through.
+    var factoryId: String
+    var kind: InterfaceKind
     var weight: String
     var isEnabled: Bool
     var isNew: Bool
@@ -559,15 +533,12 @@ private struct MemberDraft: Identifiable {
         memberId = nil
         model = ""
         upstreamOverride = ""
-        type = .openaiCompatible
         factoryId = factory.id
-        endpoint = "/v1"
-        // Blank inherits the factory key — resolved at request time.
-        apiKey = ""
+        kind = .openaiChat
         weight = ""
         isEnabled = true
         isNew = true
-        factories = [factory]
+        factories = []
     }
 
     init(_ member: MemberConfig, factories: [FactoryConfig]) {
@@ -575,19 +546,11 @@ private struct MemberDraft: Identifiable {
         memberId = member.id
         self.model = model
         upstreamOverride = member.upstreamModel == model ? "" : member.upstreamModel
-        type = member.type
-        factoryId = member.factoryId
-        if let factoryId = member.factoryId,
-           let factory = factories.first(where: { $0.id == factoryId }) {
-            let base = factory.baseUrl.absoluteString
-            var path = member.endpoint.absoluteString
-            if path.hasPrefix(base) { path.removeFirst(base.count) }
-            if path.isEmpty { path = "/" }
-            endpoint = path
-        } else {
-            endpoint = member.endpoint.absoluteString
-        }
-        apiKey = ""
+        let interface = factories.flatMap(\.interfaces).first { $0.id == member.interfaceId }
+        factoryId = factories.first {
+            $0.interfaces.contains { $0.id == member.interfaceId }
+        }?.id ?? ""
+        kind = interface?.kind ?? .openaiChat
         weight = member.weight.map(String.init) ?? ""
         isEnabled = member.isEnabled
         isNew = false
@@ -602,17 +565,13 @@ private struct MemberForm: View {
 
     @State private var model: String
     @State private var upstreamOverride: String
-    @State private var type: SourceType
-    @State private var typeEdited: Bool
-    /// nil = ungrouped (full URL field); otherwise the chosen factory id.
-    @State private var factoryId: String?
-    @State private var endpoint: String
-    @State private var apiKey: String
+    @State private var factoryId: String
+    @State private var kind: InterfaceKind
     @State private var weight: String
     @State private var isEnabled: Bool
     @State private var showMore: Bool
     @State private var formError: String?
-    /// Test outcome for the endpoint as currently entered. Nil = not tested.
+    /// Test outcome for the (interface, model) as currently entered.
     @State private var testResult: MemberProbeResult?
     @State private var isTesting = false
 
@@ -620,11 +579,8 @@ private struct MemberForm: View {
         self.draft = draft
         _model = State(initialValue: draft.model)
         _upstreamOverride = State(initialValue: draft.upstreamOverride)
-        _type = State(initialValue: draft.type)
-        _typeEdited = State(initialValue: !draft.isNew)
         _factoryId = State(initialValue: draft.factoryId)
-        _endpoint = State(initialValue: draft.endpoint)
-        _apiKey = State(initialValue: draft.apiKey)
+        _kind = State(initialValue: draft.kind)
         _weight = State(initialValue: draft.weight)
         _isEnabled = State(initialValue: draft.isEnabled)
         let hasMore = !draft.upstreamOverride.isEmpty || !draft.weight.isEmpty
@@ -632,13 +588,11 @@ private struct MemberForm: View {
     }
 
     private var selectedFactory: FactoryConfig? {
-        if let match = draft.factories.first(where: { $0.id == factoryId }) {
-            return match
-        }
-        return state.config.factories.first { $0.id == factoryId }
+        draft.factories.first { $0.id == factoryId }
+            ?? state.config.factory(id: factoryId)
     }
 
-    /// New members may only be saved after a passing endpoint test; edits
+    /// New members may only be saved after a passing bare-call test; edits
     /// stay open so an offline factory never blocks unrelated changes.
     private var saveDisabled: Bool {
         draft.isNew && testResult?.ok != true
@@ -649,6 +603,7 @@ private struct MemberForm: View {
             Text(draft.isNew ? "Add member" : "Edit member")
                 .font(.title3.bold())
             TextField("Model", text: $model)
+                .onChange(of: model) { _, _ in testResult = nil }
             if let models = testResult?.models, !models.isEmpty {
                 Menu("Choose advertised model…") {
                     ForEach(models, id: \.self) { id in
@@ -665,60 +620,31 @@ private struct MemberForm: View {
                     }
                 }
             } else {
-                // Editing: allow reassignment between factories / ungrouped.
-                Picker("Factory", selection: Binding(
-                    get: { factoryId },
-                    set: { reassign($0) })) {
-                    Text("(none)").tag(String?.none)
+                // Editing: allow moving between factories.
+                Picker("Factory", selection: $factoryId) {
                     ForEach(draft.factories) { factory in
-                        Text(factory.name).tag(String?.some(factory.id))
+                        Text(factory.name).tag(factory.id)
                     }
                 }
+                .onChange(of: factoryId) { _, _ in testResult = nil }
             }
-            if let factory = selectedFactory {
-                TextField("Path (e.g. /v1)", text: $endpoint)
-                    .onChange(of: endpoint) { _, _ in testResult = nil }
-                if let composed = PeerConfig.memberEndpoint(factoryBase: factory.baseUrl, path: endpoint) {
-                    Text(composed.absoluteString)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+            Picker("Interface", selection: $kind) {
+                ForEach(InterfaceKind.memberSelectable) { kind in
+                    Text(kind.displayName).tag(kind)
                 }
-            } else {
-                TextField("Endpoint URL", text: $endpoint)
-                    .onChange(of: endpoint) { _, newValue in
-                        testResult = nil
-                        guard !typeEdited, factoryId == nil else { return }
-                        type = inferredType(newValue)
-                    }
             }
-            SecureField(keyPlaceholder, text: $apiKey)
-                .onChange(of: apiKey) { _, _ in testResult = nil }
-            Text("ALL-UPPERCASE values are looked up in \(state.envFileURL.path).")
+            .onChange(of: kind) { _, _ in testResult = nil }
+            if let factory = selectedFactory, let url = factory.endpointURL(of: kind) {
+                Text(url.absoluteString)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+            Text("The factory's API key is used; ALL-UPPERCASE values resolve from \(state.envFileURL.path).")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 16) {
-                HStack(spacing: 6) {
-                    Text("Type")
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                    Picker("Type", selection: Binding(
-                        get: { type },
-                        set: { type = $0; typeEdited = true }
-                    )) {
-                        Text("OpenAI-compatible").tag(SourceType.openaiCompatible)
-                        Text("Local NovaMLX").tag(SourceType.localNovaMLX)
-                        Text("Anthropic").tag(SourceType.anthropic)
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                .fixedSize(horizontal: true, vertical: false)
-                Toggle("Enabled", isOn: $isEnabled)
-                Spacer(minLength: 0)
-            }
             DisclosureGroup("More", isExpanded: $showMore) {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Upstream model (blank uses Model)", text: $upstreamOverride)
@@ -738,10 +664,10 @@ private struct MemberForm: View {
             }
             HStack {
                 Button("Test") { Task { await runTest() } }
-                    .disabled(isTesting || resolvedEndpoint() == nil)
+                    .disabled(isTesting || !canTest)
                     .accessibilityIdentifier("member-form-test")
                 if draft.isNew && saveDisabled {
-                    Text("Test the endpoint to enable Save.")
+                    Text("Test the member to enable Save.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -755,95 +681,25 @@ private struct MemberForm: View {
         .frame(width: 460)
     }
 
-    /// Switching factories converts the field between path and full-URL form.
-    private func reassign(_ newId: String?) {
-        let oldFactory = selectedFactory
-        factoryId = newId
-        testResult = nil
-        let newFactory = draft.factories.first { $0.id == newId }
-        let text = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        if oldFactory != nil, newFactory == nil {
-            // path -> full URL
-            if let old = oldFactory,
-               let url = PeerConfig.memberEndpoint(factoryBase: old.baseUrl, path: text) {
-                endpoint = url.absoluteString
-            }
-        } else if oldFactory == nil, let newBase = newFactory?.baseUrl.absoluteString {
-            // full URL -> path against the new base
-            if text.hasPrefix(newBase) {
-                var path = String(text.dropFirst(newBase.count))
-                if path.isEmpty { path = "/" }
-                endpoint = path
-            } else if let url = URL(string: text),
-                      PeerConfig.factoryBase(of: url) == PeerConfig.factoryBase(of: URL(string: newBase)!) {
-                var path = url.path
-                if path.isEmpty { path = "/" }
-                if let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.query {
-                    path += "?\(query)"
-                }
-                endpoint = path
-            } else if text.hasPrefix("/") {
-                endpoint = text
-            } else if !text.isEmpty {
-                // Different host entirely: keep only the path portion.
-                var path = URL(string: text)?.path ?? "/"
-                if path.isEmpty { path = "/" }
-                endpoint = path
-            }
-        }
-    }
-
-    /// Endpoint URL exactly as `save()` would build it, or nil when invalid.
-    private func resolvedEndpoint() -> URL? {
-        if let factory = selectedFactory {
-            return PeerConfig.memberEndpoint(factoryBase: factory.baseUrl, path: endpoint)
-        }
-        guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              url.host != nil else { return nil }
-        return url
-    }
-
-    /// Blank key = inherit: the factory's key for a new member, or the
-    /// member's stored key (own -> factory) when editing.
-    private var keyPlaceholder: String {
-        if draft.isNew {
-            return factoryId != nil ? "API key (blank inherits factory)" : "API key"
-        }
-        return "API key (blank keeps the current key)"
-    }
-
-    private func effectiveAPIKey() -> String? {
-        if !apiKey.isEmpty { return apiKey }
-        if !draft.isNew, let id = draft.memberId,
-           let member = state.config.member(id: id) {
-            return state.memberAPIKey(member)
-        }
-        if let factory = selectedFactory {
-            return state.factoryDefaultKey(factory)
-        }
-        return nil
+    private var canTest: Bool {
+        selectedFactory != nil
+            && !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func runTest() async {
-        guard let url = resolvedEndpoint() else {
-            testResult = MemberProbeResult(
-                ok: false, httpStatus: 0, models: [],
-                message: "Endpoint must be an http(s) URL.")
-            return
-        }
-        if let problem = envKeyProblem { formError = problem; return }
+        guard let factory = selectedFactory else { return }
         isTesting = true
         defer { isTesting = false }
-        testResult = await state.probeEndpoint(url, apiKey: effectiveAPIKey())
+        testResult = await state.probeMember(
+            factory: factory, kind: kind, model: testModelName, apiKey: nil)
         formError = nil
     }
 
-    /// Nil, or the reason the typed key is an undefined env reference.
-    private var envKeyProblem: String? {
-        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return state.envKeyProblem(trimmed)
+    /// Model on the wire: the override when present, else the typed name.
+    private var testModelName: String {
+        let override = upstreamOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !override.isEmpty { return override }
+        return model.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func save() async {
@@ -852,13 +708,10 @@ private struct MemberForm: View {
             formError = "Model name is required."
             return
         }
-        guard let endpointURL = resolvedEndpoint() else {
-            formError = selectedFactory != nil
-                ? "Path is not valid."
-                : "Endpoint must be an http(s) URL."
+        guard let factoryId = selectedFactory?.id else {
+            formError = "No factory selected."
             return
         }
-        if let problem = envKeyProblem { formError = problem; return }
         let weightValue: Int?
         let trimmedWeight = weight.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedWeight.isEmpty {
@@ -869,39 +722,18 @@ private struct MemberForm: View {
             formError = "Weight must be a whole number of at least 1."
             return
         }
-        let key: String? = apiKey.isEmpty ? (draft.isNew ? "" : nil) : apiKey
         let saved = await state.saveMember(
             existingId: draft.memberId,
             model: trimmedModel,
             upstreamOverride: upstreamOverride,
-            type: type,
-            endpoint: endpointURL,
-            apiKey: key,
+            factoryId: factoryId,
+            kind: kind,
             weight: weightValue,
-            isEnabled: isEnabled,
-            factoryId: factoryId)
+            isEnabled: isEnabled)
         if saved {
             dismiss()
         } else {
             formError = state.lastError ?? "Could not save the member."
         }
-    }
-}
-
-private func inferredType(_ endpoint: String) -> SourceType {
-    guard let url = URL(string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-        return .openaiCompatible
-    }
-    if MemberAddress.isLoopback(url) { return .localNovaMLX }
-    let host = url.host?.lowercased() ?? ""
-    if host.contains("anthropic.com") { return .anthropic }
-    return .openaiCompatible
-}
-
-private func typeLabel(_ type: SourceType) -> String {
-    switch type {
-    case .openaiCompatible: return "OpenAI-compatible"
-    case .localNovaMLX: return "Local NovaMLX"
-    case .anthropic: return "Anthropic"
     }
 }

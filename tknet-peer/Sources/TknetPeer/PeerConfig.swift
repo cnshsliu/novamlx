@@ -43,7 +43,6 @@ public struct ServerMemory: Codable, Equatable, Sendable, Identifiable {
         capabilities = try c.decodeIfPresent([Capability].self, forKey: .capabilities) ?? []
         retiredDemandIds = try c.decodeIfPresent([String].self, forKey: .retiredDemandIds) ?? []
         pools = try c.decodeIfPresent([PoolConfig].self, forKey: .pools) ?? []
-        migrateLegacyPoolsIfNeeded()
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -55,28 +54,6 @@ public struct ServerMemory: Codable, Equatable, Sendable, Identifiable {
         try c.encode(pools, forKey: .pools)
         try c.encode(capabilities, forKey: .capabilities)
         try c.encode(retiredDemandIds, forKey: .retiredDemandIds)
-    }
-
-    /// One-time upgrade for files written before factories existed: group
-    /// members by endpoint `scheme://host:port`. Local NovaMLX members stay
-    /// ungrouped (nil factoryId) — they are special-cased elsewhere and only
-    /// appear under "All". Idempotent: skipped once any factory is present.
-    public mutating func migrateFactoriesIfNeeded() {
-        guard factories.isEmpty, !members.isEmpty else { return }
-        factories = PeerConfig.deriveFactories(from: &members)
-    }
-
-    /// Fill `pools` from capabilities when a row still has only members.
-    /// Rewrites `capability.sourceId` to the pool id (unchanged when the
-    /// published model had the source to itself).
-    public mutating func migrateLegacyPoolsIfNeeded() {
-        guard pools.isEmpty, !members.isEmpty else { return }
-        let built = PoolMigration.build(capabilities)
-        pools = built.pools
-        for index in capabilities.indices where built.poolIds.indices.contains(index) {
-            let poolId = built.poolIds[index]
-            if !poolId.isEmpty { capabilities[index].sourceId = poolId }
-        }
     }
 }
 
@@ -145,6 +122,7 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         } else {
             members = try c.decodeIfPresent([MemberConfig].self, forKey: .sources) ?? []
         }
+        factories = (try? c.decodeIfPresent([FactoryConfig].self, forKey: .factories)) ?? []
         capabilities = try c.decodeIfPresent([Capability].self, forKey: .capabilities) ?? []
         pools = try c.decodeIfPresent([PoolConfig].self, forKey: .pools) ?? []
         concurrencyLimit = try c.decodeIfPresent(Int.self, forKey: .concurrencyLimit) ?? 1
@@ -154,19 +132,6 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         gatewayHost = try c.decodeIfPresent(String.self, forKey: .gatewayHost) ?? "127.0.0.1"
         gatewayPort = try c.decodeIfPresent(Int.self, forKey: .gatewayPort) ?? 6600
         migratedFromNovaAt = Self.decodeMigrationStamp(c)
-        // One-time upgrade: pre-factory files carry no `factories` key, so
-        // derive factories from endpoint host:port groups on first load. The
-        // key is always written after that (even empty), so a deliberate
-        // delete-the-last-factory is never resurrected.
-        if let decoded = try? c.decodeIfPresent([FactoryConfig].self, forKey: .factories) {
-            factories = decoded
-        } else {
-            migrateFactoriesIfNeeded()
-            for index in serverMemory.indices {
-                serverMemory[index].migrateFactoriesIfNeeded()
-            }
-        }
-        migrateLegacyPoolsIfNeeded()
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -208,49 +173,40 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         return nil
     }
 
-    /// When `pools` is missing, derive one pool per published model and point
-    /// each capability's `sourceId` at that pool. No-op once pools exist.
-    public mutating func migrateLegacyPoolsIfNeeded() {
-        if pools.isEmpty, !members.isEmpty {
-            let built = PoolMigration.build(capabilities)
-            pools = built.pools
-            for index in capabilities.indices where built.poolIds.indices.contains(index) {
-                let poolId = built.poolIds[index]
-                if !poolId.isEmpty { capabilities[index].sourceId = poolId }
-            }
+    // MARK: - Interface-schema migration
+
+    /// One-time cutover to the interface schema (2026-10-15): legacy members
+    /// carried their own endpoint/type and decode with an empty `interfaceId`.
+    /// Per the operator's call, legacy member data is wiped rather than
+    /// migrated — members are re-imported per factory afterwards. Factories
+    /// (hosts + keys) survive. Returns true when something was dropped, so
+    /// the caller persists immediately.
+    @discardableResult
+    public mutating func migrateToInterfaceSchemaIfNeeded() -> Bool {
+        var changed = false
+        if members.contains(where: { $0.interfaceId.isEmpty }) {
+            members = []
+            pools = []
+            capabilities = []
+            changed = true
         }
         for index in serverMemory.indices {
-            serverMemory[index].migrateLegacyPoolsIfNeeded()
+            if serverMemory[index].members.contains(where: { $0.interfaceId.isEmpty }) {
+                serverMemory[index].members = []
+                serverMemory[index].pools = []
+                serverMemory[index].capabilities = []
+                changed = true
+            }
         }
+        return changed
     }
 
-    /// One-time upgrade for files written before factories existed: group
-    /// members by endpoint `scheme://host:port`. Local NovaMLX members stay
-    /// ungrouped (nil factoryId) — they are special-cased elsewhere and only
-    /// appear under "All". Idempotent: skipped once any factory is present.
-    public mutating func migrateFactoriesIfNeeded() {
-        guard factories.isEmpty, !members.isEmpty else { return }
-        factories = Self.deriveFactories(from: &members)
+    public static func defaultConfig() -> PeerConfig {
+        PeerConfig(serverURL: URL(string: "wss://tknet.ai")!)
     }
 
-    /// Group `members` by endpoint base, assigning `factoryId` in place.
-    /// Local NovaMLX members are left ungrouped.
-    public static func deriveFactories(from members: inout [MemberConfig]) -> [FactoryConfig] {
-        var byBase: [String: FactoryConfig] = [:]
-        for index in members.indices {
-            guard members[index].type != .localNovaMLX,
-                  let base = factoryBase(of: members[index].endpoint) else { continue }
-            let factory = byBase[base] ?? FactoryConfig(
-                id: UUID().uuidString, name: factoryName(for: base),
-                baseUrl: members[index].endpoint)
-            byBase[base] = factory
-            members[index].factoryId = factory.id
-        }
-        return byBase.values.sorted { $0.name < $1.name }
-    }
-
-    /// Canonical `scheme://host[:port]` of an endpoint, or nil when not http(s).
-    public static func factoryBase(of url: URL) -> String? {
+    /// Canonical `scheme://host[:port]` of a URL, or nil when not http(s).
+    public static func normalizedBase(_ url: URL) -> String? {
         guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let scheme = parts.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
@@ -261,50 +217,29 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         return parts.url?.absoluteString
     }
 
-    /// Full member endpoint: the factory base (`scheme://host[:port]`) plus
-    /// the path the user typed. A missing leading slash is inserted. An empty
-    /// path is `/`. A query on the path is kept.
-    public static func memberEndpoint(factoryBase: URL, path input: String) -> URL? {
-        var path = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        if path.isEmpty { path = "/" }
-        if !path.hasPrefix("/") { path = "/" + path }
-        var base = factoryBase.absoluteString
-        if let query = base.firstIndex(of: "?") { base = String(base[..<query]) }
-        while base.hasSuffix("/") { base.removeLast() }
-        return URL(string: base + path)
-    }
-
-    private static func factoryName(for base: String) -> String {
-        guard let parts = URLComponents(string: base), let host = parts.host else { return base }
-        if let port = parts.port,
-           !((parts.scheme?.lowercased() == "https" && port == 443)
-             || (parts.scheme?.lowercased() == "http" && port == 80)) {
-            return "\(host):\(port)"
-        }
-        return host
-    }
-
-    public static func defaultConfig() -> PeerConfig {
-        PeerConfig(serverURL: URL(string: "wss://tknet.ai")!)
-    }
-
     /// Capabilities whose demandId is still in the server's demand list.
     public var activeCapabilities: [Capability] {
         capabilities.filter { !retiredDemandIds.contains($0.demandId) }
     }
 
-    /// Capabilities for hello / capabilities.update: pool.api is the
-    /// truth source. A missing pool api means chat (legacy configs).
+    /// Capabilities for hello / capabilities.update: the pool's interface
+    /// kind is the truth source. A missing kind means chat (legacy configs).
     public var wireCapabilities: [Capability] {
         activeCapabilities.map { cap in
             var next = cap
             if let pool = pool(id: cap.sourceId) {
-                next.api = pool.api ?? SupplyAPI.chat
+                next.api = Self.apiContract(of: pool.kind)
             } else if next.api == nil {
                 next.api = SupplyAPI.chat
             }
             return next
         }
+    }
+
+    /// The gateway contract for a pool's interface kind.
+    public static func apiContract(of kind: InterfaceKind?) -> APIContract {
+        let resolved = kind ?? .openaiChat
+        return SupplyAPI.contract(kind: resolved.rawValue) ?? SupplyAPI.chat
     }
 
     /// Marks entries whose demand retired. Returns the retired demandIds.
@@ -345,6 +280,8 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         self.retiredDemandIds = Set(retiredDemandIds)
     }
 
+    // MARK: - Member / interface / factory lookups
+
     public func member(id: String) -> MemberConfig? {
         members.first { $0.id == id }
     }
@@ -353,8 +290,43 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         factories.first { $0.id == id }
     }
 
+    public func interface(id: String) -> InterfaceConfig? {
+        for factory in factories {
+            if let match = factory.interfaces.first(where: { $0.id == id }) { return match }
+        }
+        return nil
+    }
+
+    /// The factory owning one interface.
+    public func factory(ofInterface interfaceId: String) -> FactoryConfig? {
+        factories.first { $0.interfaces.contains(where: { $0.id == interfaceId }) }
+    }
+
+    /// The interface a member is invoked through.
+    public func memberInterface(_ member: MemberConfig) -> InterfaceConfig? {
+        interface(id: member.interfaceId)
+    }
+
+    /// Full endpoint URL of a member: its factory base + interface path.
+    public func memberEndpointURL(_ member: MemberConfig) -> URL? {
+        guard let interface = memberInterface(member),
+              let factory = factory(ofInterface: interface.id) else { return nil }
+        return factory.endpointURL(of: interface.kind)
+    }
+
+    /// The factory base URL of a member (host only), for /models discovery.
+    public func memberFactoryBase(_ member: MemberConfig) -> URL? {
+        factory(ofInterface: member.interfaceId)?.baseUrl
+    }
+
+    public func members(ofInterface interfaceId: String) -> [MemberConfig] {
+        members.filter { $0.interfaceId == interfaceId }
+    }
+
+    /// Members reachable through one factory, across all its interfaces.
     public func members(in factory: FactoryConfig) -> [MemberConfig] {
-        members.filter { $0.factoryId == factory.id }
+        let interfaceIds = Set(factory.interfaces.map(\.id))
+        return members.filter { interfaceIds.contains($0.interfaceId) }
     }
 
     public mutating func upsertFactory(_ factory: FactoryConfig) {
@@ -365,20 +337,28 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         }
     }
 
-    /// Drop the factory. `deleteMembers` false (default) keeps its members,
-    /// orphaned (nil factoryId); true removes them and strips pool ids.
-    public mutating func removeFactory(id: String, deleteMembers: Bool = false) {
-        guard factories.contains(where: { $0.id == id }) else { return }
-        factories.removeAll { $0.id == id }
-        if deleteMembers {
-            for member in members where member.factoryId == id {
-                removeMember(id: member.id)
-            }
-        } else {
-            for index in members.indices where members[index].factoryId == id {
-                members[index].factoryId = nil
-            }
+    /// Create an interface on a factory when absent; returns the interface id.
+    @discardableResult
+    public mutating func ensureInterface(
+        kind: InterfaceKind, on factoryId: String, makeId: () -> String = { UUID().uuidString }
+    ) -> String? {
+        guard var factory = factory(id: factoryId) else { return nil }
+        if let existing = factory.interface(of: kind) { return existing.id }
+        let interface = InterfaceConfig(id: makeId(), kind: kind)
+        factory.interfaces.append(interface)
+        upsertFactory(factory)
+        return interface.id
+    }
+
+    /// Drop the factory, its interfaces, and every member that relied on
+    /// them. Members cannot exist without an interface.
+    public mutating func removeFactory(id: String) {
+        guard let factory = factory(id: id) else { return }
+        let interfaceIds = Set(factory.interfaces.map(\.id))
+        for member in members where interfaceIds.contains(member.interfaceId) {
+            removeMember(id: member.id)
         }
+        factories.removeAll { $0.id == id }
     }
 
     public func pool(id: String) -> PoolConfig? {
@@ -599,8 +579,6 @@ public enum ConfigStore {
     /// volumes that don't support FileVault-style protection (e.g. $TMPDIR),
     /// and the POSIX 0600 chmod is the binding spec requirement.
     public static func save(_ config: PeerConfig, to url: URL) throws {
-        var config = config
-        config.migrateLegacyPoolsIfNeeded()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(config)

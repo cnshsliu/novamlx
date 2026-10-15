@@ -14,8 +14,8 @@ struct NovaConfigMigratorTests {
     func localMemberMaps() {
         let result = NovaConfigMigrator.migrate(localInput(), existing: PeerConfig.defaultConfig())
         let member = result.config.member(id: "local-Qwen3-8B")
-        #expect(member?.type == .localNovaMLX)
-        #expect(member?.endpoint.absoluteString == "http://127.0.0.1:6590/v1")
+        #expect(result.config.memberInterface(member!)?.kind == .openaiChat)
+        #expect(result.config.memberEndpointURL(member!)?.absoluteString == "http://127.0.0.1:6590/v1/chat/completions")
         #expect(member?.upstreamModel == "Qwen3-8B")
         let pool = result.config.pool(id: "coding")
         #expect(pool?.name == "coding")
@@ -46,10 +46,11 @@ struct NovaConfigMigratorTests {
         let result = NovaConfigMigrator.migrate(input, existing: PeerConfig.defaultConfig())
         let member = result.members.first { $0.id.hasPrefix("th-") }
         #expect(member?.id == "th-openai")
-        #expect(member?.endpoint.absoluteString == "https://api.openai.com/v1")
+        #expect(result.config.memberEndpointURL(member!)?.absoluteString == "https://api.openai.com/v1/chat/completions")
         #expect(member?.upstreamModel == "gpt-4o")
         #expect(member?.weight == nil)
-        #expect(result.secrets[member?.apiKeyRef ?? ""] == "sk-test")
+        let factoryId = result.config.factory(ofInterface: member!.interfaceId)!.id
+        #expect(result.secrets[result.config.factory(id: factoryId)!.apiKeyRef!] == "sk-test")
         #expect(result.config.pool(id: "coding")?.memberIds == ["th-openai"])
         #expect(result.config.pool(id: "coding")?.strategy == .roundRobin)
     }
@@ -75,10 +76,11 @@ struct NovaConfigMigratorTests {
     @Test("merge without --force leaves existing Peer pool untouched")
     func mergeRespectsExisting() {
         var existing = PeerConfig.defaultConfig()
+        existing.factories = [FactoryConfig(
+            id: "fx", name: "keep", baseUrl: URL(string: "http://10.0.0.1")!,
+            interfaces: [InterfaceConfig(id: "fx-chat", kind: .openaiChat)])]
         existing.members = [MemberConfig(
-            id: "keep-me", name: "keep", type: .openaiCompatible,
-            endpoint: URL(string: "http://10.0.0.1/v1")!, apiKeyRef: "src/keep-me",
-            upstreamModel: "kept")]
+            id: "keep-me", name: "keep", interfaceId: "fx-chat", upstreamModel: "kept")]
         existing.pools = [PoolConfig(id: "coding", name: "coding", memberIds: ["keep-me"])]
         let result = NovaConfigMigrator.migrate(localInput(), existing: existing)
         #expect(result.config.pool(id: "coding")?.memberIds == ["keep-me"])
@@ -114,11 +116,16 @@ struct NovaConfigMigratorTests {
         #expect(result.warnings.contains { $0.contains("collided") && $0.contains("coding-migrated") })
     }
 
-    @Test("bare host gains a /v1 base")
+    @Test("pasted endpoints reduce to the factory host base")
     func bareHost() {
+        // The path lives on the interface now; any pasted path drops.
         #expect(NovaConfigMigrator.normalizeOpenAIBase("https://api.example.com")?.absoluteString
-            == "https://api.example.com/v1")
+            == "https://api.example.com")
         #expect(NovaConfigMigrator.normalizeOpenAIBase("https://api.example.com/v1/")?.absoluteString
-            == "https://api.example.com/v1")
+            == "https://api.example.com")
+        #expect(NovaConfigMigrator.normalizeOpenAIBase("https://api.example.com/v1/chat/completions")?.absoluteString
+            == "https://api.example.com")
+        #expect(NovaConfigMigrator.normalizeOpenAIBase("api.example.com")?.absoluteString
+            == "https://api.example.com")
     }
 }

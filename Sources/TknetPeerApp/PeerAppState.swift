@@ -85,7 +85,11 @@ final class PeerAppState: ObservableObject {
         if loaded.adoptRegistrationsIntoMemory() {
             try? ConfigStore.save(loaded, to: configURL)
         }
-        loaded.migrateLegacyPoolsIfNeeded()
+        // Interface-schema cutover: legacy members (own endpoint/type) are
+        // wiped per the operator's call; factories survive for re-import.
+        if loaded.migrateToInterfaceSchemaIfNeeded() {
+            try? ConfigStore.save(loaded, to: configURL)
+        }
         self.config = loaded
         self.tunnelWanted = TunnelWantedPreference.read(from: defaults)
         self.serverBox = TunnelServerBox(loaded.serverURL)
@@ -419,9 +423,8 @@ final class PeerAppState: ObservableObject {
     /// Saves a member under one public model name. The internal id is kept on
     /// edit and generated on create. The member joins the pool of that name.
     func saveMember(
-        existingId: String?, model: String, upstreamOverride: String, type: SourceType,
-        endpoint: URL, apiKey: String?, weight: Int?, isEnabled: Bool,
-        factoryId: String? = nil
+        existingId: String?, model: String, upstreamOverride: String,
+        factoryId: String, kind: InterfaceKind, weight: Int?, isEnabled: Bool
     ) async -> Bool {
         guard lockError == nil else { return false }
         let publicModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -432,13 +435,16 @@ final class PeerAppState: ObservableObject {
         let override = upstreamOverride.trimmingCharacters(in: .whitespacesAndNewlines)
         let upstream = override.isEmpty ? publicModel : override
         var config = self.config
+        guard let interfaceId = config.ensureInterface(kind: kind, on: factoryId) else {
+            lastError = "No factory \(factoryId)."
+            return false
+        }
         let previous = existingId.flatMap { config.member(id: $0) }
         let id = previous?.id ?? Self.freshMemberId(in: config)
         do {
             try PeerAdmin.addMember(
-                &config, secrets: secrets, id: id, name: publicModel, endpoint: endpoint,
-                upstreamModel: upstream, apiKey: apiKey, weight: weight,
-                type: type, isEnabled: isEnabled, factoryId: factoryId)
+                &config, id: id, name: publicModel, interfaceId: interfaceId,
+                upstreamModel: upstream, weight: weight, isEnabled: isEnabled)
             if let previous {
                 let oldModel = PeerAdmin.publicModel(previous)
                 if oldModel != publicModel {
@@ -491,28 +497,16 @@ final class PeerAppState: ObservableObject {
         return await persist(config)
     }
 
-    func deleteFactory(id: String, deleteMembers: Bool) async -> Bool {
+    func deleteFactory(id: String) async -> Bool {
         guard lockError == nil else { return false }
         var config = self.config
         do {
-            try PeerAdmin.removeFactory(&config, id: id, deleteMembers: deleteMembers)
+            try PeerAdmin.removeFactory(&config, id: id)
         } catch {
             lastError = Self.userMessage(error)
             return false
         }
         return await persist(config)
-    }
-
-    /// Selecting a factory adopts ungrouped members whose endpoint base
-    /// matches. Returns the count moved, or nil on a persist failure.
-    @discardableResult
-    func adoptMembersIntoFactory(id: String) async -> Int? {
-        guard lockError == nil else { return nil }
-        var config = self.config
-        let adopted = PeerAdmin.adoptMembers(&config, factoryId: id)
-        guard adopted > 0 else { return 0 }
-        guard await persist(config) else { return nil }
-        return adopted
     }
 
     // MARK: - Env-file key references
@@ -543,33 +537,36 @@ final class PeerAppState: ObservableObject {
 
     // MARK: - Member testing
 
-    /// Key used for a member's requests: its own stored key, else its
-    /// factory's shared key when the member has none. Env references are
-    /// resolved; an undefined reference yields no key.
+    /// Key used for a member's requests: its factory's shared key, with env
+    /// references resolved. An undefined reference yields no key.
     func memberAPIKey(_ member: MemberConfig) -> String? {
-        let stored: String?
-        if let own = readSecret(member.apiKeyRef) {
-            stored = own
-        } else if let factoryId = member.factoryId,
-                  let ref = config.factory(id: factoryId)?.apiKeyRef,
-                  let shared = readSecret(ref) {
-            stored = shared
-        } else {
-            stored = nil
-        }
-        return stored.flatMap { resolveKey($0) }
+        guard let ref = config.factory(ofInterface: member.interfaceId)?.apiKeyRef else { return nil }
+        return readSecret(ref).flatMap { resolveKey($0) }
     }
 
-    /// Test a saved member: GET its `/models` with its own key.
+    /// Test a saved member: a real bare invocation through its interface.
     func probeMember(_ member: MemberConfig) async -> MemberProbeResult {
-        await MemberProbe.probe(endpoint: member.endpoint, apiKey: memberAPIKey(member))
+        guard let route = PoolForwarder.route(for: member, in: config) else {
+            return MemberProbeResult(
+                ok: false, httpStatus: 0, models: [],
+                message: "member has no valid interface")
+        }
+        return await MemberProbe.test(
+            route: route, model: member.upstreamModel, apiKey: memberAPIKey(member))
     }
 
-    /// Test an unsaved endpoint from the member form. A blank key probes
-    /// anonymously — the form pre-fills the factory default already.
-    func probeEndpoint(_ endpoint: URL, apiKey: String?) async -> MemberProbeResult {
-        await MemberProbe.probe(
-            endpoint: endpoint, apiKey: apiKey.flatMap { resolveKey($0) })
+    /// Test an unsaved member from the form: full URL + model + template.
+    func probeMember(factory: FactoryConfig, kind: InterfaceKind, model: String,
+                     apiKey: String?) async -> MemberProbeResult {
+        guard let url = factory.endpointURL(of: kind) else {
+            return MemberProbeResult(
+                ok: false, httpStatus: 0, models: [],
+                message: "factory URL is not valid")
+        }
+        return await MemberProbe.test(
+            route: MemberRoute(url: url, kind: kind,
+                               isLocal: MemberAddress.isLocalTier(factoryBase: factory.baseUrl)),
+            model: model, apiKey: apiKey.flatMap { resolveKey($0) })
     }
 
     /// Adds one enabled member per model the factory advertises on
@@ -577,39 +574,24 @@ final class PeerAppState: ObservableObject {
     /// `path` defaults to the path of the factory's first member, else `/v1`.
     /// Returns the number added, or nil with `lastError` set on failure.
     @discardableResult
+    /// Adds one enabled member per model the factory advertises, each on the
+    /// interface its `nova.type` maps to (unknown types land on chat).
+    /// Members whose model the factory already serves are skipped, as are
+    /// DSpark draft blocks. Returns counts, or nil with `lastError` set.
     func importMembersFromFactory(_ factory: FactoryConfig) async -> (added: Int, skipped: Int)? {
         guard lockError == nil else { return nil }
-        let members = config.members(in: factory)
-        let path: String
-        if let first = members.first,
-           let parts = URLComponents(url: first.endpoint, resolvingAgainstBaseURL: false),
-           !parts.path.isEmpty {
-            path = parts.path
-        } else {
-            path = "/v1"
-        }
-        guard var parts = URLComponents(url: factory.baseUrl, resolvingAgainstBaseURL: false) else {
-            lastError = "Factory URL is not valid."
-            return nil
-        }
-        parts.path = path
-        guard let endpoint = parts.url else {
-            lastError = "Factory URL is not valid."
-            return nil
-        }
         let key = factoryDefaultKey(factory)
-        let result = await MemberProbe.probe(endpoint: endpoint, apiKey: key)
+        let result = await MemberProbe.discoverModels(base: factory.baseUrl, apiKey: key)
         guard result.ok else {
             lastError = "Test failed: \(result.message)"
             return nil
         }
         guard !result.models.isEmpty else {
-            lastError = "No models advertised at \(endpoint.absoluteString)/models."
+            lastError = "No models advertised at \(MemberProbe.modelsBase(factory.baseUrl).absoluteString)/models."
             return nil
         }
         var config = self.config
         let existing = Set(config.members(in: factory).map(\.upstreamModel))
-        let type: SourceType = MemberAddress.isLoopback(endpoint) ? .localNovaMLX : .openaiCompatible
         var added = 0
         var skipped = 0
         for model in result.models where !existing.contains(model) {
@@ -618,13 +600,17 @@ final class PeerAppState: ObservableObject {
                 skipped += 1
                 continue
             }
+            let kind = MemberProbe.interfaceKind(
+                modelType: result.modelTypes[model] ?? "", modelId: model) ?? .openaiChat
+            guard let interfaceId = config.ensureInterface(kind: kind, on: factory.id) else {
+                lastError = "No factory \(factory.id)."
+                return nil
+            }
             let id = Self.freshMemberId(in: config)
             do {
                 try PeerAdmin.addMember(
-                    &config, secrets: secrets, id: id, name: model, endpoint: endpoint,
-                    // No per-member key: members inherit the factory key.
-                    upstreamModel: model, apiKey: nil, weight: nil,
-                    type: type, isEnabled: true, factoryId: factory.id)
+                    &config, id: id, name: model, interfaceId: interfaceId,
+                    upstreamModel: model, weight: nil, isEnabled: true)
                 try PeerAdmin.ensureModelPool(&config, model: model, memberId: id)
                 added += 1
             } catch {
@@ -638,7 +624,7 @@ final class PeerAppState: ObservableObject {
 
     func savePool(
         id: String, name: String, strategy: PoolStrategy, memberIds: [String],
-        maxRetries: Int, isEnabled: Bool, isNew: Bool, api: APIContract
+        maxRetries: Int, isEnabled: Bool, isNew: Bool
     ) async -> Bool {
         guard lockError == nil else { return false }
         guard !memberIds.isEmpty else {
@@ -650,7 +636,7 @@ final class PeerAppState: ObservableObject {
             if isNew || config.pool(id: id) == nil {
                 try PeerAdmin.addPool(
                     &config, id: id, name: name, strategy: strategy,
-                    maxRetries: maxRetries, memberIds: memberIds, api: api)
+                    maxRetries: maxRetries, memberIds: memberIds)
                 if !isEnabled {
                     try PeerAdmin.updatePool(&config, id: id, isEnabled: false)
                 }
@@ -660,8 +646,7 @@ final class PeerAppState: ObservableObject {
                 let remove = existing.filter { !memberIds.contains($0) }
                 try PeerAdmin.updatePool(
                     &config, id: id, name: name, strategy: strategy, maxRetries: maxRetries,
-                    addMembers: add, removeMembers: remove, isEnabled: isEnabled,
-                    api: api, setApi: true)
+                    addMembers: add, removeMembers: remove, isEnabled: isEnabled)
             }
         } catch {
             lastError = Self.userMessage(error)
