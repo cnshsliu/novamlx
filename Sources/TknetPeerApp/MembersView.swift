@@ -599,6 +599,8 @@ private struct MemberDraft: Identifiable {
     var isNew: Bool
     /// Factories available for reassignment while editing.
     var factories: [FactoryConfig]
+    /// Member's stored key (loaded on appear); nil until then.
+    var memberAPIKey: String?
 
     init(factory: FactoryConfig) {
         memberId = nil
@@ -610,12 +612,15 @@ private struct MemberDraft: Identifiable {
         isEnabled = true
         isNew = true
         factories = []
+        memberAPIKey = nil
     }
 
     init(_ member: MemberConfig, factories: [FactoryConfig]) {
         let model = PeerAdmin.publicModel(member)
         memberId = member.id
         self.model = model
+        // Member key is loaded in the form's onAppear (needs state).
+        memberAPIKey = nil
         upstreamOverride = member.upstreamModel == model ? "" : member.upstreamModel
         let interface = factories.flatMap(\.interfaces).first { $0.id == member.interfaceId }
         factoryId = factories.first {
@@ -645,6 +650,10 @@ private struct MemberForm: View {
     /// Test outcome for the (interface, model) as currently entered.
     @State private var testResult: MemberProbeResult?
     @State private var isTesting = false
+    /// Blank = use the factory key; a value overrides it.
+    @State private var apiKey = ""
+    @State private var revealKey = false
+    @State private var originalKey: String?
 
     init(draft: MemberDraft) {
         self.draft = draft
@@ -713,7 +722,33 @@ private struct MemberForm: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
             }
-            Text("The factory's API key is used; ALL-UPPERCASE values resolve from \(state.envFileURL.path).")
+            HStack(spacing: 6) {
+                Group {
+                    if revealKey {
+                        TextField("API key (blank uses the factory key)", text: $apiKey)
+                    } else {
+                        SecureField("API key (blank uses the factory key)", text: $apiKey)
+                    }
+                }
+                .onChange(of: apiKey) { _, _ in testResult = nil }
+                Button {
+                    revealKey.toggle()
+                } label: {
+                    Image(systemName: revealKey ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.link)
+                .help(revealKey ? "Hide the key" : "Reveal the key")
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(apiKey, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.link)
+                .disabled(apiKey.isEmpty)
+                .help("Copy the key")
+            }
+            Text("Blank uses the factory's key; ALL-UPPERCASE values resolve from \(state.envFileURL.path).")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             DisclosureGroup("More", isExpanded: $showMore) {
@@ -750,6 +785,13 @@ private struct MemberForm: View {
         }
         .padding(20)
         .frame(width: 460)
+        .onAppear {
+            guard !draft.isNew, let id = draft.memberId,
+                  let member = state.config.member(id: id) else { return }
+            let stored = state.memberStoredKey(member) ?? ""
+            apiKey = stored
+            originalKey = stored
+        }
     }
 
     private var canTest: Bool {
@@ -761,8 +803,10 @@ private struct MemberForm: View {
         guard let factory = selectedFactory else { return }
         isTesting = true
         defer { isTesting = false }
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         testResult = await state.probeMember(
-            factory: factory, kind: kind, model: testModelName, apiKey: nil)
+            factory: factory, kind: kind, model: testModelName,
+            apiKey: trimmedKey.isEmpty ? nil : trimmedKey)
         formError = nil
     }
 
@@ -793,12 +837,22 @@ private struct MemberForm: View {
             formError = "Weight must be a whole number of at least 1."
             return
         }
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let problem = state.envKeyProblem(trimmedKey) {
+            formError = problem
+            return
+        }
+        // nil = unchanged on edit; new members: "" (empty) = inherit factory.
+        let keyValue: String? = draft.isNew
+            ? trimmedKey
+            : (trimmedKey == originalKey ? nil : trimmedKey)
         let saved = await state.saveMember(
             existingId: draft.memberId,
             model: trimmedModel,
             upstreamOverride: upstreamOverride,
             factoryId: factoryId,
             kind: kind,
+            apiKey: keyValue,
             weight: weightValue,
             isEnabled: isEnabled)
         if saved {

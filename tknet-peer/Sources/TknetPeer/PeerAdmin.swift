@@ -14,8 +14,10 @@ public enum PeerAdmin {
     // MARK: - Members
 
     public static func addMember(
-        _ config: inout PeerConfig, id: String, name: String,
+        _ config: inout PeerConfig, secrets: any SecretStore = NullSecretStore(),
+        id: String, name: String,
         interfaceId: String, upstreamModel: String,
+        apiKey: String? = nil,
         weight: Int? = nil, isEnabled: Bool = true
     ) throws {
         try validateIdentity(id)
@@ -25,15 +27,21 @@ public enum PeerAdmin {
         }
         let upstream = upstreamModel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !upstream.isEmpty else { throw PeerAdminError("Upstream model is required.") }
+        let ref: String? = (apiKey?.isEmpty == false) ? "src/\(id)" : nil
         config.upsertMember(MemberConfig(
             id: id, name: name.isEmpty ? id : name, interfaceId: interfaceId,
-            upstreamModel: upstream, weight: weight, isEnabled: isEnabled))
+            upstreamModel: upstream, apiKeyRef: ref, weight: weight, isEnabled: isEnabled))
+        if let ref, let apiKey {
+            try secrets.save(apiKey, for: ref)
+        }
     }
 
     public static func updateMember(
-        _ config: inout PeerConfig, id: String,
+        _ config: inout PeerConfig, secrets: any SecretStore = NullSecretStore(),
+        id: String,
         name: String? = nil, interfaceId: String? = nil,
-        upstreamModel: String? = nil, weight: Int? = nil, isEnabled: Bool? = nil
+        upstreamModel: String? = nil, apiKey: String? = nil,
+        weight: Int? = nil, isEnabled: Bool? = nil
     ) throws {
         guard var member = config.member(id: id) else {
             throw PeerAdminError("No member \(id).")
@@ -55,6 +63,17 @@ public enum PeerAdmin {
             member.weight = weight
         }
         if let isEnabled { member.isEnabled = isEnabled }
+        if let apiKey {
+            // nil = leave unchanged; "" = back to the factory key; value = own.
+            let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                member.apiKeyRef = nil
+            } else {
+                let ref = member.apiKeyRef ?? "src/\(member.id)"
+                member.apiKeyRef = ref
+                try secrets.save(trimmed, for: ref)
+            }
+        }
         config.upsertMember(member)
     }
 

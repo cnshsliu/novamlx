@@ -239,6 +239,43 @@ struct PoolForwarderTests {
         await server.stop()
     }
 
+    @Test("a member's own key overrides the factory key")
+    func memberKeyOverridesFactory() async throws {
+        let server = MockSourceServer()
+        try await server.start()
+        let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("tknet-fwd-\(UUID().uuidString)"))
+        secrets.save("k-factory", for: "factory/f1")
+        secrets.save("k-member", for: "src/own")
+        var config = PeerConfig.defaultConfig()
+        config.factories = [FactoryConfig(
+            id: "f1", name: "F1", baseUrl: URL(string: "http://127.0.0.1:\(server.port)")!,
+            apiKeyRef: "factory/f1",
+            interfaces: [InterfaceConfig(id: "f1-chat", kind: .openaiChat)])]
+        config.members = [
+            MemberConfig(id: "inh", name: "inh", interfaceId: "f1-chat", upstreamModel: "u"),
+            MemberConfig(id: "own", name: "own", interfaceId: "f1-chat", upstreamModel: "u",
+                         apiKeyRef: "src/own"),
+        ]
+        config.pools = [
+            PoolConfig(id: "p-inh", name: "p-inh", kind: .openaiChat, memberIds: ["inh"]),
+            PoolConfig(id: "p-own", name: "p-own", kind: .openaiChat, memberIds: ["own"]),
+        ]
+        let forwarder = PoolForwarder(config: config, secrets: secrets)
+        do {
+            _ = await forwarder.forward(poolName: "p-inh", body: chatBody(), timeoutSeconds: 30)
+            #expect(server.lastAuthorizationHeader == "Bearer k-factory")
+            _ = await forwarder.forward(poolName: "p-own", body: chatBody(), timeoutSeconds: 30)
+            #expect(server.lastAuthorizationHeader == "Bearer k-member")
+        } catch {
+            try? await forwarder.shutdown()
+            await server.stop()
+            throw error
+        }
+        try? await forwarder.shutdown()
+        await server.stop()
+    }
+
     @Test("ALL-UPPERCASE factory key resolves from the env file; missing reference fails the member")
     func envFileKeyReference() async throws {
         let server = MockSourceServer()

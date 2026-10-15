@@ -424,7 +424,8 @@ final class PeerAppState: ObservableObject {
     /// edit and generated on create. The member joins the pool of that name.
     func saveMember(
         existingId: String?, model: String, upstreamOverride: String,
-        factoryId: String, kind: InterfaceKind, weight: Int?, isEnabled: Bool
+        factoryId: String, kind: InterfaceKind,
+        apiKey: String? = nil, weight: Int?, isEnabled: Bool
     ) async -> Bool {
         guard lockError == nil else { return false }
         let publicModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -442,9 +443,18 @@ final class PeerAppState: ObservableObject {
         let previous = existingId.flatMap { config.member(id: $0) }
         let id = previous?.id ?? Self.freshMemberId(in: config)
         do {
-            try PeerAdmin.addMember(
-                &config, id: id, name: publicModel, interfaceId: interfaceId,
-                upstreamModel: upstream, weight: weight, isEnabled: isEnabled)
+            if let previous {
+                try PeerAdmin.updateMember(
+                    &config, secrets: secrets, id: id,
+                    name: publicModel, interfaceId: interfaceId,
+                    upstreamModel: upstream, apiKey: apiKey,
+                    weight: weight, isEnabled: isEnabled)
+            } else {
+                try PeerAdmin.addMember(
+                    &config, secrets: secrets, id: id, name: publicModel,
+                    interfaceId: interfaceId, upstreamModel: upstream,
+                    apiKey: apiKey ?? "", weight: weight, isEnabled: isEnabled)
+            }
             if let previous {
                 let oldModel = PeerAdmin.publicModel(previous)
                 if oldModel != publicModel {
@@ -543,11 +553,18 @@ final class PeerAppState: ObservableObject {
 
     // MARK: - Member testing
 
-    /// Key used for a member's requests: its factory's shared key, with env
-    /// references resolved. An undefined reference yields no key.
+    /// Key used for a member's requests: its own key when set, else the
+    /// factory's shared key. Env references resolve; undefined yields nil.
     func memberAPIKey(_ member: MemberConfig) -> String? {
-        guard let ref = config.factory(ofInterface: member.interfaceId)?.apiKeyRef else { return nil }
+        let ref = member.apiKeyRef
+            ?? config.factory(ofInterface: member.interfaceId)?.apiKeyRef
+        guard let ref else { return nil }
         return readSecret(ref).flatMap { resolveKey($0) }
+    }
+
+    /// The member's own stored key (env names stay unresolved), for the form.
+    func memberStoredKey(_ member: MemberConfig) -> String? {
+        member.apiKeyRef.flatMap { readSecret($0) }
     }
 
     /// Test a saved member: a real bare invocation through its interface.
