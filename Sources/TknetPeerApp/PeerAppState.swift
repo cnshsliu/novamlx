@@ -506,6 +506,81 @@ final class PeerAppState: ObservableObject {
         factory.apiKeyRef.flatMap { readSecret($0) }
     }
 
+    // MARK: - Member testing
+
+    /// Key stored for one member, for probe calls from the member list.
+    func memberAPIKey(_ member: MemberConfig) -> String? {
+        readSecret(member.apiKeyRef)
+    }
+
+    /// Test a saved member: GET its `/models` with its own key.
+    func probeMember(_ member: MemberConfig) async -> MemberProbeResult {
+        await MemberProbe.probe(endpoint: member.endpoint, apiKey: memberAPIKey(member))
+    }
+
+    /// Test an unsaved endpoint from the member form. A blank key probes
+    /// anonymously — the form pre-fills the factory default already.
+    func probeEndpoint(_ endpoint: URL, apiKey: String?) async -> MemberProbeResult {
+        await MemberProbe.probe(endpoint: endpoint, apiKey: apiKey)
+    }
+
+    /// Adds one enabled member per model the factory advertises on
+    /// `GET {base}{path}/models`, skipping models the factory already serves.
+    /// `path` defaults to the path of the factory's first member, else `/v1`.
+    /// Returns the number added, or nil with `lastError` set on failure.
+    @discardableResult
+    func importMembersFromFactory(_ factory: FactoryConfig) async -> Int? {
+        guard lockError == nil else { return nil }
+        let members = config.members(in: factory)
+        let path: String
+        if let first = members.first,
+           let parts = URLComponents(url: first.endpoint, resolvingAgainstBaseURL: false),
+           !parts.path.isEmpty {
+            path = parts.path
+        } else {
+            path = "/v1"
+        }
+        guard var parts = URLComponents(url: factory.baseUrl, resolvingAgainstBaseURL: false) else {
+            lastError = "Factory URL is not valid."
+            return nil
+        }
+        parts.path = path
+        guard let endpoint = parts.url else {
+            lastError = "Factory URL is not valid."
+            return nil
+        }
+        let key = factoryDefaultKey(factory)
+        let result = await MemberProbe.probe(endpoint: endpoint, apiKey: key)
+        guard result.ok else {
+            lastError = "Test failed: \(result.message)"
+            return nil
+        }
+        guard !result.models.isEmpty else {
+            lastError = "No models advertised at \(endpoint.absoluteString)/models."
+            return nil
+        }
+        var config = self.config
+        let existing = Set(config.members(in: factory).map(\.upstreamModel))
+        let type: SourceType = MemberAddress.isLoopback(endpoint) ? .localNovaMLX : .openaiCompatible
+        var added = 0
+        for model in result.models where !existing.contains(model) {
+            let id = Self.freshMemberId(in: config)
+            do {
+                try PeerAdmin.addMember(
+                    &config, secrets: secrets, id: id, name: model, endpoint: endpoint,
+                    upstreamModel: model, apiKey: key, weight: nil,
+                    type: type, isEnabled: true, factoryId: factory.id)
+                try PeerAdmin.ensureModelPool(&config, model: model, memberId: id)
+                added += 1
+            } catch {
+                lastError = Self.userMessage(error)
+                return nil
+            }
+        }
+        guard await persist(config) else { return nil }
+        return added
+    }
+
     func savePool(
         id: String, name: String, strategy: PoolStrategy, memberIds: [String],
         maxRetries: Int, isEnabled: Bool, isNew: Bool, api: APIContract
