@@ -81,7 +81,7 @@ struct TunnelStatusView: View {
 
     private var identityCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Registration")
+            Text("Identity")
                 .font(.headline)
             if let peerId = state.config.peerId, !peerId.isEmpty, let key = state.connectionKey {
                 Text("Peer id")
