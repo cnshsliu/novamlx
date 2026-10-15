@@ -368,10 +368,16 @@ private struct MemberRowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     // Click copies the model name (without any "· host" suffix).
-                    Text(PeerAdmin.publicModel(member))
-                        .font(.body.bold())
-                        .onTapGesture { copyToPasteboard(PeerAdmin.publicModel(member)) }
-                        .help("Click to copy the model name")
+                    // A plain Button, not Text+onTapGesture: List row selection
+                    // swallows tap gestures on plain text.
+                    Button {
+                        copyToPasteboard(PeerAdmin.publicModel(member))
+                    } label: {
+                        Text(PeerAdmin.publicModel(member))
+                            .font(.body.bold())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Click to copy the model name")
                     if let result, !result.ok {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -379,11 +385,15 @@ private struct MemberRowView: View {
                             .help(result.message)
                     }
                 }
-                Text(fullEndpointURL)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .onTapGesture { copyToPasteboard(fullEndpointURL) }
-                    .help("Click to copy the endpoint URL")
+                Button {
+                    copyToPasteboard(fullEndpointURL)
+                } label: {
+                    Text(fullEndpointURL)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Click to copy the endpoint URL")
                 Text(detailLine)
                     .font(.caption)
                 Text(member.isEnabled ? "Enabled" : "Disabled")
