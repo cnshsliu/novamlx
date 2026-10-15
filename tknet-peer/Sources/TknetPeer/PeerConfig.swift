@@ -203,6 +203,20 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         capabilities.filter { !retiredDemandIds.contains($0.demandId) }
     }
 
+    /// Capabilities for hello / capabilities.update: pool.api is the
+    /// truth source. A missing pool api means chat (legacy configs).
+    public var wireCapabilities: [Capability] {
+        activeCapabilities.map { cap in
+            var next = cap
+            if let pool = pool(id: cap.sourceId) {
+                next.api = pool.api ?? SupplyAPI.chat
+            } else if next.api == nil {
+                next.api = SupplyAPI.chat
+            }
+            return next
+        }
+    }
+
     /// Marks entries whose demand retired. Returns the retired demandIds.
     /// Nothing is deleted: sources are reusable assets (spec: Demand lifecycle).
     @discardableResult

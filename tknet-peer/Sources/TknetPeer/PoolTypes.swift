@@ -78,6 +78,8 @@ public struct MemberConfig: Codable, Equatable, Sendable, Identifiable {
 }
 
 /// A named set of members plus the strategy used to order them.
+/// `api` is the interface this pool serves. Absent means chat only
+/// (legacy configs and pathless tunnel frames).
 public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var name: String
@@ -87,10 +89,12 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
     public var isEnabled: Bool
     /// Bumped once per accepted request, not once per retry.
     public var requestCount: Int
+    /// Interface paths this pool accepts. Nil → chat completions only.
+    public var api: APIContract?
 
     public init(id: String, name: String, strategy: PoolStrategy = .roundRobin,
                 memberIds: [String], maxRetries: Int = 3, isEnabled: Bool = true,
-                requestCount: Int = 0) {
+                requestCount: Int = 0, api: APIContract? = nil) {
         self.id = id
         self.name = name
         self.strategy = strategy
@@ -98,10 +102,11 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
         self.maxRetries = maxRetries
         self.isEnabled = isEnabled
         self.requestCount = requestCount
+        self.api = api
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, strategy, memberIds, maxRetries, isEnabled, requestCount
+        case id, name, strategy, memberIds, maxRetries, isEnabled, requestCount, api
     }
 
     public init(from decoder: Decoder) throws {
@@ -113,6 +118,7 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
         maxRetries = try c.decodeIfPresent(Int.self, forKey: .maxRetries) ?? 3
         isEnabled = try c.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         requestCount = try c.decodeIfPresent(Int.self, forKey: .requestCount) ?? 0
+        api = try c.decodeIfPresent(APIContract.self, forKey: .api)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -124,6 +130,7 @@ public struct PoolConfig: Codable, Equatable, Sendable, Identifiable {
         try c.encode(maxRetries, forKey: .maxRetries)
         try c.encode(isEnabled, forKey: .isEnabled)
         try c.encode(requestCount, forKey: .requestCount)
+        try c.encodeIfPresent(api, forKey: .api)
     }
 }
 

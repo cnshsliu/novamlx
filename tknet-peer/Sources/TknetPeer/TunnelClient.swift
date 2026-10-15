@@ -178,7 +178,8 @@ public final class TunnelClient: @unchecked Sendable {
         // must not be re-advertised on reconnect. With no demand list yet
         // (fresh connect) advertise everything declared, as before.
         let helloCapabilities: [Capability] = state.withLock { state in
-            let declared = state.config?.capabilities ?? config.capabilities
+            let cfg = state.config ?? self.config
+            let declared = cfg.wireCapabilities
             guard !state.demand.isEmpty else { return declared }
             let liveIds = Set(state.demand.map(\.demandId))
             return declared.filter { liveIds.contains($0.demandId) }

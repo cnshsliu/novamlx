@@ -115,10 +115,16 @@ public struct RequestFrame: Codable, Equatable, Sendable {
     public var model: String            // demand model name, NOT the upstream model
     public var apiFormat: APIFormat
     public var body: Data               // raw request JSON from the end user
+    /// OpenAI-style path such as `/v1/embeddings`. Nil on old frames → chat only.
+    public var path: String?
 
-    public init(reqId: String, model: String, apiFormat: APIFormat, body: Data) {
+    public init(reqId: String, model: String, apiFormat: APIFormat, body: Data, path: String? = nil) {
         self.reqId = reqId; self.model = model; self.apiFormat = apiFormat; self.body = body
+        self.path = path
     }
+
+    /// Path used for gating and upstream forwarding. Pathless frames are chat.
+    public var effectivePath: String { path ?? "/v1/chat/completions" }
 }
 
 public enum RelayStatus: String, Codable, Equatable, Sendable {

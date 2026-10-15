@@ -2,8 +2,9 @@ import Foundation
 import Hummingbird
 import NIOCore
 
-/// OpenAI-compatible loopback gateway. `POST /v1/chat/completions` treats the
-/// JSON `model` field as a pool name. `GET /v1/models` lists enabled pools.
+/// OpenAI-compatible loopback gateway. Each POST below treats `model` as a
+/// pool name and forwards the same path to the chosen member.
+/// `GET /v1/models` lists enabled pools.
 public final class LocalGateway: @unchecked Sendable {
     private let lock = NSLock()
     private var serverTask: Task<Void, Never>?
@@ -69,22 +70,40 @@ public final class LocalGateway: @unchecked Sendable {
             }
             return json(["object": "list", "data": models], status: .ok)
         }
-        router.post("/v1/chat/completions") { request, _ -> Response in
-            let buffer = try await request.body.collect(upTo: 32 * 1024 * 1024)
-            let raw = Data(buffer.readableBytesView)
-            guard let object = (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any],
-                  let model = object["model"] as? String, !model.isEmpty else {
-                return errorResponse(
-                    status: .badRequest,
-                    message: "missing model",
-                    type: "invalid_request_error")
+        for route in forwardedPosts {
+            router.post(RouterPath(route.gatewayPath)) { request, _ -> Response in
+                let buffer = try await request.body.collect(upTo: 32 * 1024 * 1024)
+                let raw = Data(buffer.readableBytesView)
+                let contentType = request.headers[.contentType]
+                guard let model = UpstreamBodyCodec.poolName(body: raw, contentType: contentType) else {
+                    return errorResponse(
+                        status: .badRequest,
+                        message: "missing model",
+                        type: "invalid_request_error")
+                }
+                let timeout = forwarder.currentConfig.requestTimeoutSeconds
+                let outcome = await forwarder.forward(
+                    poolName: model, body: raw, timeoutSeconds: timeout,
+                    upstreamPath: route.upstreamPath, contentType: contentType)
+                return response(for: outcome, model: model)
             }
-            let timeout = forwarder.currentConfig.requestTimeoutSeconds
-            let outcome = await forwarder.forward(poolName: model, body: raw, timeoutSeconds: timeout)
-            return response(for: outcome, model: model)
         }
         return router
     }
+
+    /// Gateway path and the suffix appended to a member endpoint that already
+    /// ends in `/v1`. Same operations the supply contract advertises for
+    /// embeddings, images, and audio, plus chat.
+    private static let forwardedPosts: [(gatewayPath: String, upstreamPath: String)] = [
+        ("/v1/chat/completions", "chat/completions"),
+        ("/v1/embeddings", "embeddings"),
+        ("/v1/images/generations", "images/generations"),
+        ("/v1/images/edits", "images/edits"),
+        ("/v1/images/background-removals", "images/background-removals"),
+        ("/v1/audio/speech", "audio/speech"),
+        ("/v1/audio/transcriptions", "audio/transcriptions"),
+        ("/v1/decisions", "decisions"),
+    ]
 
     private static func response(for outcome: PoolForwardOutcome, model: String) -> Response {
         switch outcome {
@@ -115,6 +134,11 @@ public final class LocalGateway: @unchecked Sendable {
                 status: .serviceUnavailable,
                 message: "No healthy members in pool '\(model)'",
                 type: "server_error")
+        case .pathNotAllowed(let path):
+            return errorResponse(
+                status: .badRequest,
+                message: "Pool '\(model)' does not serve \(path)",
+                type: "invalid_request_error")
         case .allMembersFailed(let lastError, _, _):
             return errorResponse(
                 status: .badGateway,
