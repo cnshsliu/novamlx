@@ -192,5 +192,44 @@ struct PoolForwarderTests {
             #expect(a.lastPath == "/v1/images/generations")
         }
     }
-}
 
+    @Test("member without its own key inherits the factory key; own key wins")
+    func factoryKeyInheritance() async throws {
+        let server = MockSourceServer()
+        try await server.start()
+        let secrets = FileSecretStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("tknet-fwd-\(UUID().uuidString)"))
+        secrets.save("k-f", for: "factory/f1")
+        secrets.save("k-own", for: "src/own")
+        let base = endpoint(server)
+        var config = PeerConfig.defaultConfig()
+        config.factories = [FactoryConfig(
+            id: "f1", name: "F1",
+            baseUrl: URL(string: "http://127.0.0.1:9")!,
+            apiKeyRef: "factory/f1")]
+        // "inh" has no secret stored at src/inh; "own" has k-own.
+        config.members = [
+            MemberConfig(id: "inh", name: "inh", type: .openaiCompatible, endpoint: base,
+                         apiKeyRef: "src/inh", upstreamModel: "u", factoryId: "f1"),
+            MemberConfig(id: "own", name: "own", type: .openaiCompatible, endpoint: base,
+                         apiKeyRef: "src/own", upstreamModel: "u", factoryId: "f1"),
+        ]
+        config.pools = [
+            PoolConfig(id: "p-inh", name: "p-inh", memberIds: ["inh"], api: SupplyAPI.chat),
+            PoolConfig(id: "p-own", name: "p-own", memberIds: ["own"], api: SupplyAPI.chat),
+        ]
+        let forwarder = PoolForwarder(config: config, secrets: secrets)
+        do {
+            _ = await forwarder.forward(poolName: "p-inh", body: chatBody(), timeoutSeconds: 30)
+            #expect(server.lastAuthorizationHeader == "Bearer k-f")
+            _ = await forwarder.forward(poolName: "p-own", body: chatBody(), timeoutSeconds: 30)
+            #expect(server.lastAuthorizationHeader == "Bearer k-own")
+        } catch {
+            try? await forwarder.shutdown()
+            await server.stop()
+            throw error
+        }
+        try? await forwarder.shutdown()
+        await server.stop()
+    }
+}

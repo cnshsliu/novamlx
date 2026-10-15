@@ -508,9 +508,13 @@ final class PeerAppState: ObservableObject {
 
     // MARK: - Member testing
 
-    /// Key stored for one member, for probe calls from the member list.
+    /// Key used for a member's requests: its own stored key, else its
+    /// factory's shared key when the member has none.
     func memberAPIKey(_ member: MemberConfig) -> String? {
-        readSecret(member.apiKeyRef)
+        if let own = readSecret(member.apiKeyRef) { return own }
+        guard let factoryId = member.factoryId,
+              let ref = config.factory(id: factoryId)?.apiKeyRef else { return nil }
+        return readSecret(ref)
     }
 
     /// Test a saved member: GET its `/models` with its own key.
@@ -568,7 +572,8 @@ final class PeerAppState: ObservableObject {
             do {
                 try PeerAdmin.addMember(
                     &config, secrets: secrets, id: id, name: model, endpoint: endpoint,
-                    upstreamModel: model, apiKey: key, weight: nil,
+                    // No per-member key: members inherit the factory key.
+                    upstreamModel: model, apiKey: nil, weight: nil,
                     type: type, isEnabled: true, factoryId: factory.id)
                 try PeerAdmin.ensureModelPool(&config, model: model, memberId: id)
                 added += 1

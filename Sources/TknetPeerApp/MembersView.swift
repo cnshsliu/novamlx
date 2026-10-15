@@ -120,6 +120,11 @@ struct MembersView: View {
                             Text("\(state.config.members(in: factory).count)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            Button("Edit") { factoryDraft = FactoryDraft(factory) }
+                                .buttonStyle(.link)
+                                .controlSize(.small)
+                                .disabled(state.lockError != nil)
+                                .accessibilityIdentifier("factory-edit")
                         }
                         .tag(FactorySelection.factory(factory.id))
                     }
@@ -252,7 +257,7 @@ struct MembersView: View {
     private func openMemberDraft() {
         guard let id = selectedFactory.factoryId,
               let factory = factories.first(where: { $0.id == id }) else { return }
-        memberDraft = MemberDraft(factory: factory, defaultKey: state.factoryDefaultKey(factory))
+        memberDraft = MemberDraft(factory: factory)
     }
 
     private func deleteFactory(deleteMembers: Bool) {
@@ -302,7 +307,7 @@ private struct MemberRowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(MemberLabel.title(member, among: state.config.members))
                     .font(.body.bold())
-                Text(member.endpoint.absoluteString)
+                Text(fullEndpointURL)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -341,6 +346,13 @@ private struct MemberRowView: View {
     private var isRunning: Bool {
         if case .running = testState { return true }
         return false
+    }
+
+    /// Full forward URL: the member's base plus the default upstream path.
+    private var fullEndpointURL: String {
+        var base = member.endpoint.absoluteString
+        while base.hasSuffix("/") { base.removeLast() }
+        return base + "/chat/completions"
     }
 
     private var detailLine: String {
@@ -460,14 +472,15 @@ private struct MemberDraft: Identifiable {
     /// Factories available for reassignment while editing.
     var factories: [FactoryConfig]
 
-    init(factory: FactoryConfig, defaultKey: String?) {
+    init(factory: FactoryConfig) {
         memberId = nil
         model = ""
         upstreamOverride = ""
         type = .openaiCompatible
         factoryId = factory.id
         endpoint = "/v1"
-        apiKey = defaultKey ?? ""
+        // Blank inherits the factory key — resolved at request time.
+        apiKey = ""
         weight = ""
         isEnabled = true
         isNew = true
@@ -598,7 +611,7 @@ private struct MemberForm: View {
                         type = inferredType(newValue)
                     }
             }
-            SecureField(draft.isNew ? "API key" : "API key (blank keeps the current key)", text: $apiKey)
+            SecureField(keyPlaceholder, text: $apiKey)
                 .onChange(of: apiKey) { _, _ in testResult = nil }
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
@@ -705,13 +718,23 @@ private struct MemberForm: View {
         return url
     }
 
-    /// Key used for the test: the field, else the member's stored key when
-    /// editing with a blank field ("blank keeps the current key").
+    /// Blank key = inherit: the factory's key for a new member, or the
+    /// member's stored key (own -> factory) when editing.
+    private var keyPlaceholder: String {
+        if draft.isNew {
+            return factoryId != nil ? "API key (blank inherits factory)" : "API key"
+        }
+        return "API key (blank keeps the current key)"
+    }
+
     private func effectiveAPIKey() -> String? {
         if !apiKey.isEmpty { return apiKey }
         if !draft.isNew, let id = draft.memberId,
            let member = state.config.member(id: id) {
             return state.memberAPIKey(member)
+        }
+        if let factory = selectedFactory {
+            return state.factoryDefaultKey(factory)
         }
         return nil
     }

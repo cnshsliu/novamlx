@@ -138,6 +138,16 @@ public final class PoolForwarder: Sendable {
         return request
     }
 
+    /// The member's own key, falling back to its factory's shared key when
+    /// the member has none stored. Empty strings count as absent.
+    func apiKey(for member: MemberConfig, config: PeerConfig) -> String? {
+        if let own = try? secrets.load(member.apiKeyRef), !own.isEmpty { return own }
+        guard let factoryId = member.factoryId,
+              let ref = config.factory(id: factoryId)?.apiKeyRef else { return nil }
+        if let shared = try? secrets.load(ref), !shared.isEmpty { return shared }
+        return nil
+    }
+
     // MARK: - Dispatch
 
     private func dispatch(
@@ -180,7 +190,7 @@ public final class PoolForwarder: Sendable {
             }
 
             let started = ContinuousClock.now
-            let apiKey = (try? secrets.load(member.apiKeyRef)) ?? nil
+            let apiKey = apiKey(for: member, config: config)
             do {
                 let request = try Self.makeUpstreamRequest(
                     member: member, body: body, apiKey: apiKey,
