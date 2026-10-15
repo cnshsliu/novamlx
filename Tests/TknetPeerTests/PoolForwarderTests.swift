@@ -232,4 +232,54 @@ struct PoolForwarderTests {
         try? await forwarder.shutdown()
         await server.stop()
     }
+
+    @Test("ALL-UPPERCASE key resolves from the env file; missing reference fails the member")
+    func envFileKeyReference() async throws {
+        let server = MockSourceServer()
+        try await server.start()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tknet-fwd-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let envURL = dir.appendingPathComponent("env")
+        try Data("FACTORY_LIVE=sk-env-live\n".utf8).write(to: envURL)
+        let secrets = FileSecretStore(directory: dir)
+        // "env" member's stored key is the reference name; "missing" points at
+        // an undefined variable.
+        secrets.save("FACTORY_LIVE", for: "factory/f1")
+        secrets.save("NOPE_KEY", for: "src/missing")
+        var config = PeerConfig.defaultConfig()
+        config.factories = [FactoryConfig(
+            id: "f1", name: "F1",
+            baseUrl: URL(string: "http://127.0.0.1:9")!,
+            apiKeyRef: "factory/f1")]
+        let base = endpoint(server)
+        config.members = [
+            MemberConfig(id: "env", name: "env", type: .openaiCompatible, endpoint: base,
+                         apiKeyRef: "src/env", upstreamModel: "u", factoryId: "f1"),
+            MemberConfig(id: "missing", name: "missing", type: .openaiCompatible, endpoint: base,
+                         apiKeyRef: "src/missing", upstreamModel: "u", factoryId: "f1"),
+        ]
+        config.pools = [
+            PoolConfig(id: "p-env", name: "p-env", memberIds: ["env"], api: SupplyAPI.chat),
+            PoolConfig(id: "p-missing", name: "p-missing", memberIds: ["missing"], api: SupplyAPI.chat),
+        ]
+        let forwarder = PoolForwarder(config: config, secrets: secrets, envFile: envURL)
+        do {
+            _ = await forwarder.forward(poolName: "p-env", body: chatBody(), timeoutSeconds: 30)
+            #expect(server.lastAuthorizationHeader == "Bearer sk-env-live")
+
+            let outcome = await forwarder.forward(poolName: "p-missing", body: chatBody(), timeoutSeconds: 30)
+            if case .allMembersFailed(let lastError, _, _) = outcome {
+                #expect(lastError.contains("NOPE_KEY"))
+            } else {
+                Issue.record("expected allMembersFailed, got \(outcome)")
+            }
+        } catch {
+            try? await forwarder.shutdown()
+            await server.stop()
+            throw error
+        }
+        try? await forwarder.shutdown()
+        await server.stop()
+    }
 }
