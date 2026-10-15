@@ -261,6 +261,19 @@ public struct PeerConfig: Codable, Equatable, Sendable {
         return parts.url?.absoluteString
     }
 
+    /// Full member endpoint: the factory base (`scheme://host[:port]`) plus
+    /// the path the user typed. A missing leading slash is inserted. An empty
+    /// path is `/`. A query on the path is kept.
+    public static func memberEndpoint(factoryBase: URL, path input: String) -> URL? {
+        var path = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if path.isEmpty { path = "/" }
+        if !path.hasPrefix("/") { path = "/" + path }
+        var base = factoryBase.absoluteString
+        if let query = base.firstIndex(of: "?") { base = String(base[..<query]) }
+        while base.hasSuffix("/") { base.removeLast() }
+        return URL(string: base + path)
+    }
+
     private static func factoryName(for base: String) -> String {
         guard let parts = URLComponents(string: base), let host = parts.host else { return base }
         if let port = parts.port,

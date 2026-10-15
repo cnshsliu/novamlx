@@ -117,6 +117,22 @@ struct FactoryConfigTests {
         #expect(config.factories.first { $0.name == "One renamed" } != nil)
     }
 
+    @Test("member endpoint joins the factory base and the typed path")
+    func memberEndpointJoinsFactoryBase() {
+        let base = URL(string: "https://api.one.com")!
+        #expect(PeerConfig.memberEndpoint(factoryBase: base, path: "/v1/abcd")?.absoluteString
+            == "https://api.one.com/v1/abcd")
+        #expect(PeerConfig.memberEndpoint(factoryBase: base, path: "v1/abcd")?.absoluteString
+            == "https://api.one.com/v1/abcd")
+        #expect(PeerConfig.memberEndpoint(factoryBase: base, path: "")?.absoluteString
+            == "https://api.one.com/")
+        #expect(PeerConfig.memberEndpoint(factoryBase: base, path: "/v1?beta=1")?.absoluteString
+            == "https://api.one.com/v1?beta=1")
+        let slashed = URL(string: "http://127.0.0.1:6590/")!
+        #expect(PeerConfig.memberEndpoint(factoryBase: slashed, path: "/v1/abcd")?.absoluteString
+            == "http://127.0.0.1:6590/v1/abcd")
+    }
+
     @Test("editing a factory URL rebases member endpoints, path intact")
     func factoryRebase() throws {
         let store = secrets()
