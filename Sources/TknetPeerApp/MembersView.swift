@@ -99,9 +99,17 @@ struct MembersView: View {
                     selectedFactory = $0 ?? .all
                     selectedMemberId = nil
                 })) {
-                Text("All")
-                    .tag(FactorySelection.all)
-                    .font(.body.weight(.medium))
+                HStack {
+                    Text("All")
+                        .font(.body.weight(.medium))
+                    Spacer()
+                    Button("Test") { testAllMembers() }
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                        .disabled(state.lockError != nil || factoryTestingIds.contains(allFactoryId))
+                        .accessibilityIdentifier("all-test")
+                }
+                .tag(FactorySelection.all)
                 if factories.isEmpty {
                     // No factories yet: visible but never selectable.
                     Text("(none)")
@@ -258,6 +266,21 @@ struct MembersView: View {
             } else {
                 importNotice = state.lastError ?? "Import failed."
             }
+        }
+    }
+
+    /// Sentinel id so "All" can ride the same testing-disable set.
+    private let allFactoryId = "__all__"
+
+    /// Test every member across every factory, one by one.
+    private func testAllMembers() {
+        guard !factoryTestingIds.contains(allFactoryId) else { return }
+        factoryTestingIds.insert(allFactoryId)
+        Task {
+            for member in state.config.members {
+                memberTestResults[member.id] = await state.probeMember(member)
+            }
+            factoryTestingIds.remove(allFactoryId)
         }
     }
 
