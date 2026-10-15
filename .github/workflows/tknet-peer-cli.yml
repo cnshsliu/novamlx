@@ -28,17 +28,11 @@ jobs:
       - uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.2"
-      - name: Build, test, package
-        working-directory: tknet-peer
-        run: |
-          # swift-websocket 1.6.2's utf8.span path fails to compile on Swift 6.2 Linux.
-          bash Scripts/prepare-build.sh
-          swift build -c release --product tknet-peer
-          swift test
-          bash Scripts/check-mlx-free.sh
-          bash Scripts/accept-lan-pool.sh
-          bash Scripts/package-cli.sh
+      - name: Verify the package with no NovaMLX sources
+        env:
+          TKNET_PEER_ARTIFACT_DIR: ${{ github.workspace }}/peer-dist
+        run: bash tknet-peer/Scripts/verify-standalone.sh
       - uses: actions/upload-artifact@v4
         with:
           name: tknet-peer-linux
-          path: tknet-peer/dist/*.tar.gz
+          path: peer-dist/*.tar.gz
