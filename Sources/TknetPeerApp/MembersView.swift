@@ -21,6 +21,7 @@ struct MembersView: View {
     @State private var pendingDeleteFactory: FactoryConfig?
     @State private var pendingDeleteMember: MemberConfig?
     @State private var importNotice: String?
+    @State private var adoptNotice: String?
 
     private var factories: [FactoryConfig] { state.config.factories }
 
@@ -97,7 +98,11 @@ struct MembersView: View {
         VStack(spacing: 0) {
             List(selection: Binding(
                 get: { selectedFactory },
-                set: { selectedFactory = $0 ?? .all; selectedMemberId = nil })) {
+                set: {
+                    selectedFactory = $0 ?? .all
+                    selectedMemberId = nil
+                    if case .factory(let id) = selectedFactory { adoptMembers(id: id) }
+                })) {
                 Text("All")
                     .tag(FactorySelection.all)
                     .font(.body.weight(.medium))
@@ -120,6 +125,11 @@ struct MembersView: View {
                             Text("\(state.config.members(in: factory).count)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            Button("Test") { testFactoryMembers(factory) }
+                                .buttonStyle(.link)
+                                .controlSize(.small)
+                                .disabled(state.lockError != nil || factoryTestingIds.contains(factory.id))
+                                .accessibilityIdentifier("factory-test")
                             Button("Edit") { factoryDraft = FactoryDraft(factory) }
                                 .buttonStyle(.link)
                                 .controlSize(.small)
@@ -149,6 +159,14 @@ struct MembersView: View {
 
     private var memberPane: some View {
         VStack(spacing: 0) {
+            if let adoptNotice {
+                Text(adoptNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+            }
             if visibleMembers.isEmpty {
                 Spacer()
                 Text(emptyMembersText)
@@ -180,6 +198,17 @@ struct MembersView: View {
         }
     }
 
+    /// Selecting a factory claims ungrouped members on the same base.
+    private func adoptMembers(id: String) {
+        Task {
+            if let count = await state.adoptMembersIntoFactory(id: id), count > 0 {
+                adoptNotice = "Adopted \(count) ungrouped member\(count == 1 ? "" : "s") matching this factory."
+                try? await Task.sleep(for: .seconds(4))
+                adoptNotice = nil
+            }
+        }
+    }
+
     /// Bulk-add one member per model the selected factory advertises.
     private func importModels() {
         guard let id = selectedFactory.factoryId,
@@ -196,11 +225,43 @@ struct MembersView: View {
         }
     }
 
+    // MARK: - Member testing
+
+    /// Probe results keyed by member id, shared by row buttons and the
+    /// factory-wide "Test" so a failed probe leaves a warning icon behind.
+    @State private var memberTestResults: [String: MemberProbeResult] = [:]
+    @State private var testingMemberIds: Set<String> = []
+    @State private var factoryTestingIds: Set<String> = []
+
+    private func testMember(_ member: MemberConfig) {
+        guard !testingMemberIds.contains(member.id) else { return }
+        testingMemberIds.insert(member.id)
+        Task {
+            memberTestResults[member.id] = await state.probeMember(member)
+            testingMemberIds.remove(member.id)
+        }
+    }
+
+    /// Factory test: probe this factory's members one by one.
+    private func testFactoryMembers(_ factory: FactoryConfig) {
+        guard !factoryTestingIds.contains(factory.id) else { return }
+        factoryTestingIds.insert(factory.id)
+        Task {
+            for member in state.config.members(in: factory) {
+                memberTestResults[member.id] = await state.probeMember(member)
+            }
+            factoryTestingIds.remove(factory.id)
+        }
+    }
+
     @ViewBuilder
     private func memberRow(_ member: MemberConfig) -> some View {
-        MemberRowView(member: member, factories: factories) {
-            memberDraft = MemberDraft(member, factories: factories)
-        }
+        MemberRowView(
+            member: member,
+            result: memberTestResults[member.id],
+            isTesting: testingMemberIds.contains(member.id),
+            onEdit: { memberDraft = MemberDraft(member, factories: factories) },
+            onTest: { testMember(member) })
     }
 
     private var emptyMembersText: String {
@@ -287,26 +348,29 @@ enum MemberLabel {
 }
 
 /// One member row: identity lines on the left, Test/Edit links on the right.
-/// Test state is per-row so several members can be checked independently.
+/// The probe result comes from the parent so the factory-wide test can fill
+/// it in too; a failed probe leaves a warning icon beside the model name.
 private struct MemberRowView: View {
     @EnvironmentObject private var state: PeerAppState
     let member: MemberConfig
-    let factories: [FactoryConfig]
+    let result: MemberProbeResult?
+    let isTesting: Bool
     let onEdit: () -> Void
-
-    private enum TestState {
-        case idle
-        case running
-        case done(MemberProbeResult)
-    }
-
-    @State private var testState: TestState = .idle
+    let onTest: () -> Void
 
     var body: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(MemberLabel.title(member, among: state.config.members))
-                    .font(.body.bold())
+                HStack(spacing: 4) {
+                    Text(MemberLabel.title(member, among: state.config.members))
+                        .font(.body.bold())
+                    if let result, !result.ok {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .help(result.message)
+                    }
+                }
                 Text(fullEndpointURL)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -316,14 +380,11 @@ private struct MemberRowView: View {
                 Text(member.isEnabled ? "Enabled" : "Disabled")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                switch testState {
-                case .idle:
-                    EmptyView()
-                case .running:
+                if isTesting {
                     Text("Testing…")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                case .done(let result):
+                } else if let result {
                     Text(result.ok ? "Test ✓ \(result.message)" : "Test ✗ \(result.message)")
                         .font(.caption2)
                         .foregroundStyle(result.ok ? Color.green : Color.red)
@@ -332,20 +393,15 @@ private struct MemberRowView: View {
             }
             Spacer()
             HStack(spacing: 10) {
-                Button("Test") { Task { await runTest() } }
+                Button("Test", action: onTest)
                     .buttonStyle(.link)
-                    .disabled(isRunning)
+                    .disabled(isTesting)
                     .accessibilityIdentifier("member-test")
                 Button("Edit", action: onEdit)
                     .buttonStyle(.link)
             }
         }
         .padding(.vertical, 4)
-    }
-
-    private var isRunning: Bool {
-        if case .running = testState { return true }
-        return false
     }
 
     /// Full forward URL: the member's base plus the default upstream path.
@@ -362,11 +418,6 @@ private struct MemberRowView: View {
             return "\(type) · upstream \(member.upstreamModel)"
         }
         return type
-    }
-
-    private func runTest() async {
-        testState = .running
-        testState = .done(await state.probeMember(member))
     }
 }
 

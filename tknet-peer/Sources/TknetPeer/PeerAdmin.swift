@@ -106,6 +106,23 @@ public enum PeerAdmin {
         config.removeFactory(id: id, deleteMembers: deleteMembers)
     }
 
+    /// Clicking a factory adopts ungrouped members: any member whose endpoint
+    /// base equals the factory base gains this `factoryId`. Endpoints and keys
+    /// are untouched — they already point at this factory's host. Returns how
+    /// many members moved (0 when nothing matched).
+    public static func adoptMembers(_ config: inout PeerConfig, factoryId: String) -> Int {
+        guard let factory = config.factory(id: factoryId),
+              let base = PeerConfig.factoryBase(of: factory.baseUrl) else { return 0 }
+        var adopted = 0
+        for index in config.members.indices where config.members[index].factoryId == nil {
+            guard let memberBase = PeerConfig.factoryBase(of: config.members[index].endpoint),
+                  memberBase == base else { continue }
+            config.members[index].factoryId = factoryId
+            adopted += 1
+        }
+        return adopted
+    }
+
     private static func rebaseMembers(
         of factoryId: String, from oldBase: URL, to newBase: URL,
         in config: inout PeerConfig

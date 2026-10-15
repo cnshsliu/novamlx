@@ -503,6 +503,18 @@ final class PeerAppState: ObservableObject {
         return await persist(config)
     }
 
+    /// Selecting a factory adopts ungrouped members whose endpoint base
+    /// matches. Returns the count moved, or nil on a persist failure.
+    @discardableResult
+    func adoptMembersIntoFactory(id: String) async -> Int? {
+        guard lockError == nil else { return nil }
+        var config = self.config
+        let adopted = PeerAdmin.adoptMembers(&config, factoryId: id)
+        guard adopted > 0 else { return 0 }
+        guard await persist(config) else { return nil }
+        return adopted
+    }
+
     // MARK: - Env-file key references
 
     /// The `env` file beside `peer.json` (`KEY=VALUE` lines). An ALL-UPPERCASE
