@@ -44,4 +44,4 @@ NovaMLX 的分布式切层、本机模型加载和本机 API 不动。
 - 不把推理代码拷进 Peer。
 - 不为 Windows 或 Linux 做界面。
 - 不改 tknet 网站的调度和付款。
-- 库和命令行在公开仓库 `https://github.com/cnshsliu/tknet-peer`。本仓库只留 Mac 应用。
+- 库和命令行在私有仓库 `git@github.com:cnshsliu/tknet-peer.git`。本仓库只留 Mac 应用。

@@ -29,7 +29,7 @@ Key library targets:
 - **NovaMLXPrefixCache** — KV-cache prefix caching
 - **NovaMLXAudio** / **NovaMLXImage** — modality support
 - **NovaMLXMenuBar** — macOS menu bar UI
-- **TknetPeerApp** (`Sources/TknetPeerApp/`) — macOS menu-bar app. It links the library from `https://github.com/cnshsliu/tknet-peer` (`from: "0.2.0"` in `Package.swift`). The CLI and the library source are that repository, not this one.
+- **TknetPeerApp** (`Sources/TknetPeerApp/`) — macOS menu-bar app. It links the private library `git@github.com:cnshsliu/tknet-peer.git` (`from: "0.2.0"` in `Package.swift`). The CLI and the library source are that repository, not this one.
 
 ## Build, Test, and Development Commands
 

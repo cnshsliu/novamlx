@@ -1,5 +1,5 @@
 {
-  "originHash" : "bd79270ec5a299011bbe602bcc7cfb33b0f0c435d452a04445d51980a8836b40",
+  "originHash" : "2857dd691279092c8c1da17c3418d574901a545b514f84f04057017ed778dbbc",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -310,7 +310,7 @@
     {
       "identity" : "tknet-peer",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/cnshsliu/tknet-peer",
+      "location" : "git@github.com:cnshsliu/tknet-peer.git",
       "state" : {
         "revision" : "1b7000f68506b37765b6db93cb362a5c40f7f41b",
         "version" : "0.2.0"

@@ -557,7 +557,7 @@ Use provider catalog presets for popular services (OpenAI, Anthropic, Groq, Toge
 
 ## Tknet Peer
 
-Tknet Peer is the local gateway in front of one or more inference servers. Clients send a **pool** name. The peer picks a member. This repository builds the Mac menu-bar app, `dist/TknetPeer.app`. The library and the `tknet-peer` CLI are [github.com/cnshsliu/tknet-peer](https://github.com/cnshsliu/tknet-peer), pinned at `0.2.0`.
+Tknet Peer is the local gateway in front of one or more inference servers. Clients send a **pool** name. The peer picks a member. This repository builds the Mac menu-bar app, `dist/TknetPeer.app`. The library and the `tknet-peer` CLI are the private repository `git@github.com:cnshsliu/tknet-peer.git`, pinned at `0.2.0`.
 
 ```bash
 swift build -c release --product TknetPeerApp
