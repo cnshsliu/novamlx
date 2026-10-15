@@ -80,19 +80,6 @@ public enum InterfaceKind: String, Codable, CaseIterable, Sendable, Equatable, I
     /// Anthropic wire auth (`x-api-key` + version header) vs OpenAI Bearer.
     public var usesXAPIKey: Bool { self == .anthropicMessages }
 
-    /// Bare-call probing that would burn quota or take seconds (real image
-    /// generation, audio synthesis) defaults to a light check: authed
-    /// `GET {base-with-/v1}/models`. Everything else is invoked for real.
-    public var defaultsToLightProbe: Bool {
-        switch self {
-        case .openaiImages, .openaiImageEdits, .openaiSpeech,
-             .novaBackgroundRemoval, .openaiTranscription:
-            return true
-        default:
-            return false
-        }
-    }
-
     /// Kinds worth offering in the member form picker.
     public static var memberSelectable: [InterfaceKind] {
         [.openaiChat, .anthropicMessages, .openaiResponses, .openaiEmbeddings,
