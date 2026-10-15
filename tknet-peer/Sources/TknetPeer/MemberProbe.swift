@@ -227,9 +227,10 @@ public enum MemberProbe {
         case .openaiChat:
             return #"{"model":"\#(encoded)","messages":[{"role":"user","content":"ping"}],"max_tokens":1,"stream":false}"#
         case .novaDecision:
-            // /v1/decisions wants {model, state, questions}; a no-label
-            // ("noul") question is the minimal valid spec.
-            return #"{"model":"\#(encoded)","state":"ping","questions":{"q1":{"type":"noul","instructions":"ping"}}}"#
+            // Jev/Laya standard body: {model, state, questions}. Every
+            // question needs type + instructions; criteria is optional for
+            // noul. The noul example mirrors the TypeSafe API docs.
+            return #"{"model":"\#(encoded)","state":"ping","questions":{"q1":{"type":"noul","instructions":"Does this convey urgency?"}}}"#
         case .anthropicMessages:
             return #"{"model":"\#(encoded)","messages":[{"role":"user","content":"ping"}],"max_tokens":1}"#
         case .openaiResponses:
@@ -256,6 +257,8 @@ public enum MemberProbe {
             return (object["output"] as? [[String: Any]])?.isEmpty == false
         case .openaiEmbeddings:
             return (object["data"] as? [[String: Any]])?.isEmpty == false
+        case .novaDecision:
+            return (object["answers"] as? [String: Any])?.isEmpty == false
         default:
             return true
         }
