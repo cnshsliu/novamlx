@@ -75,4 +75,17 @@ import Testing
         #expect(!MemberProbe.isDraftModel("mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"))
         #expect(!MemberProbe.isDraftModel("rufang/laya-hknews-tags-v4"))
     }
+
+    @Test func lightProbeBaseStripsKindPath() {
+        let tts = MemberRoute(
+            url: URL(string: "http://127.0.0.1:6590/v1/audio/speech")!,
+            kind: .openaiSpeech, isLocal: true)
+        #expect(MemberProbe.factoryBase(of: tts).absoluteString == "http://127.0.0.1:6590")
+        #expect(MemberProbe.modelsBase(MemberProbe.factoryBase(of: tts)).absoluteString
+            == "http://127.0.0.1:6590/v1")
+        let chat = MemberRoute(
+            url: URL(string: "https://api.x.com/v1/chat/completions")!,
+            kind: .openaiChat, isLocal: false)
+        #expect(MemberProbe.factoryBase(of: chat).absoluteString == "https://api.x.com")
+    }
 }
