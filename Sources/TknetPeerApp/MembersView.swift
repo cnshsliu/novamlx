@@ -121,16 +121,22 @@ struct MembersView: View {
                             Text("\(state.config.members(in: factory).count)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Button("Test") { testFactoryMembers(factory) }
-                                .buttonStyle(.link)
-                                .controlSize(.small)
-                                .disabled(state.lockError != nil || factoryTestingIds.contains(factory.id))
-                                .accessibilityIdentifier("factory-test")
-                            Button("Edit") { factoryDraft = FactoryDraft(factory) }
-                                .buttonStyle(.link)
-                                .controlSize(.small)
-                                .disabled(state.lockError != nil)
-                                .accessibilityIdentifier("factory-edit")
+                            Button("Test") {
+                                selectFactory(factory.id)
+                                testFactoryMembers(factory)
+                            }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                            .disabled(state.lockError != nil || factoryTestingIds.contains(factory.id))
+                            .accessibilityIdentifier("factory-test")
+                            Button("Edit") {
+                                selectFactory(factory.id)
+                                factoryDraft = FactoryDraft(factory)
+                            }
+                            .buttonStyle(.link)
+                            .controlSize(.small)
+                            .disabled(state.lockError != nil)
+                            .accessibilityIdentifier("factory-edit")
                         }
                         .tag(FactorySelection.factory(factory.id))
                     }
@@ -253,6 +259,12 @@ struct MembersView: View {
                 importNotice = state.lastError ?? "Import failed."
             }
         }
+    }
+
+    /// Row buttons (Test/Edit) select the factory first, like a row click.
+    private func selectFactory(_ id: String) {
+        selectedFactory = .factory(id)
+        selectedMemberId = nil
     }
 
     private func openMemberDraft() {
