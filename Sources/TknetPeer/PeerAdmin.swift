@@ -13,18 +13,23 @@ public enum PeerAdmin {
         _ config: inout PeerConfig, secrets: any SecretStore,
         id: String, name: String, endpoint: URL, upstreamModel: String,
         apiKey: String?, weight: Int?, type: SourceType,
-        isEnabled: Bool = true
+        isEnabled: Bool = true, factoryId: String? = nil
     ) throws {
         try validateIdentity(id)
         try validateEndpoint(endpoint)
         try validateWeight(weight)
+        if let factoryId {
+            guard config.factory(id: factoryId) != nil else {
+                throw PeerAdminError("No factory \(factoryId).")
+            }
+        }
         let upstream = upstreamModel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !upstream.isEmpty else { throw PeerAdminError("Upstream model is required.") }
         let ref = "src/\(id)"
         config.upsertMember(MemberConfig(
             id: id, name: name.isEmpty ? id : name, type: type, endpoint: endpoint,
             apiKeyRef: ref, upstreamModel: upstream, weight: weight,
-            isEnabled: isEnabled))
+            isEnabled: isEnabled, factoryId: factoryId))
         if let apiKey { try secrets.save(apiKey, for: ref) }
     }
 
@@ -60,6 +65,76 @@ public enum PeerAdmin {
     public static func removeMember(_ config: inout PeerConfig, id: String) throws {
         guard config.member(id: id) != nil else { throw PeerAdminError("No member \(id).") }
         config.removeMember(id: id)
+    }
+
+    /// Create or update a factory. `baseUrl` keeps scheme + host + port only;
+    /// a pasted path or query is dropped. When the base changes, member
+    /// endpoints in that factory are rewritten to the new base, path intact.
+    /// An optional `apiKey` seeds/updates the shared factory default.
+    public static func saveFactory(
+        _ config: inout PeerConfig, secrets: any SecretStore,
+        id: String?, name: String, baseUrl: URL, apiKey: String?
+    ) throws {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { throw PeerAdminError("Factory name is required.") }
+        guard let base = normalizeFactoryBase(baseUrl) else {
+            throw PeerAdminError("Factory URL must be an http(s) host[:port].")
+        }
+        let factoryId = id ?? UUID().uuidString
+        for other in config.factories where other.id != factoryId {
+            if PeerConfig.factoryBase(of: other.baseUrl) == PeerConfig.factoryBase(of: base) {
+                throw PeerAdminError("A factory with URL \(other.baseUrl.absoluteString) already exists.")
+            }
+        }
+        let existing = config.factory(id: factoryId)
+        let ref = existing?.apiKeyRef ?? "factory/\(factoryId)"
+        config.upsertFactory(FactoryConfig(id: factoryId, name: trimmedName, baseUrl: base, apiKeyRef: ref))
+        if let apiKey { try secrets.save(apiKey, for: ref) }
+        // Base changed: rebase every member endpoint in this factory.
+        if let existing,
+           PeerConfig.factoryBase(of: existing.baseUrl) != PeerConfig.factoryBase(of: base) {
+            rebaseMembers(of: factoryId, from: existing.baseUrl, to: base, in: &config)
+        }
+    }
+
+    /// Drop a factory. `deleteMembers` false (default) keeps its members
+    /// orphaned; true removes them and their pool memberships.
+    public static func removeFactory(
+        _ config: inout PeerConfig, id: String, deleteMembers: Bool
+    ) throws {
+        guard config.factory(id: id) != nil else { throw PeerAdminError("No factory \(id).") }
+        config.removeFactory(id: id, deleteMembers: deleteMembers)
+    }
+
+    private static func rebaseMembers(
+        of factoryId: String, from oldBase: URL, to newBase: URL,
+        in config: inout PeerConfig
+    ) {
+        for member in config.members where member.factoryId == factoryId {
+            guard var parts = URLComponents(url: member.endpoint, resolvingAgainstBaseURL: false) else { continue }
+            parts.scheme = newBase.scheme
+            parts.host = newBase.host
+            parts.port = newBase.port
+            guard let url = parts.url else { continue }
+            config.upsertMember(MemberConfig(
+                id: member.id, name: member.name, type: member.type, endpoint: url,
+                apiKeyRef: member.apiKeyRef, upstreamModel: member.upstreamModel,
+                weight: member.weight, isEnabled: member.isEnabled,
+                factoryId: member.factoryId))
+        }
+    }
+
+    /// scheme://host[:port], any path/query stripped. nil when not http(s).
+    public static func normalizeFactoryBase(_ url: URL) -> URL? {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = parts.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = parts.host, !host.isEmpty else { return nil }
+        parts.scheme = scheme
+        parts.path = ""
+        parts.query = nil
+        parts.fragment = nil
+        return parts.url
     }
 
     /// Name clients see. A stored name that is empty or just the internal id
@@ -184,7 +259,8 @@ public enum PeerAdmin {
         if config.members.isEmpty { return "(no members)" }
         return config.members.map { member in
             let weight = member.weight.map(String.init) ?? "-"
-            return "\(member.id)\t\(member.name)\t\(member.endpoint.absoluteString)\tupstream=\(member.upstreamModel)\tenabled=\(member.isEnabled)\tweight=\(weight)\ttype=\(member.type.rawValue)"
+            let factory = member.factoryId.flatMap { config.factory(id: $0)?.name } ?? "-"
+            return "\(member.id)\t\(member.name)\t\(member.endpoint.absoluteString)\tupstream=\(member.upstreamModel)\tenabled=\(member.isEnabled)\tweight=\(weight)\ttype=\(member.type.rawValue)\tfactory=\(factory)"
         }.joined(separator: "\n")
     }
 
