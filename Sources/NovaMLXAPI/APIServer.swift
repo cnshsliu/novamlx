@@ -1929,7 +1929,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 guard let job = inference.h3VideoService.job(id: jobId) else {
                     throw NovaMLXError.modelNotFound("video job '\(jobId)'")
                 }
-                return try Self.jsonResponse(VideoJobResponse(job: job))
+                return try Self.jsonResponse(
+                    VideoJobResponse(job: job, progress: inference.h3VideoService.progress(id: jobId)))
             }
 
             Get("/v1/videos/{id}/content") { request, context in

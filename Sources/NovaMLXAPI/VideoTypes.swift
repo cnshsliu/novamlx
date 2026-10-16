@@ -141,9 +141,12 @@ struct VideoJobResponse: Codable, Sendable {
     let usage: VideoUsage?
     let error: String?
     let createdAt: Int
+    /// Live progress while the job runs (extension beyond the OpenRouter
+    /// wire shape; nil unless in_progress).
+    let progress: VideoJobProgress?
 
     enum CodingKeys: String, CodingKey {
-        case id, status, model, width, height, duration, error
+        case id, status, model, width, height, duration, error, progress
         case generationId = "generation_id"
         case pollingUrl = "polling_url"
         case unsignedUrls = "unsigned_urls"
@@ -152,10 +155,17 @@ struct VideoJobResponse: Codable, Sendable {
     }
 }
 
+struct VideoJobProgress: Codable, Sendable, Equatable {
+    let phase: String
+    let completed: Int
+    let total: Int
+    let percent: Int
+}
+
 extension VideoJobResponse {
     /// URLs are path-relative — clients resolve them against the same host
     /// they POSTed to (there is no configured public base URL).
-    init(job: H3VideoJob) {
+    init(job: H3VideoJob, progress: H3VideoProgress? = nil) {
         id = job.id
         generationId = job.status == .completed ? job.id : nil
         pollingUrl = "/v1/videos/\(job.id)"
@@ -170,6 +180,9 @@ extension VideoJobResponse {
         usage = job.status == .completed ? VideoUsage(cost: 0, isByok: false) : nil
         error = job.error
         createdAt = Int(job.createdAt.timeIntervalSince1970)
+        self.progress = progress.map {
+            VideoJobProgress(phase: $0.phase, completed: $0.completed, total: $0.total, percent: $0.percent)
+        }
     }
 }
 
