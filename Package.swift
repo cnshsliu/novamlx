@@ -25,7 +25,6 @@ let package = Package(
         .library(name: "NovaMLXDistributed", targets: ["NovaMLXDistributed"]),
         .library(name: "NovaMLXMenuBar", targets: ["NovaMLXMenuBar"]),
         .library(name: "NovaMLXDB", targets: ["NovaMLXDB"]),
-        .executable(name: "TknetPeerApp", targets: ["TknetPeerApp"]),
     ],
     dependencies: [
         .package(path: "vendors/mlx-swift"),
@@ -41,7 +40,6 @@ let package = Package(
         .package(url: "https://github.com/hummingbird-project/hummingbird", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
-        .package(url: "git@github.com:cnshsliu/tknet-peer.git", from: "0.2.0"),
     ],
     targets: [
         .target(
@@ -252,13 +250,6 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Hub", package: "swift-transformers"),
-            ],
-            swiftSettings: concurrencySettings
-        ),
-        .executableTarget(
-            name: "TknetPeerApp",
-            dependencies: [
-                .product(name: "TknetPeer", package: "tknet-peer"),
             ],
             swiftSettings: concurrencySettings
         ),

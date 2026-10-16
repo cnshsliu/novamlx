@@ -235,11 +235,6 @@ if [ -z "$BUILD_BIN_DIR" ] || [ ! -d "$BUILD_BIN_DIR" ]; then
 	exit 0
 fi
 
-# Peer menu-bar app is MLX-free and independent of dist/NovaMLX.app.
-if [ -f "$BUILD_BIN_DIR/TknetPeerApp" ]; then
-	NOVAMLX_PEER_BIN="$BUILD_BIN_DIR/TknetPeerApp" bash Scripts/package-peer.sh || echo "→ Tknet Peer package sync failed"
-fi
-
 APP_MACOS="dist/NovaMLX.app/Contents/MacOS"
 if [ ! -d "$APP_MACOS" ]; then
 	# No packaged NovaMLX app yet — nothing further to sync. First-time users

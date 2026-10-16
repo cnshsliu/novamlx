@@ -1,5 +1,5 @@
 {
-  "originHash" : "2857dd691279092c8c1da17c3418d574901a545b514f84f04057017ed778dbbc",
+  "originHash" : "dd8c9c62288ec37b87c62f6e120c0682b308caca696fb37952323ef67d4f9306",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -8,15 +8,6 @@
       "state" : {
         "revision" : "3a5b74a58782c3b4c1f0bc75e9b67b10c2494e8f",
         "version" : "1.33.1"
-      }
-    },
-    {
-      "identity" : "compress-nio",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/adam-fowler/compress-nio.git",
-      "state" : {
-        "revision" : "e238631c31f06274ad75c003c154f0b6ad4910e7",
-        "version" : "1.5.0"
       }
     },
     {
@@ -47,30 +38,12 @@
       }
     },
     {
-      "identity" : "hummingbird-websocket",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/hummingbird-project/hummingbird-websocket",
-      "state" : {
-        "revision" : "716c54294152c6d3301a6239a1d74db57cbcd6dc",
-        "version" : "2.6.0"
-      }
-    },
-    {
       "identity" : "swift-algorithms",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-algorithms.git",
       "state" : {
         "revision" : "87e50f483c54e6efd60e885f7f5aa946cee68023",
         "version" : "1.2.1"
-      }
-    },
-    {
-      "identity" : "swift-argument-parser",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-argument-parser",
-      "state" : {
-        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
-        "version" : "1.8.2"
       }
     },
     {
@@ -296,24 +269,6 @@
       "state" : {
         "revision" : "2fa33e1f5e7131a7fc64c28e6d161dcec0d24820",
         "version" : "1.3.3"
-      }
-    },
-    {
-      "identity" : "swift-websocket",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/hummingbird-project/swift-websocket.git",
-      "state" : {
-        "revision" : "126df9655565068bd97838c072c1db11f9fd42ee",
-        "version" : "1.6.1"
-      }
-    },
-    {
-      "identity" : "tknet-peer",
-      "kind" : "remoteSourceControl",
-      "location" : "git@github.com:cnshsliu/tknet-peer.git",
-      "state" : {
-        "revision" : "1b7000f68506b37765b6db93cb362a5c40f7f41b",
-        "version" : "0.2.0"
       }
     },
     {
