@@ -37,6 +37,9 @@ public enum NovaMLXError: Error, LocalizedError {
     case mtpCompanionNotLoadable(String)
     case tieConversionFailed(String, String)
     case tieLayoutIncomplete(String, String)
+    /// Capacity protection: a bounded queue (e.g. async video jobs) is full.
+    /// Maps to HTTP 429.
+    case tooManyRequests(String)
 
     public var errorDescription: String? {
         switch self {
@@ -64,6 +67,8 @@ public enum NovaMLXError: Error, LocalizedError {
             "TIE conversion failed for '\(id)': \(reason)"
         case .tieLayoutIncomplete(let id, let reason):
             "TIE layout for '\(id)' is incomplete (\(reason)). Remove the TIE layout and convert again."
+        case .tooManyRequests(let msg):
+            "Too many requests: \(msg)"
         }
     }
 

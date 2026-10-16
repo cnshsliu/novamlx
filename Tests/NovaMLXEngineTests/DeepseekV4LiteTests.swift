@@ -7,6 +7,11 @@ import MLXLLM
 @testable import NovaMLXEngine
 @testable import NovaMLXModelManager
 
+// Disambiguate from the identical helpers vendored in MLXLMCommon — the
+// #expect macro cannot parse module-qualified calls, so bind them locally.
+private let engineDsparkDraftCandidates: @Sendable (String) -> [String] = { NovaMLXEngine.dsparkDraftCandidates(forMainId: $0) }
+private let engineDflashDraftCandidates: @Sendable (String) -> [String] = { NovaMLXEngine.dflashDraftCandidates(forMainId: $0) }
+
 // ────────────────────────────────────────────────────────────
 // DeepSeek-V4 lite regression suite — todo.markdown §2.10.
 //
@@ -115,11 +120,11 @@ struct DeepseekV4LiteTests {
     @Test("V4.1 Flash ids resolve to the DSpark companion, not Qwen DFlash")
     func v41ResolvesDSparkNotDFlash() {
         let id = "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit"
-        #expect(dsparkDraftCandidates(forMainId: id) == [
+        #expect(engineDsparkDraftCandidates(id) == [
             "mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter"
         ])
-        #expect(dflashDraftCandidates(forMainId: id).isEmpty)
-        #expect(dsparkDraftCandidates(forMainId: "mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter").isEmpty)
+        #expect(engineDflashDraftCandidates(id).isEmpty)
+        #expect(engineDsparkDraftCandidates("mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter").isEmpty)
     }
 
     @Test("LLMTypeRegistry has 'deepseek_v41' registered after ensureRegistered()")

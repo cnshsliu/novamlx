@@ -5,11 +5,17 @@ import NovaMLXCore
 import Testing
 @testable import NovaMLXEngine
 
+// Disambiguate from the identical helpers vendored in MLXLMCommon — the
+// #expect macro cannot parse module-qualified calls, so bind them locally.
+private let engineIsMtpDraftConfig: @Sendable (URL) -> Bool = { NovaMLXEngine.isMtpDraftConfig(at: $0) }
+private let engineCheckpointHasMtpWeights: @Sendable (URL) -> Bool = { NovaMLXEngine.checkpointHasMtpWeights(at: $0) }
+private let engineMtpDraftCandidates: @Sendable (String) -> [String] = { NovaMLXEngine.mtpDraftCandidates(forMainId: $0) }
+
 @Suite("MTP support")
 struct MtpSupportTests {
     @Test("mtp draft id candidates from 8-bit backbone")
     func draftCandidates() {
-        let ids = mtpDraftCandidates(forMainId: "mlx-community/Qwen3.8-27B-8bit")
+        let ids = engineMtpDraftCandidates("mlx-community/Qwen3.8-27B-8bit")
         #expect(ids.contains("mlx-community/Qwen3.8-27B-MTP-4bit"))
         #expect(ids.contains("mlx-community/Qwen3.8-27B-MTP-8bit"))
     }
@@ -24,8 +30,8 @@ struct MtpSupportTests {
         {"model_type":"qwen3_5_mtp","text_config":{"hidden_size":64,"vocab_size":128}}
         """
         try json.write(to: dir.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
-        #expect(isMtpDraftConfig(at: dir))
-        #expect(checkpointHasMtpWeights(at: dir))
+        #expect(engineIsMtpDraftConfig(dir))
+        #expect(engineCheckpointHasMtpWeights(dir))
     }
 
     @Test("backbone with only mtp_num_hidden_layers is not treated as having MTP weights")
@@ -41,8 +47,8 @@ struct MtpSupportTests {
         try """
         {"weight_map":{"language_model.model.layers.0.self_attn.q_proj.weight":"a.safetensors"}}
         """.write(to: dir.appendingPathComponent("model.safetensors.index.json"), atomically: true, encoding: .utf8)
-        #expect(!isMtpDraftConfig(at: dir))
-        #expect(!checkpointHasMtpWeights(at: dir))
+        #expect(!engineIsMtpDraftConfig(dir))
+        #expect(!engineCheckpointHasMtpWeights(dir))
     }
 
     @Test("hy_v4 native mtp_layers in the weight map count as MTP weights")
@@ -57,8 +63,8 @@ struct MtpSupportTests {
         try """
         {"weight_map":{"model.mtp_layers.0.eh_proj.weight":"mtp.safetensors"}}
         """.write(to: dir.appendingPathComponent("model.safetensors.index.json"), atomically: true, encoding: .utf8)
-        #expect(!isMtpDraftConfig(at: dir))
-        #expect(checkpointHasMtpWeights(at: dir))
+        #expect(!engineIsMtpDraftConfig(dir))
+        #expect(engineCheckpointHasMtpWeights(dir))
     }
 
     @Test("registry pairs backbone with on-disk MTP")

@@ -639,6 +639,7 @@ private extension String {
             || self.hasPrefix("/v1/audio/speech")
             || self.hasPrefix("/v1/images/generations")
             || self.hasPrefix("/v1/video/talking-head")
+            || self.hasPrefix("/v1/videos")
     }
 }
 
@@ -661,6 +662,7 @@ extension NovaMLXError {
         case .mtpCompanionNotLoadable: .badRequest
         case .tieConversionFailed: .internalServerError
         case .tieLayoutIncomplete: .conflict
+        case .tooManyRequests: .tooManyRequests
         }
     }
 
@@ -682,6 +684,7 @@ extension NovaMLXError {
         case .mtpCompanionNotLoadable: "invalid_request_error"
         case .tieConversionFailed: "server_error"
         case .tieLayoutIncomplete: "invalid_request_error"
+        case .tooManyRequests: "rate_limit_error"
         }
     }
 
@@ -703,6 +706,7 @@ extension NovaMLXError {
         case .mtpCompanionNotLoadable: "mtp_companion_not_loadable"
         case .tieConversionFailed: "tie_conversion_failed"
         case .tieLayoutIncomplete: "tie_layout_incomplete"
+        case .tooManyRequests: "too_many_requests"
         }
     }
 }
@@ -1898,6 +1902,80 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
                 let data = try JSONSerialization.data(withJSONObject: response)
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+            }
+
+            // MARK: - Async Video Generation (OpenRouter-compatible, h3.c backend)
+
+            // Registered BEFORE "/v1/videos/{id}" so "models" isn't captured as an id.
+            Get("/v1/videos/models") { _, _ in
+                try Self.jsonResponse(VideoModelsResponse.h3)
+            }
+
+            Post("/v1/videos") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(VideoGenerationRequest.self, from: body)
+                let job = try inference.h3VideoService.submit(req.toJobRequest())
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    RequestLogStore.shared.finish(
+                        model: job.model, kind: .video, status: .success,
+                        tps: 0, promptTokens: 0, completionTokens: 0,
+                        durationMs: 0, requestId: rid)
+                }
+                return try Self.jsonResponse(VideoJobResponse(job: job), httpStatus: .accepted)
+            }
+
+            Get("/v1/videos/{id}") { request, context in
+                let jobId = try context.parameters.require("id")
+                guard let job = inference.h3VideoService.job(id: jobId) else {
+                    throw NovaMLXError.modelNotFound("video job '\(jobId)'")
+                }
+                return try Self.jsonResponse(VideoJobResponse(job: job))
+            }
+
+            Get("/v1/videos/{id}/content") { request, context in
+                let jobId = try context.parameters.require("id")
+                let index: Int = request.uri.query
+                    .flatMap { query in
+                        query.split(separator: "&")
+                            .compactMap { param -> Int? in
+                                let parts = param.split(separator: "=", maxSplits: 1)
+                                guard parts.count == 2, parts[0] == "index" else { return nil }
+                                return Int(parts[1])
+                            }
+                            .first
+                    } ?? 0
+                guard let fileURL = inference.h3VideoService.contentURL(id: jobId, index: index) else {
+                    throw NovaMLXError.modelNotFound("video content for job '\(jobId)'")
+                }
+                let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+                let fileSize = (attrs[.size] as? NSNumber)?.intValue
+                // Stream the mp4 in chunks — a 10 s clip is tens of MB, too
+                // big to buffer whole into one ByteBuffer.
+                let body = ResponseBody(contentLength: fileSize) { writer in
+                    let handle = try FileHandle(forReadingFrom: fileURL)
+                    while true {
+                        let chunk = try handle.read(upToCount: 256 * 1024) ?? Data()
+                        if chunk.isEmpty { break }
+                        do { try await writer.write(ByteBuffer(data: chunk)) }
+                        catch { break } // client went away
+                    }
+                    try? handle.close()
+                    try await writer.finish(nil)
+                }
+                return Response(
+                    status: .ok,
+                    headers: [
+                        .contentType: "video/mp4",
+                        .contentDisposition: "attachment; filename=\"\(jobId).mp4\"",
+                    ],
+                    body: body
+                )
+            }
+
+            Post("/v1/videos/{id}/cancel") { request, context in
+                let jobId = try context.parameters.require("id")
+                let job = try inference.h3VideoService.cancel(id: jobId)
+                return try Self.jsonResponse(VideoJobResponse(job: job))
             }
 
             Post("/v1/responses") { request, context in
