@@ -46,6 +46,90 @@ public struct H3VideoJob: Codable, Sendable {
     public var expiredAt: Date?
 }
 
+/// Live progress of a running job, parsed from h3's stderr
+/// (`\r<phase> <completed>/<total>` updates). Held in memory only — job.json
+/// is written on status transitions, not per progress tick.
+public struct H3VideoProgress: Codable, Sendable, Equatable {
+    public var phase: String
+    public var completed: Int
+    public var total: Int
+    /// 0–100, estimated from phase weights (denoise dominates runtime).
+    public var percent: Int
+}
+
+/// Parses h3's carriage-return progress stream into `H3VideoProgress`.
+///
+/// Phase order/weights come from the measured runtime breakdown (standard
+/// tier, M4 Max): denoise is ~75% of wall time, video VAE ~12%, the rest is
+/// small. Phases not in the table keep the previous estimate.
+public struct H3ProgressParser: Sendable {
+    /// Cumulative percent at which each phase starts.
+    static let phaseStart: [(phase: String, start: Double, end: Double)] = [
+        ("tokenizer", 0, 1),
+        ("text encoder", 1, 7),
+        ("Qwen vision", 7, 9),
+        ("video VAE encoder", 9, 11),
+        ("audio VAE encoder", 11, 12),
+        ("denoise", 12, 87),
+        ("video VAE load", 87, 88),
+        ("preview VAE load", 88, 89),
+        ("video VAE", 89, 97),
+        ("audio VAE", 97, 99),
+        ("FFmpeg", 99, 100),
+    ]
+
+    private var buffer = ""
+
+    public init() {}
+
+    /// Feed a raw stderr chunk; returns the newest parsed progress (if any).
+    public mutating func feed(_ chunk: String) -> H3VideoProgress? {
+        buffer += chunk
+        // Progress updates are \r-separated; keep the incomplete tail.
+        // Note: "\r\n" is a single grapheme cluster in Swift, so compare
+        // with isNewline rather than == "\r" / == "\n".
+        var latest: H3VideoProgress? = nil
+        var consumedUpTo = buffer.startIndex
+        for i in buffer.indices where buffer[i].isNewline {
+            if let parsed = Self.parseLine(String(buffer[consumedUpTo..<i])) {
+                latest = parsed
+            }
+            consumedUpTo = buffer.index(after: i)
+        }
+        buffer = String(buffer[consumedUpTo...])
+        return latest
+    }
+
+    /// Parse one `<phase> <completed>/<total>` segment.
+    static func parseLine(_ line: String) -> H3VideoProgress? {        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let match = trimmed.range(
+            of: #"^(.+?)\s+(\d+)/(\d+)$"#, options: .regularExpression)
+        else { return nil }
+        let parts = String(trimmed[match]).split(separator: " ")
+        guard parts.count >= 2,
+              let counts = parts.last,
+              let slash = counts.firstIndex(of: "/"),
+              let completed = Int(counts[..<slash]),
+              let total = Int(counts[counts.index(after: slash)...]),
+              total > 0
+        else { return nil }
+        let phase = parts.dropLast().joined(separator: " ")
+        // Unknown phases (future h3 versions) are skipped — the caller keeps
+        // the last known estimate instead of jumping backwards.
+        guard let entry = phaseStart.first(where: { $0.phase == phase }) else { return nil }
+        let percent = Int(
+            (entry.start + (entry.end - entry.start) * Double(completed) / Double(total))
+                .rounded())
+        return H3VideoProgress(phase: phase, completed: completed, total: total, percent: percent)
+    }
+}
+
+/// Reference wrapper so a @Sendable stream callback can mutate the parser
+/// (SafeProcess's drain queue is serial, so no locking is needed).
+private final class H3ProgressParserBox: @unchecked Sendable {
+    var parser = H3ProgressParser()
+}
+
 /// Everything the service needs to validate and enqueue a job. The API layer
 /// maps the OpenRouter wire shape onto this.
 public struct H3VideoJobRequest: Sendable {
@@ -114,6 +198,10 @@ public final class H3VideoService: @unchecked Sendable {
     private let lock = NovaMLXLock()
     private var jobs: [String: H3VideoJob] = [:]
     private var runnerTask: Task<Void, Never>?
+    /// Live progress for running jobs (in-memory only).
+    private var progressById: [String: H3VideoProgress] = [:]
+    /// Cancellation handles for running h3 processes.
+    private var cancelTokens: [String: SafeProcess.CancelToken] = [:]
 
     /// Test hook: when false, submit only enqueues — the serial runner never
     /// starts, so queueing behaviour is deterministic without a real GPU run.
@@ -310,6 +398,12 @@ public final class H3VideoService: @unchecked Sendable {
         return lock.withLock { jobs[id] }
     }
 
+    /// Live progress for a running job (nil once finished or never started).
+    public func progress(id: String) -> H3VideoProgress? {
+        guard Self.isValidJobId(id) else { return nil }
+        return lock.withLock { progressById[id] }
+    }
+
     /// Absolute file URL of the finished clip. Only completed jobs have
     /// content, and only index 0 exists (h3 renders one clip per job).
     public func contentURL(id: String, index: Int = 0) -> URL? {
@@ -320,9 +414,9 @@ public final class H3VideoService: @unchecked Sendable {
         return url
     }
 
-    /// Cancel a queued job. A job already running under SafeProcess cannot be
-    /// killed (SafeProcess exposes no process handle); it fails at the
-    /// deadline instead — that limitation is intentional.
+    /// Cancel a queued job immediately, or ask the runner to kill a running
+    /// one (SIGTERM, SIGKILL after 2 s). A running job flips to `cancelled`
+    /// once the runner observes the process exit — poll to confirm.
     @discardableResult
     public func cancel(id: String) throws -> H3VideoJob {
         guard Self.isValidJobId(id) else {
@@ -342,8 +436,13 @@ public final class H3VideoService: @unchecked Sendable {
                 fireWebhookLocked(for: job)
                 return job
             case .inProgress:
-                throw NovaMLXError.apiError(
-                    "Job \(id) is already running and cannot be cancelled (the h3 process exits at its deadline)")
+                guard let token = cancelTokens[id] else {
+                    throw NovaMLXError.apiError(
+                        "Job \(id) is finishing up and can no longer be cancelled")
+                }
+                token.terminate()
+                NovaMLXLog.info("H3Video: terminate requested for running job \(id)")
+                return job
             case .completed, .failed, .cancelled, .expired:
                 return job
             }
@@ -455,6 +554,18 @@ public final class H3VideoService: @unchecked Sendable {
             // h3 resolves h3_shaders.metal relative to its CWD, so run it from
             // the binary's own directory (same as gen.sh's `cd`).
             let workingDir = URL(fileURLWithPath: binaryPath).deletingLastPathComponent()
+            let jobId = job.id
+            let token = SafeProcess.CancelToken()
+            lock.withLock { cancelTokens[jobId] = token }
+            defer {
+                lock.withLock {
+                    cancelTokens[jobId] = nil
+                    progressById[jobId] = nil
+                }
+            }
+            // The drain queue is serial, so the parser needs no locking; the
+            // box exists because @Sendable closures can't mutate a captured var.
+            let parserBox = H3ProgressParserBox()
             let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SafeProcess.Result, Error>) in
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
@@ -463,13 +574,28 @@ public final class H3VideoService: @unchecked Sendable {
                             arguments: args,
                             currentDirectory: workingDir,
                             deadline: deadline,
-                            allowTimeout: false
+                            allowTimeout: false,
+                            stderrStream: { [weak self] chunk in
+                                guard let self, let text = String(data: chunk, encoding: .utf8) else { return }
+                                guard let parsed = parserBox.parser.feed(text) else { return }
+                                self.lock.withLock { self.progressById[jobId] = parsed }
+                            },
+                            cancelToken: token
                         )
                         continuation.resume(returning: result)
                     } catch {
                         continuation.resume(throwing: error)
                     }
                 }
+            }
+            if token.wasTerminated {
+                try transition(job.id) { job in
+                    job.status = .cancelled
+                    job.error = "cancelled by user"
+                    job.finishedAt = Date()
+                }
+                NovaMLXLog.info("H3Video: \(job.id) cancelled")
+                return
             }
             guard result.succeeded else {
                 let tail = result.stderrText.split(separator: "\n").suffix(5).joined(separator: " | ")

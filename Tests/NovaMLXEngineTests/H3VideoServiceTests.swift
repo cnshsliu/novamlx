@@ -426,4 +426,103 @@ struct H3VideoServiceTests {
         #expect(final?.error?.contains("boom: out of memory") == true)
         #expect(service.contentURL(id: job.id) == nil)
     }
+
+    // MARK: - Progress parsing
+
+    @Test func progressLineParsesPhaseCountsAndPercent() {
+        let denoise = H3ProgressParser.parseLine("denoise                    10/20  ")
+        #expect(denoise?.phase == "denoise")
+        #expect(denoise?.completed == 10)
+        #expect(denoise?.total == 20)
+        // denoise spans 12–87%; halfway lands near the middle.
+        #expect(denoise != nil && denoise!.percent > 40 && denoise!.percent < 60)
+
+        let start = H3ProgressParser.parseLine("tokenizer                     0/1   ")
+        #expect(start?.percent == 0)
+
+        let ffmpeg = H3ProgressParser.parseLine("FFmpeg                       22/22")
+        #expect(ffmpeg?.percent == 100)
+
+        // Unknown phases and non-progress lines are ignored.
+        #expect(H3ProgressParser.parseLine("h3: video VAE cache hit") == nil)
+        #expect(H3ProgressParser.parseLine("future phase                3/9") == nil)
+    }
+
+    @Test func progressParserHandlesCarriageReturnStream() {
+        var parser = H3ProgressParser()
+        #expect(parser.feed("tokenizer                     0/1   \rtokenizer") == H3VideoProgress(phase: "tokenizer", completed: 0, total: 1, percent: 0))
+        // The incomplete tail is buffered and completed by the next chunk.
+        let second = parser.feed("                     1/1   \r\ndenoise                      3/20  \r")
+        #expect(second?.phase == "denoise")
+        #expect(second?.completed == 3)
+    }
+
+    // MARK: - Cancelling a running job
+
+    @Test func cancelRunningJobTerminatesProcess() async throws {
+        let dir = try makeTempDir()
+        // A stand-in that emits one progress line then sleeps past the test.
+        let script = dir.appendingPathComponent("slow-h3.sh")
+        try """
+        #!/bin/sh
+        printf 'denoise                      1/20  \\r' >&2
+        sleep 60
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        var config = makeConfig(jobsDir: dir)
+        config.binaryPath = script.path
+        let service = H3VideoService(config: config)
+
+        let job = try service.submit(makeRequest())
+
+        // Wait for the runner to pick the job up.
+        var sawRunning = false
+        for _ in 0..<100 {
+            if service.job(id: job.id)?.status == .inProgress { sawRunning = true; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(sawRunning)
+
+        _ = try service.cancel(id: job.id)
+
+        var final: H3VideoJob?
+        for _ in 0..<100 {
+            if let current = service.job(id: job.id), current.status.isTerminal {
+                final = current
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(final?.status == .cancelled)
+        #expect(final?.error == "cancelled by user")
+    }
+
+    @Test func progressIsExposedWhileRunning() async throws {
+        let dir = try makeTempDir()
+        let script = dir.appendingPathComponent("progress-h3.sh")
+        try """
+        #!/bin/sh
+        printf 'tokenizer                     1/1   \\r' >&2
+        printf 'denoise                      5/20  \\r' >&2
+        sleep 60
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        var config = makeConfig(jobsDir: dir)
+        config.binaryPath = script.path
+        let service = H3VideoService(config: config)
+
+        let job = try service.submit(makeRequest())
+        defer { _ = try? service.cancel(id: job.id) }
+
+        var seen: H3VideoProgress?
+        for _ in 0..<100 {
+            if let p = service.progress(id: job.id) { seen = p; break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(seen?.phase == "denoise")
+        #expect(seen?.completed == 5)
+        #expect(seen != nil && seen!.percent > 0)
+    }
 }
