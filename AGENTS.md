@@ -20,7 +20,7 @@ Key library targets:
 
 - **NovaMLXCore** — foundational types, version, logging setup
 - **NovaMLXUtils** — helpers, resource bundle locator, Security framework integration
-- **NovaMLXEngine** — MLX model loading, inference engine, chat templates
+- **NovaMLXEngine** — MLX model loading, inference engine, chat templates; also hosts the external-CLI video services (`TalkingHeadService`, `H3VideoService` — OpenRouter-compatible `/v1/videos` async jobs backed by the local h3.c binary; config at `~/.nova/h3_video.json` + `NOVA_H3_*` env)
 - **NovaMLXInference** — high-level inference orchestration, streaming, distributed pipelines
 - **NovaMLXModelManager** — model loading/unloading, lifecycle
 - **NovaMLXAPI** — HTTP API (Hummingbird-based, port 6591)

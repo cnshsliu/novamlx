@@ -28,6 +28,7 @@
 - [Distributed Inference](#distributed-inference)
 - [Audio (ASR / TTS / Voice Cloning)](#audio-asr--tts--voice-cloning)
 - [Image Generation](#image-generation)
+- [Video Generation](#video-generation)
 - [Embeddings & Reranking](#embeddings--reranking)
 - [Session Management](#session-management)
 - [MCP — Model Context Protocol](#mcp--model-context-protocol)
@@ -127,6 +128,10 @@ Three wire formats share a single inference engine and tool-calling layer.
 | `/v1/images/generations` | POST | FLUX.1 |
 | `/v1/images/edits` | POST | FLUX.1 with mask |
 | `/v1/images/variations` | POST | FLUX.1 variations |
+| `/v1/videos` | POST | Async video job (OpenRouter-compatible, h3.c) → 202 |
+| `/v1/videos/{id}` | GET | Poll video job status |
+| `/v1/videos/{id}/content` | GET | Download generated mp4 |
+| `/v1/videos/models` | GET | Video model capabilities |
 | `/v1/rerank` | POST | Cross-encoder reranking |
 
 ### Anthropic-Compatible
@@ -297,6 +302,20 @@ Pipeline-parallel sharding across multiple Apple Silicon nodes over TCP / Thunde
 | **Endpoints** | `/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` |
 | **Output** | Base64 PNG; configurable height / width / steps / guidance |
 | **Service** | `ImageGenerationService` async API |
+
+## Video Generation
+
+| Feature | Details |
+|---------|---------|
+| **Backend** | Local h3.c CLI (MiniMax-H3, joint audio+video) via `H3VideoService`; talking-head pipeline via `TalkingHeadService` |
+| **API shape** | OpenRouter-compatible async jobs: submit → poll → download |
+| **Endpoints** | `POST /v1/videos` (202 + job id), `GET /v1/videos/{id}` (poll), `GET /v1/videos/{id}/content` (mp4 download), `GET /v1/videos/models`, `POST /v1/videos/{id}/cancel` (queued jobs) |
+| **Talking-head** | `POST /v1/video/talking-head`, `GET /v1/video/progress` |
+| **Execution** | Bounded FIFO queue (full → 429), one h3 job at a time, `SafeProcess` with deadline |
+| **Persistence** | File-based jobs under `~/.nova/videos/<id>/`; restart recovery; TTL expiry |
+| **Webhooks** | `callback_url` POST on terminal state; `X-OpenRouter-Idempotency-Key` + optional HMAC-SHA256 signature |
+| **Config** | `~/.nova/h3_video.json` + `NOVA_H3_*` env overrides (binary path, weights dir, steps/layers/reuse, timeouts) |
+| **Notes** | `usage.cost` always 0 (local); `generate_audio` ignored (h3 always emits AAC); spec in `docs/research/openrouter-video-generation-api.md` |
 
 ## Embeddings & Reranking
 
