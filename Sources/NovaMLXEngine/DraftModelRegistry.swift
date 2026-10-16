@@ -157,10 +157,23 @@ public final class DraftModelRegistry: Sendable {
     }
 
     /// Native MTP head on disk for this backbone (same vocab, `qwen3_5_mtp` or `mtp.*` weights).
+    ///
+    /// Candidates come from two sources: the hard-coded known companions
+    /// (`mtpDraftCandidates`) and a generic sibling guess — `<org>/<Name>-<quant>`
+    /// pairs with `<org>/<Name>-MTP-{4,8}bit`. The guess is safe here (unlike
+    /// in `acceleratorCandidates`, which drives download suggestions) because
+    /// every candidate is validated against its on-disk config and vocab below.
     public func mtpCandidate(forMainId mainId: String) -> DraftModelCandidate? {
         let mainDir = NovaMLXPaths.directory(forModelId:mainId)
         let vocab = Self.readVocabSize(from: mainDir)
-        for id in NovaMLXEngine.mtpDraftCandidates(forMainId: mainId) {
+        var ids = NovaMLXEngine.mtpDraftCandidates(forMainId: mainId)
+        if let siblingBase = Self.siblingMtpBase(forMainId: mainId) {
+            for quant in ["4bit", "8bit"] {
+                let id = "\(siblingBase)-MTP-\(quant)"
+                if !ids.contains(id) { ids.append(id) }
+            }
+        }
+        for id in ids {
             let dir = NovaMLXPaths.directory(forModelId:id)
             let cfg = dir.appendingPathComponent("config.json")
             guard FileManager.default.fileExists(atPath: cfg.path) else { continue }
@@ -296,5 +309,25 @@ public final class DraftModelRegistry: Sendable {
 
     private static func leaf(_ id: String) -> String {
         id.split(separator: "/").last.map(String.init) ?? id
+    }
+
+    /// `<org>/<Name>` for a `<org>/<Name>-<quant>` backbone, so `mtpCandidate`
+    /// can guess sibling companion ids (`<org>/<Name>-MTP-<quant>`). Returns
+    /// nil for ids without an org prefix or without a recognisable quant
+    /// suffix (`-8bit`, `-4bit`, `-bf16`, …) — no suffix, no naming convention
+    /// to guess from.
+    private static func siblingMtpBase(forMainId mainId: String) -> String? {
+        let parts = mainId.split(separator: "/")
+        guard parts.count == 2 else { return nil }
+        let leaf = String(parts[1])
+        let lower = leaf.lowercased()
+        guard !lower.contains("-mtp"), !lower.contains("dflash"), !lower.contains("dspark") else {
+            return nil
+        }
+        guard let range = leaf.range(
+            of: #"-(?:\d+bit|bf16|fp16|fp8)$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else { return nil }
+        return "\(parts[0])/\(leaf[..<range.lowerBound])"
     }
 }
