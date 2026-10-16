@@ -315,3 +315,59 @@ Job 到达终态时，OpenRouter 向回调地址 POST 事件信封，事件类�
 | 查询进度 | `GET /api/v1/videos/{jobId}` | 状态机：`pending`→`in_progress`→终态 |
 | 下载视频 | `GET /api/v1/videos/{jobId}/content?index=0` | 需 API Key，流式下载 |
 | Webhook | 请求体 `callback_url` 或工作区默认 | 终态推送，带幂等 key 和 HMAC 签名 |
+
+---
+
+# 附录：NovaMLX 实现对照（2026-10-16）
+
+NovaMLX 在本地完整实现了上述 OpenRouter 视频 API（后端为 h3.c + MiniMax-H3 权重）。
+基址 `http://127.0.0.1:6590`（路径无 `/api` 前缀，直接 `/v1/videos`），鉴权同为
+`Authorization: Bearer <key>`。
+
+## 已实现端点
+
+| 操作 | 路径 | 状态 |
+|---|---|---|
+| 列出视频模型 | `GET /v1/videos/models` | ✅ 返回 `minimax/h3` 及别名 `minimax/hailuo-3`，含 supported_* 能力字段 |
+| 提交生成 | `POST /v1/videos` | ✅ 返回 202 + `id` + `polling_url` |
+| 查询进度 | `GET /v1/videos/{id}` | ✅ 状态机一致；未知 id 返回 404 |
+| 下载视频 | `GET /v1/videos/{id}/content?index=0` | ✅ MP4（h264 + aac） |
+| 取消任务 | `POST /v1/videos/{id}/cancel` | ✅ 排队中直接取消；**运行中会 SIGTERM 杀掉 h3 进程**（2 秒宽限后 SIGKILL） |
+| Webhook | `callback_url` | ✅ 终态投递 `video.generation.<status>` envelope，带 `X-OpenRouter-Idempotency-Key`（`<job_id>-<status>`）；在 `~/.nova/h3_video.json` 配 `webhookSigningSecret` 后带 `X-OpenRouter-Signature`（`t=<ts>,v1=<HMAC-SHA256(ts + "," + rawBody)>`，与 OpenRouter 方案一致） |
+
+## 与上游规范的差异（有意为之）
+
+- `usage.cost` 恒为 0、`is_byok` 恒为 false（本地生成，无计费）。
+- `generate_audio` 接受但忽略（h3 始终渲染 AAC 音轨）。
+- `provider.options` 不透传给任何厂商；**私有命名空间 `provider.options.h3`
+  承载质量参数覆盖**：`{"provider":{"options":{"h3":{"steps":4,"layers":40,"reuse":3}}}}`。
+  顶层写 `steps`/`layers`/`reuse` 会被静默忽略（默认 20/45/2）。
+- `callback_url` 允许 HTTP（本地回环场景；上游要求 HTTPS）。
+
+## NovaMLX 扩展（上游没有）
+
+- `GET /v1/videos/{id}` 在任务运行中额外返回 `progress` 字段，实时解析自 h3 的
+  stderr 进度流（按阶段加权，denoise 占 12%–87% 大头）：
+
+  ```json
+  "progress": {"phase": "denoise", "completed": 2, "total": 4, "percent": 50}
+  ```
+
+## 配置
+
+`~/.nova/h3_video.json`（全部可选，缺省用内置默认值，可被 `NOVA_H3_*` 环境变量覆盖）：
+
+```json
+{
+  "binaryPath": "/Users/lucas/dev/h3.c/h3",
+  "weightsDir": "/Volumes/Samsung768/h3/MiniMax-H3",
+  "jobsDir": "~/.nova/videos",
+  "steps": 20, "layers": 45, "reuse": 2,
+  "processTimeoutSeconds": 3600,
+  "jobTTLSeconds": 86400,
+  "maxQueuedJobs": 4,
+  "webhookSigningSecret": "..."
+}
+```
+
+注意：h3 以其二进制所在目录为 CWD 运行（相对路径找 `h3_shaders.metal`）。
