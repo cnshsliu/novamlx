@@ -186,6 +186,7 @@ struct SettingsPageView: View {
 
             Divider().padding(.horizontal, 12)
             modelDirsEditor
+            moveModelsPanelSection
         }
     }
 
@@ -203,9 +204,10 @@ struct SettingsPageView: View {
                     .font(.system(size: 13)).foregroundColor(.secondary)
                 Spacer()
                 Button {
-                    showMoveModelsSheet = true
+                    withAnimation { showMoveModelsSheet.toggle() }
                 } label: {
-                    Label("Move Models…", systemImage: "arrow.left.arrow.right")
+                    Label(showMoveModelsSheet ? "Hide Move Models" : "Move Models…",
+                          systemImage: "arrow.left.arrow.right")
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
@@ -293,8 +295,12 @@ struct SettingsPageView: View {
             .padding(.vertical, 4)
         }
         .onAppear { loadModelDirs() }
-        .sheet(isPresented: $showMoveModelsSheet) {
-            MoveModelsSheet(
+    }
+
+    /// Inline two-pane move/delete panel, expanded under the dirs list.
+    @ViewBuilder private var moveModelsPanelSection: some View {
+        if showMoveModelsSheet {
+            MoveModelsPanel(
                 modelManager: modelManager,
                 isModelLoaded: { id in inferenceService.isModelLoaded(id) }
             )

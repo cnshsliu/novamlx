@@ -597,4 +597,31 @@ struct ModelManagerTests {
             try manager.moveModel("ghost-model", from: vaultA, to: vaultB)
         }
     }
+
+    @Test("deleteModel(at:) removes files and marks the record not-downloaded")
+    func deleteModelAt() async throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let vaultA = tempDir.appendingPathComponent("vault-a", isDirectory: true)
+        let modelId = "org/doomed-model"
+        let dir = vaultA.appendingPathComponent(modelId, isDirectory: true)
+        try createFakeModelConfig(at: dir, architectures: ["LlamaForCausalLM"], modelType: "llm")
+        try Data("weights".utf8).write(to: dir.appendingPathComponent("model.safetensors"))
+
+        let manager = ModelManager(modelsDirectory: vaultA)
+        manager.discoverModels()
+        #expect(manager.isDownloaded(modelId))
+
+        try manager.deleteModel(at: dir)
+        #expect(!dir.directoryExists)
+        #expect(!manager.isDownloaded(modelId))
+        // Record survives (re-downloadable) but is not downloaded.
+        #expect(manager.getRecord(modelId) != nil)
+        #expect(manager.getRecord(modelId)?.downloadedAt == nil)
+
+        await #expect(throws: ModelManager.ModelMoveError.self) {
+            try manager.deleteModel(at: dir)
+        }
+    }
 }
