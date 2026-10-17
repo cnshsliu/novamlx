@@ -405,8 +405,12 @@ Anthropic 的 `cache_control: { type: "ephemeral" }` 字段是为**计费**设�
 
 | 功能 | 详情 |
 |---------|---------|
-| **模型目录** | `~/.nova/models/<repo_id>/` |
-| **发现** | `modelManager.downloadedModels()` + `inferenceService.listLoadedModels()` |
+| **模型目录** | `~/.nova/models/<repo_id>/`（默认主目录） |
+| **多目录存储** | 有序目录列表存于 `~/.config/novamlx/models-path`（一行一个，首行优先级最高）。可在设置页或 `GET`/`PUT /admin/api/models-dirs` 管理，免重启生效 |
+| **按优先级下载** | `NovaMLXPaths.downloadRoot` 选取第一个已挂载、可写、空间充足的目录；全部不满足时返回 HTTP 507 |
+| **按优先级加载回退** | 加载按优先级依次尝试持有该模型副本的目录（`candidateLoadURLs`），某个目录里的副本损坏会自动落到下一个，不删除文件 |
+| **外置硬盘** | 未挂载的 `/Volumes/...` 目录直接跳过（不触发 TCC 弹窗）；硬盘拔掉后上面的模型暂时从加载/列表中消失，重新挂载即恢复 |
+| **发现** | `modelManager.downloadedModels()` + `inferenceService.listLoadedModels()`；`discoverModels()` 扫描所有已挂载目录，同 id 去重保留高优先级副本 |
 | **自动加载** | 请求未加载模型时触发加载（通过 `ensureModelReady` 可配） |
 | **自动驱逐** | 内存压力下 LRU；绝不在请求中途驱逐 |
 | **重启恢复** | `restoreModels()` 重建上次会话的加载集合 |
