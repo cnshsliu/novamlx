@@ -48,6 +48,7 @@ public final class InferenceService: @unchecked Sendable {
     public let ttsService: TTSService
     public let imageGenerationService: ImageGenerationService
     public let talkingHeadService: TalkingHeadService
+    public let h3VideoService: H3VideoService
     public let decisionService: DecisionService
 
     // Worker subprocess mode
@@ -78,6 +79,7 @@ public final class InferenceService: @unchecked Sendable {
         self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
         self.talkingHeadService = TalkingHeadService()
+        self.h3VideoService = H3VideoService()
         self.decisionService = DecisionService()
         // Share the engine's metrics store with every backend so the status
         // panel's "Realtime Inference Speed" reflects ALL model types, not just LLM.
@@ -85,6 +87,7 @@ public final class InferenceService: @unchecked Sendable {
         self.ttsService.metricsStore = engine.metricsStore
         self.imageGenerationService.metricsStore = engine.metricsStore
         self.talkingHeadService.metricsStore = engine.metricsStore
+        self.h3VideoService.metricsStore = engine.metricsStore
         self.workerMode = workerMode
         self.clusterMode = clusterMode
 

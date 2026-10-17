@@ -136,31 +136,44 @@ public actor AutoLoadCoordinator {
             )
         }
 
-        // Dispatch to inference or embeddings
+        // Dispatch to inference or embeddings, trying every storage location
+        // in priority order — a corrupt copy on a higher-priority disk falls
+        // through to the next root instead of failing the load outright.
+        let candidates = models.candidateLoadURLs(for: modelId)
         let modelConfig = ModelConfig(
             identifier: ModelIdentifier(id: modelId, family: record.family),
             modelType: record.modelType
         )
 
-        if record.modelType == .decision {
-            try await inference.loadModel(
-                at: record.localURL,
-                config: modelConfig,
-                progress: options.progress
-            )
-        } else if record.modelType == .embedding {
-            _ = try await embeddings.loadModel(
-                from: record.localURL,
-                config: modelConfig,
-                progress: options.progress
-            )
-        } else {
-            try await inference.loadModel(
-                at: record.localURL,
-                config: modelConfig,
-                progress: options.progress
-            )
+        var lastError: Error?
+        for (index, url) in candidates.enumerated() {
+            if index > 0 {
+                NovaMLXLog.warning(
+                    "[AutoLoad] \(modelId): retrying load from fallback location \(url.path)")
+            }
+            do {
+                if record.modelType == .embedding {
+                    _ = try await embeddings.loadModel(
+                        from: url,
+                        config: modelConfig,
+                        progress: options.progress
+                    )
+                } else {
+                    try await inference.loadModel(
+                        at: url,
+                        config: modelConfig,
+                        progress: options.progress
+                    )
+                }
+                lastError = nil
+                break
+            } catch {
+                lastError = error
+                NovaMLXLog.warning(
+                    "[AutoLoad] \(modelId): load from \(url.path) failed: \(error.localizedDescription)")
+            }
         }
+        if let lastError { throw lastError }
 
         applyDefaultTTLIfNeeded(modelId: modelId)
     }

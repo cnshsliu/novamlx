@@ -250,8 +250,8 @@ struct ModelAnalyzerTests {
         }
     }
 
-    @Test("ShardPlan respects memory ratios from profiles")
-    func shardPlanRespectsMemoryRatios() async throws {
+    @Test("ShardPlan minNodes packs a small model onto the biggest node")
+    func shardPlanMinNodesPacksSingleNode() async throws {
         let dir = try createTestModelDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -273,21 +273,54 @@ struct ModelAnalyzerTests {
             port: 6591
         )
 
+        // Default minLayersPerShard (32) caps active nodes at 6/32 → 1, and
+        // minNodes greedily packs the biggest node first without a memory
+        // ceiling, so a 6-layer model lands entirely on node A.
         let plan = ShardPlan(profiles: profiles, nodes: [nodeA, nodeB], strategy: .minNodes)
 
-        // Should produce 2 assignments
-        #expect(plan.assignments.count == 2)
+        #expect(plan.assignments.count == 1)
+        let assignment = try #require(plan.assignments.first)
+        #expect(assignment.nodeId == "mac-a")
+        #expect(assignment.startLayer == 0)
+        #expect(assignment.endLayer == profiles.count)
+        #expect(assignment.memoryEstimate > 0)
+    }
 
-        // All layers must be covered
+    @Test("ShardPlan spread honours minLayersPerShard across nodes")
+    func shardPlanSpreadSplitsLayers() async throws {
+        let dir = try createTestModelDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let profiles = try await ModelAnalyzer.shared.analyze(modelPath: dir.path)
+        #expect(profiles.count == 6)
+
+        let nodeA = NodeSpec(
+            nodeId: "mac-a",
+            totalMemoryBytes: 128 * 1024 * 1024 * 1024,
+            computeCapability: 1.0,
+            hostname: "mac-a.local",
+            port: 6591
+        )
+        let nodeB = NodeSpec(
+            nodeId: "mac-b",
+            totalMemoryBytes: 64 * 1024 * 1024 * 1024,
+            computeCapability: 0.6,
+            hostname: "mac-b.local",
+            port: 6591
+        )
+
+        let plan = ShardPlan(
+            profiles: profiles, nodes: [nodeA, nodeB],
+            strategy: .spread, minLayersPerShard: 2
+        )
+
+        // Both nodes get minLayersPerShard, the fastest soaks up the rest.
+        #expect(plan.assignments.count == 2)
         let totalCovered = plan.assignments.reduce(0) { $0 + ($1.endLayer - $1.startLayer) }
         #expect(totalCovered == profiles.count)
-
-        // Node A (128GB) should get roughly 2x the layers of Node B (64GB)
-        let layersA = plan.assignments[0].endLayer - plan.assignments[0].startLayer
-        let layersB = plan.assignments[1].endLayer - plan.assignments[1].startLayer
-        // Ratio should be approximately 2:1 (128:64)
-        let ratio = Double(layersA) / Double(layersB)
-        #expect(ratio > 1.5 && ratio < 2.5)
+        for assignment in plan.assignments {
+            #expect(assignment.endLayer - assignment.startLayer >= 2)
+        }
     }
 
     @Test("Error thrown for missing directory")

@@ -167,7 +167,6 @@ struct SettingsPageView: View {
 
     private var configPathRow: some View {
         let configPath = NovaMLXPaths.configFile.path
-        let modelRoots = NovaMLXPaths.modelsDirs
 
         return VStack(spacing: 0) {
             HStack {
@@ -185,24 +184,160 @@ struct SettingsPageView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
 
-            ForEach(Array(modelRoots.enumerated()), id: \.element.path) { index, root in
-                Divider().padding(.horizontal, 12)
-                HStack {
-                    Text(index == 0 ? l10n.tr("settings.modelsPath") : l10n.tr("settings.modelsPathExtra"))
-                        .font(.system(size: 13)).foregroundColor(.secondary)
-                    Spacer()
-                    Text(root.path)
+            Divider().padding(.horizontal, 12)
+            modelDirsEditor
+        }
+    }
+
+    // MARK: - Model Storage Directories
+
+    @State private var modelDirs: [String] = []
+    @State private var modelDirsDirty = false
+    @State private var modelDirsMessage: String?
+
+    private var modelDirsEditor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(l10n.tr("settings.modelsPath"))
+                    .font(.system(size: 13)).foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    addModelDir()
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Add a storage directory")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 6)
+
+            ForEach(Array(modelDirs.enumerated()), id: \.element) { index, path in
+                HStack(spacing: 6) {
+                    Text("\(index + 1).")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(width: 18, alignment: .trailing)
+                    Text(path)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundColor(NovaTheme.Colors.accent)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .onTapGesture {
-                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: root.path)
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
                         }
+                    Spacer()
+                    if let status = modelDirStatuses.first(where: { $0.path == path }) {
+                        Text(modelDirStatusLabel(status))
+                            .font(.system(size: 10))
+                            .foregroundColor(status.mounted && status.writable ? .secondary : .orange)
+                    }
+                    Button {
+                        moveModelDir(index, by: -1)
+                    } label: {
+                        Image(systemName: "arrow.up")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(index == 0)
+                    Button {
+                        moveModelDir(index, by: 1)
+                    } label: {
+                        Image(systemName: "arrow.down")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(index == modelDirs.count - 1)
+                    Button {
+                        modelDirs.remove(at: index)
+                        modelDirsDirty = true
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(modelDirs.count <= 1)
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                .padding(.vertical, 2)
             }
+
+            HStack {
+                if let msg = modelDirsMessage {
+                    Text(msg)
+                        .font(.system(size: 11))
+                        .foregroundColor(msg.hasPrefix("Error") ? .red : NovaTheme.Colors.statusOK)
+                }
+                Spacer()
+                if modelDirsDirty {
+                    Button(l10n.tr("settings.cancel")) {
+                        loadModelDirs()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    Button(l10n.tr("settings.save")) {
+                        applyModelDirs()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(modelDirs.isEmpty)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+        }
+        .onAppear { loadModelDirs() }
+    }
+
+    private var modelDirStatuses: [NovaMLXPaths.ModelDirStatus] {
+        NovaMLXPaths.modelDirStatuses()
+    }
+
+    private func modelDirStatusLabel(_ status: NovaMLXPaths.ModelDirStatus) -> String {
+        if !status.mounted { return "not mounted" }
+        if !status.exists { return "not created" }
+        if !status.writable { return "read-only" }
+        guard let free = status.freeBytes else { return "" }
+        let fmt = ByteCountFormatter.string(fromByteCount: Int64(free), countStyle: .file)
+        return "\(fmt) free"
+    }
+
+    private func loadModelDirs() {
+        modelDirs = NovaMLXPaths.configuredModelsDirs.map(\.path)
+        modelDirsDirty = false
+        modelDirsMessage = nil
+    }
+
+    private func moveModelDir(_ index: Int, by delta: Int) {
+        let target = index + delta
+        guard modelDirs.indices.contains(index), modelDirs.indices.contains(target) else { return }
+        modelDirs.swapAt(index, target)
+        modelDirsDirty = true
+    }
+
+    private func addModelDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if !modelDirs.contains(url.path) {
+            modelDirs.append(url.path)
+            modelDirsDirty = true
+        }
+    }
+
+    private func applyModelDirs() {
+        do {
+            try NovaMLXPaths.setModelsDirs(modelDirs)
+            let ordered = NovaMLXPaths.configuredModelsDirs
+            if let primary = ordered.first {
+                modelManager.updateDirectories(primary: primary, extras: Array(ordered.dropFirst()))
+            }
+            Task { await modelManager.refreshModelCaches() }
+            modelDirs = ordered.map(\.path)
+            modelDirsDirty = false
+            modelDirsMessage = "Saved."
+        } catch {
+            modelDirsMessage = "Error: \(error.localizedDescription)"
         }
     }
 

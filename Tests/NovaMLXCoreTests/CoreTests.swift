@@ -151,23 +151,103 @@ struct CoreTypesTests {
         #expect(missing.path.hasSuffix("org/not-there"))
     }
 
-    @Test("downloadRoot sends large checkpoints to the extra disk")
-    func downloadRootPrefersExtraForLargeModels() throws {
+    @Test("downloadRoot picks the highest-priority root that fits")
+    func downloadRootPriorityOrder() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("novamlx-dlroot-\(UUID().uuidString)")
         let primary = base.appendingPathComponent("internal", isDirectory: true)
         let extra = base.appendingPathComponent("external", isDirectory: true)
+        try fm.createDirectory(at: primary, withIntermediateDirectories: true)
         try fm.createDirectory(at: extra, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: base) }
 
-        let small = NovaMLXPaths.downloadRoot(estimatedBytes: 1_000_000_000, roots: [primary, extra])
-        #expect(small.path == NovaMLXPaths.modelsDir.path)
+        // Small or large, priority order wins: the first root that fits.
+        let small = try NovaMLXPaths.downloadRoot(estimatedBytes: 1_000_000_000, roots: [primary, extra])
+        #expect(small.path == primary.path)
 
-        let large = NovaMLXPaths.downloadRoot(
-            estimatedBytes: NovaMLXPaths.largeModelDownloadThresholdBytes,
-            roots: [primary, extra]
-        )
-        #expect(large.path == extra.path)
+        // A missing (creatable) primary is still eligible when its ancestor
+        // is writable and has room.
+        let notYetCreated = base.appendingPathComponent("newdisk/sub", isDirectory: true)
+        let created = try NovaMLXPaths.downloadRoot(estimatedBytes: 1_000, roots: [notYetCreated, extra])
+        #expect(created.path == notYetCreated.path)
+
+        // Unmounted removable volume is skipped without hanging or prompting.
+        let unmounted = URL(fileURLWithPath: "/Volumes/NoSuchVolume12345/Models", isDirectory: true)
+        let fallback = try NovaMLXPaths.downloadRoot(estimatedBytes: 1_000, roots: [unmounted, extra])
+        #expect(fallback.path == extra.path)
+    }
+
+    @Test("downloadRoot throws when no root can hold the download")
+    func downloadRootInsufficientSpaceThrows() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("novamlx-dlfull-\(UUID().uuidString)")
+        let primary = base.appendingPathComponent("internal", isDirectory: true)
+        let extra = base.appendingPathComponent("external", isDirectory: true)
+        try fm.createDirectory(at: primary, withIntermediateDirectories: true)
+        try fm.createDirectory(at: extra, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        // More than any real disk: every root must fail the preflight.
+        #expect(throws: ModelStorageError.self) {
+            _ = try NovaMLXPaths.downloadRoot(
+                estimatedBytes: UInt64(Int64.max), roots: [primary, extra])
+        }
+        do {
+            _ = try NovaMLXPaths.downloadRoot(
+                estimatedBytes: UInt64(Int64.max), roots: [primary, extra])
+            Issue.record("expected insufficientSpace to throw")
+        } catch let ModelStorageError.insufficientSpace(_, reasons) {
+            #expect(reasons.count == 2)
+        }
+    }
+
+    @Test("setModelsDirs validates, dedupes, and round-trips through the file")
+    func setModelsDirsRoundTrip() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("novamlx-mpw-\(UUID().uuidString)")
+        let primary = base.appendingPathComponent("internal", isDirectory: true)
+        let file = base.appendingPathComponent("models-path")
+        defer { try? fm.removeItem(at: base) }
+
+        try NovaMLXPaths.setModelsDirs(
+            [primary.path, "/Volumes/Samsung768/Models", primary.path + "/"], to: file)
+        let written = try String(contentsOf: file, encoding: .utf8)
+        #expect(NovaMLXPaths.parseModelsPathContents(written) == [
+            primary.standardizedFileURL.path,
+            "/Volumes/Samsung768/Models",
+        ])
+        // Primary was created on disk as a side effect of validation.
+        #expect(fm.fileExists(atPath: primary.path))
+
+        // Empty list is rejected.
+        #expect(throws: ModelStorageError.self) {
+            try NovaMLXPaths.setModelsDirs([], to: file)
+        }
+    }
+
+    @Test("candidateDirectories returns every copy in root-priority order")
+    func candidateDirectoriesPriority() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("novamlx-cand-\(UUID().uuidString)")
+        let primary = base.appendingPathComponent("internal", isDirectory: true)
+        let extra = base.appendingPathComponent("external", isDirectory: true)
+        let modelId = "org/model"
+        let onPrimary = primary.appendingPathComponent(modelId, isDirectory: true)
+        let onExtraHub = extra.appendingPathComponent("hub/models/\(modelId)", isDirectory: true)
+        try fm.createDirectory(at: onPrimary, withIntermediateDirectories: true)
+        try fm.createDirectory(at: onExtraHub, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+
+        let all = NovaMLXPaths.candidateDirectories(forModelId: modelId, roots: [primary, extra])
+        #expect(all.map(\.path) == [onPrimary.path, onExtraHub.path])
+
+        // Only the extra root holds it → single candidate from the extra root.
+        let none = "org/elsewhere"
+        try fm.createDirectory(
+            at: extra.appendingPathComponent(none, isDirectory: true),
+            withIntermediateDirectories: true)
+        let single = NovaMLXPaths.candidateDirectories(forModelId: none, roots: [primary, extra])
+        #expect(single.map(\.path) == [extra.appendingPathComponent(none).path])
     }
 
     @Test("Token creation")

@@ -37,6 +37,46 @@ public enum SafeProcess {
         }
     }
 
+    /// Opaque cancellation handle for a running process. Pass one into
+    /// `run(cancelToken:)`; calling `terminate()` from any thread sends
+    /// SIGTERM (then SIGKILL after a short grace) and the bounded wait
+    /// unwinds normally with a non-zero status.
+    public final class CancelToken: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var terminateRequested = false
+
+        public init() {}
+
+        /// True after `terminate()` was called (even before the process
+        /// attached) — lets callers distinguish a cancelled run from a crash.
+        public var wasTerminated: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return terminateRequested
+        }
+
+        public func terminate() {
+            lock.lock()
+            terminateRequested = true
+            let target = process
+            lock.unlock()
+            guard let target, target.isRunning else { return }
+            target.terminate()
+            let pid = target.processIdentifier
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                if target.isRunning { kill(pid, SIGKILL) }
+            }
+        }
+
+        fileprivate func attach(_ child: Process) {
+            lock.lock()
+            process = child
+            let requested = terminateRequested
+            lock.unlock()
+            if requested { terminate() }
+        }
+    }
+
     /// Run a process to completion with both pipes concurrently drained and
     /// a bounded wait. `deadline` caps the TOTAL wall time; on expiry the
     /// child is terminated and `.timedOut` is thrown (unless `allowTimeout`,
@@ -52,6 +92,10 @@ public enum SafeProcess {
     ///     across both streams, e.g. git)
     ///   - deadline: hard wall-time cap in seconds
     ///   - allowTimeout: return a partial result on deadline instead of throwing
+    ///   - stderrStream: optional live callback invoked on the drain queue
+    ///     with each stderr chunk as it arrives (full stderr is still
+    ///     accumulated into `Result.stderr` regardless)
+    ///   - cancelToken: optional handle; `terminate()` kills the child early
     @discardableResult
     public static func run(
         _ url: String,
@@ -60,7 +104,9 @@ public enum SafeProcess {
         environment: [String: String]? = nil,
         mergeStderrIntoStdout: Bool = false,
         deadline: TimeInterval = 60,
-        allowTimeout: Bool = false
+        allowTimeout: Bool = false,
+        stderrStream: (@Sendable (Data) -> Void)? = nil,
+        cancelToken: CancelToken? = nil
     ) throws -> Result {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: url)
@@ -78,12 +124,32 @@ public enum SafeProcess {
         let errPipe = process.standardError as? Pipe
 
         // Concurrent drains — this is what makes large outputs safe.
+        // The stderr drain reads incrementally when a stream callback is
+        // installed so progress output is visible while the child runs.
         let outBox = DataBox()
         let errBox = DataBox()
         let drain = DispatchQueue(label: "nova.safeproc.drain", qos: .utility)
+        // stderr gets its own queue: the stdout drain blocks in
+        // readDataToEndOfFile until the child exits, and a serial queue
+        // would starve the incremental stderr loop until then.
+        let errDrain = DispatchQueue(label: "nova.safeproc.drain.err", qos: .utility)
         drain.async { outBox.set(outPipe.fileHandleForReading.readDataToEndOfFile()) }
         if let errPipe {
-            drain.async { errBox.set(errPipe.fileHandleForReading.readDataToEndOfFile()) }
+            errDrain.async {
+                let handle = errPipe.fileHandleForReading
+                if let stderrStream {
+                    var acc = Data()
+                    while true {
+                        let chunk = handle.availableData
+                        if chunk.isEmpty { break }
+                        acc.append(chunk)
+                        stderrStream(chunk)
+                    }
+                    errBox.set(acc)
+                } else {
+                    errBox.set(handle.readDataToEndOfFile())
+                }
+            }
         }
 
         do {
@@ -91,6 +157,7 @@ public enum SafeProcess {
         } catch {
             throw Failure.launchFailed(error.localizedDescription)
         }
+        cancelToken?.attach(process)
 
         // Bounded wait on a side queue; terminate the child at the deadline.
         let exited = SignalBox()

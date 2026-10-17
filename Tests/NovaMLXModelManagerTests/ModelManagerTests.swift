@@ -27,7 +27,7 @@ enum IsolatedTestDB {
     }
 }
 
-@Suite("ModelManager Tests", .serialized)
+@Suite("ModelManager Tests", .serialized, .novaDBSerial)
 struct ModelManagerTests {
     private func makeTempManager() -> ModelManager {
         IsolatedTestDB.run { dir in
@@ -426,5 +426,86 @@ struct ModelManagerTests {
         #expect(record?.family == .deepseek)
         #expect(record?.localURL.resolvingSymlinksInPath().path == modelDir.resolvingSymlinksInPath().path)
         #expect(record?.downloadedAt != nil)
+    }
+
+    @Test("updateDirectories hot-swaps the storage roots")
+    func updateDirectoriesHotSwap() throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let manager = ModelManager(modelsDirectory: tempDir)
+        let newPrimary = tempDir.appendingPathComponent("new-primary", isDirectory: true)
+        let newExtra = tempDir.appendingPathComponent("new-extra", isDirectory: true)
+        try FileManager.default.createDirectory(at: newExtra, withIntermediateDirectories: true)
+
+        manager.updateDirectories(primary: newPrimary, extras: [newExtra])
+        #expect(manager.modelsDirectory.resolvingSymlinksInPath().path
+                == newPrimary.resolvingSymlinksInPath().path)
+        #expect(manager.extraModelDirectories.map { $0.resolvingSymlinksInPath().path }
+                == [newExtra.resolvingSymlinksInPath().path])
+        // Primary is created as a side effect.
+        #expect(FileManager.default.fileExists(atPath: newPrimary.path))
+
+        // A primary passed as its own extra is deduped away.
+        manager.updateDirectories(primary: newPrimary, extras: [newPrimary, newExtra])
+        #expect(manager.extraModelDirectories.count == 1)
+    }
+
+    @Test("candidateLoadURLs orders by storage priority and includes the registry path")
+    func candidateLoadURLsPriority() throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let internal_ = tempDir.appendingPathComponent("internal", isDirectory: true)
+        let external = tempDir.appendingPathComponent("external", isDirectory: true)
+        let modelId = "org/cand-model"
+        let onExternal = external.appendingPathComponent(modelId, isDirectory: true)
+        try createFakeModelConfig(at: onExternal, architectures: ["LlamaForCausalLM"], modelType: "llama")
+
+        let manager = ModelManager(modelsDirectory: internal_, extraModelDirectories: [external])
+
+        // Only the extra root holds the model → single candidate.
+        let only = manager.candidateLoadURLs(for: modelId)
+        #expect(only.map { $0.resolvingSymlinksInPath().path }
+                == [onExternal.resolvingSymlinksInPath().path])
+
+        // Registering pins localURL to the primary root; it leads the list so
+        // a stale registration is tried first and fails fast, then the copy on
+        // the extra root is the fallback.
+        _ = manager.register(id: modelId, family: .llama, modelType: .llm,
+                             remoteURL: "https://example.com/cand")
+        let both = manager.candidateLoadURLs(for: modelId)
+        #expect(both.count == 2)
+        #expect(both[0].resolvingSymlinksInPath().path
+                == internal_.appendingPathComponent(modelId).resolvingSymlinksInPath().path)
+        #expect(both[1].resolvingSymlinksInPath().path
+                == onExternal.resolvingSymlinksInPath().path)
+    }
+
+    @Test("discoverModels keeps the higher-priority copy of a duplicated model")
+    func discoverModelsPrefersHigherPriorityRoot() throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let internal_ = tempDir.appendingPathComponent("internal", isDirectory: true)
+        let external = tempDir.appendingPathComponent("external", isDirectory: true)
+        let modelId = "dup-model"
+        for root in [internal_, external] {
+            let dir = root.appendingPathComponent(modelId, isDirectory: true)
+            try createFakeModelConfig(at: dir, architectures: ["LlamaForCausalLM"], modelType: "llama")
+            try Data("fake weights".utf8).write(to: dir.appendingPathComponent("model.safetensors"))
+        }
+
+        let manager = ModelManager(modelsDirectory: internal_, extraModelDirectories: [external])
+        let discovered = manager.discoverModels()
+
+        // Duplicates collapse to a single entry pointing at the primary copy.
+        let hits = discovered.filter { $0.modelId == modelId }
+        #expect(hits.count == 1)
+        #expect(hits.first?.modelPath.resolvingSymlinksInPath().path
+                == internal_.appendingPathComponent(modelId).resolvingSymlinksInPath().path)
+        let record = manager.getRecord(modelId)
+        #expect(record?.localURL.resolvingSymlinksInPath().path
+                == internal_.appendingPathComponent(modelId).resolvingSymlinksInPath().path)
     }
 }

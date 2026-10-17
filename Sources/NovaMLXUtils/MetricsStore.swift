@@ -291,13 +291,20 @@ public final class MetricsStore: @unchecked Sendable {
 
     // MARK: - SQLite-backed load/save (Phase E)
 
+    /// Metrics persistence is best-effort: when NovaDB was never set up
+    /// (e.g. unit tests constructing an MLXEngine), skip silently instead of
+    /// crashing on the unbound singleton.
+    private var isPersistenceAvailable: Bool { NovaDB.shared.isSetup }
+
     private func load() {
-        guard let record = try? NovaDB.shared.metricsStore.get() else { return }
+        guard isPersistenceAvailable,
+              let record = try? NovaDB.shared.metricsStore.get() else { return }
         lock.withLock { _metrics = Self.recordToMetrics(record) }
         NovaMLXLog.info("Loaded persistent metrics: \(_metrics.totalRequestsAllTime) requests, \(_metrics.totalTokensAllTime) tokens all-time")
     }
 
     private func save() {
+        guard isPersistenceAvailable else { return }
         let snapshot = lock.withLock { _metrics }
         let record = Self.metricsToRecord(snapshot)
         do {
@@ -312,6 +319,7 @@ public final class MetricsStore: @unchecked Sendable {
     /// otherwise we decode and upsert, then rename the file to .migrated.
     private func importLegacyJSONIfNeeded() {
         let fm = FileManager.default
+        guard isPersistenceAvailable else { return }
         guard fm.fileExists(atPath: metricsFile.path) else { return }
 
         // Skip if store already populated — SQLite is source of truth.

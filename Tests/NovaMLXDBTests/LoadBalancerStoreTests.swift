@@ -4,7 +4,7 @@ import GRDB
 @testable import NovaMLXDB
 import NovaMLXCore
 
-@Suite("LoadBalancer Store + Migration", .serialized)
+@Suite("LoadBalancer Store + Migration", .serialized, .novaDBSerial)
 struct LoadBalancerStoreTests {
 
     private func makeTmpDir() throws -> URL {

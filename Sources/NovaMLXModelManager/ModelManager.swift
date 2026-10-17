@@ -76,12 +76,12 @@ public struct DownloadStatus: Codable, Sendable {
 }
 
 public final class ModelManager: @unchecked Sendable {
-    public let modelsDirectory: URL
-    /// Additional roots scanned for load (external disks). Empty in unit tests.
-    public let extraModelDirectories: [URL]
+    public private(set) var modelsDirectory: URL
+    /// Additional roots scanned for load (external disks), in priority order.
+    public private(set) var extraModelDirectories: [URL]
     public let catalogStore: ModelCatalogStore
-    private let registryFile: URL
-    private let hubApi: HubApi
+    private var registryFile: URL
+    private var hubApi: HubApi
     private var _registry: [String: ModelRecord]
     private var _activeDownloads: Set<String>
     private var _downloadStates: [String: DownloadStatus]
@@ -112,19 +112,56 @@ public final class ModelManager: @unchecked Sendable {
         loadRegistry()
     }
 
-    /// Extra disks get models at/above the large-checkpoint threshold.
-    private func rootForNewModel(sizeBytes: UInt64) -> URL {
-        guard sizeBytes >= NovaMLXPaths.largeModelDownloadThresholdBytes else {
-            return modelsDirectory
+    /// Hot-apply a new ordered storage list (from `NovaMLXPaths.setModelsDirs`
+    /// or the models-dirs admin API) without restarting the process.
+    /// Existing registry records keep their absolute `localURL`s — models on
+    /// disks that left the list stay loadable until the next discovery sync.
+    public func updateDirectories(primary: URL, extras: [URL]) {
+        lock.withLock {
+            modelsDirectory = primary
+            extraModelDirectories = extras.filter {
+                $0.standardizedFileURL != primary.standardizedFileURL
+            }
+            registryFile = primary.appendingPathComponent("registry.json")
+            hubApi = HubApi(
+                downloadBase: primary.appendingPathComponent("hub"), cache: nil)
         }
-        for extra in extraModelDirectories {
-            if NovaMLXPaths.triggersRemovableVolumeTCC(extra) { return extra }
-            guard FileManager.default.isWritableFile(atPath: extra.path) else { continue }
-            let free = (try? FileManager.default.attributesOfFileSystem(
-                forPath: extra.path)[.systemFreeSize] as? Int64) ?? 0
-            if free > Int64(sizeBytes) { return extra }
+        try? FileManager.default.createDirectory(at: primary, withIntermediateDirectories: true)
+        invalidateListCaches()
+        NovaMLXLog.info(
+            "[ModelManager] Storage dirs updated: primary=\(primary.path) extras=\(extras.map(\.path))")
+    }
+
+    /// Download root for a new registration: strict priority order across the
+    /// configured roots. Falls back to the primary when every root fails the
+    /// space/writability preflight — the actual download re-checks and
+    /// surfaces the error to the user.
+    private func rootForNewModel(sizeBytes: UInt64) -> URL {
+        let roots = [modelsDirectory] + extraModelDirectories
+        if let chosen = try? NovaMLXPaths.downloadRoot(
+            estimatedBytes: sizeBytes, roots: roots) {
+            return chosen
         }
         return modelsDirectory
+    }
+
+    /// All on-disk locations for `modelId`, in storage-priority order:
+    /// the registry's `localURL` plus every other configured root that holds
+    /// a copy. Load paths try these in order so a corrupt copy on a
+    /// higher-priority disk falls through to the next one.
+    public func candidateLoadURLs(for modelId: String) -> [URL] {
+        let record = lock.withLock { _registry[modelId] }
+        var candidates = NovaMLXPaths.candidateDirectories(
+            forModelId: modelId,
+            roots: [modelsDirectory] + extraModelDirectories
+        )
+        if let record {
+            let key = record.localURL.standardizedFileURL.path
+            if !candidates.contains(where: { $0.standardizedFileURL.path == key }) {
+                candidates.insert(record.localURL, at: 0)
+            }
+        }
+        return candidates
     }
 
     /// Models that are downloaded and ready to use (complete weight files on disk).
@@ -149,10 +186,13 @@ public final class ModelManager: @unchecked Sendable {
     /// Reachability and directory size, off the caller. Views read the cache.
     public func refreshModelCaches() async {
         let records = lock.withLock { Array(_registry.values) }
-        let dir = modelsDirectory
+        let dirs = lock.withLock { [modelsDirectory] + extraModelDirectories }
         let (fresh, size) = await Task.detached(priority: .utility) {
             let fresh = Self.reachableDownloaded(records)
-            let size = FileManager.default.directorySize(at: dir)
+            let size = dirs.reduce(UInt64(0)) { acc, dir in
+                guard NovaMLXPaths.isVolumeMounted(dir) else { return acc }
+                return acc + FileManager.default.directorySize(at: dir)
+            }
             return (fresh, size)
         }.value
         lock.withLock {
@@ -237,19 +277,33 @@ public final class ModelManager: @unchecked Sendable {
             throw NovaMLXError.modelNotFound(modelId)
         }
 
+        // Preflight: pick the highest-priority root that is mounted, writable,
+        // and has room. Throws ModelStorageError.insufficientSpace when none do.
+        let roots = lock.withLock { [modelsDirectory] + extraModelDirectories }
+        let chosenRoot = try NovaMLXPaths.downloadRoot(
+            estimatedBytes: record.sizeBytes, roots: roots)
+        let primary = lock.withLock { modelsDirectory }
+        let downloadHubApi: HubApi
+        if chosenRoot.standardizedFileURL == primary.standardizedFileURL {
+            downloadHubApi = lock.withLock { hubApi }
+        } else {
+            downloadHubApi = HubApi(
+                downloadBase: chosenRoot.appendingPathComponent("hub"), cache: nil)
+        }
+
         lock.withLock {
             _downloadStates[modelId] = DownloadStatus(modelId: modelId, state: .downloading)
         }
 
-        Task { [hubApi] in
+        Task { [downloadHubApi] in
             NovaMLXLog.info("[ModelManager] Download task started for \(modelId)")
             do {
                 let repo = Hub.Repo(id: modelId)
-                let destDir = hubApi.localRepoLocation(repo)
+                let destDir = downloadHubApi.localRepoLocation(repo)
                 try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
 
                 NovaMLXLog.info("[ModelManager] Fetching file list for \(modelId)...")
-                let allFilenames = try await hubApi.getFilenames(from: repo)
+                let allFilenames = try await downloadHubApi.getFilenames(from: repo)
                 NovaMLXLog.info("[ModelManager] Found \(allFilenames.count) files in \(modelId)")
 
                 let totalFiles = allFilenames.count
@@ -343,7 +397,11 @@ public final class ModelManager: @unchecked Sendable {
 
     public func totalDiskUsage() -> UInt64 {
         if let cached = lock.withLock({ diskUsageCache }) { return cached }
-        let size = FileManager.default.directorySize(at: modelsDirectory)
+        let dirs = lock.withLock { [modelsDirectory] + extraModelDirectories }
+        let size = dirs.reduce(UInt64(0)) { acc, dir in
+            guard NovaMLXPaths.isVolumeMounted(dir) else { return acc }
+            return acc + FileManager.default.directorySize(at: dir)
+        }
         lock.withLock { diskUsageCache = size }
         return size
     }
@@ -412,8 +470,10 @@ public final class ModelManager: @unchecked Sendable {
         #endif
 
         for dir in scanDirs {
-            if NovaMLXPaths.triggersRemovableVolumeTCC(dir) {
-                NovaMLXLog.info("[Discovery] Skipping removable volume (no TCC probe): \(dir.path)")
+            if NovaMLXPaths.triggersRemovableVolumeTCC(dir),
+               !NovaMLXPaths.isVolumeMounted(dir) {
+                // Unmounted external disk — skip without probing (no TCC sheet).
+                NovaMLXLog.info("[Discovery] Skipping unmounted volume: \(dir.path)")
                 continue
             }
             guard dir.directoryExists else {
@@ -426,10 +486,18 @@ public final class ModelManager: @unchecked Sendable {
             allDiscovered.append(contentsOf: found)
         }
 
+        // Same model id found under several roots: keep the copy on the
+        // highest-priority root (roots were scanned in priority order).
+        var seenIds = Set<String>()
+        var prioritized: [DiscoveredModel] = []
+        for model in allDiscovered where seenIds.insert(model.modelId).inserted {
+            prioritized.append(model)
+        }
+
         var registered = 0
         var updated = 0
 
-        for model in allDiscovered {
+        for model in prioritized {
             let existing = lock.withLock { _registry[model.modelId] }
             if existing == nil {
                 let remoteURL = "https://huggingface.co/\(model.modelId)"
@@ -487,12 +555,21 @@ public final class ModelManager: @unchecked Sendable {
         }
 
         if registered > 0 || updated > 0 { invalidateListCaches() }
-        NovaMLXLog.info("[ModelManager] Model discovery: \(allDiscovered.count) found, \(registered) registered, \(updated) updated")
-        return allDiscovered
+        NovaMLXLog.info("[ModelManager] Model discovery: \(prioritized.count) found (\(allDiscovered.count) raw), \(registered) registered, \(updated) updated")
+        return prioritized
     }
 
-    /// Clean up empty directories left by failed/interrupted downloads
+    /// Clean up empty directories left by failed/interrupted downloads,
+    /// across every configured storage root.
     public func cleanupEmptyDirectories() {
+        let roots = lock.withLock { [modelsDirectory] + extraModelDirectories }
+        for root in roots {
+            guard NovaMLXPaths.isVolumeMounted(root) else { continue }
+            cleanupEmptyDirectories(under: root)
+        }
+    }
+
+    private func cleanupEmptyDirectories(under modelsDirectory: URL) {
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(
             at: modelsDirectory, includingPropertiesForKeys: nil
@@ -547,8 +624,9 @@ public final class ModelManager: @unchecked Sendable {
 
     private func saveRegistry() {
         let snapshot = lock.withLock { _registry }
+        let dir = lock.withLock { modelsDirectory }
         for (_, record) in snapshot {
-            try? NovaDB.shared.modelRegistryStore.upsertRecord(record, modelsDirectory: modelsDirectory)
+            try? NovaDB.shared.modelRegistryStore.upsertRecord(record, modelsDirectory: dir)
         }
     }
 
