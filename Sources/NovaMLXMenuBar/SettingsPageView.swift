@@ -194,6 +194,7 @@ struct SettingsPageView: View {
     @State private var modelDirs: [String] = []
     @State private var modelDirsDirty = false
     @State private var modelDirsMessage: String?
+    @State private var showMoveModelsSheet = false
 
     private var modelDirsEditor: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -201,6 +202,14 @@ struct SettingsPageView: View {
                 Text(l10n.tr("settings.modelsPath"))
                     .font(.system(size: 13)).foregroundColor(.secondary)
                 Spacer()
+                Button {
+                    showMoveModelsSheet = true
+                } label: {
+                    Label("Move Models…", systemImage: "arrow.left.arrow.right")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("Move models between storage directories")
                 Button {
                     addModelDir()
                 } label: {
@@ -284,6 +293,12 @@ struct SettingsPageView: View {
             .padding(.vertical, 4)
         }
         .onAppear { loadModelDirs() }
+        .sheet(isPresented: $showMoveModelsSheet) {
+            MoveModelsSheet(
+                modelManager: modelManager,
+                isModelLoaded: { id in inferenceService.isModelLoaded(id) }
+            )
+        }
     }
 
     private var modelDirStatuses: [NovaMLXPaths.ModelDirStatus] {
