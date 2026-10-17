@@ -38,18 +38,18 @@ public struct CatalogAdminStore: Sendable {
         }
         while let dir = cursor {
             candidates.append(dir)
-            let parent = dir.deletingLastPathComponent()
-            if parent.path == dir.path { break }
-            cursor = parent
+            // URL("/").deletingLastPathComponent() is "/.." on this Foundation,
+            // so the parent-equality check never fires — stop at "/" instead.
+            if dir.path == "/" { break }
+            cursor = dir.deletingLastPathComponent()
         }
         candidates.append(home.appendingPathComponent("dev/novamlx", isDirectory: true))
         candidates.append(cwd)
         var walk: URL? = cwd
         while let dir = walk {
             candidates.append(dir)
-            let parent = dir.deletingLastPathComponent()
-            if parent.path == dir.path { break }
-            walk = parent
+            if dir.path == "/" { break }
+            walk = dir.deletingLastPathComponent()
         }
 
         var seen = Set<String>()
