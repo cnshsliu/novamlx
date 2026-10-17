@@ -10,7 +10,12 @@ struct PackMissingError: Error {}
 /// M2 gates for the pure-Swift LTX-2.5 port: the dgrauet single-file pack must
 /// load through the symlink adapter and produce numerically sane tensors.
 ///
-/// All tests skip silently when the 42GB pack is absent (CI, other machines).
+/// These load multi-GB models onto the GPU and a mid-run MLX failure is a
+/// process-fatal assertion, so the whole suite is opt-in via
+/// NOVA_LTX2_PARITY=1 — not merely "pack exists on disk" — to keep the
+/// default test run stable on machines that happen to have the pack mounted.
+@Suite(.enabled(if: ProcessInfo.processInfo.environment["NOVA_LTX2_PARITY"] == "1",
+                "set NOVA_LTX2_PARITY=1 to run the heavy LTX-2 parity probes"))
 struct LTX2PackAdapterTests {
 
     static let packDir = URL(fileURLWithPath: "/Volumes/WD/nova-models/ltx-2.5-q8")
