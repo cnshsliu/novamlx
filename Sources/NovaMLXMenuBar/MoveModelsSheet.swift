@@ -17,8 +17,27 @@ struct MoveModelsSheet: View {
     @State private var rightModels: [ModelManager.VaultModelEntry] = []
     @State private var leftSelection = Set<String>()
     @State private var rightSelection = Set<String>()
+    @State private var leftSort: VaultSort = .name
+    @State private var rightSort: VaultSort = .name
     @State private var busy = false
     @State private var message: String?
+
+    private enum VaultSort: String, CaseIterable, Identifiable {
+        case name, size
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .name: return "Name"
+            case .size: return "Size"
+            }
+        }
+        func apply(_ models: [ModelManager.VaultModelEntry]) -> [ModelManager.VaultModelEntry] {
+            switch self {
+            case .name: return models.sorted { $0.modelId.localizedStandardCompare($1.modelId) == .orderedAscending }
+            case .size: return models.sorted { $0.sizeBytes != $1.sizeBytes ? $0.sizeBytes > $1.sizeBytes : $0.modelId < $1.modelId }
+            }
+        }
+    }
 
     private var vaults: [URL] { NovaMLXPaths.configuredModelsDirs }
 
@@ -33,11 +52,11 @@ struct MoveModelsSheet: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 HStack(spacing: 0) {
-                    vaultPane(selection: $leftVault, models: leftModels,
-                              paneSelection: $leftSelection)
+                    vaultPane(selection: $leftVault, models: leftSort.apply(leftModels),
+                              paneSelection: $leftSelection, sortOrder: $leftSort)
                     moveButtons
-                    vaultPane(selection: $rightVault, models: rightModels,
-                              paneSelection: $rightSelection)
+                    vaultPane(selection: $rightVault, models: rightSort.apply(rightModels),
+                              paneSelection: $rightSelection, sortOrder: $rightSort)
                 }
                 .frame(maxHeight: .infinity)
             }
@@ -59,7 +78,8 @@ struct MoveModelsSheet: View {
     private func vaultPane(
         selection: Binding<URL?>,
         models: [ModelManager.VaultModelEntry],
-        paneSelection: Binding<Set<String>>
+        paneSelection: Binding<Set<String>>,
+        sortOrder: Binding<VaultSort>
     ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Picker("", selection: selection) {
@@ -68,7 +88,18 @@ struct MoveModelsSheet: View {
                 }
             }
             .labelsHidden()
-            .padding(8)
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+
+            Picker("", selection: sortOrder) {
+                ForEach(VaultSort.allCases) { sort in
+                    Text(sort.label).tag(sort)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
 
             List(models, selection: paneSelection) { entry in
                 HStack {
