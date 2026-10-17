@@ -2382,6 +2382,60 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
             }
         } else if let draftModelId = request.draftModel,
+                  NovaMLXEngine.isDFlashDraftConfig(at: NovaMLXPaths.directory(forModelId: draftModelId))
+        {
+            // DFlash checkpoints are not chat models. Load the drafter from disk
+            // even when the pool would have built a Qwen3Model from the same files.
+            let tag = String(request.id.uuidString.prefix(8))
+            do {
+                if var dflashIterator = try openDFlashIterator(
+                    model: model.value,
+                    draftModelId: draftModelId,
+                    input: effectiveInput,
+                    cache: kvCache,
+                    parameters: parameters,
+                    processor: processor,
+                    promptTokenCount: Int(promptTokenCount),
+                    logTag: "GENERATE:\(tag)"
+                ) {
+                    dflashIterator.onSpeculationRound = { round in
+                        let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
+                        guard round.cap > 0 || profile else { return }
+                        NovaMLXLog.info(
+                            "[DFlash:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
+                        )
+                    }
+                    iterator = dflashIterator
+                } else {
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
+            } catch {
+                NovaMLXLog.warning("[GENERATE:\(tag)] DFlashTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
+                do {
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                } catch {
+                    NovaMLXLog.error("[GENERATE:\(tag)] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                    let freshCache = try model.value.newCache(parameters: parameters)
+                    kvCacheBox.value = freshCache
+                    iterator = try TokenIterator(
+                        input: input, model: model.value,
+                        cache: freshCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
+            }
+        } else if let draftModelId = request.draftModel,
            let draftContainer = getContainer(for: draftModelId),
            let draftMlxContainer = draftContainer.mlxContainer {
             // Speculative decoding with a draft model
@@ -2394,13 +2448,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             do {
                 let tag = String(request.id.uuidString.prefix(8))
                 let dflashDrafter = dflashDrafterReady(draftModel.value, draftModelId: draftModelId)
-                if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
-                   let target = model.value as? any DFlashTarget,
-                   let drafter = dflashDrafter, drafter.hasSpeculativeWeights
+                let dflashCanTap = model.value is any DFlashTarget
+                    || DFlashHooks.make(model: model.value) != nil
+                if parameters.temperature <= 0,
+                   Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
+                   let drafter = dflashDrafter, drafter.hasSpeculativeWeights, dflashCanTap
                 {
                     var dflashIterator = try DFlashTokenIterator(
                         input: effectiveInput,
-                        target: target,
+                        model: model.value,
                         drafter: drafter,
                         mainCache: kvCache,
                         parameters: parameters,
@@ -2418,9 +2474,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         "[GENERATE:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize)"
                     )
                 } else if dflashDrafter != nil {
-                    if dflashDrafter?.hasSpeculativeWeights != true {
+                    if parameters.temperature > 0 {
+                        NovaMLXLog.info(
+                            "[GENERATE:\(tag)] DFlash2 '\(draftModelId)' idle — temperature \(parameters.temperature) > 0; one-token decode"
+                        )
+                    } else if dflashDrafter?.hasSpeculativeWeights != true {
                         NovaMLXLog.info(
                             "[GENERATE:\(tag)] DFlash2 '\(draftModelId)' has no path-selector weights — plain decode"
+                        )
+                    } else if !dflashCanTap {
+                        NovaMLXLog.info(
+                            "[GENERATE:\(tag)] DFlash2 '\(draftModelId)' target has no hidden-state taps — plain decode"
                         )
                     } else {
                         NovaMLXLog.info(
@@ -3176,6 +3240,58 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             }
                         }
                     } else if let draftModelId = request.draftModel,
+                              NovaMLXEngine.isDFlashDraftConfig(at: NovaMLXPaths.directory(forModelId: draftModelId))
+                    {
+                        let tag = String(request.id.uuidString.prefix(8))
+                        do {
+                            if var dflashIterator = try openDFlashIterator(
+                                model: model.value,
+                                draftModelId: draftModelId,
+                                input: effectiveInput,
+                                cache: kvCache,
+                                parameters: parameters,
+                                processor: processor,
+                                promptTokenCount: Int(promptTokenCount),
+                                logTag: "STREAM:\(tag)"
+                            ) {
+                                dflashIterator.onSpeculationRound = { round in
+                                    let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
+                                    guard round.cap > 0 || profile else { return }
+                                    NovaMLXLog.info(
+                                        "[DFlash:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
+                                    )
+                                }
+                                iterator = dflashIterator
+                            } else {
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
+                        } catch {
+                            NovaMLXLog.warning("[STREAM:\(tag)] DFlashTokenIterator failed: \(error.localizedDescription) — falling back to normal TokenIterator")
+                            do {
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            } catch {
+                                NovaMLXLog.error("[STREAM:\(tag)] TokenIterator failed: \(error.localizedDescription) — falling back to full prefill")
+                                let freshCache = try model.value.newCache(parameters: parameters)
+                                kvCacheBox.value = freshCache
+                                iterator = try TokenIterator(
+                                    input: input, model: model.value,
+                                    cache: freshCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
+                        }
+                    } else if let draftModelId = request.draftModel,
                        let draftContainer = self.getContainer(for: draftModelId),
                        let draftMlxContainer = draftContainer.mlxContainer {
                         // Speculative decoding with a draft model
@@ -3188,13 +3304,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         do {
                             let tag = String(request.id.uuidString.prefix(8))
                             let dflashDrafter = dflashDrafterReady(draftModel.value, draftModelId: draftModelId)
-                            if Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
-                               let target = model.value as? any DFlashTarget,
-                               let drafter = dflashDrafter, drafter.hasSpeculativeWeights
+                            let dflashCanTap = model.value is any DFlashTarget
+                                || DFlashHooks.make(model: model.value) != nil
+                            if parameters.temperature <= 0,
+                               Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
+                               let drafter = dflashDrafter, drafter.hasSpeculativeWeights, dflashCanTap
                             {
                                 var dflashIterator = try DFlashTokenIterator(
                                     input: effectiveInput,
-                                    target: target,
+                                    model: model.value,
                                     drafter: drafter,
                                     mainCache: kvCache,
                                     parameters: parameters,
@@ -3212,9 +3330,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                     "[STREAM:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize)"
                                 )
                             } else if dflashDrafter != nil {
-                                if dflashDrafter?.hasSpeculativeWeights != true {
+                                if parameters.temperature > 0 {
+                                    NovaMLXLog.info(
+                                        "[STREAM:\(tag)] DFlash2 '\(draftModelId)' idle — temperature \(parameters.temperature) > 0; one-token decode"
+                                    )
+                                } else if dflashDrafter?.hasSpeculativeWeights != true {
                                     NovaMLXLog.info(
                                         "[STREAM:\(tag)] DFlash2 '\(draftModelId)' has no path-selector weights — plain decode"
+                                    )
+                                } else if !dflashCanTap {
+                                    NovaMLXLog.info(
+                                        "[STREAM:\(tag)] DFlash2 '\(draftModelId)' target has no hidden-state taps — plain decode"
                                     )
                                 } else {
                                     NovaMLXLog.info(

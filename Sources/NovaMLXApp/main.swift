@@ -159,6 +159,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         super.init()
+        // Menu-bar loads call the speed gate directly. Without this bind,
+        // auto_on downloads never start (`acceleratorDownloads` stays nil).
+        inferenceService.bindAcceleratorDownloads(modelManager)
     }
 
     /// One-time migration from ~/Library/Application Support/NovaMLX to ~/.nova
