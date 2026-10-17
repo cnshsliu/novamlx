@@ -4,7 +4,7 @@ import GRDB
 import NovaMLXDB
 import NovaMLXCore
 
-@Suite("ConfigStore", .serialized)
+@Suite("ConfigStore", .serialized, .novaDBSerial)
 struct ConfigStoreTests {
 
     private func makeTmpDir() throws -> URL {

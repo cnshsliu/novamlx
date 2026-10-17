@@ -163,6 +163,14 @@ struct CoreTypesTests {
         let small = NovaMLXPaths.downloadRoot(estimatedBytes: 1_000_000_000, roots: [primary, extra])
         #expect(small.path == NovaMLXPaths.modelsDir.path)
 
+        // The fallback only engages when the extra disk can actually hold a
+        // threshold-sized checkpoint; skip on machines too full to tell.
+        let free = (try fm.attributesOfFileSystem(forPath: extra.path)[.systemFreeSize] as? Int64) ?? 0
+        guard free > Int64(NovaMLXPaths.largeModelDownloadThresholdBytes) else {
+            Issue.record("[SKIP] temp volume has \(free / 1_073_741_824)GiB free, need >\(NovaMLXPaths.largeModelDownloadThresholdBytes / 1_073_741_824)GiB")
+            return
+        }
+
         let large = NovaMLXPaths.downloadRoot(
             estimatedBytes: NovaMLXPaths.largeModelDownloadThresholdBytes,
             roots: [primary, extra]
