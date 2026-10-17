@@ -2594,21 +2594,40 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         modelType: record.modelType
                     )
 
-                    if record.modelType == .embedding {
-                        _ = try await embeddings.loadModel(from: record.localURL, config: config)
-                    } else if record.modelType == .audio {
-                        if record.family == .dotsTts || record.family == .qwen3Tts {
-                            try await inference.ttsService.loadModel(from: record.localURL)
-                        } else {
-                            _ = try await inference.transcriptionService.loadModel(from: record.localURL, config: config)
+                    // Try every storage location in priority order; a corrupt
+                    // copy on one disk falls through to the next root.
+                    let candidates = models.candidateLoadURLs(for: req.modelId)
+                    var lastLoadError: Error?
+                    for (index, url) in candidates.enumerated() {
+                        if index > 0 {
+                            NovaMLXLog.warning(
+                                "[Admin] \(req.modelId): retrying load from fallback location \(url.path)")
                         }
-                        inference.saveLoadedModelsList()
-                    } else if record.modelType == .image {
-                        _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
-                        inference.saveLoadedModelsList()
-                    } else {
-                        try await inference.loadModel(at: record.localURL, config: config)
+                        do {
+                            if record.modelType == .embedding {
+                                _ = try await embeddings.loadModel(from: url, config: config)
+                            } else if record.modelType == .audio {
+                                if record.family == .dotsTts || record.family == .qwen3Tts {
+                                    try await inference.ttsService.loadModel(from: url)
+                                } else {
+                                    _ = try await inference.transcriptionService.loadModel(from: url, config: config)
+                                }
+                                inference.saveLoadedModelsList()
+                            } else if record.modelType == .image {
+                                _ = try await inference.imageGenerationService.loadModel(from: url, config: config)
+                                inference.saveLoadedModelsList()
+                            } else {
+                                try await inference.loadModel(at: url, config: config)
+                            }
+                            lastLoadError = nil
+                            break
+                        } catch {
+                            lastLoadError = error
+                            NovaMLXLog.warning(
+                                "[Admin] \(req.modelId): load from \(url.path) failed: \(error.localizedDescription)")
+                        }
                     }
+                    if let lastLoadError { throw lastLoadError }
 
                     return try Self.jsonResponse(AdminModelStatus(
                         id: req.modelId, family: record.family.rawValue,
@@ -3038,6 +3057,66 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     }
                     return try Self.jsonResponse(["status": "ok", "message": "Config saved. Restart required."])
                 }
+                RouteGroup("models-dirs") {
+                    // Ordered storage roots (index 0 = highest priority) with
+                    // live mount/writability/free-space status.
+                    Get("") { _, _ in
+                        let statuses = NovaMLXPaths.modelDirStatuses()
+                        let records = models.allRegisteredModels()
+                        let rows: [[String: Any]] = statuses.map { status in
+                            var row: [String: Any] = [
+                                "path": status.path,
+                                "priority": status.priority,
+                                "isRemovable": status.isRemovable,
+                                "mounted": status.mounted,
+                                "exists": status.exists,
+                                "writable": status.writable,
+                            ]
+                            if let free = status.freeBytes { row["freeBytes"] = free }
+                            let prefix = status.path.hasSuffix("/") ? status.path : status.path + "/"
+                            row["modelCount"] = records.filter {
+                                $0.downloadedAt != nil && $0.localURL.path.hasPrefix(prefix)
+                            }.count
+                            return row
+                        }
+                        let data = try JSONSerialization.data(withJSONObject: ["directories": rows])
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                    // Replace the ordered list wholesale. Applies immediately:
+                    // writes ~/.config/novamlx/models-path and hot-updates the
+                    // ModelManager (no restart required).
+                    Put("") { request, _ in
+                        struct ModelsDirsUpdateRequest: Codable {
+                            let paths: [String]
+                        }
+                        let body = try await request.body.collect(upTo: .max)
+                        let req = try JSONDecoder().decode(ModelsDirsUpdateRequest.self, from: body)
+                        do {
+                            try NovaMLXPaths.setModelsDirs(req.paths)
+                        } catch let error as ModelStorageError {
+                            throw NovaMLXError.apiError(error.errorDescription ?? "Invalid paths")
+                        }
+                        let ordered = NovaMLXPaths.configuredModelsDirs
+                        if let primary = ordered.first {
+                            models.updateDirectories(
+                                primary: primary, extras: Array(ordered.dropFirst()))
+                        }
+                        let statuses = NovaMLXPaths.modelDirStatuses().map { status in
+                            [
+                                "path": status.path,
+                                "priority": status.priority,
+                                "mounted": status.mounted,
+                                "exists": status.exists,
+                                "writable": status.writable,
+                            ] as [String: Any]
+                        }
+                        let data = try JSONSerialization.data(withJSONObject: [
+                            "status": "ok",
+                            "directories": statuses,
+                        ])
+                        return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
+                    }
+                }
                 Get("/log-level") { _, _ in
                     try Self.jsonResponse(["level": "\(NovaMLXLog.fileLogLevel.rawValue)"] as [String: String])
                 }
@@ -3423,7 +3502,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             let exact = catalog.first {
                                 $0.id == repoId && !ModelCatalogPolicy.isIdPattern($0.id)
                             }
-                            let dest = NovaMLXPaths.downloadRoot(estimatedBytes: exact?.sizeBytes ?? 0)
+                            let dest: URL
+                            do {
+                                dest = try NovaMLXPaths.downloadRoot(estimatedBytes: exact?.sizeBytes ?? 0)
+                            } catch let storageError as ModelStorageError {
+                                NovaMLXLog.error("[HF] Download refused: \(storageError.errorDescription ?? "insufficient storage")")
+                                return try Self.jsonResponse(
+                                    ["error": storageError.errorDescription ?? "insufficient storage"],
+                                    httpStatus: HTTPResponse.Status(code: 507))
+                            }
                             let task = try await hf.startDownload(
                                 repoId: repoId,
                                 hfToken: hfToken,

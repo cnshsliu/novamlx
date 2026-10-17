@@ -424,8 +424,12 @@ SQLite-backed API key system with hashing, rate limits, and whitelists.
 
 | Feature | Details |
 |---------|---------|
-| **Model directory** | `~/.nova/models/<repo_id>/` |
-| **Discovery** | `modelManager.downloadedModels()` + `inferenceService.listLoadedModels()` |
+| **Model directory** | `~/.nova/models/<repo_id>/` (default primary root) |
+| **Multi-root storage** | Ordered directory list in `~/.config/novamlx/models-path` (one per line, first = highest priority). Manage via Settings UI or `GET`/`PUT /admin/api/models-dirs`; applies without restart |
+| **Priority download placement** | `NovaMLXPaths.downloadRoot` picks the first root that is mounted, writable, and has room; fails with HTTP 507 when no root qualifies |
+| **Priority load fallback** | Loads try every root holding a copy, in priority order (`candidateLoadURLs`); a corrupt copy falls through instead of failing |
+| **External disks** | Unmounted `/Volumes/...` roots are skipped without probing (no TCC prompt); models on a detached disk simply drop out of load/list until it remounts |
+| **Discovery** | `modelManager.downloadedModels()` + `inferenceService.listLoadedModels()`; `discoverModels()` scans every mounted root and dedupes by id toward the highest-priority copy |
 | **Auto-load** | Request to unloaded model triggers load (configurable via `ensureModelReady`) |
 | **Auto-eviction** | LRU under memory pressure; never evicts mid-request |
 | **Restore on restart** | `restoreModels()` rehydrates last session's loaded set |
