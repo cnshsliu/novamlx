@@ -4,7 +4,7 @@ import GRDB
 import NovaMLXDB
 import NovaMLXCore
 
-@Suite("TokenhubStore", .serialized)
+@Suite("TokenhubStore", .serialized, .novaDBSerial)
 struct TokenhubStoreTests {
 
     private func makeTmpDir() throws -> URL {

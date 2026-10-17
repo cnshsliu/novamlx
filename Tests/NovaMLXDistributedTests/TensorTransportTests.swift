@@ -140,8 +140,8 @@ struct TensorTransportTests {
         let encoded = WireFormat.encode(array: array)
         let computed = WireFormat.wireSize(for: array)
         #expect(encoded.count == computed)
-        // Header(32) + shape(1*8) + data(4) = 44
-        #expect(encoded.count == 44)
+        // Header(32) + shape(0*8, scalar is 0-dim) + data(4) = 36
+        #expect(encoded.count == 36)
     }
 
     // MARK: - NodeEndpoint
