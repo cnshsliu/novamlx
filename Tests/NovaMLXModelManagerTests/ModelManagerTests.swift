@@ -27,7 +27,7 @@ enum IsolatedTestDB {
     }
 }
 
-@Suite("ModelManager Tests", .serialized)
+@Suite("ModelManager Tests", .serialized, .novaDBSerial)
 struct ModelManagerTests {
     private func makeTempManager() -> ModelManager {
         IsolatedTestDB.run { dir in
