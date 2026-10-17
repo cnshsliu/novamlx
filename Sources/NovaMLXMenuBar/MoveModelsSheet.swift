@@ -21,22 +21,15 @@ struct MoveModelsSheet: View {
     @State private var rightSort: VaultSort = .name
     @State private var busy = false
     @State private var message: String?
+    /// Live move progress; nil when idle.
+    @State private var progress: MoveProgress?
+    /// Names of the models moved by the last completed batch.
+    @State private var lastMovedNames: [String]?
 
-    private enum VaultSort: String, CaseIterable, Identifiable {
-        case name, size
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .name: return "Name"
-            case .size: return "Size"
-            }
-        }
-        func apply(_ models: [ModelManager.VaultModelEntry]) -> [ModelManager.VaultModelEntry] {
-            switch self {
-            case .name: return models.sorted { $0.modelId.localizedStandardCompare($1.modelId) == .orderedAscending }
-            case .size: return models.sorted { $0.sizeBytes != $1.sizeBytes ? $0.sizeBytes > $1.sizeBytes : $0.modelId < $1.modelId }
-            }
-        }
+    struct MoveProgress: Equatable {
+        let done: Int
+        let total: Int
+        let current: String
     }
 
     private var vaults: [URL] { NovaMLXPaths.configuredModelsDirs }
@@ -61,9 +54,10 @@ struct MoveModelsSheet: View {
                 .frame(maxHeight: .infinity)
             }
             Divider()
-            footer
+            statusBar
+            if message != nil { footer }
         }
-        .frame(minWidth: 720, minHeight: 420)
+        .frame(minWidth: 720, minHeight: 460)
         .onAppear {
             leftVault = vaults.first
             rightVault = vaults.count > 1 ? vaults[1] : nil
@@ -71,9 +65,34 @@ struct MoveModelsSheet: View {
         }
         .onChange(of: leftVault) { _ in reload() }
         .onChange(of: rightVault) { _ in reload() }
+        // Selection is exclusive: picking rows on one side clears the other,
+        // so the arrow buttons always reflect a single direction.
+        .onChange(of: leftSelection) { sel in
+            if !sel.isEmpty, !rightSelection.isEmpty { rightSelection = [] }
+        }
+        .onChange(of: rightSelection) { sel in
+            if !sel.isEmpty, !leftSelection.isEmpty { leftSelection = [] }
+        }
     }
 
     // MARK: - Panes
+
+    private enum VaultSort: String, CaseIterable, Identifiable {
+        case name, size
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .name: return "Name"
+            case .size: return "Size"
+            }
+        }
+        func apply(_ models: [ModelManager.VaultModelEntry]) -> [ModelManager.VaultModelEntry] {
+            switch self {
+            case .name: return models.sorted { $0.modelId.localizedStandardCompare($1.modelId) == .orderedAscending }
+            case .size: return models.sorted { $0.sizeBytes != $1.sizeBytes ? $0.sizeBytes > $1.sizeBytes : $0.modelId < $1.modelId }
+            }
+        }
+    }
 
     private func vaultPane(
         selection: Binding<URL?>,
@@ -135,27 +154,33 @@ struct MoveModelsSheet: View {
         .frame(maxWidth: .infinity)
     }
 
+    // MARK: - Move Buttons
+
+    private var leftSelected: Bool { !leftSelection.isEmpty }
+    private var rightSelected: Bool { !rightSelection.isEmpty }
+
     private var moveButtons: some View {
         VStack(spacing: 12) {
             Spacer()
-            moveButton("→", help: "Move selected to the right vault", direction: .right, all: false)
-                .disabled(rightSelection.isEmpty)
-            moveButton("→→", help: "Move all to the right vault", direction: .right, all: true)
-                .disabled(leftModels.isEmpty)
+            // Right-movers act on the left list; they are only available when
+            // the selection sits on the left side.
+            moveButton("→", help: "Move selected to the right vault",
+                       enabled: leftSelected, direction: .right, all: false)
+            moveButton("→→", help: "Move all to the right vault",
+                       enabled: !leftModels.isEmpty && !rightSelected, direction: .right, all: true)
             Divider().frame(width: 36)
-            moveButton("←", help: "Move selected to the left vault", direction: .left, all: false)
-                .disabled(leftSelection.isEmpty)
-            moveButton("←←", help: "Move all to the left vault", direction: .left, all: true)
-                .disabled(rightModels.isEmpty)
+            moveButton("←", help: "Move selected to the left vault",
+                       enabled: rightSelected, direction: .left, all: false)
+            moveButton("←←", help: "Move all to the left vault",
+                       enabled: !rightModels.isEmpty && !leftSelected, direction: .left, all: true)
             Spacer()
         }
         .padding(.horizontal, 10)
-        .opacity(sameVault ? 0.3 : 1)
     }
 
     private enum Direction { case left, right }
 
-    private func moveButton(_ title: String, help: String,
+    private func moveButton(_ title: String, help: String, enabled: Bool,
                             direction: Direction, all: Bool) -> some View {
         Button {
             move(direction: direction, all: all)
@@ -166,7 +191,7 @@ struct MoveModelsSheet: View {
         }
         .buttonStyle(.bordered)
         .help(help)
-        .disabled(busy || sameVault)
+        .disabled(busy || sameVault || !enabled)
     }
 
     private var sameVault: Bool {
@@ -174,7 +199,7 @@ struct MoveModelsSheet: View {
         return l.standardizedFileURL.path == r.standardizedFileURL.path
     }
 
-    // MARK: - Header / Footer
+    // MARK: - Header / Status Bar / Footer
 
     private var header: some View {
         HStack {
@@ -191,6 +216,66 @@ struct MoveModelsSheet: View {
                 .keyboardShortcut(.defaultAction)
         }
         .padding(12)
+    }
+
+    /// Full-name readout under the lists: current selection while idle, live
+    /// progress during a move, and the completed batch afterwards.
+    private var statusBar: some View {
+        HStack(alignment: .center, spacing: 8) {
+            if let progress {
+                ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1)))
+                    .frame(width: 120)
+                Text("Moving \(progress.done)/\(progress.total): \(progress.current)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+            } else if let moved = lastMovedNames, !moved.isEmpty {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(NovaTheme.Colors.statusOK)
+                Text("移动完成：\(moved.joined(separator: ", "))")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.statusOK)
+                    .lineLimit(3)
+            } else {
+                selectionSummary
+            }
+            Spacer(minLength: 12)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(minHeight: 44, alignment: .center)
+        .background(Color.primary.opacity(0.03))
+    }
+
+    /// Both panes' selected model names, untruncated (wraps up to 3 lines).
+    private var selectionSummary: some View {
+        let leftNames = leftModels.filter { leftSelection.contains($0.id) }.map(\.modelId)
+        let rightNames = rightModels.filter { rightSelection.contains($0.id) }.map(\.modelId)
+        return HStack(spacing: 8) {
+            if leftNames.isEmpty && rightNames.isEmpty {
+                Text("Select models to move")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } else {
+                if !leftNames.isEmpty {
+                    Text("← \(leftNames.joined(separator: ", "))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if !rightNames.isEmpty {
+                    Text("\(rightNames.joined(separator: ", ")) →")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(NovaTheme.Colors.accent)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+        }
     }
 
     private var footer: some View {
@@ -240,28 +325,40 @@ struct MoveModelsSheet: View {
         }
 
         busy = true
-        message = "Moving \(entries.count) model\(entries.count == 1 ? "" : "s")…"
+        message = nil
+        lastMovedNames = nil
+        progress = MoveProgress(done: 0, total: entries.count, current: entries.first?.modelId ?? "")
         let manager = modelManager
         Task.detached(priority: .userInitiated) {
-            var moved = 0
+            var movedNames: [String] = []
             var errors: [String] = []
-            for entry in entries {
+            for (index, entry) in entries.enumerated() {
+                await MainActor.run {
+                    progress = MoveProgress(done: index, total: entries.count, current: entry.modelId)
+                }
                 do {
                     try manager.moveModel(entry.modelId, from: source, to: dest)
-                    moved += 1
+                    movedNames.append(entry.modelId)
                 } catch {
                     errors.append("\(entry.modelId): \(error.localizedDescription)")
+                }
+                await MainActor.run {
+                    progress = MoveProgress(done: index + 1, total: entries.count, current: entry.modelId)
                 }
             }
             _ = manager.discoverModels()
             await manager.refreshModelCaches()
             await MainActor.run {
                 busy = false
+                progress = nil
                 reload()
+                leftSelection = []
+                rightSelection = []
+                lastMovedNames = movedNames
                 if errors.isEmpty {
-                    message = "Moved \(moved) model\(moved == 1 ? "" : "s")."
+                    message = nil
                 } else {
-                    message = "Error: \(moved) moved, \(errors.count) failed — "
+                    message = "Error: \(movedNames.count) moved, \(errors.count) failed — "
                         + errors.prefix(3).joined(separator: "; ")
                 }
             }
