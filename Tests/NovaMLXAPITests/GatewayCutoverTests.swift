@@ -11,10 +11,19 @@ struct GatewayCutoverTests {
         ProcessInfo.processInfo.environment["NOVA_API_URL"] ?? "http://127.0.0.1:6590"
     }
 
+    /// The live server requires Bearer auth; without a key every request is
+    /// 401 and the migration-404 assertions below can never run.
+    private var apiKey: String? {
+        ProcessInfo.processInfo.environment["NOVA_API_KEY"]
+    }
+
     private func postChat(model: String) async throws -> (Int, String) {
         var request = URLRequest(url: URL(string: "\(base)/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = Data(#"{"model":"\#(model)","messages":[{"role":"user","content":"hi"}]}"#.utf8)
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -23,6 +32,10 @@ struct GatewayCutoverTests {
 
     @Test("lb: and tknet: models return 404 pointing at Peer")
     func movedModelsAre404() async throws {
+        guard apiKey != nil else {
+            Issue.record("[SKIP] NOVA_API_KEY not set; the live server requires auth")
+            return
+        }
         let moved = "Load-balanced and Tokenhub models moved to Tknet Peer"
         let lb = try await postChat(model: "lb:coding")
         #expect(lb.0 == 404)
