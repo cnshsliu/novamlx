@@ -213,7 +213,6 @@ struct MoveModelsSheet: View {
             Button("Done") { dismiss() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .keyboardShortcut(.defaultAction)
         }
         .padding(12)
     }
