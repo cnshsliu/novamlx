@@ -570,6 +570,38 @@ public final class ModelManager: @unchecked Sendable {
         return nil
     }
 
+    /// Delete the model directory at `path` (a vault move pane selection).
+    /// When it is the registry's copy, the record is marked not-downloaded
+    /// (like `deleteModel(_:)`); a copy remaining on another vault is
+    /// re-registered by the next discovery pass.
+    public func deleteModel(at path: URL) throws {
+        guard path.directoryExists else {
+            throw ModelMoveError.sourceMissing(path.path)
+        }
+        // Resolve both spellings BEFORE the delete — resolvingSymlinksInPath
+        // degrades to the raw string once the target no longer exists, and
+        // discovery stores /private/var spellings while callers pass /var.
+        let key = path.resolvingSymlinksInPath().path
+        let record = lock.withLock {
+            _registry.values.first {
+                $0.localURL.resolvingSymlinksInPath().path == key
+            }
+        }
+        try FileManager.default.removeItem(at: path)
+        if let record = record {
+            lock.withLock {
+                _registry[record.id] = ModelRecord(
+                    id: record.id, family: record.family, modelType: record.modelType,
+                    source: record.source, localURL: record.localURL, remoteURL: record.remoteURL,
+                    sizeBytes: record.sizeBytes, downloadedAt: nil, version: record.version)
+                _downloadStates.removeValue(forKey: record.id)
+            }
+            saveRegistry()
+        }
+        invalidateListCaches()
+        NovaMLXLog.info("[ModelManager] Deleted model files at \(path.path)")
+    }
+
     @discardableResult
     public func discoverModels() -> [DiscoveredModel] {
         let discovery = ModelDiscovery()
