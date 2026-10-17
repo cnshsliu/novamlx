@@ -508,4 +508,93 @@ struct ModelManagerTests {
         #expect(record?.localURL.resolvingSymlinksInPath().path
                 == internal_.appendingPathComponent(modelId).resolvingSymlinksInPath().path)
     }
+
+    @Test("moveModel relocates files, registry, and vault listings")
+    func moveModelBetweenVaults() throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let vaultA = tempDir.appendingPathComponent("vault-a", isDirectory: true)
+        let vaultB = tempDir.appendingPathComponent("vault-b", isDirectory: true)
+        let modelId = "org/portable-model"
+        let srcDir = vaultA.appendingPathComponent(modelId, isDirectory: true)
+        try createFakeModelConfig(at: srcDir, architectures: ["LlamaForCausalLM"], modelType: "llama")
+        try Data("weights".utf8).write(to: srcDir.appendingPathComponent("model.safetensors"))
+
+        let manager = ModelManager(modelsDirectory: vaultA, extraModelDirectories: [vaultB])
+        manager.discoverModels() // register the on-disk model
+
+        #expect(manager.modelsInVault(vaultA).map(\.modelId) == [modelId])
+        #expect(manager.modelsInVault(vaultB).isEmpty)
+
+        let newLocation = try manager.moveModel(modelId, from: vaultA, to: vaultB)
+        #expect(newLocation.resolvingSymlinksInPath().path
+                == vaultB.appendingPathComponent(modelId).resolvingSymlinksInPath().path)
+        #expect(FileManager.default.fileExists(
+            atPath: vaultB.appendingPathComponent("\(modelId)/model.safetensors").path))
+        #expect(!srcDir.directoryExists)
+
+        // Registry follows the moved copy; load candidates prefer the new path.
+        let record = manager.getRecord(modelId)
+        #expect(record?.localURL.resolvingSymlinksInPath().path
+                == vaultB.appendingPathComponent(modelId).resolvingSymlinksInPath().path)
+        #expect(manager.candidateLoadURLs(for: modelId).first?.resolvingSymlinksInPath().path
+                == vaultB.appendingPathComponent(modelId).resolvingSymlinksInPath().path)
+
+        // Listings reflect the move on both sides.
+        #expect(manager.modelsInVault(vaultA).isEmpty)
+        #expect(manager.modelsInVault(vaultB).map(\.modelId) == [modelId])
+    }
+
+    @Test("moveModel preserves the hub/models layout")
+    func moveModelPreservesHubLayout() throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let vaultA = tempDir.appendingPathComponent("vault-a", isDirectory: true)
+        let vaultB = tempDir.appendingPathComponent("vault-b", isDirectory: true)
+        let modelId = "hub-laid-model"
+        let srcDir = vaultA.appendingPathComponent("hub/models/\(modelId)", isDirectory: true)
+        try createFakeModelConfig(at: srcDir, architectures: ["LlamaForCausalLM"], modelType: "llama")
+
+        let manager = ModelManager(modelsDirectory: vaultA, extraModelDirectories: [vaultB])
+        let newLocation = try manager.moveModel(modelId, from: vaultA, to: vaultB)
+        #expect(newLocation.path.hasSuffix("hub/models/\(modelId)"))
+        #expect(manager.modelsInVault(vaultB).map(\.modelId) == [modelId])
+    }
+
+    @Test("moveModel refuses to overwrite an existing destination copy")
+    func moveModelRejectsDestinationExists() async throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let vaultA = tempDir.appendingPathComponent("vault-a", isDirectory: true)
+        let vaultB = tempDir.appendingPathComponent("vault-b", isDirectory: true)
+        let modelId = "clash-model"
+        for root in [vaultA, vaultB] {
+            let dir = root.appendingPathComponent(modelId, isDirectory: true)
+            try createFakeModelConfig(at: dir, architectures: ["LlamaForCausalLM"], modelType: "llama")
+        }
+
+        let manager = ModelManager(modelsDirectory: vaultA, extraModelDirectories: [vaultB])
+        await #expect(throws: ModelManager.ModelMoveError.self) {
+            try manager.moveModel(modelId, from: vaultA, to: vaultB)
+        }
+        // Source untouched after the refusal.
+        #expect(vaultA.appendingPathComponent(modelId).directoryExists)
+        #expect(vaultB.appendingPathComponent(modelId).directoryExists)
+    }
+
+    @Test("moveModel fails cleanly for a missing source")
+    func moveModelMissingSource() async throws {
+        let tempDir = IsolatedTestDB.run { $0 }
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let vaultA = tempDir.appendingPathComponent("vault-a", isDirectory: true)
+        let vaultB = tempDir.appendingPathComponent("vault-b", isDirectory: true)
+        let manager = ModelManager(modelsDirectory: vaultA, extraModelDirectories: [vaultB])
+        await #expect(throws: ModelManager.ModelMoveError.self) {
+            try manager.moveModel("ghost-model", from: vaultA, to: vaultB)
+        }
+    }
 }

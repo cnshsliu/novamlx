@@ -446,6 +446,130 @@ public final class ModelManager: @unchecked Sendable {
         }
     }
 
+    // MARK: - Vault Moves
+
+    /// A model directory found under one storage vault (root), for the
+    /// two-pane move UI. `modelId` is the repo id relative to the vault
+    /// (e.g. "mlx-community/Qwen3-0.6B-4bit").
+    public struct VaultModelEntry: Identifiable, Sendable {
+        public let modelId: String
+        public let path: URL
+        public let sizeBytes: UInt64
+        public let isComplete: Bool
+        public var id: String { path.path }
+    }
+
+    public enum ModelMoveError: LocalizedError {
+        case sourceMissing(String)
+        case destinationExists(String)
+        case vaultUnavailable(String)
+        case insufficientSpace(needed: UInt64, free: UInt64)
+
+        public var errorDescription: String? {
+            switch self {
+            case .sourceMissing(let p): return "source not found: \(p)"
+            case .destinationExists(let p): return "already exists at destination: \(p)"
+            case .vaultUnavailable(let p): return "destination vault not mounted or not writable: \(p)"
+            case .insufficientSpace(let needed, let free):
+                return "insufficient space (need \(ByteCountFormatter.string(fromByteCount: Int64(needed), countStyle: .file)), have \(ByteCountFormatter.string(fromByteCount: Int64(free), countStyle: .file)))"
+            }
+        }
+    }
+
+    /// Models stored under one vault, scanning both layouts
+    /// (`<root>/<id>` and `<root>/hub/models/<id>`). Sorted by id.
+    public func modelsInVault(_ vault: URL) -> [VaultModelEntry] {
+        let discovery = ModelDiscovery()
+        var found: [VaultModelEntry] = []
+        for base in [vault, vault.appendingPathComponent("hub/models", isDirectory: true)] {
+            guard base.directoryExists else { continue }
+            found.append(contentsOf: discovery.discover(in: base).map {
+                VaultModelEntry(
+                    modelId: $0.modelId, path: $0.modelPath,
+                    sizeBytes: $0.estimatedSizeBytes, isComplete: $0.isComplete)
+            })
+        }
+        // The same id under both layouts of one vault keeps the first hit.
+        var seen = Set<String>()
+        return found
+            .filter { seen.insert($0.modelId).inserted }
+            .sorted { $0.modelId < $1.modelId }
+    }
+
+    /// Move a model directory between vaults, preserving its layout
+    /// (direct vs `hub/models/`). Cross-volume moves copy-then-delete via
+    /// `FileManager.moveItem`. The registry record (when present) is
+    /// repointed at the new location. Returns the new directory URL.
+    @discardableResult
+    public func moveModel(_ modelId: String, from sourceVault: URL, to destVault: URL) throws -> URL {
+        guard let source = Self.modelDirectory(modelId, in: sourceVault) else {
+            throw ModelMoveError.sourceMissing("\(sourceVault.path)/\(modelId)")
+        }
+        guard NovaMLXPaths.isVolumeMounted(destVault) else {
+            throw ModelMoveError.vaultUnavailable(destVault.path)
+        }
+        // The vault dir itself may not exist yet (freshly added in Settings);
+        // create it after the mounted check so we never materialize a bogus
+        // mountpoint for an unmounted volume.
+        if !destVault.directoryExists {
+            try? FileManager.default.createDirectory(at: destVault, withIntermediateDirectories: true)
+        }
+        guard FileManager.default.isWritableFile(atPath: destVault.path) else {
+            throw ModelMoveError.vaultUnavailable(destVault.path)
+        }
+
+        // Same vault or aliased roots: nothing to do.
+        let sourceKey = sourceVault.standardizedFileURL.path
+        let destKey = destVault.standardizedFileURL.path
+        guard sourceKey != destKey else { return source }
+
+        let inHubLayout = source.path.contains("/hub/models/")
+        let relative = inHubLayout ? "hub/models/\(modelId)" : modelId
+        let destination = destVault.appendingPathComponent(relative, isDirectory: true)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw ModelMoveError.destinationExists(destination.path)
+        }
+
+        let needed = FileManager.default.directorySize(at: source)
+        let free = (try? FileManager.default.attributesOfFileSystem(
+            forPath: destVault.path)[.systemFreeSize] as? Int64) ?? 0
+        guard UInt64(max(free, 0)) > needed else {
+            throw ModelMoveError.insufficientSpace(needed: needed, free: UInt64(max(free, 0)))
+        }
+
+        // Create the parent chain (org dirs may not exist on the target yet).
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: source, to: destination)
+
+        // Repoint the registry record; the moved copy is the live one.
+        let record = lock.withLock { _registry[modelId] }
+        if let record = record {
+            lock.withLock {
+                _registry[modelId] = ModelRecord(
+                    id: record.id, family: record.family, modelType: record.modelType,
+                    source: record.source, localURL: destination, remoteURL: record.remoteURL,
+                    sizeBytes: max(record.sizeBytes, needed), downloadedAt: record.downloadedAt,
+                    version: record.version)
+            }
+            saveRegistry()
+        }
+        invalidateListCaches()
+        NovaMLXLog.info("[ModelManager] Moved \(modelId): \(source.path) → \(destination.path)")
+        return destination
+    }
+
+    /// The on-disk directory for `modelId` under `vault`, either layout.
+    private static func modelDirectory(_ modelId: String, in vault: URL) -> URL? {
+        for candidate in [
+            vault.appendingPathComponent(modelId, isDirectory: true),
+            vault.appendingPathComponent("hub/models/\(modelId)", isDirectory: true),
+        ] where candidate.directoryExists {
+            return candidate
+        }
+        return nil
+    }
+
     @discardableResult
     public func discoverModels() -> [DiscoveredModel] {
         let discovery = ModelDiscovery()
