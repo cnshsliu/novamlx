@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import NovaMLXCore
 import NovaMLXModelManager
 import NovaMLXUtils
@@ -31,6 +32,8 @@ struct MoveModelsPanel: View {
     /// stay off the main thread or the panel blocks for seconds on appear.
     @State private var loading = false
     @State private var reloadGeneration = 0
+    /// Text most recently copied via click; shown briefly in the status bar.
+    @State private var copiedHint: String?
 
     struct MoveProgress: Equatable {
         let done: Int
@@ -79,12 +82,15 @@ struct MoveModelsPanel: View {
         .onChange(of: leftVault) { _ in reload() }
         .onChange(of: rightVault) { _ in reload() }
         // Selection is exclusive: picking rows on one side clears the other,
-        // so the arrow buttons always reflect a single direction.
+        // so the arrow buttons always reflect a single direction. A stale
+        // unload-first error goes away once the user picks something else.
         .onChange(of: leftSelection) { sel in
             if !sel.isEmpty, !rightSelection.isEmpty { rightSelection = [] }
+            clearStaleError()
         }
         .onChange(of: rightSelection) { sel in
             if !sel.isEmpty, !leftSelection.isEmpty { leftSelection = [] }
+            clearStaleError()
         }
         .confirmationDialog(
             "Delete \(pendingDeleteEntries.count) model\(pendingDeleteEntries.count == 1 ? "" : "s")?",
@@ -150,6 +156,12 @@ struct MoveModelsPanel: View {
                             .font(.system(size: 12, design: .monospaced))
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .onTapGesture {
+                                // Click the name to copy it; also keep the
+                                // row selectable like a plain click.
+                                copyToClipboard(entry.modelId)
+                                paneSelection.wrappedValue = [entry.id]
+                            }
                         HStack(spacing: 6) {
                             Text(ByteCountFormatter.string(
                                 fromByteCount: Int64(entry.sizeBytes), countStyle: .file))
@@ -240,7 +252,15 @@ struct MoveModelsPanel: View {
     /// progress during an operation, and the completed batch afterwards.
     private var statusBar: some View {
         HStack(alignment: .center, spacing: 8) {
-            if let progress {
+            if let copiedHint {
+                Image(systemName: "doc.on.doc")
+                    .foregroundColor(.secondary)
+                Text("已复制：\(copiedHint)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            } else if let progress {
                 ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1)))
                     .frame(width: 100)
                 Text("\(progress.verb) \(progress.done)/\(progress.total): \(progress.current)")
@@ -303,12 +323,29 @@ struct MoveModelsPanel: View {
                     .foregroundColor(message.hasPrefix("Error") ? .red : NovaTheme.Colors.statusOK)
                     .lineLimit(3)
                     .truncationMode(.middle)
+                    .onTapGesture { copyToClipboard(message) }
             }
             Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .frame(minHeight: 30, alignment: .center)
+    }
+
+    // MARK: - Clipboard
+
+    private func copyToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copiedHint = text
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if copiedHint == text { copiedHint = nil }
+        }
+    }
+
+    private func clearStaleError() {
+        if let m = message, m.hasPrefix("Error: unload first") { message = nil }
     }
 
     // MARK: - Actions
