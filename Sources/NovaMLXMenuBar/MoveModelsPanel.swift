@@ -20,7 +20,6 @@ struct MoveModelsPanel: View {
     @State private var rightSelection = Set<String>()
     @State private var leftSort: VaultSort = .name
     @State private var rightSort: VaultSort = .name
-    @State private var busy = false
     @State private var message: String?
     /// Live operation progress; nil when idle.
     @State private var progress: MoveProgress?
@@ -34,6 +33,25 @@ struct MoveModelsPanel: View {
     @State private var reloadGeneration = 0
     /// Text most recently copied via click; shown briefly in the status bar.
     @State private var copiedHint: String?
+
+    /// One queued operation. Source/dest/path are captured at enqueue time,
+    /// so later picker changes never corrupt a pending task.
+    struct QueueTask: Identifiable {
+        let id = UUID()
+        let modelId: String
+        let path: URL
+        let source: URL
+        let dest: URL?
+        var isDelete: Bool { dest == nil }
+    }
+
+    /// Pending tasks, drained one at a time in the background. Users can
+    /// keep adding while it runs.
+    @State private var queue: [QueueTask] = []
+    @State private var queueRunning = false
+    @State private var drainDone = 0
+
+    private var busy: Bool { queueRunning || !queue.isEmpty }
 
     struct MoveProgress: Equatable {
         let done: Int
@@ -91,18 +109,10 @@ struct MoveModelsPanel: View {
         }
         .onChange(of: leftVault) { _ in reload() }
         .onChange(of: rightVault) { _ in reload() }
-        // Selection is exclusive: picking rows on one side clears the other,
-        // so the arrow buttons always reflect a single direction. A stale
-        // unload-first error or an acknowledged 移动/删除完成 readout goes
-        // away once the user interacts with the lists again.
-        .onChange(of: leftSelection) { sel in
-            if !sel.isEmpty, !rightSelection.isEmpty { rightSelection = [] }
-            clearTransientStatus()
-        }
-        .onChange(of: rightSelection) { sel in
-            if !sel.isEmpty, !leftSelection.isEmpty { leftSelection = [] }
-            clearTransientStatus()
-        }
+        // A stale unload-first error or an acknowledged 移动/删除完成
+        // readout goes away once the user interacts with the lists again.
+        .onChange(of: leftSelection) { _ in clearTransientStatus() }
+        .onChange(of: rightSelection) { _ in clearTransientStatus() }
         .confirmationDialog(
             "Delete \(pendingDeleteEntries.count) model\(pendingDeleteEntries.count == 1 ? "" : "s")?",
             isPresented: $confirmDelete,
@@ -168,10 +178,14 @@ struct MoveModelsPanel: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .onTapGesture {
-                                // Click the name to copy it; also keep the
-                                // row selectable like a plain click.
+                                // Click the name to copy it; toggle the row
+                                // so repeated name clicks build a multi-select.
                                 copyToClipboard(entry.modelId)
-                                paneSelection.wrappedValue = [entry.id]
+                                if paneSelection.wrappedValue.contains(entry.id) {
+                                    paneSelection.wrappedValue.remove(entry.id)
+                                } else {
+                                    paneSelection.wrappedValue.insert(entry.id)
+                                }
                             }
                         HStack(spacing: 6) {
                             Text(ByteCountFormatter.string(
@@ -216,17 +230,17 @@ struct MoveModelsPanel: View {
     private var moveButtons: some View {
         VStack(spacing: 10) {
             Spacer()
-            // Right-movers act on the left list; they are only available when
-            // the selection sits on the left side.
-            moveButton("→", help: "Move selected to the right vault",
-                       enabled: leftSelected, action: { move(direction: .right, all: false) })
-            moveButton("→→", help: "Move all to the right vault",
-                       enabled: !leftModels.isEmpty && !rightSelected, action: { move(direction: .right, all: true) })
+            // Arrows act on their own pane's selection and ENQUEUE tasks —
+            // the queue keeps draining while the user lines up the next ones.
+            moveButton("→", help: "Queue: move selected to the right vault",
+                       enabled: leftSelected, action: { enqueue(direction: .right, all: false) })
+            moveButton("→→", help: "Queue: move all to the right vault",
+                       enabled: !leftModels.isEmpty, action: { enqueue(direction: .right, all: true) })
             Divider().frame(width: 36)
-            moveButton("←", help: "Move selected to the left vault",
-                       enabled: rightSelected, action: { move(direction: .left, all: false) })
-            moveButton("←←", help: "Move all to the left vault",
-                       enabled: !rightModels.isEmpty && !leftSelected, action: { move(direction: .left, all: true) })
+            moveButton("←", help: "Queue: move selected to the left vault",
+                       enabled: rightSelected, action: { enqueue(direction: .left, all: false) })
+            moveButton("←←", help: "Queue: move all to the left vault",
+                       enabled: !rightModels.isEmpty, action: { enqueue(direction: .left, all: true) })
             Divider().frame(width: 36)
             Button {
                 confirmDelete = true
@@ -235,8 +249,8 @@ struct MoveModelsPanel: View {
                     .frame(width: 44, height: 28)
             }
             .buttonStyle(.bordered)
-            .help("Delete selected models")
-            .disabled(busy || loading || !(leftSelected || rightSelected))
+            .help("Queue: delete selected models")
+            .disabled(loading || !(leftSelected || rightSelected))
             .tint(.red)
             Spacer()
         }
@@ -252,7 +266,7 @@ struct MoveModelsPanel: View {
         }
         .buttonStyle(.bordered)
         .help(help)
-        .disabled(busy || loading || sameVault || !enabled)
+        .disabled(loading || sameVault || !enabled)
     }
 
     private var sameVault: Bool {
@@ -282,6 +296,14 @@ struct MoveModelsPanel: View {
                     .foregroundColor(.secondary)
                     .lineLimit(2)
                     .truncationMode(.tail)
+                if queue.count > 1 {
+                    Text("队列 \(queue.count - 1) 待处理")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Button("清空队列") { queue.removeSubrange(1...) }
+                        .controlSize(.mini)
+                        .buttonStyle(.borderless)
+                }
             } else if let completion, !completion.names.isEmpty {
                 Image(systemName: completion.deleted ? "trash.fill" : "checkmark.circle.fill")
                     .foregroundColor(completion.deleted ? .orange : NovaTheme.Colors.statusOK)
@@ -391,11 +413,8 @@ struct MoveModelsPanel: View {
     }
 
     private func finishBatch(deleted: Bool, names: [String], errors: [String]) {
-        busy = false
         progress = nil
         reload()
-        leftSelection = []
-        rightSelection = []
         completion = Completion(deleted: deleted, names: names)
         message = errors.isEmpty ? nil : "Error: \(names.count) succeeded, \(errors.count) failed — "
             + errors.prefix(3).joined(separator: "; ")
@@ -408,92 +427,104 @@ struct MoveModelsPanel: View {
     }
 
     private func deleteSelected() {
-        let entries = pendingDeleteEntries
-        guard !entries.isEmpty, !busy else { return }
-        let loaded = entries.filter { isModelLoaded($0.modelId) }.map(\.modelId)
-        if !loaded.isEmpty {
-            message = "Error: unload first — \(loaded.joined(separator: ", "))"
-            return
-        }
-        busy = true
-        message = nil
-        completion = nil
-        progress = MoveProgress(done: 0, total: entries.count,
-                                current: entries.first?.modelId ?? "", verb: "Deleting")
-        let manager = modelManager
-        Task.detached(priority: .userInitiated) {
-            var deletedNames: [String] = []
-            var errors: [String] = []
-            for (index, entry) in entries.enumerated() {
-                await MainActor.run {
-                    progress = MoveProgress(done: index, total: entries.count,
-                                            current: entry.modelId, verb: "Deleting")
-                }
-                do {
-                    try manager.deleteModel(at: entry.path)
-                    deletedNames.append(entry.modelId)
-                } catch {
-                    errors.append("\(entry.modelId): \(error.localizedDescription)")
-                }
-                await MainActor.run {
-                    progress = MoveProgress(done: index + 1, total: entries.count,
-                                            current: entry.modelId, verb: "Deleting")
-                }
-            }
-            _ = manager.discoverModels()
-            await manager.refreshModelCaches()
-            await MainActor.run {
-                finishBatch(deleted: true, names: deletedNames, errors: errors)
-            }
-        }
+        enqueue(entries: pendingDeleteEntries, source: nil, dest: nil)
     }
 
     private enum Direction { case left, right }
 
-    private func move(direction: Direction, all: Bool) {
-        guard !busy, !sameVault,
+    /// Turn the current selection into queue tasks. `source`/`dest` are the
+    /// move endpoints (nil = delete). Called from the arrow and trash
+    /// buttons — works any time, even while the queue is draining.
+    private func enqueue(direction: Direction, all: Bool) {
+        guard !sameVault,
               let source = direction == .right ? leftVault : rightVault,
               let dest = direction == .right ? rightVault : leftVault else { return }
         let models = direction == .right ? leftModels : rightModels
         let selectedIds = direction == .right ? leftSelection : rightSelection
         let entries = all ? models : models.filter { selectedIds.contains($0.id) }
-        guard !entries.isEmpty else { return }
+        enqueue(entries: entries, source: source, dest: dest)
+        // Free the selection so the user can line up the next batch.
+        if direction == .right { leftSelection = [] } else { rightSelection = [] }
+    }
 
+    private func enqueue(entries: [ModelManager.VaultModelEntry], source: URL?, dest: URL?) {
+        guard !entries.isEmpty else { return }
         let loaded = entries.filter { isModelLoaded($0.modelId) }.map(\.modelId)
         if !loaded.isEmpty {
             message = "Error: unload first — \(loaded.joined(separator: ", "))"
             return
         }
-
-        busy = true
+        // Both panes may hold selections (delete button): resolve per entry.
+        var tasks: [QueueTask] = []
+        if let source, let dest {
+            tasks = entries.map {
+                QueueTask(modelId: $0.modelId, path: $0.path, source: source, dest: dest)
+            }
+        } else {
+            let leftIds = Set(leftModels.map(\.id))
+            tasks = entries.map { entry in
+                let src = leftIds.contains(entry.id) ? leftVault : rightVault
+                return QueueTask(modelId: entry.modelId, path: entry.path,
+                                 source: src ?? entry.path.deletingLastPathComponent(),
+                                 dest: nil)
+            }
+        }
         message = nil
         completion = nil
-        progress = MoveProgress(done: 0, total: entries.count,
-                                current: entries.first?.modelId ?? "", verb: "Moving")
+        queue.append(contentsOf: tasks)
+        if source == nil { leftSelection = []; rightSelection = [] }
+        drainQueue()
+    }
+
+    /// Execute queued tasks one at a time in the background. New tasks may
+    /// be appended while draining; the loop picks them up. Failures are
+    /// collected and reported when the queue empties.
+    private func drainQueue() {
+        guard !queueRunning else { return }
+        queueRunning = true
+        drainDone = 0
         let manager = modelManager
         Task.detached(priority: .userInitiated) {
             var movedNames: [String] = []
+            var deletedNames: [String] = []
             var errors: [String] = []
-            for (index, entry) in entries.enumerated() {
+            while true {
+                let task: QueueTask? = await MainActor.run { queue.first }
+                guard let task = task else { break }
+                let done = await MainActor.run { drainDone }
+                let pending = await MainActor.run { queue.count }
                 await MainActor.run {
-                    progress = MoveProgress(done: index, total: entries.count,
-                                            current: entry.modelId, verb: "Moving")
+                    progress = MoveProgress(done: done, total: done + pending,
+                                            current: task.modelId,
+                                            verb: task.isDelete ? "Deleting" : "Moving")
                 }
                 do {
-                    try manager.moveModel(entry.modelId, from: source, to: dest)
-                    movedNames.append(entry.modelId)
+                    if let dest = task.dest {
+                        try manager.moveModel(task.modelId, from: task.source, to: dest)
+                        movedNames.append(task.modelId)
+                    } else {
+                        try manager.deleteModel(at: task.path)
+                        deletedNames.append(task.modelId)
+                    }
                 } catch {
-                    errors.append("\(entry.modelId): \(error.localizedDescription)")
+                    errors.append("\(task.modelId): \(error.localizedDescription)")
                 }
+                // Pop the finished task; refresh listings so both-sides
+                // badges and the moved rows update as the queue drains.
                 await MainActor.run {
-                    progress = MoveProgress(done: index + 1, total: entries.count,
-                                            current: entry.modelId, verb: "Moving")
+                    if !queue.isEmpty, queue[0].id == task.id { queue.remove(at: 0) }
+                    drainDone += 1
+                    reload()
                 }
             }
             _ = manager.discoverModels()
             await manager.refreshModelCaches()
             await MainActor.run {
-                finishBatch(deleted: false, names: movedNames, errors: errors)
+                queueRunning = false
+                let deleted = deletedNames.count > movedNames.count
+                finishBatch(deleted: deleted,
+                            names: movedNames + deletedNames,
+                            errors: errors)
             }
         }
     }
