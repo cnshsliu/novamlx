@@ -93,14 +93,15 @@ struct MoveModelsPanel: View {
         .onChange(of: rightVault) { _ in reload() }
         // Selection is exclusive: picking rows on one side clears the other,
         // so the arrow buttons always reflect a single direction. A stale
-        // unload-first error goes away once the user picks something else.
+        // unload-first error or an acknowledged 移动/删除完成 readout goes
+        // away once the user interacts with the lists again.
         .onChange(of: leftSelection) { sel in
             if !sel.isEmpty, !rightSelection.isEmpty { rightSelection = [] }
-            clearStaleError()
+            clearTransientStatus()
         }
         .onChange(of: rightSelection) { sel in
             if !sel.isEmpty, !leftSelection.isEmpty { leftSelection = [] }
-            clearStaleError()
+            clearTransientStatus()
         }
         .confirmationDialog(
             "Delete \(pendingDeleteEntries.count) model\(pendingDeleteEntries.count == 1 ? "" : "s")?",
@@ -357,7 +358,11 @@ struct MoveModelsPanel: View {
         }
     }
 
-    private func clearStaleError() {
+    /// Drop the status-bar readout once the user moves on (selects another
+    /// model) — the completion notice is only interesting right after the
+    /// batch finished.
+    private func clearTransientStatus() {
+        completion = nil
         if let m = message, m.hasPrefix("Error: unload first") { message = nil }
     }
 
