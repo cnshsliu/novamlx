@@ -77,7 +77,28 @@ restart_app() {
 	killall NovaMLX 2>/dev/null || true
 	killall NovaMLXWorker 2>/dev/null || true
 	sleep 2
+	sync_applications_copy
 	open dist/NovaMLX.app
+}
+
+# Keep the /Applications copy (if one exists) at the same build as dist so a
+# Dock/Spotlight launch never runs a stale second version. ditto preserves
+# the code signature; re-sign ad-hoc if verification still fails.
+sync_applications_copy() {
+	local SRC="dist/NovaMLX.app" DST="/Applications/NovaMLX.app"
+	[ -d "$SRC" ] || return 0
+	# Never install unrequested — only refresh a copy that is already there.
+	[ -d "$DST" ] || return 0
+	if pgrep -qf "/Applications/NovaMLX.app"; then
+		echo "→ /Applications copy in use — skipped sync (./build.sh --restart updates it)"
+		return 0
+	fi
+	rm -rf "$DST"
+	ditto "$SRC" "$DST" || { echo "→ /Applications sync failed (ditto)"; return 0; }
+	if ! codesign --verify "$DST" >/dev/null 2>&1; then
+		codesign --force --deep --sign - "$DST" >/dev/null 2>&1
+	fi
+	echo "→ /Applications copy synced to latest build"
 }
 
 # Resolve first (no compilation)
@@ -493,5 +514,6 @@ else
 fi
 [ ${#SKIPPED[@]} -gt 0 ] && echo "  skipped: ${SKIPPED[*]}"
 
+sync_applications_copy
 restart_app
 exit 0
