@@ -49,6 +49,16 @@ struct MoveModelsPanel: View {
 
     private var vaults: [URL] { NovaMLXPaths.configuredModelsDirs }
 
+    /// Model ids present on BOTH panes' vaults — moving them across would
+    /// hit "already exists at destination". Derived from the listings, so it
+    /// refreshes automatically after every move/delete/reload. Meaningless
+    /// when both pickers show the same vault.
+    private var bothSidesIds: Set<String> {
+        guard !sameVault else { return [] }
+        return Set(leftModels.map(\.modelId))
+            .intersection(Set(rightModels.map(\.modelId)))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if vaults.count < 2 {
@@ -168,6 +178,9 @@ struct MoveModelsPanel: View {
                             if !entry.isComplete { Text("incomplete").foregroundColor(.orange) }
                             if isModelLoaded(entry.modelId) {
                                 Text("loaded").foregroundColor(NovaTheme.Colors.accent)
+                            }
+                            if bothSidesIds.contains(entry.modelId) {
+                                Text("both sides").foregroundColor(.orange)
                             }
                         }
                         .font(.system(size: 10))
