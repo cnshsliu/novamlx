@@ -27,6 +27,10 @@ struct MoveModelsPanel: View {
     @State private var completion: Completion?
     /// Pending delete confirmation.
     @State private var confirmDelete = false
+    /// Vault listing load state; discovery walks whole model trees and must
+    /// stay off the main thread or the panel blocks for seconds on appear.
+    @State private var loading = false
+    @State private var reloadGeneration = 0
 
     struct MoveProgress: Equatable {
         let done: Int
@@ -164,9 +168,14 @@ struct MoveModelsPanel: View {
             .listStyle(.inset)
             .overlay {
                 if models.isEmpty {
-                    Text("No models")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                    if loading {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("No models")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
         }
@@ -201,7 +210,7 @@ struct MoveModelsPanel: View {
             }
             .buttonStyle(.bordered)
             .help("Delete selected models")
-            .disabled(busy || !(leftSelected || rightSelected))
+            .disabled(busy || loading || !(leftSelected || rightSelected))
             .tint(.red)
             Spacer()
         }
@@ -217,7 +226,7 @@ struct MoveModelsPanel: View {
         }
         .buttonStyle(.bordered)
         .help(help)
-        .disabled(busy || sameVault || !enabled)
+        .disabled(busy || loading || sameVault || !enabled)
     }
 
     private var sameVault: Bool {
@@ -305,16 +314,25 @@ struct MoveModelsPanel: View {
     // MARK: - Actions
 
     private func reload() {
-        if let left = leftVault {
-            leftModels = modelManager.modelsInVault(left)
-        } else { leftModels = [] }
-        if let right = rightVault {
-            rightModels = modelManager.modelsInVault(right)
-        } else { rightModels = [] }
-        let validLeft = Set(leftModels.map(\.id))
-        let validRight = Set(rightModels.map(\.id))
-        leftSelection.formIntersection(validLeft)
-        rightSelection.formIntersection(validRight)
+        let left = leftVault
+        let right = rightVault
+        reloadGeneration += 1
+        let generation = reloadGeneration
+        loading = true
+        let manager = modelManager
+        Task.detached(priority: .userInitiated) {
+            let l = left.map { manager.modelsInVault($0) } ?? []
+            let r = right.map { manager.modelsInVault($0) } ?? []
+            await MainActor.run {
+                // A newer reload (vault switch) superseded this one.
+                guard generation == reloadGeneration else { return }
+                leftModels = l
+                rightModels = r
+                leftSelection.formIntersection(Set(l.map(\.id)))
+                rightSelection.formIntersection(Set(r.map(\.id)))
+                loading = false
+            }
+        }
     }
 
     private func finishBatch(deleted: Bool, names: [String], errors: [String]) {
