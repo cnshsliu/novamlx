@@ -91,7 +91,13 @@ restart_app() {
 	killall NovaMLXWorker 2>/dev/null || true
 	sleep 2
 	sync_applications_copy
-	open dist/NovaMLX.app
+	# Launch through the /Applications copy when present — it is kept in sync
+	# and is also what the Dock opens, so there is only ever one launch path.
+	if [ -d "/Applications/NovaMLX.app" ]; then
+		open /Applications/NovaMLX.app
+	else
+		open dist/NovaMLX.app
+	fi
 }
 
 # Keep the /Applications copy (if one exists) at the same build as dist so a
