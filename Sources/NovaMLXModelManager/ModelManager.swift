@@ -316,7 +316,7 @@ public final class ModelManager: @unchecked Sendable {
                         continue
                     }
                     remaining.append(Aria2DownloadFile(
-                        url: hubFileURL(repo: repo, filename: filename),
+                        url: await hubFileURL(repo: repo, filename: filename),
                         relativePath: filename
                     ))
                 }
@@ -756,8 +756,12 @@ public final class ModelManager: @unchecked Sendable {
         return true
     }
 
-    private func hubFileURL(repo: Hub.Repo, filename: String) -> URL {
-        var url = URL(string: "https://huggingface.co")!
+    private func hubFileURL(repo: Hub.Repo, filename: String) async -> URL {
+        // Respect the configured HF endpoint (e.g. https://hf-mirror.com) —
+        // hardcoded huggingface.co is unreachable from some networks.
+        let base = (await NovaMLXConfiguration.shared.huggingfaceEndpoint)
+            ?? "https://huggingface.co"
+        var url = URL(string: base) ?? URL(string: "https://huggingface.co")!
         if repo.type != .models {
             url = url.appendingPathComponent(repo.type.rawValue)
         }
