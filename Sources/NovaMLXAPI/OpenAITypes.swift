@@ -283,6 +283,9 @@ public struct OpenAIRequest: Codable, Sendable {
     /// 1. `enable_thinking: false` (Qwen / DashScope)
     /// 2. `chat_template_kwargs.enable_thinking: false` (vLLM / SGLang)
     /// 3. `chat_template_kwargs.thinking: false` (alternative Qwen)
+    /// 4. `reasoning_effort: "none"/"minimal"` (OpenAI-style — clients like
+    ///    mem0 can only send standard params, so map minimal effort to
+    ///    thinking-off)
     public var resolvedEnableThinking: Bool? {
         if let v = enableThinking { return v }
         if let kwargs = chatTemplateKwargs {
@@ -292,6 +295,10 @@ public struct OpenAIRequest: Codable, Sendable {
             if let ac = kwargs["thinking"] {
                 if case .bool(let v) = ac { return v }
             }
+        }
+        if let effort = reasoningEffort?.lowercased(),
+           effort == "none" || effort == "minimal" {
+            return false
         }
         return nil
     }
