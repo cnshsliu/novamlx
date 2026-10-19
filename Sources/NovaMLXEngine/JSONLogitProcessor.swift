@@ -110,13 +110,24 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
         case array
     }
 
-    /// Precomputed mask key. We materialize one mask per `(state, parentFrame)`
-    /// combination. Most combinations are reachable; the unreachable ones
-    /// (e.g. `.expectObjectKeyOrEnd` with `parentFrame == .topLevel`) are still
-    /// computed but never looked up at runtime.
+    /// Precomputed mask key. We materialize one mask per
+    /// `(state, parentFrame, isKeyString)` combination. `isKeyString` only
+    /// matters for `.inString`: a closing quote in a **key** string must be
+    /// followed by `:`, while in a **value** string `,`/`}` are valid
+    /// continuations. Collapsing both into one value-string mask let merged
+    /// tokens like `",\n  ` and `"}` through mid-key, producing truncated
+    /// output (`{"memories"}`) — Tier 4 fix. Most combinations are reachable;
+    /// the unreachable ones are still computed but never looked up at runtime.
     struct MaskKey: Hashable {
         let state: JSONState
         let parentFrame: ParentFrame
+        let isKeyString: Bool
+
+        init(state: JSONState, parentFrame: ParentFrame, isKeyString: Bool = false) {
+            self.state = state
+            self.parentFrame = parentFrame
+            self.isKeyString = isKeyString
+        }
     }
 
     private var state: JSONState = .expectValue
@@ -187,14 +198,19 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
             precomputeMasks()
         }
         let currentState = firstToken ? JSONState.expectValue : state
-        let key = MaskKey(state: currentState, parentFrame: currentParentFrame())
+        let key = MaskKey(
+            state: currentState,
+            parentFrame: currentParentFrame(),
+            isKeyString: currentState == .inString ? stringIsKey : false
+        )
         if let mask = precomputedMasks[key] {
             return TokenMaskBuilder.applyMask(mask, to: logits)
         }
         // Fall back to the topLevel mask if the (state, parent) combination is
         // unreachable in practice — preserves prior behavior rather than
         // returning unmasked logits, which would let arbitrary tokens through.
-        if let mask = precomputedMasks[MaskKey(state: currentState, parentFrame: .topLevel)] {
+        if let mask = precomputedMasks[MaskKey(state: currentState, parentFrame: .topLevel,
+                                               isKeyString: key.isKeyString)] {
             return TokenMaskBuilder.applyMask(mask, to: logits)
         }
         return logits
@@ -464,7 +480,11 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     private func precomputeMasks() {
         for s in Self.allStates {
             for pf in Self.allParentFrames {
-                guard let initialCtx = makeInitialSimContext(forState: s, parentFrame: pf) else {
+                // Key/value string variants — only `.inString` distinguishes
+                // them; for every other state the flag is irrelevant.
+                let keyVariants: [Bool] = s == .inString ? [false, true] : [false]
+                for isKey in keyVariants {
+                guard let initialCtx = makeInitialSimContext(forState: s, parentFrame: pf, isKeyString: isKey) else {
                     // (state, parentFrame) combination is structurally
                     // impossible (e.g. `.expectObjectKeyOrEnd` with no
                     // enclosing object). Skip — runtime will never query it.
@@ -496,7 +516,8 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
                         maskValues[i] = true
                     }
                 }
-                precomputedMasks[MaskKey(state: s, parentFrame: pf)] = MLXArray(maskValues)[.newAxis, 0...]
+                precomputedMasks[MaskKey(state: s, parentFrame: pf, isKeyString: isKey)] = MLXArray(maskValues)[.newAxis, 0...]
+                }
             }
         }
     }
@@ -509,7 +530,8 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     /// each state's reachable parent frame is fully determined by the FSM
     /// transitions (e.g. `.expectObjectKeyOrEnd` only follows `{` which
     /// pushes a `[true]` frame).
-    private func makeInitialSimContext(forState s: JSONState, parentFrame: ParentFrame) -> SimContext? {
+    private func makeInitialSimContext(forState s: JSONState, parentFrame: ParentFrame,
+                                       isKeyString: Bool = false) -> SimContext? {
         // Build the assumed depth stack for `parentFrame`.
         let baseStack: [Bool]
         switch parentFrame {
@@ -553,14 +575,18 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
 
         // Genuinely multi-context states: in-flight numeric / literal /
         // string content can occur as a top-level value, an object value, or
-        // an array element. We build a mask for each.
+        // an array element. We build a mask for each. Strings additionally
+        // distinguish key vs value: a key's closing quote must lead to `:`,
+        // a value's may lead to `,`/`}` — so the admitted merged tokens
+        // (e.g. `",\n  `, `"}`) differ.
         case .inNumber,
              .inLiteralT, .inLiteralTr, .inLiteralTru,
              .inLiteralF, .inLiteralFa, .inLiteralFal, .inLiteralFals,
              .inLiteralN, .inLiteralNu, .inLiteralNul,
              .inString:
+            guard !(isKeyString && parentFrame != .object) else { return nil }
             return SimContext(state: s, depthStack: baseStack,
-                              escapeNext: false, stringIsKey: false)
+                              escapeNext: false, stringIsKey: isKeyString)
         }
     }
 

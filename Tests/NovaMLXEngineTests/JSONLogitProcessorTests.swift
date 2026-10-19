@@ -339,19 +339,52 @@ struct JSONLogitProcessorTests {
         #expect(depth.isEmpty, "Stack should be empty at end")
         _ = proc  // silence unused warning
     }
+
+    // MARK: - Tier 4: key-string vs value-string masks
+
+    /// Regression for the json_object corruption seen on Qwen3.8-27B: a
+    /// merged token like `",\n  ` or `"}` passes the VALUE-string mask
+    /// (value closed → `,`/`}` valid in object frame) but is invalid inside
+    /// a KEY string (must be followed by `:`). Collapsing both into one
+    /// value-string mask let those tokens through mid-key; the runtime FSM
+    /// then clamped to `.done` and truncated the output (`{"memories"}`).
+    @Test("Merged quote-terminator tokens rejected mid-key, admitted after value")
+    func keyStringVsValueStringMasks() {
+        let vocab = ["{", "}", "\"", ":", ",", "name", "memories", "\",\n  ", "\"}", " ", "\n"]
+        let proc = makeProcessor(vocab: vocab)
+        let idOf: (String) -> Int = { s in vocab.firstIndex(of: s)! }
+
+        // KEY string inside an object: `",\n  ` and `"}` must be rejected —
+        // a key's closing quote may only be followed by `:`.
+        #expect(proc.testMaskBoolValues(state: .inString, parent: .object, isKey: true)![idOf("\",\n  ")] == false)
+        #expect(proc.testMaskBoolValues(state: .inString, parent: .object, isKey: true)![idOf("\"}")] == false)
+        // Plain `:` inside the key text is ordinary string content (allowed);
+        // the close-quote-then-colon form `"…":` is what carries the key out.
+        #expect(proc.testMaskBoolValues(state: .inString, parent: .object, isKey: true)![idOf(":")] == true)
+
+        // VALUE string inside an object: `",\n  ` IS valid (value closed,
+        // comma continues the object).
+        #expect(proc.testMaskBoolValues(state: .inString, parent: .object, isKey: false)![idOf("\",\n  ")] == true)
+        // `"}` closes the value and the object — valid as the final pair.
+        #expect(proc.testMaskBoolValues(state: .inString, parent: .object, isKey: false)![idOf("\"}")] == true)
+
+        // Key-string masks only exist for the object frame.
+        #expect(proc.testMask(state: .inString, parent: .topLevel, isKey: true) == nil)
+        #expect(proc.testMask(state: .inString, parent: .array, isKey: true) == nil)
+    }
 }
 
 // MARK: - Test helpers (driving via the JSONLogitProcessor's internal hooks)
 
 extension JSONLogitProcessor {
     /// Convenience: probe the precomputed mask for a (state, parent) pair.
-    func testMask(state: JSONState, parent: ParentFrame) -> MLXArray? {
-        return precomputedMasksForTesting[MaskKey(state: state, parentFrame: parent)]
+    func testMask(state: JSONState, parent: ParentFrame, isKey: Bool = false) -> MLXArray? {
+        return precomputedMasksForTesting[MaskKey(state: state, parentFrame: parent, isKeyString: isKey)]
     }
 
     /// Convenience: read mask as [Bool] for assertions on individual token ids.
-    func testMaskBoolValues(state: JSONState, parent: ParentFrame) -> [Bool]? {
-        guard let mask = testMask(state: state, parent: parent) else { return nil }
+    func testMaskBoolValues(state: JSONState, parent: ParentFrame, isKey: Bool = false) -> [Bool]? {
+        guard let mask = testMask(state: state, parent: parent, isKey: isKey) else { return nil }
         // Mask shape is [1, vocabSize]
         return mask[0].asArray(Bool.self)
     }
