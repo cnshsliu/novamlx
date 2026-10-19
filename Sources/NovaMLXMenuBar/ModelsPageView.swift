@@ -26,6 +26,11 @@ struct ModelsPageView: View {
     @State private var modelQuery = ""
     @State private var scrollAnchor: String?
     @State private var downloadedSnapshot: [ModelRecord] = []
+    @State private var showUnmountedModels = false
+    @State private var unmountedSnapshot: [ModelRecord] = []
+    @State private var redownloadRoots: [NovaMLXPaths.ModelDirStatus] = []
+    @State private var redownloadTarget: ModelRecord?
+    @State private var showRootPicker = false
     let memory: ModelsPageMemory
 
     init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager, memory: ModelsPageMemory) {
@@ -159,19 +164,47 @@ struct ModelsPageView: View {
         } message: {
             Text(l10n.tr("models.deleteMessage", modelToDelete ?? ""))
         }
+        .confirmationDialog(
+            l10n.tr("models.chooseDisk"),
+            isPresented: $showRootPicker,
+            titleVisibility: .visible
+        ) {
+            ForEach(redownloadRoots, id: \.path) { root in
+                Button(rootButtonLabel(root)) {
+                    if let record = redownloadTarget {
+                        startRedownload(record, to: URL(fileURLWithPath: root.path, isDirectory: true))
+                    }
+                    redownloadTarget = nil
+                }
+            }
+            Button(l10n.tr("models.cancel"), role: .cancel) { redownloadTarget = nil }
+        } message: {
+            if let record = redownloadTarget {
+                Text(l10n.tr("models.chooseDiskMessage", record.id))
+            }
+        }
         .onAppear { Task { await refreshDownloaded() } }
         .onChange(of: modelQuery) { _, value in memory.modelQuery = value }
         .onChange(of: typeFilter) { _, value in memory.typeFilter = value }
         .onChange(of: scrollAnchor) { _, value in memory.scrollAnchor = value }
-        .onChange(of: refreshTrigger) { _, _ in Task { await refreshDownloaded() } }
+        .onChange(of: refreshTrigger) { _, _ in Task { await refreshDownloaded(fullRescan: true) } }
         .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
             Task { await refreshDownloaded() }
         }
     }
 
-    private func refreshDownloaded() async {
+    private func refreshDownloaded(fullRescan: Bool = false) async {
+        // Full rescan re-syncs the registry with what's actually on disk
+        // (manually added/removed/moved folders, unmounted disks, incomplete
+        // downloads); the light path only refreshes reachability caches.
+        if fullRescan {
+            _ = await Task.detached(priority: .utility) {
+                modelManager.discoverModels()
+            }.value
+        }
         await modelManager.refreshModelCaches()
         downloadedSnapshot = modelManager.downloadedModels()
+        unmountedSnapshot = modelManager.unmountedModels()
     }
 
     private var localModelsContent: some View {
@@ -180,10 +213,103 @@ struct ModelsPageView: View {
                 VStack(spacing: 20) {
                     loadedSection
                     downloadedSection
+                    if showUnmountedModels && !unmountedSnapshot.isEmpty {
+                        unmountedSection
+                    }
                 }
                 .padding(24)
             }
             .scrollPosition(id: $scrollAnchor)
+        }
+    }
+
+    /// Models whose files live on a removable disk that is not mounted.
+    /// Shown on demand so the user can re-download them to another disk.
+    private var unmountedSection: some View {
+        let downloading = Set(
+            unmountedSnapshot
+                .map { $0.id }
+                .filter { modelManager.getDownloadStatus($0)?.state == .downloading }
+        )
+        let unmounted = unmountedSnapshot.filter { !downloading.contains($0.id) }
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                sectionHeader(l10n.tr("models.unmountedSection"), icon: "externaldrive.badge.xmark", count: unmounted.count)
+            }
+
+            if unmounted.isEmpty {
+                emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
+            } else {
+                ForEach(unmounted, id: \.id) { record in
+                    modelRow(
+                        record.id,
+                        subtitle: "\(volumeName(of: record.localURL)) · \(l10n.tr("models.notMounted"))",
+                        isLoaded: false,
+                        actions: {
+                            Button(l10n.tr("models.redownload")) {
+                                requestRedownload(record)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .help(l10n.tr("models.redownloadHelp"))
+
+                            Button(role: .destructive) {
+                                modelToDelete = record.id
+                                showDeleteConfirmation = true
+                            } label: {
+                                Image(systemName: "trash").font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    )
+                }
+            }
+        }
+        .sectionCard()
+    }
+
+    private func volumeName(of url: URL) -> String {
+        let parts = url.standardizedFileURL.pathComponents
+        guard parts.count > 2, parts[0] == "/", parts[1] == "Volumes" else {
+            return url.deletingLastPathComponent().lastPathComponent
+        }
+        return parts[2]
+    }
+
+    private func rootButtonLabel(_ root: NovaMLXPaths.ModelDirStatus) -> String {
+        let name = (root.path as NSString).lastPathComponent
+        guard let free = root.freeBytes else { return name }
+        let freeText = ByteCountFormatter.string(fromByteCount: Int64(free), countStyle: .file)
+        return "\(name) — \(freeText) \(l10n.tr("models.free"))"
+    }
+
+    /// Re-download flow: one viable disk → download immediately; several →
+    /// let the user pick (external disks may be multiple configured roots).
+    private func requestRedownload(_ record: ModelRecord) {
+        let viable = NovaMLXPaths.modelDirStatuses().filter { $0.mounted && $0.writable }
+        guard !viable.isEmpty else {
+            alertMessage = l10n.tr("models.noWritableDisks")
+            showAlert = true
+            return
+        }
+        if viable.count == 1, let only = viable.first {
+            startRedownload(record, to: URL(fileURLWithPath: only.path, isDirectory: true))
+            return
+        }
+        redownloadTarget = record
+        redownloadRoots = viable
+        showRootPicker = true
+    }
+
+    private func startRedownload(_ record: ModelRecord, to root: URL) {
+        do {
+            try modelManager.startDownload(record.id, preferredRoot: root)
+            refreshTrigger.toggle()
+        } catch {
+            alertMessage = error.localizedDescription
+            showAlert = true
         }
     }
 
@@ -217,6 +343,14 @@ struct ModelsPageView: View {
     private func matchesQuery(_ id: String) -> Bool {
         let query = modelQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return true }
+        // Regex-first: any plain substring is itself a valid regex with
+        // identical semantics, so valid patterns (incl. ^, .*, |, […]) match
+        // as regexes; invalid patterns (e.g. a dangling "(" or "+") fall
+        // back to plain substring matching.
+        if let regex = try? NSRegularExpression(pattern: query, options: [.caseInsensitive]) {
+            let range = NSRange(id.startIndex..., in: id)
+            return regex.firstMatch(in: id, range: range) != nil
+        }
         return id.localizedCaseInsensitiveContains(query)
     }
 
@@ -459,6 +593,21 @@ struct ModelsPageView: View {
             HStack {
                 sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
                 Spacer()
+                if !unmountedSnapshot.isEmpty {
+                    Button {
+                        showUnmountedModels.toggle()
+                    } label: {
+                        Label(
+                            l10n.tr("models.unmountedToggle"),
+                            systemImage: showUnmountedModels
+                                ? "externaldrive.badge.xmark" : "externaldrive.badge.exclamationmark"
+                        )
+                        .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help(l10n.tr("models.unmountedToggleHelp"))
+                }
                 Button {
                     refreshTrigger.toggle()
                     // Force rescan of local models directory

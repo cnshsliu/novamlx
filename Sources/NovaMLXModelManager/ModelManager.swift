@@ -183,6 +183,17 @@ public final class ModelManager: @unchecked Sendable {
         return fresh
     }
 
+    /// Records whose files live on a removable volume that is currently
+    /// unmounted. Hidden from `downloadedModels()`, but surfaced by the UI
+    /// on demand so the user can re-download them to another disk.
+    public func unmountedModels() -> [ModelRecord] {
+        lock.withLock { Array(_registry.values) }.filter { record in
+            guard record.downloadedAt != nil else { return false }
+            return NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL)
+                && !NovaMLXPaths.isVolumeMounted(record.localURL)
+        }
+    }
+
     /// Reachability and directory size, off the caller. Views read the cache.
     public func refreshModelCaches() async {
         let records = lock.withLock { Array(_registry.values) }
@@ -209,7 +220,12 @@ public final class ModelManager: @unchecked Sendable {
     private static func reachableDownloaded(_ records: [ModelRecord]) -> [ModelRecord] {
         records.filter { record in
             guard record.downloadedAt != nil else { return false }
-            if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) { return true }
+            // Removable-volume paths are never probed directly (TCC), but an
+            // unmounted disk must not list as available — check the mount
+            // table instead, which is probe-free.
+            if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) {
+                return NovaMLXPaths.isVolumeMounted(record.localURL)
+            }
             return (try? record.localURL.checkResourceIsReachable()) == true
         }
     }
@@ -224,7 +240,9 @@ public final class ModelManager: @unchecked Sendable {
     public func isDownloaded(_ modelId: String) -> Bool {
         lock.withLock {
             guard let record = _registry[modelId], record.downloadedAt != nil else { return false }
-            if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) { return true }
+            if NovaMLXPaths.triggersRemovableVolumeTCC(record.localURL) {
+                return NovaMLXPaths.isVolumeMounted(record.localURL)
+            }
             return (try? record.localURL.checkResourceIsReachable()) == true
         }
     }
@@ -262,7 +280,7 @@ public final class ModelManager: @unchecked Sendable {
         saveRegistry()
     }
 
-    public func startDownload(_ modelId: String) throws {
+    public func startDownload(_ modelId: String, preferredRoot: URL? = nil) throws {
         let record: ModelRecord? = lock.withLock {
             guard let r = _registry[modelId] else { return nil }
             guard _activeDownloads.insert(modelId).inserted else { return nil }
@@ -279,7 +297,10 @@ public final class ModelManager: @unchecked Sendable {
 
         // Preflight: pick the highest-priority root that is mounted, writable,
         // and has room. Throws ModelStorageError.insufficientSpace when none do.
-        let roots = lock.withLock { [modelsDirectory] + extraModelDirectories }
+        // A `preferredRoot` (user-chosen disk for re-downloads) goes through
+        // the same validation, just as the only candidate.
+        let roots = preferredRoot.map { [$0] }
+            ?? lock.withLock { [modelsDirectory] + extraModelDirectories }
         let chosenRoot = try NovaMLXPaths.downloadRoot(
             estimatedBytes: record.sizeBytes, roots: roots)
         let primary = lock.withLock { modelsDirectory }
