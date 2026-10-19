@@ -122,6 +122,12 @@ if [ -d .build/checkouts/mlx-swift-lm ] && ! grep -q "NOVAMLX_FUSED_SDPA_PATCHED
 	python3 Scripts/patch-fused-sdpa.py
 fi
 
+# DFlash2 target taps. Upstream mlx-swift-lm has no DFlashTarget; the local
+# fork already verifies on the text model. Hooks are skipped when present.
+if [ -d mlx-swift-lm ]; then
+	python3 Scripts/install-dflash-hooks.py mlx-swift-lm
+fi
+
 # Profiler otherwise pulls github.com/ml-explore/mlx-swift beside vendors/mlx-swift.
 if [ -f vendors/flux-2-swift-mlx/Package.swift ] && ! grep -q "NOVAMLX_PROFILER_MLX_PATH" vendors/flux-2-swift-mlx/Package.swift 2>/dev/null; then
 	echo "→ Pointing swift-mlx-profiler at vendors/mlx-swift..."

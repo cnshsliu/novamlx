@@ -810,6 +810,13 @@ public final class InferenceService: @unchecked Sendable {
             guard await downloadAccelerator(candidate) else { return false }
             return DSparkDrafterStore.isLoadableDSparkDraft(modelId: candidate.acceleratorId)
         }
+        // DFlash2 checkpoints are not chat models. Download only when the speed
+        // gate put this id in `plan.attach`. The worker loads the drafter itself.
+        if candidate.kind == .dflash2 {
+            if dflashCompanionReady(modelId: candidate.acceleratorId) { return true }
+            guard await downloadAccelerator(candidate) else { return false }
+            return dflashCompanionReady(modelId: candidate.acceleratorId)
+        }
         if isModelLoaded(candidate.acceleratorId) { return true }
         var dir = NovaMLXPaths.directory(forModelId: candidate.acceleratorId)
         if !FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path) {
@@ -881,6 +888,9 @@ public final class InferenceService: @unchecked Sendable {
         for candidate in candidates where candidate.acceleratorId != keep && candidate.acceleratorId != mainId {
             guard isModelLoaded(candidate.acceleratorId) else { continue }
             if candidate.kind == .dspark, DSparkDrafterStore.isLoadableDSparkDraft(modelId: candidate.acceleratorId) {
+                continue
+            }
+            if candidate.kind == .dflash2, dflashCompanionReady(modelId: candidate.acceleratorId) {
                 continue
             }
             NovaMLXLog.info(
@@ -1025,6 +1035,9 @@ public final class InferenceService: @unchecked Sendable {
         // parseable one as loaded so an explicit `draft_model` skips the pool
         // auto-load (which cannot load these checkpoints).
         if DSparkDrafterStore.isLoadableDSparkDraft(modelId: resolvedId) { return true }
+        // Same for DFlash2: an on-disk checkpoint with weights is "loaded" so
+        // auto-inject can set draft_model without pool-loading it as Qwen3.
+        if dflashCompanionReady(modelId: resolvedId) { return true }
         // Decision, ASR, TTS and image models stay on the host. In worker mode
         // they are not in workerLoadedModels; treating that as "not loaded"
         // reloaded the 678 MB Laya checkpoint on every request.
