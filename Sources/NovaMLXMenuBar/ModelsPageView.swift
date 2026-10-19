@@ -215,6 +215,7 @@ struct ModelsPageView: View {
                     downloadedSection
                     if showUnmountedModels && !unmountedSnapshot.isEmpty {
                         unmountedSection
+                            .id(Self.unmountedSectionAnchor)
                     }
                 }
                 .padding(24)
@@ -222,6 +223,10 @@ struct ModelsPageView: View {
             .scrollPosition(id: $scrollAnchor)
         }
     }
+
+    /// Scroll anchor for the unmounted-disks section; model ids are
+    /// `org/name`, so this never collides with row ids.
+    private static let unmountedSectionAnchor = "section:unmounted"
 
     /// Models whose files live on a removable disk that is not mounted.
     /// Shown on demand so the user can re-download them to another disk.
@@ -231,7 +236,11 @@ struct ModelsPageView: View {
                 .map { $0.id }
                 .filter { modelManager.getDownloadStatus($0)?.state == .downloading }
         )
-        let unmounted = unmountedSnapshot.filter { !downloading.contains($0.id) }
+        let unmounted = unmountedSnapshot.filter { record in
+            !downloading.contains(record.id)
+                && matchesQuery(record.id)
+                && typeFilter.matches(record.modelType)
+        }
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -239,7 +248,11 @@ struct ModelsPageView: View {
             }
 
             if unmounted.isEmpty {
-                emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
+                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
+                } else {
+                    emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
+                }
             } else {
                 ForEach(unmounted, id: \.id) { record in
                     modelRow(
@@ -315,29 +328,56 @@ struct ModelsPageView: View {
 
     private var modelFilterField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-            TextField(l10n.tr("models.filterPlaceholder"), text: $modelQuery)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .accessibilityIdentifier("models-filter")
-            if !modelQuery.isEmpty {
-                Button {
-                    modelQuery = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                TextField(l10n.tr("models.filterPlaceholder"), text: $modelQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .accessibilityIdentifier("models-filter")
+                if !modelQuery.isEmpty {
+                    Button {
+                        modelQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if !unmountedSnapshot.isEmpty {
+                Button {
+                    toggleUnmountedSection()
+                } label: {
+                    Label(
+                        l10n.tr("models.unmountedToggle"),
+                        systemImage: showUnmountedModels
+                            ? "externaldrive.badge.xmark" : "externaldrive.badge.exclamationmark"
+                    )
+                    .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(l10n.tr("models.unmountedToggleHelp"))
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 24)
         .padding(.bottom, 8)
+    }
+
+    /// Toggle the unmounted-disks section; turning it on jumps the scroll
+    /// view to the section (it renders at the bottom of the list).
+    private func toggleUnmountedSection() {
+        showUnmountedModels.toggle()
+        if showUnmountedModels {
+            scrollAnchor = Self.unmountedSectionAnchor
+        }
     }
 
     private func matchesQuery(_ id: String) -> Bool {
@@ -593,21 +633,6 @@ struct ModelsPageView: View {
             HStack {
                 sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
                 Spacer()
-                if !unmountedSnapshot.isEmpty {
-                    Button {
-                        showUnmountedModels.toggle()
-                    } label: {
-                        Label(
-                            l10n.tr("models.unmountedToggle"),
-                            systemImage: showUnmountedModels
-                                ? "externaldrive.badge.xmark" : "externaldrive.badge.exclamationmark"
-                        )
-                        .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help(l10n.tr("models.unmountedToggleHelp"))
-                }
                 Button {
                     refreshTrigger.toggle()
                     // Force rescan of local models directory
