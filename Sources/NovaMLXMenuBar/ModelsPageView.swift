@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import NovaMLXCore
+import NovaMLXEngine
 import NovaMLXInference
 import NovaMLXModelManager
 import NovaMLXUtils
@@ -28,6 +29,10 @@ struct ModelsPageView: View {
     @State private var downloadedSnapshot: [ModelRecord] = []
     @State private var showUnmountedModels = false
     @State private var unmountedSnapshot: [ModelRecord] = []
+    /// DFlash2 / DSpark / MTP companion models cannot run standalone — they
+    /// are hidden from the lists unless the user opts in. Persisted.
+    @AppStorage("models.showCompanions") private var showCompanions = false
+    @State private var companionIds: Set<String> = []
     @State private var redownloadRoots: [NovaMLXPaths.ModelDirStatus] = []
     @State private var redownloadTarget: ModelRecord?
     @State private var showRootPicker = false
@@ -205,6 +210,26 @@ struct ModelsPageView: View {
         await modelManager.refreshModelCaches()
         downloadedSnapshot = modelManager.downloadedModels()
         unmountedSnapshot = modelManager.unmountedModels()
+        companionIds = await Self.detectCompanionIds(in: downloadedSnapshot)
+    }
+
+    /// Config-based companion detection (DSpark / DFlash2 / MTP draft heads).
+    /// Runs off the main thread — one JSON read per downloaded model.
+    private static func detectCompanionIds(in records: [ModelRecord]) async -> Set<String> {
+        let ids = records.map(\.id)
+        return await Task.detached(priority: .utility) {
+            Set(ids.filter { id in
+                let dir = NovaMLXPaths.directory(forModelId: id)
+                return NovaMLXEngine.isDSparkDraftConfig(at: dir)
+                    || NovaMLXEngine.isDFlashDraftConfig(at: dir)
+                    || NovaMLXEngine.isMtpDraftConfig(at: dir)
+            })
+        }.value
+    }
+
+    /// Companions cannot run standalone; hidden unless the user opts in.
+    private func passesCompanionFilter(_ id: String) -> Bool {
+        showCompanions || !companionIds.contains(id)
     }
 
     private var localModelsContent: some View {
@@ -315,27 +340,34 @@ struct ModelsPageView: View {
 
     private var modelFilterField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-            TextField(l10n.tr("models.filterPlaceholder"), text: $modelQuery)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .accessibilityIdentifier("models-filter")
-            if !modelQuery.isEmpty {
-                Button {
-                    modelQuery = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                TextField(l10n.tr("models.filterPlaceholder"), text: $modelQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .accessibilityIdentifier("models-filter")
+                if !modelQuery.isEmpty {
+                    Button {
+                        modelQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            Toggle(l10n.tr("models.showCompanions"), isOn: $showCompanions)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+                .help("DFlash2 / DSpark / MTP companion models cannot run standalone; they accelerate other models.")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 24)
         .padding(.bottom, 8)
     }
@@ -356,12 +388,12 @@ struct ModelsPageView: View {
 
     private var loadedSection: some View {
         let loaded = appState.loadedModels.filter { id in
-            guard matchesQuery(id) else { return false }
+            guard matchesQuery(id), passesCompanionFilter(id) else { return false }
             guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
             return typeFilter.matches(record.modelType)
         }
         let restoring = appState.restoringModels.filter { id in
-            guard matchesQuery(id) else { return false }
+            guard matchesQuery(id), passesCompanionFilter(id) else { return false }
             guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
             return typeFilter.matches(record.modelType)
         }
@@ -586,7 +618,8 @@ struct ModelsPageView: View {
         let allDownloaded = downloadedSnapshot
         let loaded = Set(inferenceService.listLoadedModels())
         let downloaded = allDownloaded.filter {
-            !loaded.contains($0.id) && typeFilter.matches($0.modelType) && matchesQuery($0.id)
+            !loaded.contains($0.id) && typeFilter.matches($0.modelType)
+                && matchesQuery($0.id) && passesCompanionFilter($0.id)
         }
 
         return VStack(alignment: .leading, spacing: 12) {
