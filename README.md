@@ -483,7 +483,11 @@ Automatically detects AI coding agents (Claude Code, OpenCode, OpenClaw, Hermes)
 
 ## Supported Models
 
-Browse and search the verified catalog (4-bit, 8-bit, or FP16 SafeTensors). Popular catalog entries:
+Supported means an exact weight id (`org/repo`) from the NovaMLX catalog, the same string as `nova download <id>`. A repo with a similar name can fail to load when the id differs.
+
+The full list (size, quant, status, minimum memory) is **[Supported models](docs/features/supported-models.md)**.
+
+A few catalog entries:
 
 | Model                  | Size    | Download Command                                                          |
 | ---------------------- | ------- | ------------------------------------------------------------------------- |
@@ -492,9 +496,9 @@ Browse and search the verified catalog (4-bit, 8-bit, or FP16 SafeTensors). Popu
 | Qwen3-VL-4B            | ~2.5 GB | `nova download lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit`          |
 | Whisper-Large-V3-Turbo | 0.8 GB  | `nova download mlx-community/whisper-large-v3-turbo`                      |
 | Dots.TTS               | 4.0 GB  | `nova download smcleod/dots.tts-soar-mlx`                                 |
-| FLUX.1-schnell-4bit    | ~6 GB   | `nova download mzbac/flux1.schnell.4bit.mlx`                              |
+| FLUX.2-klein-4B        | ~16 GB  | `nova download black-forest-labs/FLUX.2-klein-4B`                         |
 
-Search the catalog: `nova search "your model name"`. For models outside the catalog, enable **Download Models → Allow unverified downloads**.
+Search the catalog with `nova search "your model name"`. The download-page Mirror setting (Official, ModelScope, or a custom endpoint) uses that same id. For models outside the catalog, enable **Download Models → Allow unverified downloads**.
 
 ---
 
