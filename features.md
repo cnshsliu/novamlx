@@ -4,8 +4,6 @@ The canonical catalog is **[docs/features/README.md](docs/features/README.md)** 
 
 This file used to be a single long reference. That text now lives under `docs/features/`. This page does not keep a second copy.
 
-Promo and video briefs stay in [docs/feature-briefs/](docs/feature-briefs/README.md).
-
 ## Categories
 
 - [Inference & performance](docs/features/README.md#inference-performance)
