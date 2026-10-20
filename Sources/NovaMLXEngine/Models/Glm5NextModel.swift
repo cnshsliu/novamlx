@@ -352,12 +352,12 @@ private func glm5HC(
         eps: config.hcEps, normEps: config.rmsNormEps)
     let collapsed = rmsNormF32(norm, hcReduce(x, pre: pre))
     let out = branch(collapsed)
-    return hcPost(out, residual: x, post: post, comb: comb)
+    return hcPost(x: out, residual: x, post: post, comb: comb)
 }
 
 // MARK: - MultiLinear (absorbed MLA). Local: MLXLLM's copy is internal.
 
-private class Glm5MultiLinear: Module, Quantizable {
+final class Glm5MultiLinear: Module, Quantizable {
     let inputDims: Int
     let outputDims: Int
     let numHeads: Int
@@ -370,6 +370,7 @@ private class Glm5MultiLinear: Module, Quantizable {
         let scale = sqrt(1 / Float(inputDims))
         _weight.wrappedValue = MLXRandom.uniform(
             low: -scale, high: scale, [numHeads, outputDims, inputDims])
+        super.init()
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -389,7 +390,7 @@ private class Glm5MultiLinear: Module, Quantizable {
     }
 }
 
-private class Glm5QuantizedMultiLinear: Module, Quantized {
+final class Glm5QuantizedMultiLinear: Module, Quantized {
     let groupSize: Int
     let bits: Int
     let mode: QuantizationMode
@@ -414,6 +415,7 @@ private class Glm5QuantizedMultiLinear: Module, Quantized {
         _weight.wrappedValue = weight
         _scales.wrappedValue = scales
         _biases.wrappedValue = biases
+        super.init()
         freeze()
     }
 
@@ -442,7 +444,7 @@ private func glm5MultiLinear(_ module: Module, _ x: MLXArray, transpose: Bool) -
 
 // MARK: - MLP / MoE
 
-private class Glm5MLP: Module {
+final class Glm5MLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
@@ -453,6 +455,7 @@ private class Glm5MLP: Module {
         _gateProj.wrappedValue = Linear(hiddenSize, intermediateSize, bias: false)
         _upProj.wrappedValue = Linear(hiddenSize, intermediateSize, bias: false)
         _downProj.wrappedValue = Linear(intermediateSize, hiddenSize, bias: false)
+        super.init()
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -460,7 +463,7 @@ private class Glm5MLP: Module {
     }
 }
 
-private class Glm5MoEGate: Module {
+final class Glm5MoEGate: Module {
     @ParameterInfo var weight: MLXArray
     @ParameterInfo(key: "e_score_correction_bias") var eScoreCorrectionBias: MLXArray
     let topK: Int
@@ -479,6 +482,7 @@ private class Glm5MoEGate: Module {
             [config.nRoutedExperts, config.hiddenSize], dtype: .float32)
         _eScoreCorrectionBias.wrappedValue = MLXArray.zeros(
             [config.nRoutedExperts], dtype: .float32)
+        super.init()
     }
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
@@ -512,7 +516,7 @@ private class Glm5MoEGate: Module {
     }
 }
 
-private class Glm5SwitchGLU: Module {
+final class Glm5SwitchGLU: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: SwitchLinear
     @ModuleInfo(key: "up_proj") var upProj: SwitchLinear
     @ModuleInfo(key: "down_proj") var downProj: SwitchLinear
@@ -529,6 +533,7 @@ private class Glm5SwitchGLU: Module {
             inputDims: hidden, outputDims: inner, numExperts: experts, bias: false)
         _downProj.wrappedValue = SwitchLinear(
             inputDims: inner, outputDims: hidden, numExperts: experts, bias: false)
+        super.init()
     }
 
     func callAsFunction(_ x: MLXArray, indices: MLXArray, weights: MLXArray) -> MLXArray {
@@ -542,7 +547,7 @@ private class Glm5SwitchGLU: Module {
     }
 }
 
-private class Glm5MoE: Module {
+final class Glm5MoE: Module {
     @ModuleInfo(key: "gate") var gate: Glm5MoEGate
     @ModuleInfo(key: "switch_mlp") var switchMLP: Glm5SwitchGLU
     @ModuleInfo(key: "shared_experts") var sharedExperts: Glm5MLP
@@ -554,6 +559,7 @@ private class Glm5MoE: Module {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.moeIntermediateSize * config.nSharedExperts,
             swigluLimit: config.swigluLimit)
+        super.init()
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -567,7 +573,7 @@ private class Glm5MoE: Module {
 
 // MARK: - Linear attention
 
-private class Glm5LinearAttention: Module {
+final class Glm5LinearAttention: Module {
     let numHeads: Int
     let headDim: Int
     let convKernel: Int
@@ -619,6 +625,7 @@ private class Glm5LinearAttention: Module {
         _dtBias.wrappedValue = MLXArray.zeros([projectionDim], dtype: .float32)
         _oNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         _oProj.wrappedValue = Linear(projectionDim, config.hiddenSize, bias: false)
+        super.init()
     }
 
     private func causalConv(_ conv: Conv1d, _ x: MLXArray, cache: MLXArray?) -> (MLXArray, MLXArray) {
@@ -718,7 +725,7 @@ private func glm5HeadGather(_ values: MLXArray, _ indices: MLXArray) -> MLXArray
     return gathered.reshaped([batch, heads, queryLength, topk, dim])
 }
 
-private class Glm5Indexer: Module {
+final class Glm5Indexer: Module {
     let nHeads: Int
     let headDim: Int
     let indexTopk: Int
@@ -746,6 +753,7 @@ private class Glm5Indexer: Module {
         _weightsProj.wrappedValue = Linear(config.hiddenSize, nHeads, bias: false)
         _compressApe.wrappedValue = MLXArray.zeros([indexKPool, headDim], dtype: .float32)
         _compressGate.wrappedValue = MLXArray.zeros([headDim, config.hiddenSize], dtype: .float32)
+        super.init()
     }
 
     func project(x: MLXArray) -> (MLXArray, MLXArray) {
@@ -892,7 +900,7 @@ private class Glm5Indexer: Module {
     }
 }
 
-private class Glm5SparseAttention: Module {
+final class Glm5SparseAttention: Module {
     let numHeads: Int
     let qLoraRank: Int
     let qHeadDim: Int
@@ -935,6 +943,7 @@ private class Glm5SparseAttention: Module {
         if config.indexerTypes[layerIndex] != "shared" {
             _indexer.wrappedValue = Glm5Indexer(config)
         }
+        super.init()
     }
 
     func callAsFunction(
@@ -1020,7 +1029,7 @@ private class Glm5SparseAttention: Module {
 
 // MARK: - Block
 
-private class Glm5Block: Module {
+final class Glm5Block: Module {
     let isLinear: Bool
     let config: Glm5NextConfiguration
     @ModuleInfo(key: "self_attn") var selfAttn: Module
@@ -1052,6 +1061,7 @@ private class Glm5Block: Module {
             hcMult: config.hcMult, hiddenSize: config.hiddenSize)
         _ffnHC.wrappedValue = DeepseekV4HyperConnection(
             hcMult: config.hcMult, hiddenSize: config.hiddenSize)
+        super.init()
     }
 
     func callAsFunction(
@@ -1085,7 +1095,7 @@ private class Glm5Block: Module {
     }
 }
 
-private class Glm5TextModel: Module {
+final class Glm5TextModel: Module {
     let config: Glm5NextConfiguration
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     var layers: [Glm5Block]
@@ -1097,6 +1107,7 @@ private class Glm5TextModel: Module {
             embeddingCount: config.vocabSize, dimensions: config.hiddenSize)
         layers = (0..<config.numHiddenLayers).map { Glm5Block(config, layerIndex: $0) }
         _norm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        super.init()
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
@@ -1112,7 +1123,7 @@ private class Glm5TextModel: Module {
     }
 }
 
-private class Glm5LanguageModel: Module {
+final class Glm5LanguageModel: Module {
     let config: Glm5NextConfiguration
     @ModuleInfo(key: "model") var model: Glm5TextModel
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
@@ -1123,6 +1134,7 @@ private class Glm5LanguageModel: Module {
         if !config.tieWordEmbeddings {
             _lmHead.wrappedValue = Linear(config.hiddenSize, config.vocabSize, bias: false)
         }
+        super.init()
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
@@ -1149,6 +1161,7 @@ public final class Glm5NextModel: Module, LLMModel, KVCacheDimensionProvider, Lo
         vocabularySize = configuration.vocabSize
         kvHeads = configuration.layerTypes.map { $0 == "deepseek_sparse_attention" ? 1 : 0 }
         _languageModel.wrappedValue = Glm5LanguageModel(configuration)
+        super.init()
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
