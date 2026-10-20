@@ -2,7 +2,9 @@
 
 All notable changes to NovaMLX will be documented in this file.
 
-## [Unreleased] - 2026-07-09
+## [Unreleased]
+
+## [1.6.0] - 2026-10-20
 
 ### Added
 - **Feature catalog** — user-facing docs are indexed at [`docs/features/README.md`](docs/features/README.md) (one markdown page per feature). The root README links that index. `features.md` and `features.zh-CN.md` now point at it instead of keeping a second full catalog. Promo briefs remain in `docs/feature-briefs/`.
