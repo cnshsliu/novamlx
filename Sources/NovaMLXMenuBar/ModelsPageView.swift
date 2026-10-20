@@ -29,9 +29,11 @@ struct ModelsPageView: View {
     @State private var downloadedSnapshot: [ModelRecord] = []
     @State private var showUnmountedModels = false
     @State private var unmountedSnapshot: [ModelRecord] = []
-    /// DFlash2 / DSpark / MTP companion models cannot run standalone — they
-    /// are hidden from the lists unless the user opts in. Persisted.
+    /// DFlash / DSpark / MTP companions stay hidden until the user opts in.
+    /// `false` is the default. AppStorage keeps the choice across launches.
     @AppStorage("models.showCompanions") private var showCompanions = false
+    /// Empty means every configured model root.
+    @State private var diskFilter = ModelRootFilter.all
     @State private var companionIds: Set<String> = []
     @State private var redownloadRoots: [NovaMLXPaths.ModelDirStatus] = []
     @State private var redownloadTarget: ModelRecord?
@@ -210,26 +212,55 @@ struct ModelsPageView: View {
         await modelManager.refreshModelCaches()
         downloadedSnapshot = modelManager.downloadedModels()
         unmountedSnapshot = modelManager.unmountedModels()
-        companionIds = await Self.detectCompanionIds(in: downloadedSnapshot)
+        let catalog = modelManager.catalogStore.models
+        var items = downloadedSnapshot.map { (id: $0.id, directory: $0.localURL) }
+        let known = Set(items.map(\.id))
+        for id in appState.loadedModels + appState.restoringModels where !known.contains(id) {
+            let directory = modelManager.getRecord(id)?.localURL
+                ?? NovaMLXPaths.directory(forModelId: id)
+            items.append((id: id, directory: directory))
+        }
+        companionIds = await Self.detectCompanionIds(items, catalog: catalog)
+        if !diskFilter.isEmpty,
+           !ModelRootFilter.options(for: NovaMLXPaths.configuredModelsDirs).contains(where: { $0.path == diskFilter }) {
+            diskFilter = ModelRootFilter.all
+        }
     }
 
-    /// Config-based companion detection (DSpark / DFlash2 / MTP draft heads).
-    /// Runs off the main thread — one JSON read per downloaded model.
-    private static func detectCompanionIds(in records: [ModelRecord]) async -> Set<String> {
-        let ids = records.map(\.id)
+    /// Companion classification (id, catalog `Companion` tag, draft config).
+    /// Config reads stay off the main actor.
+    private static func detectCompanionIds(
+        _ items: [(id: String, directory: URL)],
+        catalog: [CatalogEntry]
+    ) async -> Set<String> {
+        let snapshot = items
+        let tags = catalog
         return await Task.detached(priority: .utility) {
-            Set(ids.filter { id in
-                let dir = NovaMLXPaths.directory(forModelId: id)
-                return NovaMLXEngine.isDSparkDraftConfig(at: dir)
-                    || NovaMLXEngine.isDFlashDraftConfig(at: dir)
-                    || NovaMLXEngine.isMtpDraftConfig(at: dir)
+            Set(snapshot.compactMap { item in
+                CompanionModel.isAuxiliary(id: item.id, catalog: tags, directory: item.directory)
+                    ? item.id : nil
             })
         }.value
     }
 
-    /// Companions cannot run standalone; hidden unless the user opts in.
-    private func passesCompanionFilter(_ id: String) -> Bool {
-        showCompanions || !companionIds.contains(id)
+    /// Companions stay out of both lists unless the user opts in.
+    /// The id / catalog check is synchronous so known companions do not flash
+    /// in before the config scan finishes.
+    private func passesCompanionFilter(_ id: String, catalog: [CatalogEntry]) -> Bool {
+        if showCompanions { return true }
+        if companionIds.contains(id) { return false }
+        return !CompanionModel.isAuxiliary(id: id, catalog: catalog)
+    }
+
+    /// Drops a selection whose root was removed from the models-path list.
+    private var resolvedDiskFilter: String {
+        if diskFilter.isEmpty { return ModelRootFilter.all }
+        let roots = ModelRootFilter.options(for: NovaMLXPaths.configuredModelsDirs)
+        return roots.contains(where: { $0.path == diskFilter }) ? diskFilter : ModelRootFilter.all
+    }
+
+    private func passesDiskFilter(_ record: ModelRecord) -> Bool {
+        ModelRootFilter.matches(modelURL: record.localURL, selectedRoot: resolvedDiskFilter)
     }
 
     private var localModelsContent: some View {
@@ -261,10 +292,12 @@ struct ModelsPageView: View {
                 .map { $0.id }
                 .filter { modelManager.getDownloadStatus($0)?.state == .downloading }
         )
+        let catalog = modelManager.catalogStore.models
         let unmounted = unmountedSnapshot.filter { record in
             !downloading.contains(record.id)
                 && matchesQuery(record.id)
                 && typeFilter.matches(record.modelType)
+                && passesCompanionFilter(record.id, catalog: catalog)
         }
 
         return VStack(alignment: .leading, spacing: 12) {
@@ -376,11 +409,6 @@ struct ModelsPageView: View {
             .background(Color(nsColor: .controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
-            Toggle(l10n.tr("models.showCompanions"), isOn: $showCompanions)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 11))
-                .help("DFlash2 / DSpark / MTP companion models cannot run standalone; they accelerate other models.")
-
             if !unmountedSnapshot.isEmpty {
                 Button {
                     toggleUnmountedSection()
@@ -425,13 +453,14 @@ struct ModelsPageView: View {
     }
 
     private var loadedSection: some View {
+        let catalog = modelManager.catalogStore.models
         let loaded = appState.loadedModels.filter { id in
-            guard matchesQuery(id), passesCompanionFilter(id) else { return false }
+            guard matchesQuery(id), passesCompanionFilter(id, catalog: catalog) else { return false }
             guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
             return typeFilter.matches(record.modelType)
         }
         let restoring = appState.restoringModels.filter { id in
-            guard matchesQuery(id), passesCompanionFilter(id) else { return false }
+            guard matchesQuery(id), passesCompanionFilter(id, catalog: catalog) else { return false }
             guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
             return typeFilter.matches(record.modelType)
         }
@@ -652,18 +681,59 @@ struct ModelsPageView: View {
         }
     }
 
+    private var diskFilterBinding: Binding<String> {
+        Binding(
+            get: { resolvedDiskFilter },
+            set: { diskFilter = $0 }
+        )
+    }
+
+    /// Disk menu and companion checkbox. Both sit on the downloaded-not-loaded
+    /// header. The companion choice also filters the loaded list.
+    private var downloadedHeaderFilters: some View {
+        let roots = ModelRootFilter.options(for: NovaMLXPaths.configuredModelsDirs)
+        return HStack(spacing: 10) {
+            Picker(l10n.tr("models.diskFilter"), selection: diskFilterBinding) {
+                Text(l10n.tr("models.diskAll")).tag(ModelRootFilter.all)
+                ForEach(roots) { root in
+                    Text(root.label).tag(root.path)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .fixedSize()
+            .accessibilityIdentifier("models-disk-filter")
+            .accessibilityLabel(l10n.tr("models.diskFilter"))
+            .help(l10n.tr("models.diskFilterHelp"))
+
+            Toggle(l10n.tr("models.showCompanions"), isOn: $showCompanions)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 11))
+                .accessibilityIdentifier("models-show-companions")
+                .help(l10n.tr("models.showCompanionsHelp"))
+        }
+    }
+
     private var downloadedSection: some View {
+        let catalog = modelManager.catalogStore.models
         let allDownloaded = downloadedSnapshot
         let loaded = Set(inferenceService.listLoadedModels())
         let downloaded = allDownloaded.filter {
             !loaded.contains($0.id) && typeFilter.matches($0.modelType)
-                && matchesQuery($0.id) && passesCompanionFilter($0.id)
+                && matchesQuery($0.id)
+                && passesCompanionFilter($0.id, catalog: catalog)
+                && passesDiskFilter($0)
         }
+        let diskNarrowed = !resolvedDiskFilter.isEmpty
+        let queryNarrowed = !modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         return VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(spacing: 8) {
                 sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
-                Spacer()
+                Spacer(minLength: 8)
+                downloadedHeaderFilters
+                    .layoutPriority(1)
                 Button {
                     refreshTrigger.toggle()
                     // Force rescan of local models directory
@@ -677,10 +747,10 @@ struct ModelsPageView: View {
             }
 
             if downloaded.isEmpty {
-                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
-                } else {
+                if queryNarrowed || diskNarrowed {
                     emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
+                } else {
+                    emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
                 }
             } else {
                 ForEach(downloaded, id: \.id) { record in
@@ -766,7 +836,8 @@ struct ModelsPageView: View {
 
     @ViewBuilder
     private func playButton(modelId: String) -> some View {
-        if !ResourceLimits.isCompanionDraftModelId(modelId) {
+        if !companionIds.contains(modelId),
+           !CompanionModel.isAuxiliary(id: modelId, catalog: modelManager.catalogStore.models) {
             Button {
                 openTypedDemo(modelId)
             } label: {
