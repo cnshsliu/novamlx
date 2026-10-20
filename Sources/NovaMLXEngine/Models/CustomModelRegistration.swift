@@ -33,6 +33,18 @@ enum CustomModelRegistration {
             })
         // Decodable-only: Bolt's time_step_limit uses {"__float__": "Infinity"}.
         await LLMTypeRegistry.shared.registerModelType(
+            "glm5_next",
+            creator: { data in
+                let configuration = try Glm5NextConfiguration.decode(from: data)
+                return Glm5NextModel(configuration)
+            })
+        await LLMTypeRegistry.shared.registerModelType(
+            "glm5_next_text",
+            creator: { data in
+                let configuration = try Glm5NextConfiguration.decode(from: data)
+                return Glm5NextModel(configuration)
+            })
+        await LLMTypeRegistry.shared.registerModelType(
             "nemotron_h_puzzle",
             creator: { data in
                 let configuration = try JSONDecoder.json5().decode(

@@ -116,6 +116,13 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
             headDim: 256,
             samplingDefaults: FamilySamplingDefaults(temperature: 1.0, topP: 0.95, topK: 64)
         ),
+        .glm: ModelFamilyOptimization(
+            defaultKVBits: nil,
+            prefillStepSize: 512,
+            recommendedContextLength: Glm5NextMemory.validatedContextTokens,
+            repeatLastN: 64,
+            headDim: 512
+        ),
         .starcoder: ModelFamilyOptimization(
             defaultKVBits: 4,
             prefillStepSize: 1024,
@@ -132,6 +139,7 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
         "Qwen2VLForConditionalGeneration": .qwen,
         "Gemma2ForCausalLM": .gemma,
         "Starcoder2ForCausalLM": .starcoder,
+        "Glm5NextForConditionalGeneration": .glm,
     ]
 
     public func optimization(for modelId: String, family: ModelFamily, architectures: [String]? = nil) -> ModelFamilyOptimization {

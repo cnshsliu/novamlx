@@ -1,7 +1,59 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-20T18:00:00Z",
+  "updatedAt": "2026-10-20T20:30:00Z",
   "models": [
+    {
+      "id": "mlx-community/GLM-5.3-Flash-4bit",
+      "url": "https://huggingface.co/mlx-community/GLM-5.3-Flash-4bit",
+      "name": "GLM-5.3-Flash 4-bit",
+      "description": "Text-only GLM-5.3-Flash (glm5_next): hybrid linear attention and sparse MLA, mHC, 288-expert MoE. mlx-community 4-bit (~204 GB). Needs about 256 GB unified memory. Context is capped at 32,768 tokens. Thinking and GLM XML tool calls come from the checkpoint chat template. Vision weights are dropped. Not the zai-org FP8 or BF16 checkpoint.",
+      "category": "llm",
+      "family": "glm",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "4bit",
+      "size": "~204 GB (4-bit)",
+      "sizeBytes": 203992076296,
+      "minRamGB": 256,
+      "addedAt": "2026-10-20T00:00:00Z",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "GLM",
+        "MoE",
+        "glm5_next"
+      ],
+      "capabilities": [
+        "thinking",
+        "tools"
+      ]
+    },
+    {
+      "id": "TensorFold/GLM-5.3-Flash-MLX-2bit-MTP",
+      "url": "https://huggingface.co/TensorFold/GLM-5.3-Flash-MLX-2bit-MTP",
+      "name": "GLM-5.3-Flash hybrid 2-bit",
+      "description": "Text-only GLM-5.3-Flash (glm5_next) hybrid 2-bit (~111 GB): routed experts at 2-bit, other language weights at higher precision. Needs about 128 GB unified memory. Aggressive 2-bit; long code and careful reasoning are less reliable than the 4-bit quant. MTP weights are ignored. Context is capped at 32,768 tokens. Vision weights are dropped. This repository is a standalone hybrid 2-bit checkpoint, not an orcarouter 2bit-lite subfolder.",
+      "category": "llm",
+      "family": "glm",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "2bit",
+      "size": "~111 GB (hybrid 2-bit)",
+      "sizeBytes": 111317859192,
+      "minRamGB": 128,
+      "addedAt": "2026-10-20T00:00:00Z",
+      "tags": [
+        "MLX",
+        "2-bit",
+        "GLM",
+        "MoE",
+        "glm5_next"
+      ],
+      "capabilities": [
+        "thinking",
+        "tools"
+      ]
+    },
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
       "url": "https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
@@ -206,7 +258,12 @@
       "sizeBytes": 734003200,
       "minRamGB": 4,
       "addedAt": "2026-09-21T13:30:00Z",
-      "tags": ["MLX", "Laya", "Decision", "Multilingual"],
+      "tags": [
+        "MLX",
+        "Laya",
+        "Decision",
+        "Multilingual"
+      ],
       "capabilities": [],
       "testedOn": "1.4.0"
     },
