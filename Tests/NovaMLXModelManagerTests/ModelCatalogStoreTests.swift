@@ -105,6 +105,27 @@ struct ModelCatalogStoreTests {
         #expect(file.models.contains { $0.id == "orcarouter/Qwen3.8-27B-Uncensored-MLX" })
         #expect(file.models.contains { $0.id == "incoai/Qwen3.8-27B-DFlash2" })
         #expect(file.models.contains { $0.id == "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit" })
+        let bolt4 = file.models.first {
+            $0.id == "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit"
+        }
+        let bolt3 = file.models.first {
+            $0.id == "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit"
+        }
+        #expect(bolt4?.category == .llm)
+        #expect(bolt4?.family == .nemotron)
+        #expect(bolt4?.status == .preview)
+        #expect(bolt4?.quant == "4bit")
+        #expect(bolt4?.minRamGB == 64)
+        #expect(bolt4?.sizeBytes == 43_256_967_168)
+        #expect(bolt4?.capabilities == ["thinking", "tools"])
+        #expect(bolt3?.category == .llm)
+        #expect(bolt3?.family == .nemotron)
+        #expect(bolt3?.quant == "3bit")
+        #expect(bolt3?.minRamGB == 48)
+        #expect(bolt3?.sizeBytes == 31_653_163_008)
+        #expect(CatalogEntry.guessedQuant(fromId: bolt3?.id ?? "") == "3bit")
+        #expect(CatalogEntry.guessedQuant(fromId: bolt4?.id ?? "") == "4bit")
+        #expect(CatalogEntry.guessedQuant(fromId: "org/model-q4") == "4bit")
         #expect(file.models.contains { $0.id == "mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter" })
         #expect(file.models.contains { $0.id == "mlx-community/Qwen3.8-27B-MTP-*" })
         #expect(!file.models.contains { $0.id == "mlx-community/Qwen3.8-*" })

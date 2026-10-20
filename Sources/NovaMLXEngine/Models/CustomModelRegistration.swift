@@ -31,5 +31,13 @@ enum CustomModelRegistration {
                     DeepseekV4Configuration.self, from: flat)
                 return DeepseekV4Model(configuration)
             })
+        // Decodable-only: Bolt's time_step_limit uses {"__float__": "Infinity"}.
+        await LLMTypeRegistry.shared.registerModelType(
+            "nemotron_h_puzzle",
+            creator: { data in
+                let configuration = try JSONDecoder.json5().decode(
+                    NemotronHPuzzleConfiguration.self, from: data)
+                return NemotronHPuzzleModel(configuration)
+            })
     }
 }
