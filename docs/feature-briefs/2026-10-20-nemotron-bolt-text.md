@@ -104,6 +104,7 @@ Image, video, RADIO, and audio are out of scope. Do not demo `image_url` or vide
 
 ## Links
 
+- 用户文档：[docs/features/nemotron-bolt-text.md](../features/nemotron-bolt-text.md)
 - PR: https://github.com/cnshsliu/novamlx/pull/22 （merge `d726022`，2026-10-20）
 - 4-bit: https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit
 - 3-bit: https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit

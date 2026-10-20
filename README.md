@@ -22,9 +22,24 @@ Run 50+ model families — Llama, Qwen, Gemma, DeepSeek-V4-Pro (779GB!), Mistral
 
 ---
 
+## Features
+
+Per-feature docs, one page each: **[Feature index](docs/features/README.md)**（中文正文，英文标题）.
+
+- [Inference engine](docs/features/inference-engine.md) — local MLX inference on Apple Silicon
+- [NovaMLX-TIE](docs/features/tie.md) — models larger than unified memory
+- [Continuous batching](docs/features/continuous-batching.md), [speculative decoding](docs/features/speculative-decoding.md), and [distributed inference](docs/features/distributed-inference.md)
+- [TurboQuant KV](docs/features/turboquant-kv.md) and [prefix KV cache](docs/features/kv-cache.md)
+- [OpenAI, Anthropic, and Responses](docs/features/api-compatibility.md)
+- [Tokenhub](docs/features/tokenhub.md) and [load balancers](docs/features/load-balancers.md)
+- [Menu bar app](docs/features/menu-bar.md)
+- [Nemotron 3.5 Bolt text](docs/features/nemotron-bolt-text.md) — preview, text only
+
+---
+
 ## 🚀 NovaMLX-TIE: Run Models Larger Than RAM
 
-**NovaMLX-TIE** (Tiered Inference Engine) is a Mac-native SSD streaming architecture that lets you run models bigger than your unified memory — **the only path to run 141GB DeepSeek-V4-Flash-4bit or 779GB V4-Pro on a 128GB Mac**.
+**NovaMLX-TIE** (Tiered Inference Engine) is a Mac-native SSD streaming architecture that lets you run models bigger than your unified memory — **the only path to run 141GB DeepSeek-V4-Flash-4bit or 779GB V4-Pro on a 128GB Mac**. Feature page: [NovaMLX-TIE](docs/features/tie.md).
 
 ### Why TIE is unique
 
@@ -362,13 +377,17 @@ Click the icon to open the **Dashboard** window for detailed monitoring.
 
 ## What Can NovaMLX Do?
 
+The full list is the [feature index](docs/features/README.md). The snippets below are short ways to call a few of those features.
+
 ### 50+ Model Architectures
+
+See [model architectures](docs/features/model-architectures.md).
 
 Runs Llama 3, Qwen 2/2.5/3, Gemma 2/3, Phi 3.5/4, Mistral, Mixtral, DeepSeek, StarCoder2, and many more SafeTensors architectures. Downloads come from the verified catalog by default; enable **Download Models → Allow unverified downloads** for arbitrary HuggingFace URLs.
 
 ### Vision (VLM)
 
-Send images with your messages — supports Qwen2-VL, Gemma3, LLaVA, Phi-3-Vision, Pixtral, Molmo, and others:
+See [vision](docs/features/vision.md). Send images with your messages — supports Qwen2-VL, Gemma3, LLaVA, Phi-3-Vision, Pixtral, Molmo, and others:
 
 ```python
 response = client.chat.completions.create(
@@ -385,7 +404,7 @@ response = client.chat.completions.create(
 
 ### Structured Output
 
-Force the model to output valid JSON matching your schema:
+See [structured output](docs/features/structured-output.md). Force the model to output valid JSON matching your schema:
 
 ```python
 response = client.chat.completions.create(
@@ -413,9 +432,11 @@ Also supports: JSON mode, Regex patterns, and GBNF grammars.
 
 ### Tool Calling
 
-Automatic tool call detection across 7 format families — works with any model without fine-tuning.
+See [tool calling](docs/features/tool-calling.md). Automatic tool call detection across 7 format families — works with any model without fine-tuning.
 
 ### Embeddings & Reranking
+
+See [embeddings and reranking](docs/features/embeddings-rerank.md).
 
 ```bash
 # Embeddings for RAG/semantic search
@@ -428,6 +449,8 @@ curl http://localhost:8080/v1/rerank \
 ```
 
 ### Audio (STT/TTS)
+
+See [audio](docs/features/audio.md).
 
 Uses Apple's built-in on-device speech recognition and synthesis:
 
@@ -442,7 +465,7 @@ curl http://localhost:8080/v1/audio/speech \
 
 ### Both OpenAI and Anthropic APIs
 
-Same server, both APIs:
+See [API compatibility](docs/features/api-compatibility.md). Same server, both APIs:
 
 | API                | Endpoint                    |
 | ------------------ | --------------------------- |
