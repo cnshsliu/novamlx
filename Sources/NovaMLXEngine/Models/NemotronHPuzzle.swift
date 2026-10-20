@@ -295,14 +295,18 @@ public struct NemotronHPuzzleConfiguration: Decodable, Sendable {
             ?? 0
 
         if decodedBlocks.isEmpty {
+            // Locals so the map closure does not capture self before blockConfigs is set.
+            let moeSize = moeIntermediateSize
+            let routedExperts = nRoutedExperts
+            let expertsPerTok = numExpertsPerTok
             blockConfigs = pattern.map { char in
                 switch char {
                 case "E":
                     NemotronHPuzzleBlockConfig(
                         blockType: "moe",
-                        moeIntermediateSize: moeIntermediateSize,
-                        nRoutedExperts: nRoutedExperts,
-                        numExpertsPerTok: numExpertsPerTok
+                        moeIntermediateSize: moeSize,
+                        nRoutedExperts: routedExperts,
+                        numExpertsPerTok: expertsPerTok
                     )
                 case "*":
                     NemotronHPuzzleBlockConfig(blockType: "attention")
