@@ -117,6 +117,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case zImage
     case qwenImage
     case qwenImage21
+    case mossImage
     case laya
     case other
 

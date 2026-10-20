@@ -497,6 +497,7 @@ A few catalog entries:
 | Whisper-Large-V3-Turbo | 0.8 GB  | `nova download mlx-community/whisper-large-v3-turbo`                      |
 | Dots.TTS               | 4.0 GB  | `nova download smcleod/dots.tts-soar-mlx`                                 |
 | FLUX.2-klein-4B        | ~16 GB  | `nova download black-forest-labs/FLUX.2-klein-4B`                         |
+| MOSS-Image-SFT         | ~27 GB  | `nova download OpenMOSS-Team/MOSS-Image-SFT`                              |
 
 Search the catalog with `nova search "your model name"`. The download-page Mirror setting (Official, ModelScope, or a custom endpoint) uses that same id. For models outside the catalog, enable **Download Models → Allow unverified downloads**.
 

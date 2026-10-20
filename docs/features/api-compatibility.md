@@ -25,7 +25,7 @@ OpenAI、Anthropic、Responses 三种协议共用同一套推理引擎与工具�
 | `/v1/embeddings` | POST | 文本转向量 |
 | `/v1/audio/transcriptions` | POST | Whisper / Qwen3-ASR |
 | `/v1/audio/speech` | POST | Dots / Qwen3-TTS |
-| `/v1/images/generations` | POST | FLUX.1 |
+| `/v1/images/generations` | POST | FLUX、Qwen-Image、Z-Image、MOSS-Image 文生图 |
 | `/v1/images/edits` | POST | FLUX.1 带遮罩 |
 | `/v1/images/variations` | POST | FLUX.1 变体 |
 | `/v1/videos` | POST | 异步视频任务（OpenRouter 形态，h3.c），返回 202 |

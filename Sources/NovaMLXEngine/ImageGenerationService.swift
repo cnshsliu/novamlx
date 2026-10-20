@@ -15,7 +15,7 @@ public final class ImageGenerationContainer: @unchecked Sendable {
 
     public var isFlux: Bool {
         switch config.identifier.family {
-        case .flux, .flux2, .zImage, .qwenImage, .qwenImage21: return true
+        case .flux, .flux2, .zImage, .qwenImage, .qwenImage21, .mossImage: return true
         default: return false
         }
     }
@@ -103,6 +103,10 @@ public final class ImageGenerationService: @unchecked Sendable {
             let qwen = QwenImage21Pipeline(directoryURL: url)
             try await qwen.load()
             pipeline = qwen
+        case .mossImage:
+            let moss = MossImageGenPipeline(directoryURL: url, modelId: config.identifier.id)
+            try await moss.load()
+            pipeline = moss
         default:
             pipeline = try SDPipeline(directoryURL: url)
         }
@@ -212,6 +216,12 @@ public final class ImageGenerationService: @unchecked Sendable {
             throw NovaMLXError.modelNotFound(modelId)
         }
 
+        if container.identifier.family == .mossImage {
+            throw NovaMLXError.apiError(
+                "Image editing is not supported for MOSS-Image. Use POST /v1/images/generations."
+            )
+        }
+
         if container.pipeline is QwenImage21Pipeline {
             return try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "edit") { pipeline, imageSeed in
                 guard let qwen = pipeline as? QwenImage21Pipeline else {
@@ -263,6 +273,12 @@ public final class ImageGenerationService: @unchecked Sendable {
         seed: UInt64? = nil,
         steps: Int? = nil
     ) async throws -> ImageGenerationResult {
+        if lock.withLock({ containers[modelId]?.identifier.family == .mossImage }) {
+            throw NovaMLXError.apiError(
+                "Image variation is not supported for MOSS-Image. Use POST /v1/images/generations."
+            )
+        }
+
         guard let container = lock.withLock({ containers[modelId] }),
               !container.isFlux
         else {
@@ -349,7 +365,15 @@ public final class ImageGenerationService: @unchecked Sendable {
                 self?.noteImageStep(modelId: modelId, step: step, total: total)
             }
         }
-        defer { (pipeline as? QwenImage21Pipeline)?.onStep = nil }
+        if let moss = pipeline as? MossImageGenPipeline {
+            moss.onStep = { [weak self] step, total in
+                self?.noteImageStep(modelId: modelId, step: step, total: total)
+            }
+        }
+        defer {
+            (pipeline as? QwenImage21Pipeline)?.onStep = nil
+            (pipeline as? MossImageGenPipeline)?.onStep = nil
+        }
 
         for i in 0..<n {
             if ImageRunControl.shared.isCancelled {

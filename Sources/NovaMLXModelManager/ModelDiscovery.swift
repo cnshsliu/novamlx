@@ -111,6 +111,8 @@ public final class ModelDiscovery: Sendable {
         "QwenImageTransformer2DModel",
         "QwenImage21Pipeline",
         "QwenImage21Transformer2DModel",
+        "MOSSImagePipeline",
+        "MOSSImageTransformer",
     ]
 
     private static let imageModelTypes: Set<String> = [
@@ -123,6 +125,8 @@ public final class ModelDiscovery: Sendable {
         "zimage",
         "qwen_image",
         "qwenimage",
+        "moss_image",
+        "mossimage",
     ]
 
     private static let familyByModelType: [String: ModelFamily] = [
@@ -150,6 +154,7 @@ public final class ModelDiscovery: Sendable {
         "z_image": .zImage, "zimage": .zImage,
         "qwen_image": .qwenImage, "qwenimage": .qwenImage,
         "qwen_image_21": .qwenImage21, "qwenimage21": .qwenImage21,
+        "moss_image": .mossImage, "mossimage": .mossImage,
     ]
 
     private static let familyByArchitecture: [String: ModelFamily] = [
@@ -184,6 +189,8 @@ public final class ModelDiscovery: Sendable {
         "QwenImagePipeline": .qwenImage,
         "QwenImage21Transformer2DModel": .qwenImage21,
         "QwenImage21Pipeline": .qwenImage21,
+        "MOSSImageTransformer": .mossImage,
+        "MOSSImagePipeline": .mossImage,
     ]
 
     public init() {}
@@ -613,7 +620,9 @@ public final class ModelDiscovery: Sendable {
         }
         if dirName.contains("flux.2") || dirName.contains("flux2")
             || dirName.contains("flux-2") || dirName.contains("z-image")
-            || dirName.contains("zimage") || dirName.contains("qwen-image") {
+            || dirName.contains("zimage") || dirName.contains("qwen-image")
+            || dirName.contains("moss-image") || dirName.contains("moss_image")
+            || dirName.contains("mossimage") {
             return .image
         }
         // Qwen3-Embedding / EmbeddingGemma checkpoints often keep a CausalLM
@@ -640,6 +649,9 @@ public final class ModelDiscovery: Sendable {
         // into ~/.nova/templates/registry.json under `familyDetection`.
 
         let idLower = modelId.lowercased()
+        if MossImageSupport.matches(id: modelId) {
+            return .mossImage
+        }
         if QwenImage21Support.matches(id: modelId) {
             return .qwenImage21
         }
@@ -694,11 +706,15 @@ public final class ModelDiscovery: Sendable {
     /// Qwen-Image-2.1 shares the "qwen-image" name with the 20B checkpoint. The diffusers
     /// class name is the reliable signal when the folder was renamed.
     private func refineImageFamily(_ family: ModelFamily, path: URL, id: String) -> ModelFamily {
+        if MossImageSupport.matches(id: id) { return .mossImage }
         if QwenImage21Support.matches(id: id) { return .qwenImage21 }
-        if let name = Self.diffusersClassName(at: path),
-           name == "QwenImage21Transformer2DModel" || name == "QwenImage21Pipeline"
-        {
-            return .qwenImage21
+        if let name = Self.diffusersClassName(at: path) {
+            if name == "MOSSImageTransformer" || name == "MOSSImagePipeline" {
+                return .mossImage
+            }
+            if name == "QwenImage21Transformer2DModel" || name == "QwenImage21Pipeline" {
+                return .qwenImage21
+            }
         }
         return family
     }
