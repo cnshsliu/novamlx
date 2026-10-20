@@ -14,6 +14,7 @@
 | **加载回退** | `candidateLoadURLs` 按优先级尝试每个持有副本的根。损坏的副本会落到下一个，不因此删除文件 |
 | **外置磁盘** | 未挂载的 `/Volumes/...` 直接跳过，不触发 TCC 提示。卸下后模型从列表消失，重新挂载后回来 |
 | **发现** | `modelManager.downloadedModels()` 与 `inferenceService.listLoadedModels()`。`discoverModels()` 扫描已挂载根，同一 id 保留高优先级副本 |
+| **列表过滤** | Local Inference 里「已下载，尚未加载」标题行有磁盘菜单（全部，以及每个已配置模型根；外置卷用卷名）和「显示辅助模型」。开关默认关，DSpark / DFlash / DFlash2 / MTP 辅助权重不出现在已加载列表和未加载列表里，选择记在本机。打开后两边都显示。只改列表，不删文件 |
 | **自动加载** | 请求未加载模型时加载（`ensureModelReady` 可配） |
 | **自动驱逐** | 内存压力下 LRU。不在请求进行中驱逐 |
 | **重启** | `restoreModels()` 恢复上次会话加载的集合 |

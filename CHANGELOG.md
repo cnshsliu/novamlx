@@ -5,6 +5,7 @@ All notable changes to NovaMLX will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Model list filters** — On Local Inference, the “Downloaded, not loaded” header has a disk menu (All, plus each configured model root, labeled by volume or folder name) and a “Show companions” checkbox (显示辅助模型). DSpark, DFlash / DFlash2, and MTP companion weights stay hidden by default in both that list and the loaded-models list. The checkbox is remembered. Hiding only changes the lists; files stay on disk.
 - **Supported models list** — [`docs/features/supported-models.md`](docs/features/supported-models.md) lists each catalog weight id (`org/repo`) from `catalog/models.json`. The root README links that page. Regenerate with `python3 Scripts/generate-supported-models-doc.py`.
 
 ## [1.6.0] - 2026-10-20

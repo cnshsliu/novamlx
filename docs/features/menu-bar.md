@@ -16,7 +16,7 @@
 |------|------|
 | **Status** | 实时 TPS 曲线（90 个采样、峰值、零值裁剪）、CPU / 内存 / GPU、设备信息、峰值 TPS |
 | **Dashboard** | 已加载模型、活跃请求、内存、uptime、快速加载 |
-| **Local Inference** | 已激活模型：卸载、复制名称、Play 到 Playground。已下载模型按类型分栏：全部 / LLM / VLM / Embed / Audio / Image。模型卡 |
+| **Local Inference** | 已激活模型：卸载、复制名称、Play 到 Playground。已下载、尚未加载：类型分栏（全部 / LLM / VLM / Embed / Audio / Image）、按磁盘筛选、显示辅助模型（默认隐藏 DSpark / DFlash / MTP）。模型卡 |
 | **Downloads** | 分类、推荐模型卡、分阶段进度、卡顿检测、镜像配置 |
 | **Playground（Chat）** | LLM / ASR / TTS / Image 统一入口；按模型类型识别模式。Picker 区分本地直连与 Tokenhub HTTP。参数滑块、Disable-Thinking、粘性自动滚动、复制 cURL（OpenAI / Anthropic / Responses）。ASR 麦克风、TTS 扬声器、语音克隆 |
 | **Tokenhub** | 20+ 提供商目录与 CRUD。每个 provider 的模型可复制、可 Play。端点测试 |
