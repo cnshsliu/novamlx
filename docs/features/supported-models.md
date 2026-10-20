@@ -90,6 +90,8 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 | Qwen-Image | `Qwen/Qwen-Image` | ~40 GB | preview | — | `nova download Qwen/Qwen-Image` | [Hugging Face](https://huggingface.co/Qwen/Qwen-Image) |
 | Qwen-Image-2.1 | `Qwen/Qwen-Image-2.1` | ~33 GB | preview | 64 GB | `nova download Qwen/Qwen-Image-2.1` | [Hugging Face](https://huggingface.co/Qwen/Qwen-Image-2.1) |
 | Qwen-Image-2.1 4-bit | `mlx-community/Qwen-Image-2.1-MLX-4bit` | ~10.5 GB / 4bit | preview | 32 GB | `nova download mlx-community/Qwen-Image-2.1-MLX-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Qwen-Image-2.1-MLX-4bit) |
+| MOSS-Image-SFT | `OpenMOSS-Team/MOSS-Image-SFT` | ~27 GB / bf16 | preview | 32 GB | `nova download OpenMOSS-Team/MOSS-Image-SFT` | [Hugging Face](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) |
+| MOSS-Image-Base | `OpenMOSS-Team/MOSS-Image-Base` | ~27 GB / bf16 | preview | 32 GB | `nova download OpenMOSS-Team/MOSS-Image-Base` | [Hugging Face](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base) |
 
 <a id="embedding"></a>
 

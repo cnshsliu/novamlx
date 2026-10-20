@@ -119,6 +119,10 @@ jobs:
             https://github.com/xocialize/mlx-block-stream-swift.git vendors/mlx-block-stream-swift
           clone_retry vendors/mlx-engine-swift --depth 1 \
             https://github.com/xocialize/mlx-engine-swift.git vendors/mlx-engine-swift
+          clone_retry vendors/flux2-vae-mlx-swift --depth 1 \
+            https://github.com/xocialize/flux2-vae-mlx-swift.git vendors/flux2-vae-mlx-swift
+          clone_retry vendors/moss-image-swift --depth 1 \
+            https://github.com/xocialize/moss-image-swift.git vendors/moss-image-swift
 
           # One mlx-swift checkout, and package names that Package.swift imports.
           python3 - <<'PY'
@@ -240,6 +244,7 @@ jobs:
               "qwen.image.swift",
               "flux-2-swift-mlx",
               "ltx2-swift",
+              "moss-image-swift",
           ):
               package_name = None
               if name == "flux-2-swift-mlx":
@@ -258,6 +263,7 @@ jobs:
               "mlx-profiling",
               "mlx-block-stream-swift",
               "mlx-engine-swift",
+              "flux2-vae-mlx-swift",
           ):
               patch(f"vendors/{name}/Package.swift", "../mlx-swift")
           block = Path("vendors/mlx-block-stream-swift/Package.swift")
@@ -290,7 +296,12 @@ jobs:
               ('https://github.com/xocialize/mlx-engine-swift"', "../mlx-engine-swift"),
           ):
               retarget(ltx, url, dest)
-          print("retargeted flux-2 and ltx2 transitive packages")
+          moss = "vendors/moss-image-swift/Package.swift"
+          retarget(moss, 'https://github.com/xocialize/flux2-vae-mlx-swift"', "../flux2-vae-mlx-swift")
+          retarget(moss, 'https://github.com/xocialize/mlx-engine-swift"', "../mlx-engine-swift")
+          vae = "vendors/flux2-vae-mlx-swift/Package.swift"
+          retarget(vae, 'https://github.com/xocialize/mlx-exact-conv-swift"', "../mlx-exact-conv-swift")
+          print("retargeted flux-2, ltx2, and moss-image transitive packages")
 
           # mlx-swift main keeps Cmlx as an internal target. NovaMLXDistributed
           # imports it, which SwiftPM only allows through a product.

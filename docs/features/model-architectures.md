@@ -6,7 +6,7 @@
 
 ## Catalog
 
-`ModelFamily`（`Sources/NovaMLXCore/Types.swift`）：`llama`、`mistral`、`phi`、`qwen`、`gemma`、`starcoder`、`claude`、`bailing`、`gptOss`、`whisper`、`qwen3Asr`、`qwen3Tts`、`dotsTts`、`stableDiffusion`、`flux`、`other`。
+`ModelFamily`（`Sources/NovaMLXCore/Types.swift`）：`llama`、`mistral`、`phi`、`qwen`、`gemma`、`starcoder`、`claude`、`bailing`、`gptOss`、`whisper`、`qwen3Asr`、`qwen3Tts`、`dotsTts`、`stableDiffusion`、`flux`、`flux2`、`zImage`、`qwenImage`、`qwenImage21`、`mossImage`、`other`。
 
 **LLM 家族：** Llama 3 / 3.1 / 3.2 / 3.3、Mistral / Mixtral、Qwen 2 / 2.5 / 3 / 3.5 / 3.6、Gemma 2 / 3 / 4、Phi 3.5 / 4、StarCoder2、GPT-OSS（Harmony）、Bailing-Hybrid（Ling 系列 — MLA + GLA + MoE）。
 

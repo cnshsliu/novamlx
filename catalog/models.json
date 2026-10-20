@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-20T00:00:00Z",
+  "updatedAt": "2026-10-20T18:00:00Z",
   "models": [
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
@@ -960,6 +960,46 @@
       "quant": "4bit",
       "status": "preview",
       "addedAt": "2026-09-23T00:00:00Z"
+    },
+    {
+      "id": "OpenMOSS-Team/MOSS-Image-SFT",
+      "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT",
+      "name": "MOSS-Image-SFT",
+      "description": "OpenMOSS MOSS-Image-SFT text-to-image (Apache-2.0). 5B DiT, Qwen3.5-9B text encoder, FLUX.2 small VAE. Natural language or a JSON layout string. bf16 download is about 27 GB. Macs with at least 48 GB unified memory keep bf16 (about 27 GB peak). Below that, Nova quantizes the DiT and text encoder to int8 on load (about 16 GB peak). Override with NOVA_MOSS_IMAGE_QUANT=bf16 or int8. This is the generation checkpoint.",
+      "size": "~27 GB",
+      "tags": [
+        "MLX",
+        "bf16",
+        "MOSS-Image"
+      ],
+      "category": "image",
+      "sizeBytes": 27199664580,
+      "minRamGB": 32,
+      "family": "mossImage",
+      "format": "mlx",
+      "quant": "bf16",
+      "status": "preview",
+      "addedAt": "2026-10-20T18:00:00Z"
+    },
+    {
+      "id": "OpenMOSS-Team/MOSS-Image-Base",
+      "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base",
+      "name": "MOSS-Image-Base",
+      "description": "OpenMOSS MOSS-Image-Base pretrain (Apache-2.0), same loader as SFT. Use OpenMOSS-Team/MOSS-Image-SFT for generation. Base is the research checkpoint.",
+      "size": "~27 GB",
+      "tags": [
+        "MLX",
+        "bf16",
+        "MOSS-Image"
+      ],
+      "category": "image",
+      "sizeBytes": 27199664580,
+      "minRamGB": 32,
+      "family": "mossImage",
+      "format": "mlx",
+      "quant": "bf16",
+      "status": "preview",
+      "addedAt": "2026-10-20T18:00:00Z"
     }
   ]
 }
