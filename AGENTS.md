@@ -15,6 +15,7 @@ The project is organized as a Swift 6.0 package with three executable targets an
 | `vendors/mlx-swift/` | Vendored MLX Swift bindings (read-only) |
 | `mlx-swift-lm/` | Local package dependency for MLX LLM / VLM support |
 | `dist/NovaMLX.app/` | Packaged app bundle (auto-synced by `./build.sh`) |
+| `docs/feature-briefs/` | Per-feature intro briefs for promo videos; the chronological log stays in `CHANGELOG.md` |
 
 Key library targets:
 
