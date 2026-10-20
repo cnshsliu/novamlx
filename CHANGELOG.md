@@ -4,6 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Supported models list** — [`docs/features/supported-models.md`](docs/features/supported-models.md) lists each catalog weight id (`org/repo`) from `catalog/models.json`. The root README links that page. Regenerate with `python3 Scripts/generate-supported-models-doc.py`.
+
 ## [1.6.0] - 2026-10-20
 
 ### Added

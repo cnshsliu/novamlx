@@ -65,6 +65,7 @@ This directory is the user-facing documentation, one page per feature.
 
 | 功能 / Feature | 一句话 / Pitch | 状态 |
 |----------------|----------------|------|
+| [支持的模型 / Supported models](supported-models.md) | 目录中每条具体权重的 `org/repo`，与 `nova download` 相同。 | stable |
 | [模型架构 / Model architectures](model-architectures.md) | `ModelFamily` 与按家族的 KV、prefill、上下文默认值。 | stable |
 | [模型管理 / Model management](model-management.md) | 多根目录、按需加载、重启恢复。 | stable |
 | [Hugging Face](huggingface.md) | 下载、取消、续传，以及镜像端点。 | stable |

@@ -18,6 +18,6 @@
 | **残文件** | 启动时看到 `*.download` 临时文件，变成 `.failed` 任务，供手动 Resume |
 | **Xet** | 跟随 `cas-bridge.xethub.hf.co` 重定向 |
 
-镜像切换不必重启，见 [菜单栏](menu-bar.md) 的 HF Endpoint。文件最终落在哪个根目录见 [模型管理](model-management.md)。
+镜像切换不必重启，见 [菜单栏](menu-bar.md) 的 HF Endpoint。文件最终落在哪个根目录见 [模型管理](model-management.md)。已测权重的精确 id 见 [支持的模型](supported-models.md)；镜像使用同一个 id。
 
 正文来自 `features.zh-CN.md`「HuggingFace 集成」；标题与 pitch 为英文。
