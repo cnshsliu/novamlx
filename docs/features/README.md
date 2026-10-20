@@ -1,8 +1,8 @@
 # 功能目录 / Feature index
 
-用户向说明在本目录，一项一页。促销视频用的 brief 在 [`docs/feature-briefs/`](../feature-briefs/README.md)，不替代这里的页面。
+本目录是面向用户的功能说明，一项一页。
 
-User-facing docs live here, one page per feature. Promo briefs stay in [`docs/feature-briefs/`](../feature-briefs/README.md).
+This directory is the user-facing documentation, one page per feature.
 
 正文尽量来自 `features.zh-CN.md`，标题与一句话为英文。某节只有英文目录（视频）或只有根 README（TIE）时，页面上会注明。`stable` 表示从既有目录拆出；`preview` 表示产品自己标成预览。
 
@@ -98,4 +98,4 @@ User-facing docs live here, one page per feature. Promo briefs stay in [`docs/fe
 
 | 功能 / Feature | 一句话 / Pitch | 状态 |
 |----------------|----------------|------|
-| [Nemotron 3.5 Bolt 文本 / Nemotron 3.5 Bolt text](nemotron-bolt-text.md) | 本地 74B 级异构 MoE，仅文本，思考默认开启。视频 brief 另见 [feature brief](../feature-briefs/2026-10-20-nemotron-bolt-text.md)。 | preview |
+| [Nemotron 3.5 Bolt 文本 / Nemotron 3.5 Bolt text](nemotron-bolt-text.md) | 本地 74B 级异构 MoE，仅文本，思考默认开启。 | preview |

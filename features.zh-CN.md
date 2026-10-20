@@ -4,8 +4,6 @@
 
 本文件以前是一整份长文。那些内容已经拆进 `docs/features/`，这里不再保留第二份全文。
 
-促销与视频 brief 仍在 [docs/feature-briefs/](docs/feature-briefs/README.md)。
-
 ## 分类
 
 - [推理与性能 / Inference & performance](docs/features/README.md#inference-performance)
