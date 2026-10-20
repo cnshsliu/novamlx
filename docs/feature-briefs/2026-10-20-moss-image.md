@@ -80,6 +80,7 @@ No image edits, no prompt enhancer, no training UI, no video.
 
 ## Links
 
+- PR: https://github.com/cnshsliu/novamlx/pull/28
 - 用户文档：[docs/features/image-generation.md](../features/image-generation.md)
 - 目录：[docs/features/supported-models.md](../features/supported-models.md)
 - SFT: https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT
