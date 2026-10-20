@@ -122,6 +122,7 @@ extension CatalogEntry {
         if lower.contains("mxfp4") { return "mxfp4" }
         if lower.contains("6bit") { return "6bit" }
         if lower.contains("8bit") || lower.contains("q8") { return "8bit" }
+        if lower.contains("3bit") { return "3bit" }
         if lower.contains("4bit") || lower.contains("q4") { return "4bit" }
         if lower.contains("2bit") { return "2bit" }
         if lower.contains("fp16") { return "fp16" }

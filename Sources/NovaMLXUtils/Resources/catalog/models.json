@@ -1,7 +1,61 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-23T00:00:00Z",
+  "updatedAt": "2026-10-20T00:00:00Z",
   "models": [
+    {
+      "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
+      "url": "https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
+      "name": "Nemotron 3.5 Bolt 74B-A9B 4-bit",
+      "description": "Text-only Nemotron 3.5 Bolt (nemotron_h_puzzle): hybrid Mamba-2 + attention + heterogeneous per-layer latent MoE. Rapid-MLX 4-bit (~43 GB). Needs about 64 GB unified memory. Thinking and XML tool calls come from the checkpoint chat template. Not the multimodal RADIO build; image and video inputs are not supported.",
+      "category": "llm",
+      "family": "nemotron",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "4bit",
+      "size": "~43 GB (4-bit)",
+      "sizeBytes": 43256967168,
+      "minRamGB": 64,
+      "addedAt": "2026-10-20T00:00:00Z",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "Nemotron",
+        "Bolt",
+        "MoE",
+        "Mamba"
+      ],
+      "capabilities": [
+        "thinking",
+        "tools"
+      ]
+    },
+    {
+      "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit",
+      "url": "https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit",
+      "name": "Nemotron 3.5 Bolt 74B-A9B 3-bit",
+      "description": "Text-only Nemotron 3.5 Bolt (nemotron_h_puzzle): same hybrid latent MoE as the 4-bit quant, with mixed 3-bit and 4-bit tensors (~32 GB). Needs about 48 GB unified memory. Thinking and XML tool calls come from the checkpoint chat template. Not the multimodal RADIO build; image and video inputs are not supported.",
+      "category": "llm",
+      "family": "nemotron",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "3bit",
+      "size": "~32 GB (3-bit)",
+      "sizeBytes": 31653163008,
+      "minRamGB": 48,
+      "addedAt": "2026-10-20T00:00:00Z",
+      "tags": [
+        "MLX",
+        "3-bit",
+        "Nemotron",
+        "Bolt",
+        "MoE",
+        "Mamba"
+      ],
+      "capabilities": [
+        "thinking",
+        "tools"
+      ]
+    },
     {
       "id": "mlx-community/DeepSeek-V4.1-Flash-MLX-2bit",
       "url": "https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-MLX-2bit",

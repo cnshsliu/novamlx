@@ -738,6 +738,28 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Distributed inference Workers may intentionally exceed the recommended working set
         // since they only use a subset of layers. Skip the gate when explicitly requested.
         if !skipMemoryGate {
+        if let configJson, NemotronHPuzzleMemory.isTextPuzzle(configJson) {
+            if let vision = configJson["vision_config"], !(vision is NSNull) {
+                throw NovaMLXError.configurationError(
+                    """
+                    \(config.identifier.id) includes vision_config. This build loads \
+                    Nemotron 3.5 Bolt as text only. Use a Rapid-MLX text quant \
+                    (4-bit or 3-bit). Image and video inputs are not supported.
+                    """
+                )
+            }
+            let weightBytes = NemotronHPuzzleMemory.indexedWeightBytes(at: url)
+                ?? Self.estimateModelWeightSize(at: url)
+                ?? 0
+            if let message = NemotronHPuzzleMemory.refusalMessage(
+                modelId: config.identifier.id,
+                weightBytes: weightBytes,
+                physicalBytes: ProcessInfo.processInfo.physicalMemory
+            ) {
+                NovaMLXLog.error("[MemoryGate] \(message)")
+                throw NovaMLXError.configurationError(message)
+            }
+        }
         // Check ProcessMemoryEnforcer soft limit BEFORE loading weights.
         // If we can't fit the new model under the soft limit, evict LRU unpinned
         // models to make room. If that's not enough, fail fast with a clear error
@@ -885,6 +907,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             } else if let mt = tc["model_type"] as? String, mt == "bailing_hybrid" {
                 container.config.hasLinearAttention = true
                 NovaMLXLog.info("[Engine] Detected bailing_hybrid model (MLA+GLA) — will use ContinuousBatcher")
+            } else if let mt = tc["model_type"] as? String,
+                      mt == "nemotron_h_puzzle" || mt == "nemotron_h" {
+                container.config.hasLinearAttention = true
+                NovaMLXLog.info("[Engine] Detected \(mt) hybrid Mamba model — will use ContinuousBatcher")
             }
         }
 
