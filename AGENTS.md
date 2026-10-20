@@ -15,7 +15,8 @@ The project is organized as a Swift 6.0 package with three executable targets an
 | `vendors/mlx-swift/` | Vendored MLX Swift bindings (read-only) |
 | `mlx-swift-lm/` | Local package dependency for MLX LLM / VLM support |
 | `dist/NovaMLX.app/` | Packaged app bundle (auto-synced by `./build.sh`) |
-| `docs/feature-briefs/` | Per-feature intro briefs for promo videos; the chronological log stays in `CHANGELOG.md` |
+| `docs/features/` | User-facing feature catalog: [`docs/features/README.md`](docs/features/README.md) plus one page per feature. Root `features.md` / `features.zh-CN.md` only point here. |
+| `docs/feature-briefs/` | Promo and video briefs (who it is for, how to try, suggested beats). Not the catalog — link a brief to `docs/features/<slug>.md` when that page exists. The chronological log stays in `CHANGELOG.md`. |
 
 Key library targets:
 

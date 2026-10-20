@@ -2,6 +2,8 @@
 
 One markdown file per shipped, user-facing feature or new model-family support. A separate video-maker agent reads a brief and produces a promo video from it. This directory holds the briefs only — not video files, shot lists, or edit notes.
 
+**User-facing docs** live in [`docs/features/`](../features/README.md): a categorized index and one page per feature. Briefs here are for video and promo. They may link to the matching `docs/features/<slug>.md` when that page exists. Do not treat a brief as the catalog.
+
 `CHANGELOG.md` stays the chronological product log (what landed, in order). A feature brief is the deeper intro: who it is for, what a person can actually do, how to try it, and what is out of scope.
 
 Write only behavior that shipped. Verify names, sizes, and defaults against the merge. Do not invent metrics, UI, or modalities.
