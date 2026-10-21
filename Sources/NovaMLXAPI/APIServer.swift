@@ -1935,52 +1935,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
 
-            // MARK: - Shared media tasks
-            //
-            // Image (async) and video jobs share this query. Video's
-            // `/v1/videos/{id}` routes stay as the OpenRouter alias.
-
-            Get("/v1/tasks/{id}/content") { request, context in
-                let taskId = try context.parameters.require("id")
-                if let job = inference.imageTaskService.job(id: taskId) {
-                    guard job.status == .completed, let result = job.result else {
-                        throw NovaMLXError.apiError("task '\(taskId)' is \(job.status.rawValue)")
-                    }
-                    return try Self.jsonResponse(imageGenerationBody(job: job, result: result))
-                }
-                if inference.h3VideoService.job(id: taskId) != nil {
-                    return try Self.videoFileResponse(jobId: taskId, inference: inference, index: 0)
-                }
-                throw NovaMLXError.modelNotFound("task '\(taskId)'")
-            }
-
-            Get("/v1/tasks/{id}") { _, context in
-                let taskId = try context.parameters.require("id")
-                if let job = inference.imageTaskService.job(id: taskId) {
-                    return try Self.jsonResponse(
-                        MediaTaskResponse(image: job, progress: inference.imageTaskService.progress(id: taskId)))
-                }
-                if let job = inference.h3VideoService.job(id: taskId) {
-                    return try Self.jsonResponse(
-                        MediaTaskResponse(video: job, progress: inference.h3VideoService.progress(id: taskId)))
-                }
-                throw NovaMLXError.modelNotFound("task '\(taskId)'")
-            }
-
-            Post("/v1/tasks/{id}/cancel") { _, context in
-                let taskId = try context.parameters.require("id")
-                if inference.imageTaskService.job(id: taskId) != nil {
-                    let job = try inference.imageTaskService.cancel(id: taskId)
-                    return try Self.jsonResponse(
-                        MediaTaskResponse(image: job, progress: inference.imageTaskService.progress(id: taskId)))
-                }
-                if inference.h3VideoService.job(id: taskId) != nil {
-                    let job = try inference.h3VideoService.cancel(id: taskId)
-                    return try Self.jsonResponse(
-                        MediaTaskResponse(video: job, progress: inference.h3VideoService.progress(id: taskId)))
-                }
-                throw NovaMLXError.modelNotFound("task '\(taskId)'")
-            }
+            // Image and video share this query. Registered from its own
+            // function: the router closure is already at the stack limit.
+            Self.mediaTaskRoutes(inference: inference)
 
             // MARK: - Async Video Generation (OpenRouter-compatible, h3.c backend)
 
