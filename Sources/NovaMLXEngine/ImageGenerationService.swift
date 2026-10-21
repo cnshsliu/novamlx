@@ -107,6 +107,10 @@ public final class ImageGenerationService: @unchecked Sendable {
             let moss = MossImageGenPipeline(directoryURL: url, modelId: config.identifier.id)
             try await moss.load()
             pipeline = moss
+        case .biRefNet:
+            let birefnet = BiRefNetMattingPipeline(directoryURL: url)
+            try await birefnet.load()
+            pipeline = birefnet
         default:
             pipeline = try SDPipeline(directoryURL: url)
         }
@@ -401,6 +405,53 @@ public final class ImageGenerationService: @unchecked Sendable {
             images: base64Images,
             model: modelId,
             seed: usedSeed
+        )
+    }
+
+    // MARK: - Matting
+
+    public struct MattingOutput: Sendable {
+        public let mask: String    // base64 PNG, grayscale (white = foreground)
+        public let cutout: String  // base64 PNG, source pixels with matte alpha
+        public let model: String
+
+        public init(mask: String, cutout: String, model: String) {
+            self.mask = mask
+            self.cutout = cutout
+            self.model = model
+        }
+    }
+
+    /// Run a BiRefNet matte over `image`. `format` selects what goes into
+    /// `MattingOutput`: the grayscale mask, the alpha cutout, or both.
+    public func matte(
+        modelId: String,
+        image: CGImage,
+        include: (mask: Bool, cutout: Bool) = (true, true)
+    ) async throws -> MattingOutput {
+        guard let container = lock.withLock({ containers[modelId] }), container.isLoaded else {
+            throw NovaMLXError.modelNotFound(modelId)
+        }
+        guard container.identifier.family == .biRefNet else {
+            throw NovaMLXError.apiError(
+                "Model \(modelId) does not support matting. Load a BiRefNet checkpoint."
+            )
+        }
+        guard let matting = container.pipeline as? BiRefNetMattingPipeline else {
+            throw NovaMLXError.apiError("Matting requires the BiRefNet pipeline")
+        }
+
+        let startTime = Date()
+        let result = try matting.matte(image)
+        metricsStore?.reportActivity(model: modelId, kind: .image, speed: 1, unit: "img/s")
+        NovaMLXLog.info(
+            "Matte complete in \(String(format: "%.1f", Date().timeIntervalSince(startTime)))s"
+        )
+
+        return MattingOutput(
+            mask: include.mask ? try cgImageToBase64PNG(result.mask) : "",
+            cutout: include.cutout ? try cgImageToBase64PNG(result.cutout) : "",
+            model: modelId
         )
     }
 

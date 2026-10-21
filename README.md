@@ -32,6 +32,7 @@ Per-feature docs, one page each: **[Feature index](docs/features/README.md)**（
 - [TurboQuant KV](docs/features/turboquant-kv.md) and [prefix KV cache](docs/features/kv-cache.md)
 - [OpenAI, Anthropic, and Responses](docs/features/api-compatibility.md)
 - [Tokenhub](docs/features/tokenhub.md) and [load balancers](docs/features/load-balancers.md)
+- [Image generation](docs/features/image-generation.md) and [image matting](docs/features/matting.md) — T2I plus BiRefNet background removal
 - [Menu bar app](docs/features/menu-bar.md)
 - [Nemotron 3.5 Bolt text](docs/features/nemotron-bolt-text.md) — preview, text only
 

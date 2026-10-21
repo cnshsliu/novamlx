@@ -31,6 +31,7 @@ This directory is the user-facing documentation, one page per feature.
 | [视觉 / VLM](vision.md) | Qwen-VL、LLaVA、Gemma3、Pixtral 等本地看图。 | stable |
 | [音频 ASR / TTS / Audio](audio.md) | Whisper 或 Qwen3-ASR 转写，Dots TTS 与语音克隆。 | stable |
 | [图像生成 / Image generation](image-generation.md) | FLUX、Qwen-Image、Z-Image 与 MOSS-Image 文生图，输出 Base64 PNG。 | stable |
+| [抠图去背景 / Image matting](matting.md) | BiRefNet 通用与人像版抠图，`POST /v1/images/matting` 出 mask 与透明底。 | preview |
 | [视频生成 / Video generation](video-generation.md) | 本地 h3.c 的异步 `/v1/videos` 任务。 | stable |
 | [嵌入与重排 / Embeddings & rerank](embeddings-rerank.md) | `POST /v1/embeddings` 与 `POST /v1/rerank`。 | stable |
 

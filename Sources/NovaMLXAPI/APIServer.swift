@@ -638,6 +638,7 @@ private extension String {
             || self.hasPrefix("/v1/audio/transcriptions")
             || self.hasPrefix("/v1/audio/speech")
             || self.hasPrefix("/v1/images/generations")
+            || self.hasPrefix("/v1/images/matting")
             || self.hasPrefix("/v1/video/talking-head")
             || self.hasPrefix("/v1/videos")
     }
@@ -1538,6 +1539,79 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let response = ImageGenerationResponse(
                     created: Int(Date().timeIntervalSince1970),
                     data: imageData,
+                    model: model
+                )
+                return try Self.jsonResponse(response)
+            }
+
+            // MARK: - Image Matting
+
+            Post("/v1/images/matting") { request, context in
+                let body = try await request.body.collect(upTo: .max)
+                let req = try JSONDecoder().decode(ImageMattingRequest.self, from: body)
+
+                guard !req.image.isEmpty else {
+                    throw NovaMLXError.apiError("'image' is required and must be base64-encoded")
+                }
+                guard let imageData = Data(base64Encoded: req.image) else {
+                    throw NovaMLXError.apiError("'image' is not valid base64")
+                }
+
+                let model = req.model
+                // Auto-load check
+                if !inference.imageGenerationService.isLoaded(model) {
+                    guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
+                        throw NovaMLXError.modelNotFound(model)
+                    }
+                    guard record.modelType == .image else {
+                        throw NovaMLXError.unsupportedModel("Model '\(model)' is not an image model (type: \(record.modelType))")
+                    }
+                    let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
+                    _ = try await inference.imageGenerationService.loadModel(
+                        from: record.localURL, config: config)
+                }
+
+                guard let inputCGImage = Self.dataToCGImage(imageData) else {
+                    throw NovaMLXError.apiError("Failed to decode input image")
+                }
+
+                let tmatteStart = Date()
+                let result = try await inference.imageGenerationService.matte(
+                    modelId: model,
+                    image: inputCGImage,
+                    include: (mask: req.wantsMask, cutout: req.wantsCutout)
+                )
+                if let rid = HTTPHelpers.requestID(from: request) {
+                    RequestLogStore.shared.finish(
+                        model: model, kind: .image, status: .success,
+                        tps: 0, promptTokens: 0, completionTokens: 1,
+                        durationMs: Date().timeIntervalSince(tmatteStart) * 1000,
+                        requestId: rid)
+                }
+
+                func encode(_ b64: String, _ kind: String, _ index: Int) throws -> ImageMattingResponse.Output {
+                    guard !b64.isEmpty else {
+                        return ImageMattingResponse.Output(kind: kind, b64Json: nil, url: nil)
+                    }
+                    if req.resolvedResponseFormat == "url" {
+                        guard let data = Data(base64Encoded: b64) else {
+                            throw NovaMLXError.apiError("Failed to encode matte output")
+                        }
+                        let url = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("novamlx_matte_\(Int(Date().timeIntervalSince1970))_\(index).png")
+                        try data.write(to: url)
+                        return ImageMattingResponse.Output(kind: kind, b64Json: nil, url: url.absoluteString)
+                    }
+                    return ImageMattingResponse.Output(kind: kind, b64Json: b64, url: nil)
+                }
+
+                var outputs: [ImageMattingResponse.Output] = []
+                if req.wantsMask { outputs.append(try encode(result.mask, "mask", 0)) }
+                if req.wantsCutout { outputs.append(try encode(result.cutout, "cutout", 1)) }
+
+                let response = ImageMattingResponse(
+                    created: Int(Date().timeIntervalSince1970),
+                    data: outputs,
                     model: model
                 )
                 return try Self.jsonResponse(response)

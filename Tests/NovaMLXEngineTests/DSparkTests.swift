@@ -4,6 +4,7 @@ import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXRandom
+import NovaMLXCore
 @testable import NovaMLXEngine
 import Testing
 

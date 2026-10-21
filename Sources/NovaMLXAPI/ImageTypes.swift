@@ -52,6 +52,49 @@ struct ImageGenerationResponse: Codable, Sendable {
     let model: String
 }
 
+/// `POST /v1/images/matting` — BiRefNet foreground matting over an uploaded
+/// image. Returns the grayscale mask and/or the alpha cutout as base64 PNGs.
+struct ImageMattingRequest: Codable, Sendable {
+    let model: String
+    let image: String
+    /// Which outputs to include; defaults to both. Ignored values return
+    /// an empty string for that field.
+    let include: [String]?
+    let responseFormat: String?
+
+    enum CodingKeys: String, CodingKey {
+        case model, image, include
+        case responseFormat = "response_format"
+    }
+
+    var wantsMask: Bool {
+        include?.contains("mask") ?? true
+    }
+    var wantsCutout: Bool {
+        include?.contains("cutout") ?? true
+    }
+    var resolvedResponseFormat: String { responseFormat ?? "b64_json" }
+}
+
+struct ImageMattingResponse: Codable, Sendable {
+    struct Output: Codable, Sendable {
+        /// "mask" (grayscale, white = foreground) or "cutout" (source + alpha).
+        let kind: String
+        let b64Json: String?
+        let url: String?
+
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case b64Json = "b64_json"
+            case url
+        }
+    }
+
+    let created: Int
+    let data: [Output]
+    let model: String
+}
+
 struct ImageData: Codable, Sendable {
     let b64Json: String?
     let url: String?

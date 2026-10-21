@@ -113,6 +113,7 @@ public final class ModelDiscovery: Sendable {
         "QwenImage21Transformer2DModel",
         "MOSSImagePipeline",
         "MOSSImageTransformer",
+        "BiRefNet",
     ]
 
     private static let imageModelTypes: Set<String> = [
@@ -127,6 +128,7 @@ public final class ModelDiscovery: Sendable {
         "qwenimage",
         "moss_image",
         "mossimage",
+        "birefnet",
     ]
 
     private static let familyByModelType: [String: ModelFamily] = [
@@ -155,6 +157,7 @@ public final class ModelDiscovery: Sendable {
         "qwen_image": .qwenImage, "qwenimage": .qwenImage,
         "qwen_image_21": .qwenImage21, "qwenimage21": .qwenImage21,
         "moss_image": .mossImage, "mossimage": .mossImage,
+        "birefnet": .biRefNet,
     ]
 
     private static let familyByArchitecture: [String: ModelFamily] = [
@@ -191,6 +194,7 @@ public final class ModelDiscovery: Sendable {
         "QwenImage21Pipeline": .qwenImage21,
         "MOSSImageTransformer": .mossImage,
         "MOSSImagePipeline": .mossImage,
+        "BiRefNet": .biRefNet,
     ]
 
     public init() {}

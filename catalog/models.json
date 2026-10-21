@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-20T18:00:00Z",
+  "updatedAt": "2026-10-21T00:00:00Z",
   "models": [
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
@@ -206,7 +206,12 @@
       "sizeBytes": 734003200,
       "minRamGB": 4,
       "addedAt": "2026-09-21T13:30:00Z",
-      "tags": ["MLX", "Laya", "Decision", "Multilingual"],
+      "tags": [
+        "MLX",
+        "Laya",
+        "Decision",
+        "Multilingual"
+      ],
       "capabilities": [],
       "testedOn": "1.4.0"
     },
@@ -1000,6 +1005,47 @@
       "quant": "bf16",
       "status": "preview",
       "addedAt": "2026-10-20T18:00:00Z"
+    },
+    {
+      "id": "ZhengPeng7/BiRefNet",
+      "url": "https://huggingface.co/ZhengPeng7/BiRefNet",
+      "name": "BiRefNet",
+      "description": "General-purpose foreground matting / background removal (MIT). Swin-L BiRefNet at 1024x1024, fp16 PyTorch safetensors (~440 MB). First load converts once to a cached MLX fp16 file. Use POST /v1/images/matting. For people photos prefer BiRefNet-portrait.",
+      "size": "~440 MB",
+      "tags": [
+        "MLX",
+        "fp16",
+        "BiRefNet",
+        "matting"
+      ],
+      "category": "image",
+      "sizeBytes": 444473596,
+      "minRamGB": 8,
+      "family": "biRefNet",
+      "format": "mlx",
+      "status": "preview",
+      "addedAt": "2026-10-21T00:00:00Z"
+    },
+    {
+      "id": "ZhengPeng7/BiRefNet-portrait",
+      "url": "https://huggingface.co/ZhengPeng7/BiRefNet-portrait",
+      "name": "BiRefNet-portrait",
+      "description": "Portrait fine-tune of BiRefNet for human subjects (MIT): cleanest hair/face/body edges. Same swin_v1_l architecture and loader as BiRefNet, fp32 safetensors (~885 MB), converted once to MLX fp16 on first load. Use POST /v1/images/matting.",
+      "size": "~885 MB",
+      "tags": [
+        "MLX",
+        "fp32",
+        "BiRefNet",
+        "matting",
+        "portrait"
+      ],
+      "category": "image",
+      "sizeBytes": 884878856,
+      "minRamGB": 8,
+      "family": "biRefNet",
+      "format": "mlx",
+      "status": "preview",
+      "addedAt": "2026-10-21T00:00:00Z"
     }
   ]
 }

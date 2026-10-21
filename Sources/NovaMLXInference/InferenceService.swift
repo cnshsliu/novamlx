@@ -621,7 +621,7 @@ public final class InferenceService: @unchecked Sendable {
         // Image models stay on the host ImageGenerationService (not the worker MLXEngine).
         let isImageFamily: Bool = {
             switch config.identifier.family {
-            case .flux, .flux2, .zImage, .qwenImage, .qwenImage21, .mossImage, .stableDiffusion: return true
+            case .flux, .flux2, .zImage, .qwenImage, .qwenImage21, .mossImage, .biRefNet, .stableDiffusion: return true
             default: return false
             }
         }()

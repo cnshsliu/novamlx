@@ -6,7 +6,7 @@
 
 「支持」指「精确权重」一节中的 id。该 id 与 `nova download <id>` 相同。名字相近而 id 不同的仓库可能无法加载。
 
-本页与应用内目录一致，数据日期 2026-10-20。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
+本页与应用内目录一致，数据日期 2026-10-21。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
 
 ## 下载 / Download
 
@@ -92,6 +92,8 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 | Qwen-Image-2.1 4-bit | `mlx-community/Qwen-Image-2.1-MLX-4bit` | ~10.5 GB / 4bit | preview | 32 GB | `nova download mlx-community/Qwen-Image-2.1-MLX-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Qwen-Image-2.1-MLX-4bit) |
 | MOSS-Image-SFT | `OpenMOSS-Team/MOSS-Image-SFT` | ~27 GB / bf16 | preview | 32 GB | `nova download OpenMOSS-Team/MOSS-Image-SFT` | [Hugging Face](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT) |
 | MOSS-Image-Base | `OpenMOSS-Team/MOSS-Image-Base` | ~27 GB / bf16 | preview | 32 GB | `nova download OpenMOSS-Team/MOSS-Image-Base` | [Hugging Face](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base) |
+| BiRefNet | `ZhengPeng7/BiRefNet` | ~440 MB | preview | 8 GB | `nova download ZhengPeng7/BiRefNet` | [Hugging Face](https://huggingface.co/ZhengPeng7/BiRefNet) |
+| BiRefNet-portrait | `ZhengPeng7/BiRefNet-portrait` | ~885 MB | preview | 8 GB | `nova download ZhengPeng7/BiRefNet-portrait` | [Hugging Face](https://huggingface.co/ZhengPeng7/BiRefNet-portrait) |
 
 <a id="embedding"></a>
 
@@ -129,4 +131,4 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 - `mzbac/flux1.schnell.4bit.mlx` — Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.
 
-表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-20）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。
+表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-21）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。
