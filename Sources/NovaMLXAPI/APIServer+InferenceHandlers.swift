@@ -922,4 +922,15 @@ extension NovaMLXAPIServer {
         guard let request else { return false }
         return request.headers[.init("X-No-Autoload")!]?.first == "1"
     }
+
+    /// Marketplace image calls must not hold the HTTP connection open for
+    /// sampling. DashScope's header and the standard Prefer token both opt in.
+    /// Absent either, `POST /v1/images/generations` stays a synchronous OpenAI response.
+    static func wantsAsyncImage(_ request: Request) -> Bool {
+        if request.headers[.init("X-DashScope-Async")!]?.first?.lowercased() == "enable" {
+            return true
+        }
+        let prefer = request.headers[.init("Prefer")!]?.first?.lowercased() ?? ""
+        return prefer.contains("respond-async")
+    }
 }

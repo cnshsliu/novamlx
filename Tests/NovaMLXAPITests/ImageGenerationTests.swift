@@ -151,4 +151,24 @@ struct ImageGenerationTests {
         #expect(req.resolvedSize == (1024, 1024))
         #expect(req.resolvedResponseFormat == "b64_json")
     }
+
+    @Test("queued image task uses the shared task envelope and can be cancelled")
+    func cancelQueuedImageTask() throws {
+        let service = ImageTaskService(images: ImageGenerationService(), autostart: false)
+        let job = service.submit(
+            model: "missing", prompt: "a red circle", negativePrompt: "",
+            n: 1, width: 1024, height: 1024, seed: nil, steps: nil,
+            responseFormat: "b64_json")
+        #expect(job.status == .pending)
+        #expect(job.id.hasPrefix("img-"))
+        let cancelled = try service.cancel(id: job.id)
+        #expect(cancelled.status == .cancelled)
+        let encoded = try JSONEncoder().encode(MediaTaskResponse(image: cancelled, progress: nil))
+        let json = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        #expect(json["object"] as? String == "task")
+        #expect(json["task"] as? String == "image.generation")
+        #expect(json["status"] as? String == "cancelled")
+        #expect(json["polling_url"] as? String == "/v1/tasks/\(job.id)")
+        #expect(json["content_url"] == nil)
+    }
 }
