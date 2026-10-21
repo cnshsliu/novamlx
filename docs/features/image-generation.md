@@ -33,6 +33,18 @@ MOSS-Image 是 5B 单流 DiT，文本编码器是 Qwen3.5-9B，解码器是 FLUX
 
 下载约 27 GB（safetensors 合计 27,199,664,580 字节）。统一内存达到 48 GB 时按 bf16 加载，峰值大约 27 GB。低于 48 GB 时，Nova 在加载时把 DiT 和文本编码器量化成 int8，峰值大约 16 GB。目录建议内存是 32 GB。环境变量 `NOVA_MOSS_IMAGE_QUANT=bf16` 或 `int8` 可以改掉自动选择。
 
+## Turbo LoRA（Qwen-Image-2.1 few-step）
+
+Qwen-Image-2.1 支持挂 few-step 蒸馏 LoRA，把默认 40 步降到 6 步，走 viggle 采样节点表，guidance 固定 1。生成和编辑（`/v1/images/edits`）共用这条路，未写 `steps` 时 viggle 模式默认 6 步，普通 2.1 默认 40 步。
+
+以 [Viggle/Qwen-Image-2.1-viggle-turbo](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo) 为例。这一条**不在目录里**：该仓库还带 ~60 GB 的 GGUF 与完整权重变体，而 `nova download` 会拉整个仓库，所以手动只下 LoRA 文件（如 `Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors`，约 1.3 GB），放进任一模型根目录下的文件夹（例如 `<模型根>/Viggle/Qwen-Image-2.1-viggle-turbo/`）。
+
+发现与加载规则：
+
+- 文件夹里有文件名同时含 `qwen-image-2.1` 和 `lora` 的 `.safetensors`，且**没有** `vae/config.json` 和 `text_encoder/config.json`（有则视作完整底座），就注册成一条独立的 Qwen-Image-2.1 条目；多个匹配文件取最大的。
+- LoRA 只是适配器，底座按顺序解析：环境变量 `NOVAMLX_QWEN21_TURBO_BASE` → `Qwen/Qwen-Image-2.1` → `mlx-community/Qwen-Image-2.1-MLX-4bit`。都没有时加载报错，提示先装底座。
+- 底座量化跟随 `NOVAMLX_QWEN_IMAGE_21_QUANT`（`4` / `8`），与普通 2.1 一致。
+
 ## How to try
 
 生成用 SFT：
@@ -65,4 +77,4 @@ curl http://127.0.0.1:6590/v1/images/generations \
 - [多模态](multi-modal.md)
 - [API 兼容性](api-compatibility.md)
 - [模型架构](model-architectures.md)
-- 权重：[OpenMOSS-Team/MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT)、[OpenMOSS-Team/MOSS-Image-Base](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base)
+- 权重：[OpenMOSS-Team/MOSS-Image-SFT](https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT)、[OpenMOSS-Team/MOSS-Image-Base](https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base)、[Viggle/Qwen-Image-2.1-viggle-turbo](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo)（LoRA，手动导入）
