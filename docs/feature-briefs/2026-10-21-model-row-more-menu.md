@@ -61,6 +61,7 @@ Load, unload, companion and disk filters, Remove TIE, and the unmounted-disk sec
 
 ## Links
 
+- PR: https://github.com/cnshsliu/novamlx/pull/30
 - 模型列表与多目录：[docs/features/model-management.md](../features/model-management.md)
 - TIE：[docs/features/tie.md](../features/tie.md)
 - 行上的菜单：`Sources/NovaMLXMenuBar/ModelsPageView.swift`
