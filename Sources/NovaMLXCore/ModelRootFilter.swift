@@ -80,4 +80,35 @@ public enum ModelRootFilter {
         let prefix = root.hasSuffix("/") ? root : root + "/"
         return model.hasPrefix(prefix)
     }
+
+    /// The configured root that contains `modelURL`. Nested roots keep the
+    /// longest match so a model under `/Volumes/Disk/Models/extra` is not
+    /// treated as living in `/Volumes/Disk/Models`.
+    public static func containingRoot(of modelURL: URL, roots: [URL]) -> URL? {
+        let model = modelURL.standardizedFileURL.path
+        let matches = roots.map(\.standardizedFileURL).filter { root in
+            let path = root.path
+            if model == path { return true }
+            let prefix = path.hasSuffix("/") ? path : path + "/"
+            return model.hasPrefix(prefix)
+        }
+        return matches.max { $0.path.count < $1.path.count }
+    }
+
+    /// Other mounted, writable model roots a downloaded model can move to.
+    /// The root that currently holds the files is excluded. An unknown
+    /// location (not under any root) has nowhere to move from.
+    public static func moveDestinations(
+        modelURL: URL,
+        statuses: [NovaMLXPaths.ModelDirStatus]
+    ) -> [NovaMLXPaths.ModelDirStatus] {
+        let roots = statuses.map { URL(fileURLWithPath: $0.path, isDirectory: true) }
+        guard let source = containingRoot(of: modelURL, roots: roots) else { return [] }
+        let sourcePath = source.standardizedFileURL.path
+        return statuses.filter { status in
+            guard status.mounted, status.writable else { return false }
+            let path = URL(fileURLWithPath: status.path, isDirectory: true).standardizedFileURL.path
+            return path != sourcePath
+        }
+    }
 }

@@ -4,6 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Model row actions** — On Local Inference, each “Downloaded, not loaded” row keeps **Load** where it is. **More**, immediately to the right, holds **Convert to TIE**, **Move to another disk**, and **Delete**. Convert to TIE is available for the same layouts as before. Move asks which other configured disk to use, then relocates the files (same vault move as Settings). Delete still asks for confirmation and stays destructive. Intro: [feature brief](docs/feature-briefs/2026-10-21-model-row-more-menu.md).
+
 ### Added
 - **MOSS-Image text-to-image** — `POST /v1/images/generations` loads OpenMOSS MOSS-Image through the existing image service. Catalog ids: `OpenMOSS-Team/MOSS-Image-SFT` (generation, ~27 GB) and `OpenMOSS-Team/MOSS-Image-Base` (same loader, research pretrain). Defaults are Euler, 50 steps, CFG 3, shift 5, empty negative, negative-branch skip of layer 22. Sides snap to multiples of 16 (minimum 256, area at most 1456×1456). Unified memory under 48 GiB quantizes the DiT and text encoder to int8 on load; `NOVA_MOSS_IMAGE_QUANT=bf16` or `int8` overrides. Edits and variations stay unavailable for this family. Intro: [feature page](docs/features/image-generation.md), [feature brief](docs/feature-briefs/2026-10-20-moss-image.md).
 - **Model list filters** — On Local Inference, the “Downloaded, not loaded” header has a disk menu (All, plus each configured model root, labeled by volume or folder name) and a “Show companions” checkbox (显示辅助模型). DSpark, DFlash / DFlash2, and MTP companion weights stay hidden by default in both that list and the loaded-models list. The checkbox is remembered. Hiding only changes the lists; files stay on disk.
