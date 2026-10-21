@@ -119,17 +119,26 @@ final class DFlashWeightSelector: Module {
     }
 
     func walkGreedy(scores: MLXArray, candidateIds: MLXArray) -> MLXArray {
+        walkGreedyDetail(scores: scores, candidateIds: candidateIds, marginScale: 2).ids
+    }
+
+    func walkGreedyDetail(
+        scores: MLXArray, candidateIds: MLXArray, marginScale: Float
+    ) -> (ids: MLXArray, confidences: MLXArray) {
         let steps = scores.dim(0)
-        var index = argMax(scores[0, 0], axis: -1)
+        let row0 = scores[0, 0]
+        var index = argMax(row0, axis: -1)
         var picks = take(candidateIds[0], index, axis: 0).reshaped([1])
+        var confs: [MLXArray] = [dflashMarginConfidence(row: row0, scale: marginScale)]
         if steps > 1 {
             for step in 1 ..< steps {
                 let row = take(scores[step], index, axis: 0)
+                confs.append(dflashMarginConfidence(row: row, scale: marginScale))
                 index = argMax(row, axis: -1)
                 picks = concatenated([picks, take(candidateIds[step], index, axis: 0).reshaped([1])], axis: 0)
             }
         }
-        return picks
+        return (picks, MLX.stacked(confs, axis: 0))
     }
 }
 
@@ -387,8 +396,9 @@ public final class DFlashDraftModel: Module, LanguageModel, KVCacheDimensionProv
 
     /// One greedy block from the loaded module tree. The caller owns `cache`.
     public func draftBlock(
-        anchorId: Int, targetHidden: MLXArray, cache: [DFlashCtxCache], cap: Int
-    ) -> MLXArray {
+        anchorId: Int, targetHidden: MLXArray, cache: [DFlashCtxCache], cap: Int,
+        marginScale: Float = 2
+    ) -> (tokens: [Int], confidences: [Float]) {
         let width = max(config.blockSize, 2)
         let masks = Array(repeating: Int32(config.maskTokenId), count: width - 1)
         let block = MLXArray([Int32(anchorId)] + masks, [1, width])
@@ -398,19 +408,35 @@ public final class DFlashDraftModel: Module, LanguageModel, KVCacheDimensionProv
         } else {
             ctx = targetHidden
         }
-        return selectBlock(
-            block: block, targetHidden: ctx, cache: cache, cap: max(cap, 1), anchorId: anchorId)
+        let proposal = selectBlock(
+            block: block, targetHidden: ctx, cache: cache, cap: max(cap, 1),
+            anchorId: anchorId, marginScale: marginScale)
+        eval(proposal.tokens, proposal.confidences)
+        let ids = Array(proposal.tokens.asArray(Int.self).prefix(max(cap, 1)))
+        var conf = proposal.confidences.asArray(Float.self)
+        if conf.count > ids.count { conf = Array(conf.prefix(ids.count)) }
+        if conf.count < ids.count {
+            conf.append(contentsOf: [Float](repeating: 0, count: ids.count - conf.count))
+        }
+        return (ids, conf)
     }
 
     /// Greedy draft ids from the loose selector. Empty when weights were not installed.
     public func proposeGreedy(
-        anchorLogits: MLXArray, hidden: MLXArray, cap: Int
-    ) -> [Int] {
-        guard let selector = pathSelector, cap > 0 else { return [] }
+        anchorLogits: MLXArray, hidden: MLXArray, cap: Int, marginScale: Float = 2
+    ) -> (ids: [Int], confidences: [Float]) {
+        guard let selector = pathSelector, cap > 0 else { return ([], []) }
         let convHidden = convolved(hidden)
-        let picks = selector.propose(anchorLogits: anchorLogits, hidden: convHidden, cap: cap)
-        eval(picks)
-        return Array(picks.asArray(Int.self).prefix(cap))
+        let picks = selector.propose(
+            anchorLogits: anchorLogits, hidden: convHidden, cap: cap, marginScale: marginScale)
+        eval(picks.ids, picks.confidences)
+        let ids = Array(picks.ids.asArray(Int.self).prefix(cap))
+        var conf = picks.confidences.asArray(Float.self)
+        if conf.count > ids.count { conf = Array(conf.prefix(ids.count)) }
+        if conf.count < ids.count {
+            conf.append(contentsOf: [Float](repeating: 0, count: ids.count - conf.count))
+        }
+        return (ids, conf)
     }
 
     func loadBlockWeights(_ weights: [String: MLXArray]) throws {
@@ -434,15 +460,15 @@ public final class DFlashDraftModel: Module, LanguageModel, KVCacheDimensionProv
 
     private func selectBlock(
         block: MLXArray, targetHidden: MLXArray, cache: [DFlashCtxCache],
-        cap: Int, anchorId: Int
-    ) -> MLXArray {
+        cap: Int, anchorId: Int, marginScale: Float
+    ) -> (tokens: MLXArray, confidences: MLXArray) {
         let hiddenFull = forwardHidden(block, targetHidden: targetHidden, cache: cache)
         let sequence = hiddenFull.dim(1)
         let takeCount = min(cap, max(sequence, 1))
         let hidden = hiddenFull[0, 0 ..< takeCount, 0...]
         guard let selector = blockSelector, let lmHead else {
             let logits = lmHead?(hidden) ?? hidden
-            return argMax(logits, axis: -1)
+            return marginArgmax(logits, scale: marginScale)
         }
         var logits = lmHead(hidden)
         if logits.ndim == 3 { logits = logits[0] }
@@ -455,7 +481,21 @@ public final class DFlashDraftModel: Module, LanguageModel, KVCacheDimensionProv
         let unary = MLX.takeAlong(logits, candidateIds, axis: -1).asType(.float32)
         let scores = selector.lattice(
             candidateIds: candidateIds, unaryLogits: unary, hidden: hidden, anchorId: anchorId)
-        return selector.walkGreedy(scores: scores, candidateIds: candidateIds)
+        return selector.walkGreedyDetail(
+            scores: scores, candidateIds: candidateIds, marginScale: marginScale)
+    }
+
+    /// Argmax ids plus a top-2 margin confidence on each row of `[steps, vocab]`.
+    private func marginArgmax(_ logits: MLXArray, scale: Float) -> (tokens: MLXArray, confidences: MLXArray) {
+        let rows = logits.ndim >= 2 ? logits : logits.reshaped(1, -1)
+        let steps = rows.dim(0)
+        var confs: [MLXArray] = []
+        confs.reserveCapacity(steps)
+        for step in 0 ..< steps {
+            confs.append(dflashMarginConfidence(row: rows[step], scale: scale))
+        }
+        let conf = confs.isEmpty ? MLXArray([Float(1)]) : MLX.stacked(confs, axis: 0)
+        return (argMax(rows, axis: -1), conf)
     }
 
     private func forwardHidden(

@@ -296,6 +296,14 @@ public struct InferenceRequest: @unchecked Sendable {
     public let numDraftTokens: Int?
     /// Native in-graph MTP. `nil` follows model settings (default on). `false` forces serial decode.
     public let useNativeMtp: Bool?
+    /// DFlash2 / DSpark verify length. `nil` follows `NOVAMLX_ADAPTIVE_VERIFY`
+    /// (default adaptive). `"fixed"` keeps the historical block. `"adaptive"`
+    /// schedules the prefix from draft confidence.
+    public let adaptiveVerify: String?
+    /// Overrides the scheduler’s shortest prefix for this request.
+    public let adaptiveVerifyMin: Int?
+    /// Overrides the scheduler’s longest prefix for this request.
+    public let adaptiveVerifyMax: Int?
     /// When true, compute log probabilities for sampled tokens and top-K alternatives.
     public let includeLogprobs: Bool
     /// Number of top logprobs to return per token (only used when includeLogprobs is true).
@@ -334,7 +342,10 @@ public struct InferenceRequest: @unchecked Sendable {
         includeLogprobs: Bool = false,
         topLogprobsCount: Int? = nil,
         httpRequestId: String? = nil,
-        useNativeMtp: Bool? = nil
+        useNativeMtp: Bool? = nil,
+        adaptiveVerify: String? = nil,
+        adaptiveVerifyMin: Int? = nil,
+        adaptiveVerifyMax: Int? = nil
     ) {
         self.id = id
         self.model = model
@@ -365,6 +376,9 @@ public struct InferenceRequest: @unchecked Sendable {
         self.topLogprobsCount = topLogprobsCount
         self.httpRequestId = httpRequestId
         self.useNativeMtp = useNativeMtp
+        self.adaptiveVerify = adaptiveVerify
+        self.adaptiveVerifyMin = adaptiveVerifyMin
+        self.adaptiveVerifyMax = adaptiveVerifyMax
     }
 
     /// Native in-graph MTP and companion MTP auto-inject. `nil` means on.

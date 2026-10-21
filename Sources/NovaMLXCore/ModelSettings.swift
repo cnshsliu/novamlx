@@ -130,7 +130,10 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             includeLogprobs: request.includeLogprobs,
             topLogprobsCount: request.topLogprobsCount,
             httpRequestId: request.httpRequestId,
-            useNativeMtp: request.useNativeMtp ?? nativeMtpEnabled
+            useNativeMtp: request.useNativeMtp ?? nativeMtpEnabled,
+            adaptiveVerify: request.adaptiveVerify,
+            adaptiveVerifyMin: request.adaptiveVerifyMin,
+            adaptiveVerifyMax: request.adaptiveVerifyMax
         )
     }
 }

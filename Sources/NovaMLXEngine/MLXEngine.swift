@@ -2357,23 +2357,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 {
                     let drafter = try DSparkDrafterStore.shared.drafter(
                         for: NovaMLXPaths.directory(forModelId: draftModelId))
+                    let verifyConfig = adaptiveVerifyConfig(for: request)
                     var dsparkIterator = try DSparkTokenIterator(
                         input: effectiveInput,
                         target: target,
                         drafter: drafter,
                         mainCache: kvCache,
                         parameters: parameters,
-                        processor: processor
+                        processor: processor,
+                        verifyConfig: verifyConfig
                     )
                     dsparkIterator.onSpeculationRound = { round in
                         guard round.cap > 0 else { return }
-                        NovaMLXLog.info(
-                            "[DSpark:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
-                        )
+                        NovaMLXLog.info("[DSpark:\(tag)] \(round.trace)")
                     }
                     iterator = dsparkIterator
                     NovaMLXLog.info(
-                        "[GENERATE:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) cap=fixed<=\(drafter.kdraft)"
+                        "[GENERATE:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) kdraft=\(drafter.kdraft) verify=\(verifyConfig.summary)"
                     )
                 } else {
                     NovaMLXLog.info(
@@ -2422,14 +2422,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     parameters: parameters,
                     processor: processor,
                     promptTokenCount: Int(promptTokenCount),
-                    logTag: "GENERATE:\(tag)"
+                    logTag: "GENERATE:\(tag)",
+                    verifyConfig: adaptiveVerifyConfig(for: request)
                 ) {
                     dflashIterator.onSpeculationRound = { round in
                         let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
                         guard round.cap > 0 || profile else { return }
-                        NovaMLXLog.info(
-                            "[DFlash:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
-                        )
+                        NovaMLXLog.info("[DFlash:\(tag)] \(round.trace)")
                     }
                     iterator = dflashIterator
                 } else {
@@ -2480,24 +2479,24 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                    Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
                    let drafter = dflashDrafter, drafter.hasSpeculativeWeights, dflashCanTap
                 {
+                    let verifyConfig = adaptiveVerifyConfig(for: request)
                     var dflashIterator = try DFlashTokenIterator(
                         input: effectiveInput,
                         model: model.value,
                         drafter: drafter,
                         mainCache: kvCache,
                         parameters: parameters,
-                        processor: processor
+                        processor: processor,
+                        verifyConfig: verifyConfig
                     )
                     dflashIterator.onSpeculationRound = { round in
                         let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
                         guard round.cap > 0 || profile else { return }
-                        NovaMLXLog.info(
-                            "[DFlash:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
-                        )
+                        NovaMLXLog.info("[DFlash:\(tag)] \(round.trace)")
                     }
                     iterator = dflashIterator
                     NovaMLXLog.info(
-                        "[GENERATE:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize)"
+                        "[GENERATE:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize) verify=\(verifyConfig.summary)"
                     )
                 } else if dflashDrafter != nil {
                     if parameters.temperature > 0 {
@@ -3215,23 +3214,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             {
                                 let drafter = try DSparkDrafterStore.shared.drafter(
                                     for: NovaMLXPaths.directory(forModelId: draftModelId))
+                                let verifyConfig = adaptiveVerifyConfig(for: request)
                                 var dsparkIterator = try DSparkTokenIterator(
                                     input: effectiveInput,
                                     target: target,
                                     drafter: drafter,
                                     mainCache: kvCache,
                                     parameters: parameters,
-                                    processor: processor
+                                    processor: processor,
+                                    verifyConfig: verifyConfig
                                 )
                                 dsparkIterator.onSpeculationRound = { round in
                                     guard round.cap > 0 else { return }
-                                    NovaMLXLog.info(
-                                        "[STREAM:\(tag)] DSpark proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
-                                    )
+                                    NovaMLXLog.info("[STREAM:\(tag)] DSpark \(round.trace)")
                                 }
                                 iterator = dsparkIterator
                                 NovaMLXLog.info(
-                                    "[STREAM:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) cap=fixed<=\(drafter.kdraft)"
+                                    "[STREAM:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) kdraft=\(drafter.kdraft) verify=\(verifyConfig.summary)"
                                 )
                             } else {
                                 NovaMLXLog.info(
@@ -3278,14 +3277,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 parameters: parameters,
                                 processor: processor,
                                 promptTokenCount: Int(promptTokenCount),
-                                logTag: "STREAM:\(tag)"
+                                logTag: "STREAM:\(tag)",
+                                verifyConfig: adaptiveVerifyConfig(for: request)
                             ) {
                                 dflashIterator.onSpeculationRound = { round in
                                     let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
                                     guard round.cap > 0 || profile else { return }
-                                    NovaMLXLog.info(
-                                        "[DFlash:\(tag)] proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
-                                    )
+                                    NovaMLXLog.info("[DFlash:\(tag)] \(round.trace)")
                                 }
                                 iterator = dflashIterator
                             } else {
@@ -3336,24 +3334,24 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                Int(promptTokenCount) <= ResourceLimits.dflashMaxPromptTokens,
                                let drafter = dflashDrafter, drafter.hasSpeculativeWeights, dflashCanTap
                             {
+                                let verifyConfig = adaptiveVerifyConfig(for: request)
                                 var dflashIterator = try DFlashTokenIterator(
                                     input: effectiveInput,
                                     model: model.value,
                                     drafter: drafter,
                                     mainCache: kvCache,
                                     parameters: parameters,
-                                    processor: processor
+                                    processor: processor,
+                                    verifyConfig: verifyConfig
                                 )
                                 dflashIterator.onSpeculationRound = { round in
                                     let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
                                     guard round.cap > 0 || profile else { return }
-                                    NovaMLXLog.info(
-                                        "[STREAM:\(tag)] DFlash proposed=\(round.proposed) accepted=\(round.accepted) cap=\(round.cap) draftMs=\(String(format: "%.1f", round.draftMs)) verifyMs=\(String(format: "%.1f", round.verifyMs)) acceptMs=\(String(format: "%.1f", round.acceptMs)) rollbackMs=\(String(format: "%.1f", round.rollbackMs))"
-                                    )
+                                    NovaMLXLog.info("[STREAM:\(tag)] DFlash \(round.trace)")
                                 }
                                 iterator = dflashIterator
                                 NovaMLXLog.info(
-                                    "[STREAM:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize)"
+                                    "[STREAM:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize) verify=\(verifyConfig.summary)"
                                 )
                             } else if dflashDrafter != nil {
                                 if parameters.temperature > 0 {

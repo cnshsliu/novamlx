@@ -27,9 +27,14 @@ public struct DFlashRoundStats: Sendable {
     public let acceptMs: Double
     public let rollbackMs: Double
 
+    /// Tokens the drafter emitted before confidence scheduling. Equals `proposed`
+    /// when the whole draft is verified.
+    public let draftLen: Int
+
     public init(
         proposed: Int, accepted: Int, cap: Int,
-        draftMs: Double, verifyMs: Double, acceptMs: Double, rollbackMs: Double
+        draftMs: Double, verifyMs: Double, acceptMs: Double, rollbackMs: Double,
+        draftLen: Int? = nil
     ) {
         self.proposed = proposed
         self.accepted = accepted
@@ -38,6 +43,17 @@ public struct DFlashRoundStats: Sendable {
         self.verifyMs = verifyMs
         self.acceptMs = acceptMs
         self.rollbackMs = rollbackMs
+        self.draftLen = draftLen ?? proposed
+    }
+
+    public var trace: String {
+        "draft=\(draftLen) verified=\(proposed) accepted=\(accepted) cap=\(cap) "
+            + "draftMs=\(Self.ms(draftMs)) verifyMs=\(Self.ms(verifyMs)) "
+            + "acceptMs=\(Self.ms(acceptMs)) rollbackMs=\(Self.ms(rollbackMs))"
+    }
+
+    private static func ms(_ value: Double) -> String {
+        String(format: "%.1f", value)
     }
 }
 
@@ -210,6 +226,14 @@ public func dflashCompanionReady(modelId: String) -> Bool {
         atPath: dir.appendingPathComponent("model.safetensors.index.json").path)
 }
 
+func adaptiveVerifyConfig(for request: InferenceRequest) -> AdaptiveVerifyConfig {
+    AdaptiveVerifyConfig.resolved(
+        modeOverride: request.adaptiveVerify,
+        minOverride: request.adaptiveVerifyMin,
+        maxOverride: request.adaptiveVerifyMax
+    )
+}
+
 /// Start a DFlash2 iterator when the checkpoint is a real drafter and the
 /// request is greedy. Temperature above 0 stays on the ordinary sampler:
 /// block accept is argmax. Returns nil when this request should not speculate.
@@ -221,7 +245,8 @@ func openDFlashIterator(
     parameters: GenerateParameters,
     processor: LogitProcessor?,
     promptTokenCount: Int,
-    logTag: String
+    logTag: String,
+    verifyConfig: AdaptiveVerifyConfig = .resolved()
 ) throws -> DFlashTokenIterator? {
     let drafter = dflashDrafterReady(model, draftModelId: draftModelId)
     let canTap = model is any DFlashTarget || DFlashHooks.make(model: model) != nil
@@ -253,11 +278,12 @@ func openDFlashIterator(
         drafter: drafter,
         mainCache: cache,
         parameters: parameters,
-        processor: processor
+        processor: processor,
+        verifyConfig: verifyConfig
     )
     let kind = drafter.hasBlockWeights ? "block" : "selector"
     NovaMLXLog.info(
-        "[\(logTag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) weights=\(kind)"
+        "[\(logTag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) weights=\(kind) verify=\(verifyConfig.summary)"
     )
     return iterator
 }
@@ -284,6 +310,7 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
     private var lastLogits: MLXArray
     private var lastHidden: MLXArray
     private var capPolicy: DFlashCapPolicy
+    private let verifyConfig: AdaptiveVerifyConfig
     private var draftCache: [DFlashCtxCache]
     private var cacheBackup: [KVCache]
     private let tap: [Int]
@@ -294,7 +321,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         drafter: DFlashDraftModel,
         mainCache: [KVCache]? = nil,
         parameters: GenerateParameters,
-        processor: LogitProcessor? = nil
+        processor: LogitProcessor? = nil,
+        verifyConfig: AdaptiveVerifyConfig = .resolved()
     ) throws {
         try self.init(
             input: input,
@@ -304,7 +332,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
             mainCache: mainCache,
             parameters: parameters,
             processor: processor,
-            cacheModel: target
+            cacheModel: target,
+            verifyConfig: verifyConfig
         )
     }
 
@@ -316,12 +345,13 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         drafter: DFlashDraftModel,
         mainCache: [KVCache]? = nil,
         parameters: GenerateParameters,
-        processor: LogitProcessor? = nil
+        processor: LogitProcessor? = nil,
+        verifyConfig: AdaptiveVerifyConfig = .resolved()
     ) throws {
         if let target = model as? any DFlashTarget {
             try self.init(
                 input: input, target: target, drafter: drafter, mainCache: mainCache,
-                parameters: parameters, processor: processor)
+                parameters: parameters, processor: processor, verifyConfig: verifyConfig)
             return
         }
         guard let hooks = DFlashHooks.make(model: model) else {
@@ -335,7 +365,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
             mainCache: mainCache,
             parameters: parameters,
             processor: processor,
-            cacheModel: model
+            cacheModel: model,
+            verifyConfig: verifyConfig
         )
     }
 
@@ -349,7 +380,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         mainCache: [KVCache]?,
         parameters: GenerateParameters,
         processor: LogitProcessor?,
-        cacheModel: any LanguageModel
+        cacheModel: any LanguageModel,
+        verifyConfig: AdaptiveVerifyConfig
     ) throws {
         guard drafter.hasSpeculativeWeights else {
             throw DFlashError.invalidConfig(
@@ -375,6 +407,7 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         self.tap = drafter.config.targetLayerIds.isEmpty ? [0] : drafter.config.targetLayerIds
         let maxCap = Swift.max(1, drafter.config.blockSize - 1)
         self.capPolicy = DFlashCapPolicy(maxCap: maxCap)
+        self.verifyConfig = verifyConfig
         self.draftCache = []
         self.cacheBackup = []
         self.lastLogits = MLXArray.zeros([1, 1])
@@ -424,58 +457,61 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         let budget = maxTokens.map { $0 - tokenCount } ?? (capPolicy.maxCap + 1)
         guard budget > 0 else { return }
         let probed = capPolicy.cap == 0 && capPolicy.shouldProbe
-        let thisCap = Swift.min(probed ? capPolicy.maxCap : capPolicy.cap, budget - 1)
-        if thisCap <= 0 {
+        let policyCap = Swift.min(probed ? capPolicy.maxCap : capPolicy.cap, budget - 1)
+        if policyCap <= 0 {
             denseStep()
             capPolicy.observe(accepted: 0, capUsed: 0)
             return
         }
+        // Fixed mode keeps the acceptance-rate cap. Adaptive drafts the full
+        // block (while the policy is not parked) and then keeps a confidence
+        // prefix. Parking still skips the draft entirely.
+        let draftBudget = verifyConfig.mode == .adaptive
+            ? Swift.min(capPolicy.maxCap, budget - 1)
+            : policyCap
 
         let tDraft = Date()
         let anchor = MLXArray([Int32(pending)]).reshaped(1, 1)
-        let drafted: [Int]
-        let draftMs: Double
-        let step: (logits: MLXArray, fused: MLXArray)
-        let verifyMs: Double
+        let fullIDs: [Int]
+        let confidences: [Float]
         if drafter.hasBlockWeights {
             if draftCache.isEmpty { draftCache = drafter.makeCache() }
-            let raw = drafter.draftBlock(
-                anchorId: pending, targetHidden: lastHidden, cache: draftCache, cap: thisCap)
-            let verifyIds = concatenated([anchor, raw.reshaped(1, -1).asType(.int32)], axis: 1)
-            draftMs = Date().timeIntervalSince(tDraft) * 1000
-            if hooks != nil { cacheBackup = mainCache.map { $0.copy() } }
-            let tVerify = Date()
-            let verified = verify(verifyIds)
-            eval(verified.logits, verified.fused, raw)
-            drafted = Array(raw.asArray(Int.self).prefix(thisCap))
-            step = verified
-            verifyMs = Date().timeIntervalSince(tVerify) * 1000
+            let proposal = drafter.draftBlock(
+                anchorId: pending, targetHidden: lastHidden, cache: draftCache,
+                cap: draftBudget, marginScale: verifyConfig.marginScale)
+            fullIDs = proposal.tokens
+            confidences = proposal.confidences
         } else {
-            let ids = drafter.proposeGreedy(
-                anchorLogits: lastLogits, hidden: lastHidden, cap: thisCap)
-            draftMs = Date().timeIntervalSince(tDraft) * 1000
-            if ids.isEmpty {
-                denseStep()
-                capPolicy.observe(accepted: 0, capUsed: 0)
-                return
-            }
-            let verifyIds = concatenated(
-                [anchor, MLXArray(ids.map { Int32($0) }).reshaped(1, -1)], axis: 1)
-            if hooks != nil { cacheBackup = mainCache.map { $0.copy() } }
-            let tVerify = Date()
-            let verified = verify(verifyIds)
-            eval(verified.logits, verified.fused)
-            drafted = ids
-            step = verified
-            verifyMs = Date().timeIntervalSince(tVerify) * 1000
+            let proposal = drafter.proposeGreedy(
+                anchorLogits: lastLogits, hidden: lastHidden, cap: draftBudget,
+                marginScale: verifyConfig.marginScale)
+            fullIDs = proposal.ids
+            confidences = proposal.confidences
         }
-        if drafted.isEmpty {
-            undoVerify(specWidth: 1, nRejected: 1)
+        let draftMs = Date().timeIntervalSince(tDraft) * 1000
+        if fullIDs.isEmpty {
             denseStep()
             capPolicy.observe(accepted: 0, capUsed: 0)
             return
         }
-        finishRound(drafted: drafted, step: step, draftMs: draftMs, verifyMs: verifyMs)
+        let verifyLen = verifyConfig.verifyLength(
+            confidences: confidences, draftCount: fullIDs.count, fixedLength: policyCap)
+        let drafted = Array(fullIDs.prefix(verifyLen))
+        if drafted.isEmpty {
+            denseStep()
+            capPolicy.observe(accepted: 0, capUsed: 0)
+            return
+        }
+        let verifyIds = concatenated(
+            [anchor, MLXArray(drafted.map { Int32($0) }).reshaped(1, -1)], axis: 1)
+        if hooks != nil { cacheBackup = mainCache.map { $0.copy() } }
+        let tVerify = Date()
+        let verified = verify(verifyIds)
+        eval(verified.logits, verified.fused)
+        let verifyMs = Date().timeIntervalSince(tVerify) * 1000
+        finishRound(
+            drafted: drafted, step: verified, draftMs: draftMs, verifyMs: verifyMs,
+            draftLen: fullIDs.count)
     }
 
     /// Accept a verified block. The `DFlashTarget` path uses `dflashRollback`.
@@ -486,7 +522,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         drafted: [Int],
         step: (logits: MLXArray, fused: MLXArray),
         draftMs: Double,
-        verifyMs: Double
+        verifyMs: Double,
+        draftLen: Int
     ) {
         let tAccept = Date()
         let argmax = argmaxRows(step.logits)
@@ -524,7 +561,9 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         }
         let rollbackMs = Date().timeIntervalSince(tRoll) * 1000
         let acceptedCount = decision.acceptNormally ? result.accepted : 0
-        capPolicy.observe(accepted: acceptedCount, capUsed: drafted.count)
+        capPolicy.observe(
+            accepted: acceptedCount, capUsed: drafted.count,
+            scaleToMaxCap: verifyConfig.mode == .adaptive)
         totalProposed += drafted.count
         if decision.acceptNormally, !result.committed.isEmpty {
             totalAccepted += result.accepted
@@ -539,7 +578,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
                 DFlashRoundStats(
                     proposed: drafted.count, accepted: result.accepted, cap: drafted.count,
                     draftMs: draftMs, verifyMs: verifyMs,
-                    acceptMs: acceptMs, rollbackMs: rollbackMs
+                    acceptMs: acceptMs, rollbackMs: rollbackMs,
+                    draftLen: draftLen
                 )
             )
             return
@@ -550,7 +590,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
                 DFlashRoundStats(
                     proposed: drafted.count, accepted: 0, cap: drafted.count,
                     draftMs: draftMs, verifyMs: verifyMs,
-                    acceptMs: acceptMs, rollbackMs: rollbackMs
+                    acceptMs: acceptMs, rollbackMs: rollbackMs,
+                    draftLen: draftLen
                 )
             )
         }

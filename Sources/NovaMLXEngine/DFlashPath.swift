@@ -66,15 +66,24 @@ public struct DFlashCapPolicy: Sendable {
         parked && parkedRounds > 0 && parkedRounds.isMultiple(of: probeEvery)
     }
 
-    public mutating func observe(accepted: Int, capUsed: Int) {
-        _ = capUsed
+    /// `scaleToMaxCap` records `accepted / capUsed * maxCap` instead of the raw
+    /// count. Adaptive verify often checks a short prefix; a perfect short
+    /// round must not look like the absolute “accepted < parkBelow” failure
+    /// the fixed block used.
+    public mutating func observe(accepted: Int, capUsed: Int, scaleToMaxCap: Bool = false) {
+        let recorded: Int
+        if scaleToMaxCap, capUsed > 0 {
+            recorded = (accepted * maxCap + capUsed / 2) / capUsed
+        } else {
+            recorded = accepted
+        }
         rounds += 1
-        window.append(accepted)
+        window.append(recorded)
         if window.count > windowSize { window.removeFirst() }
 
         if parked {
             parkedRounds += 1
-            if accepted >= parkBelow {
+            if recorded >= parkBelow {
                 parked = false
                 parkedRounds = 0
                 cap = maxCap
@@ -144,8 +153,8 @@ public final class DFlashCandidateSelector: Module {
     /// One greedy block from the anchor logits and the (already convolved) hidden state.
     /// Candidates are the anchor row's top-k. Transitions use the codebooks.
     public func propose(
-        anchorLogits: MLXArray, hidden: MLXArray, cap: Int
-    ) -> MLXArray {
+        anchorLogits: MLXArray, hidden: MLXArray, cap: Int, marginScale: Float = 2
+    ) -> (ids: MLXArray, confidences: MLXArray) {
         let width = max(cap, 1)
         let row = anchorLogits.ndim >= 2 ? anchorLogits[0..., -1, 0...] : anchorLogits
         let flat = row.ndim > 1 ? row.reshaped(-1) : row
@@ -174,8 +183,43 @@ public final class DFlashCandidateSelector: Module {
         }
         let scores = concatenated(blocks, axis: 0)
         let candidates = repeated(ids.reshaped([1, k]), count: width, axis: 0)
-        return walkGreedy(scores: scores, candidateIds: candidates)
+        return walkGreedyDetail(
+            scores: scores, candidateIds: candidates, marginScale: marginScale)
     }
+
+    /// Same greedy ids as `walkGreedy`, plus a per-step margin confidence in (0, 1].
+    public func walkGreedyDetail(
+        scores: MLXArray, candidateIds: MLXArray, marginScale: Float
+    ) -> (ids: MLXArray, confidences: MLXArray) {
+        let slots = scores.dim(0)
+        let row0 = scores[0, 0]
+        var index = argMax(row0, axis: -1)
+        var picks: [MLXArray] = [take(candidateIds[0], index, axis: 0)]
+        var confs: [MLXArray] = [dflashMarginConfidence(row: row0, scale: marginScale)]
+        if slots > 1 {
+            for slot in 1..<slots {
+                let row = take(scores[slot], index, axis: 0)
+                confs.append(dflashMarginConfidence(row: row, scale: marginScale))
+                index = argMax(row, axis: -1)
+                picks.append(take(candidateIds[slot], index, axis: 0))
+            }
+        }
+        return (MLX.stacked(picks, axis: 0), MLX.stacked(confs, axis: 0))
+    }
+}
+
+/// Sigmoid of the gap between the best and second-best score on `row`.
+/// A single candidate is treated as certain. Matches `AdaptiveVerifyConfig.marginProbability`.
+func dflashMarginConfidence(row: MLXArray, scale: Float) -> MLXArray {
+    let flat = row.reshaped(-1)
+    let width = flat.dim(0)
+    if width <= 1 { return MLXArray(Float(1)) }
+    let idx = argPartition(-flat, kth: 1, axis: -1)
+    let a = take(flat, idx[0])
+    let b = take(flat, idx[1])
+    let gap = maximum(a, b) - minimum(a, b)
+    let scaled = gap / MLXArray(max(scale, 1e-4))
+    return MLXArray(Float(1)) / (MLXArray(Float(1)) + exp(-scaled))
 }
 
 // MARK: - Local grouped conv
