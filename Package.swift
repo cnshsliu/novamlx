@@ -34,7 +34,7 @@ let package = Package(
         .package(path: "vendors/qwen.image.swift"),
         .package(path: "vendors/flux-2-swift-mlx"),
         .package(path: "vendors/ltx2-swift"),
-        .package(path: "vendors/moss-image-swift"),
+        .package(name: "MossImage", path: "vendors/moss-image-swift"),
         .package(path: "mlx-swift-lm"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),

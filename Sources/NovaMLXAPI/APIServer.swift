@@ -1476,8 +1476,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let (width, height) = req.resolvedSize
                 let format = req.resolvedResponseFormat
 
-                // Auto-load check
+                // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {
+                    if Self.wantsNoAutoload(request) {
+                        throw NovaMLXError.modelNotResident
+                    }
                     guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
                         throw NovaMLXError.modelNotFound(model)
                     }
@@ -1531,7 +1534,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let response = ImageGenerationResponse(
                     created: Int(Date().timeIntervalSince1970),
                     data: imageData,
-                    model: model
+                    model: model,
+                    usage: .billed(from: result, images: imageData.count)
                 )
                 return try Self.jsonResponse(response)
             }
@@ -1584,8 +1588,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
                 let maskCGImage = maskData.flatMap { Self.dataToCGImage($0) }
 
-                // Auto-load check
+                // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {
+                    if Self.wantsNoAutoload(request) {
+                        throw NovaMLXError.modelNotResident
+                    }
                     guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
                         throw NovaMLXError.modelNotFound(model)
                     }
@@ -1638,7 +1645,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let response = ImageGenerationResponse(
                     created: Int(Date().timeIntervalSince1970),
                     data: imageDataResp,
-                    model: model
+                    model: model,
+                    usage: .billed(from: result, images: imageDataResp.count)
                 )
                 return try Self.jsonResponse(response)
             }
@@ -1664,6 +1672,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let n = Int(parts["n"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "1") ?? 1
                 let size = parts["size"].flatMap { String(data: $0.body, encoding: .utf8) }
                 let responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) }
+                let steps = parts["steps"].flatMap { Int(String(data: $0.body, encoding: .utf8) ?? "") }
 
                 let (width, height) = ImageVariationRequest(
                     image: imageData, model: model, n: n, size: size, responseFormat: responseFormat
@@ -1676,8 +1685,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.apiError("Failed to decode input image")
                 }
 
-                // Auto-load check
+                // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {
+                    if Self.wantsNoAutoload(request) {
+                        throw NovaMLXError.modelNotResident
+                    }
                     guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
                         throw NovaMLXError.modelNotFound(model)
                     }
@@ -1694,7 +1706,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     image: inputCGImage,
                     n: resolvedN,
                     width: width,
-                    height: height
+                    height: height,
+                    steps: steps
                 )
                 if let rid = HTTPHelpers.requestID(from: request) {
                     RequestLogStore.shared.finish(
@@ -1724,7 +1737,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let response = ImageGenerationResponse(
                     created: Int(Date().timeIntervalSince1970),
                     data: imageDataResp,
-                    model: model
+                    model: model,
+                    usage: .billed(from: result, images: imageDataResp.count)
                 )
                 return try Self.jsonResponse(response)
             }

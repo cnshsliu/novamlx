@@ -44,11 +44,34 @@ public struct ImageGenerationResult: Sendable {
     public let images: [String]  // base64-encoded PNG data
     public let model: String
     public let seed: UInt64
+    /// Pixel size of the first rendered CGImage (after the pipeline), not the request string.
+    public let width: Int
+    public let height: Int
+    /// Whole-call duration in milliseconds.
+    public let durationMs: Int
+    /// Requested steps, else the last sampler total the pipeline reported, else 0.
+    public let steps: Int
+    /// `generation`, `edit`, or `variation`.
+    public let operation: String
 
-    public init(images: [String], model: String, seed: UInt64) {
+    public init(
+        images: [String],
+        model: String,
+        seed: UInt64,
+        width: Int,
+        height: Int,
+        durationMs: Int,
+        steps: Int,
+        operation: String
+    ) {
         self.images = images
         self.model = model
         self.seed = seed
+        self.width = width
+        self.height = height
+        self.durationMs = durationMs
+        self.steps = steps
+        self.operation = operation
     }
 }
 
@@ -187,7 +210,7 @@ public final class ImageGenerationService: @unchecked Sendable {
         seed: UInt64? = nil,
         steps: Int? = nil
     ) async throws -> ImageGenerationResult {
-        try await _generateInternal(modelId: modelId, n: n, seed: seed) { pipeline, imageSeed in
+        try await _generateInternal(modelId: modelId, n: n, seed: seed, steps: steps) { pipeline, imageSeed in
             try await pipeline.generateImage(
                 prompt: prompt,
                 negativePrompt: negativePrompt,
@@ -223,7 +246,7 @@ public final class ImageGenerationService: @unchecked Sendable {
         }
 
         if container.pipeline is QwenImage21Pipeline {
-            return try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "edit") { pipeline, imageSeed in
+            return try await _generateInternal(modelId: modelId, n: n, seed: seed, steps: steps, operation: "edit") { pipeline, imageSeed in
                 guard let qwen = pipeline as? QwenImage21Pipeline else {
                     throw NovaMLXError.apiError("Image editing requires the Qwen-Image-2.1 pipeline")
                 }
@@ -248,7 +271,7 @@ public final class ImageGenerationService: @unchecked Sendable {
             throw NovaMLXError.apiError("Image editing requires a StableDiffusion pipeline")
         }
 
-        return try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "edit") { _, imageSeed in
+        return try await _generateInternal(modelId: modelId, n: n, seed: seed, steps: steps, operation: "edit") { _, imageSeed in
             let result = try sdPipeline.generateEdit(
                 from: image,
                 mask: mask,
@@ -289,7 +312,7 @@ public final class ImageGenerationService: @unchecked Sendable {
             throw NovaMLXError.apiError("Image variation requires a StableDiffusion pipeline")
         }
 
-        return try await _generateInternal(modelId: modelId, n: n, seed: seed, operation: "variation") { _, imageSeed in
+        return try await _generateInternal(modelId: modelId, n: n, seed: seed, steps: steps, operation: "variation") { _, imageSeed in
             let result = try sdPipeline.generateVariation(
                 from: image,
                 prompt: "",
@@ -310,6 +333,7 @@ public final class ImageGenerationService: @unchecked Sendable {
         modelId: String,
         n: Int,
         seed: UInt64? = nil,
+        steps: Int? = nil,
         operation: String = "generation",
         _ generateBlock: (any ImageGenerationPipeline, UInt64) async throws -> PipelineGenerationResult
     ) async throws -> ImageGenerationResult {
@@ -338,6 +362,8 @@ public final class ImageGenerationService: @unchecked Sendable {
         ImageRunControl.shared.reset()
         let startTime = Date()
         var base64Images: [String] = []
+        var renderedWidth = 0
+        var renderedHeight = 0
         let defaultSeed = UInt64(Date().timeIntervalSince1970 * 1000)
         let resolvedSeed: UInt64 = if let seed { seed } else { defaultSeed }
         var usedSeed: UInt64 = resolvedSeed
@@ -385,6 +411,10 @@ public final class ImageGenerationService: @unchecked Sendable {
             guard let cgImage = result.images.first else {
                 throw NovaMLXError.inferenceFailed("Image \(operation) produced no output")
             }
+            if renderedWidth == 0 {
+                renderedWidth = cgImage.width
+                renderedHeight = cgImage.height
+            }
             let b64 = try cgImageToBase64PNG(cgImage)
             base64Images.append(b64)
             // Refresh running speed so the panel updates every image.
@@ -395,12 +425,19 @@ public final class ImageGenerationService: @unchecked Sendable {
         }
 
         let elapsed = Date().timeIntervalSince(startTime)
+        let observedSteps = lock.withLock { stepProgress?.total ?? 0 }
+        let resolvedSteps = steps ?? observedSteps
         NovaMLXLog.info("Image \(operation) complete: \(n) image(s) in \(String(format: "%.1f", elapsed))s")
 
         return ImageGenerationResult(
             images: base64Images,
             model: modelId,
-            seed: usedSeed
+            seed: usedSeed,
+            width: renderedWidth,
+            height: renderedHeight,
+            durationMs: Int((elapsed * 1000).rounded()),
+            steps: resolvedSteps,
+            operation: operation
         )
     }
 

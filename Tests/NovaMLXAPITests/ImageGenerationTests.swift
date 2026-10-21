@@ -66,7 +66,11 @@ struct ImageGenerationTests {
             data: [
                 ImageData(b64Json: "iVBORw0KGgo=", url: nil, revisedPrompt: "a sunset"),
             ],
-            model: "sdxl-turbo"
+            model: "sdxl-turbo",
+            usage: ImageUsage.billed(
+                images: 1, operation: "generation",
+                width: 1024, height: 1024, steps: 4, durationMs: 8200, model: "sdxl-turbo"
+            )
         )
 
         let encoded = try JSONEncoder().encode(response)
@@ -80,6 +84,40 @@ struct ImageGenerationTests {
         #expect(data[0]["b64_json"] as? String == "iVBORw0KGgo=")
         #expect(data[0]["revised_prompt"] as? String == "a sunset")
         #expect(data[0]["url"] == nil)
+    }
+
+    @Test("ImageGenerationResponse usage bills images without token counts")
+    func testImageGenerationResponseUsage() throws {
+        let response = ImageGenerationResponse(
+            created: 1715234567,
+            data: [
+                ImageData(b64Json: "a", url: nil, revisedPrompt: nil),
+                ImageData(b64Json: "b", url: nil, revisedPrompt: nil),
+            ],
+            model: "flux-schnell",
+            usage: ImageUsage.billed(
+                images: 2, operation: "generation",
+                width: 1024, height: 1024, steps: 4, durationMs: 8200, model: "flux-schnell"
+            )
+        )
+
+        let encoded = try JSONEncoder().encode(response)
+        let json = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        let usage = json["usage"] as! [String: Any]
+
+        #expect(usage["images"] as? Int == 2)
+        #expect(usage["size_tier"] as? String == "1024x1024")
+        #expect(usage["pixels"] as? Int == 1_048_576)
+        #expect(usage["operation"] as? String == "generation")
+        #expect(usage["width"] as? Int == 1024)
+        #expect(usage["height"] as? Int == 1024)
+        #expect(usage["steps"] as? Int == 4)
+        #expect(usage["duration_ms"] as? Int == 8200)
+        #expect(usage["model"] as? String == "flux-schnell")
+
+        let blob = String(decoding: encoded, as: UTF8.self)
+        #expect(!blob.contains("prompt_tokens"))
+        #expect(!blob.contains("completion_tokens"))
     }
 
     @Test("ImageEditRequest resolves defaults")
