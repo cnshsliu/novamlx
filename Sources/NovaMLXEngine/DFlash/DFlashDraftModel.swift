@@ -481,8 +481,9 @@ public final class DFlashDraftModel: Module, LanguageModel, KVCacheDimensionProv
         let unary = MLX.takeAlong(logits, candidateIds, axis: -1).asType(.float32)
         let scores = selector.lattice(
             candidateIds: candidateIds, unaryLogits: unary, hidden: hidden, anchorId: anchorId)
-        return selector.walkGreedyDetail(
+        let walked = selector.walkGreedyDetail(
             scores: scores, candidateIds: candidateIds, marginScale: marginScale)
+        return (tokens: walked.ids, confidences: walked.confidences)
     }
 
     /// Argmax ids plus a top-2 margin confidence on each row of `[steps, vocab]`.
