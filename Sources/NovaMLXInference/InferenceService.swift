@@ -970,16 +970,57 @@ public final class InferenceService: @unchecked Sendable {
                 + imageGenerationService.listLoadedModels()
                 + decisionService.listLoadedModels()
         )
-        for id in listLoadedModels() where Self.shouldExclusiveEvict(id: id, keep: keep, sideLoaded: sideLoaded) {
+        let pinned = Set(settingsManager.getPinnedModelIds())
+        for id in listLoadedModels() where Self.shouldExclusiveEvict(
+            id: id, keep: keep, sideLoaded: sideLoaded, pinned: pinned
+        ) {
             NovaMLXLog.info("[Exclusive] unloading '\(id)' to keep '\(modelId)'")
             await unloadModel(ModelIdentifier(id: id, family: .other))
         }
     }
 
     /// Chat exclusive-load may replace another LLM/VLM, but never auto-unload
-    /// TTS, ASR, or image models sitting beside it.
-    public static func shouldExclusiveEvict(id: String, keep: Set<String>, sideLoaded: Set<String>) -> Bool {
-        !keep.contains(id) && !sideLoaded.contains(id)
+    /// TTS, ASR, or image models sitting beside it. Pinned models stay loaded.
+    public static func shouldExclusiveEvict(
+        id: String, keep: Set<String>, sideLoaded: Set<String>, pinned: Set<String> = []
+    ) -> Bool {
+        !keep.contains(id) && !sideLoaded.contains(id) && !pinned.contains(id)
+    }
+
+    public func isPinned(_ modelId: String) -> Bool {
+        settingsManager.getSettings(settingsManager.resolveModelId(modelId)).isPinned
+    }
+
+    /// Persist pin. A pinned model reloads after restart and refuses unload until this is off.
+    public func setPinned(_ modelId: String, pinned: Bool) {
+        let id = settingsManager.resolveModelId(modelId)
+        var settings = settingsManager.getSettings(id)
+        settings.isPinned = pinned
+        settingsManager.setSettings(id, settings)
+        if pinned {
+            engine.pool.pin(id)
+            saveLoadedModelsList()
+        } else {
+            engine.pool.unpin(id)
+        }
+        NovaMLXLog.info("[InferenceService] pin \(id)=\(pinned)")
+    }
+
+    /// Nil when unload is allowed. Message when the model is pinned.
+    public func pinnedUnloadRefusal(_ modelId: String) -> String? {
+        let id = settingsManager.resolveModelId(modelId)
+        guard settingsManager.getSettings(id).isPinned else { return nil }
+        return "Cannot unload pinned model '\(id)'. Turn Pin off first."
+    }
+
+    /// Last-loaded ids first, then any pinned id that is not already in that list.
+    public static func restoreIds(lastLoaded: [String], pinned: [String]) -> [String] {
+        var seen = Set<String>()
+        var ids: [String] = []
+        for id in lastLoaded + pinned where seen.insert(id).inserted {
+            ids.append(id)
+        }
+        return ids
     }
 
     public func applyResourceLimits() async {
@@ -997,6 +1038,10 @@ public final class InferenceService: @unchecked Sendable {
 
     public func unloadModel(_ identifier: ModelIdentifier) async {
         let resolvedId = settingsManager.resolveModelId(identifier.id)
+        if settingsManager.getSettings(resolvedId).isPinned {
+            NovaMLXLog.warning("[InferenceService] refused unload of pinned model \(resolvedId)")
+            return
+        }
 
         // TTS models
         if identifier.family == .qwen3Tts || identifier.family == .dotsTts
@@ -1164,7 +1209,7 @@ public final class InferenceService: @unchecked Sendable {
         let allInfo = engine.pool.allModelInfo()
         let now = Date()
         for info in allInfo {
-            if info.pinned { continue }
+            if info.pinned || settingsManager.getSettings(info.id).isPinned { continue }
 
             if let prd = info.perRequestDeadline {
                 if prd > now { continue }
@@ -1203,7 +1248,10 @@ public final class InferenceService: @unchecked Sendable {
 
     public func restoreModels(modelManager: ModelManager,
                               progress: RestoreProgressCallback? = nil) async {
-        let ids = loadLoadedModelsList()
+        let ids = Self.restoreIds(
+            lastLoaded: loadLoadedModelsList(),
+            pinned: settingsManager.getPinnedModelIds()
+        )
         guard !ids.isEmpty else { return }
         NovaMLXLog.info("[InferenceService] Restoring \(ids.count) previously loaded model(s)...")
         for modelId in ids {

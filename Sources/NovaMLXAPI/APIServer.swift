@@ -2785,6 +2785,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     guard isLoaded else {
                         throw NovaMLXError.modelNotFound(req.modelId)
                     }
+                    if let refusal = inference.pinnedUnloadRefusal(req.modelId) {
+                        throw NovaMLXError.apiError(refusal)
+                    }
 
                     if embeddings.isLoaded(req.modelId) {
                         embeddings.unloadModel(req.modelId)
@@ -2803,6 +2806,9 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 Delete("/{id}") { request, context in
                     let modelId = try context.parameters.require("id")
 
+                    if let refusal = inference.pinnedUnloadRefusal(modelId) {
+                        throw NovaMLXError.apiError(refusal)
+                    }
                     if inference.isModelLoaded(modelId) {
                         await inference.unloadModel(ModelIdentifier(id: modelId, family: .other))
                     }

@@ -16,6 +16,7 @@
 - 配套视觉模型
 - 思考：`enableThinking`、`thinkingBudget`、`preserveThinking`
 - Keep-alive 间隔
+- 盯住（Pin）：重启仍加载，关掉之前不能卸载
 
 存储在 SQLite `model_settings`。见 [模型管理](model-management.md)。家族级默认（未单独覆盖时）见 [模型架构](model-architectures.md)。
 

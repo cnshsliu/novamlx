@@ -48,6 +48,25 @@ struct InferenceServiceTests {
                 sideLoaded: side
             ) == false
         )
+        #expect(
+            InferenceService.shouldExclusiveEvict(
+                id: "pinned-chat",
+                keep: keep,
+                sideLoaded: side,
+                pinned: ["pinned-chat"]
+            ) == false
+        )
+    }
+
+    @Test("Restore ids keep last-loaded order and append extra pinned")
+    func restoreIdsUnion() {
+        let ids = InferenceService.restoreIds(
+            lastLoaded: ["a", "b"],
+            pinned: ["b", "c"]
+        )
+        #expect(ids == ["a", "b", "c"])
+        #expect(InferenceService.restoreIds(lastLoaded: [], pinned: ["p"]) == ["p"])
+        #expect(InferenceService.restoreIds(lastLoaded: ["x"], pinned: []) == ["x"])
     }
 
     @Test("Exclusive keep set always includes the backbone id")

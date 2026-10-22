@@ -88,7 +88,7 @@ public final class MemoryPressureHandler: @unchecked Sendable {
         let allInfo = engine.pool.allModelInfo()
         let now = Date()
         for info in allInfo {
-            if info.pinned { continue }
+            if info.pinned || settingsManager.getSettings(info.id).isPinned { continue }
 
             if let prd = info.perRequestDeadline {
                 if prd > now { continue }
@@ -111,7 +111,7 @@ public final class MemoryPressureHandler: @unchecked Sendable {
 
     private func evictUnpinnedModels(keepLast: Int) {
         let allInfo = engine.pool.allModelInfo()
-            .filter { !$0.pinned }
+            .filter { !$0.pinned && !settingsManager.getSettings($0.id).isPinned }
             .sorted { $0.lastAccessed < $1.lastAccessed }
 
         let toEvict = keepLast > 0 ? max(0, allInfo.count - keepLast) : allInfo.count

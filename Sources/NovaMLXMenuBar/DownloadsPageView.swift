@@ -656,11 +656,13 @@ struct DownloadsPageView: View {
                     .lineLimit(1)
             }
         } else if appState.loadedModels.contains(repoId) {
-            Button(l10n.tr("models.unload")) {
-                Task { await unloadDownloaded(repoId) }
+            if !inferenceService.isPinned(repoId) {
+                Button(l10n.tr("models.unload")) {
+                    Task { await unloadDownloaded(repoId) }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         } else {
             Button(l10n.tr("models.load")) {
                 loadingModelId = repoId

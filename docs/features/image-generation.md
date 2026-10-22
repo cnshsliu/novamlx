@@ -29,7 +29,7 @@
 
 MOSS-Image 是 5B 单流 DiT，文本编码器是 Qwen3.5-9B，解码器是 FLUX.2 的 small VAE。权重 Apache-2.0。提示词是普通句子，也可以是模型自己的 JSON 版式字符串，原样送进编码器。
 
-未写 `steps` 时，MOSS-Image 用官方采样：Euler flow matching、50 步、CFG 3、shift 5、空负面提示、负面分支跳过第 22 层。宽和高会落到 16 的倍数，每边至少 256，面积不超过 1456×1456。DiT 整步编译进一张 MLX 图，按文本长度、latent 格点和 skip 层缓存；CFG 负向分支单独一张图。该形状第一次前向会编译，后面的步复用。`NOVA_MOSS_IMAGE_COMPILE=0` 关掉编译。
+未写 `steps` 时，MOSS-Image 用官方采样：Euler flow matching、50 步、CFG 3、shift 5、空负面提示、负面分支跳过第 22 层。宽和高会落到 16 的倍数，每边至少 256，面积不超过 1456×1456。去噪走 moss-image-swift 0.3.0 的逐层 `eval` 路径。
 
 下载约 27 GB（safetensors 合计 27,199,664,580 字节）。统一内存达到 48 GB 时按 bf16 加载，峰值大约 27 GB。低于 48 GB 时，Nova 在加载时把 DiT 和文本编码器量化成 int8，峰值大约 16 GB。目录建议内存是 32 GB。环境变量 `NOVA_MOSS_IMAGE_QUANT=bf16` 或 `int8` 可以改掉自动选择。
 

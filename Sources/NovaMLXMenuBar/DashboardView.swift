@@ -175,20 +175,22 @@ public struct DashboardView: View {
                         }
                         CopyIDButton(id: modelId)
                         Spacer()
-                        Button {
-                            Task {
-                                if let record = modelManager.getRecord(modelId) {
-                                    await inferenceService.unloadModel(
-                                        ModelIdentifier(id: modelId, family: record.family)
-                                    )
+                        if !inferenceService.isPinned(modelId) {
+                            Button {
+                                Task {
+                                    if let record = modelManager.getRecord(modelId) {
+                                        await inferenceService.unloadModel(
+                                            ModelIdentifier(id: modelId, family: record.family)
+                                        )
+                                    }
                                 }
+                            } label: {
+                                Image(systemName: "eject.circle")
+                                    .font(.caption)
                             }
-                        } label: {
-                            Image(systemName: "eject.circle")
-                                .font(.caption)
+                            .buttonStyle(.plain)
+                            .foregroundColor(.secondary)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundColor(.secondary)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)

@@ -490,6 +490,7 @@ struct ModelsPageView: View {
                     restoringModelRow(modelId)
                 }
                 ForEach(loaded, id: \.self) { modelId in
+                    let pinned = inferenceService.isPinned(modelId)
                     modelRow(
                         modelId,
                         subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
@@ -501,16 +502,19 @@ struct ModelsPageView: View {
                             tieBadge(for: modelId)
                             addToCatalogButton(modelId: modelId)
                             tieActions(for: modelId, isLoaded: true)
-                            Button(l10n.tr("models.unload")) {
-                                Task {
-                                    if let record = modelManager.getRecord(modelId) {
-                                        await inferenceService.unloadModel(ModelIdentifier(id: modelId, family: record.family))
-                                        refreshTrigger.toggle()
+                            pinToggle(for: modelId)
+                            if !pinned {
+                                Button(l10n.tr("models.unload")) {
+                                    Task {
+                                        if let record = modelManager.getRecord(modelId) {
+                                            await inferenceService.unloadModel(ModelIdentifier(id: modelId, family: record.family))
+                                            refreshTrigger.toggle()
+                                        }
                                     }
                                 }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     )
                 }
@@ -542,6 +546,23 @@ struct ModelsPageView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(NovaTheme.Colors.accent.opacity(0.2), lineWidth: 0.5)
         )
+    }
+
+    private func pinToggle(for modelId: String) -> some View {
+        Toggle(isOn: Binding(
+            get: { inferenceService.isPinned(modelId) },
+            set: { on in
+                inferenceService.setPinned(modelId, pinned: on)
+                refreshTrigger.toggle()
+            }
+        )) {
+            Text(l10n.tr("models.pin"))
+                .font(.caption2.weight(.semibold))
+        }
+        .toggleStyle(.switch)
+        .controlSize(.mini)
+        .help(l10n.tr("models.pinHelp"))
+        .accessibilityIdentifier("models-pin-\(modelId)")
     }
 
     @ViewBuilder
