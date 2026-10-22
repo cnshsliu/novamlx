@@ -1484,8 +1484,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let (width, height) = req.resolvedSize
                 let format = req.resolvedResponseFormat
 
-                // Auto-load check
+                // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {
+                    if Self.wantsNoAutoload(request) {
+                        throw NovaMLXError.modelNotResident
+                    }
                     guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
                         throw NovaMLXError.modelNotFound(model)
                     }
@@ -1495,6 +1498,23 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
                     _ = try await inference.imageGenerationService.loadModel(
                         from: record.localURL, config: config)
+                }
+
+                if Self.wantsAsyncImage(request) {
+                    let job = inference.imageTaskService.submit(
+                        model: model,
+                        prompt: req.prompt,
+                        negativePrompt: req.negativePrompt ?? "",
+                        n: n,
+                        width: width,
+                        height: height,
+                        seed: req.seed.map { UInt64($0) },
+                        steps: req.steps,
+                        responseFormat: format
+                    )
+                    return try Self.jsonResponse(
+                        MediaTaskResponse(image: job, progress: nil),
+                        httpStatus: .accepted)
                 }
 
                 let tgenStart = Date()
@@ -1539,7 +1559,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let response = ImageGenerationResponse(
                     created: Int(Date().timeIntervalSince1970),
                     data: imageData,
-                    model: model
+                    model: model,
+                    usage: .billed(from: result, images: imageData.count)
                 )
                 return try Self.jsonResponse(response)
             }
@@ -1659,14 +1680,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let format = responseFormat ?? "b64_json"
                 let resolvedN = min(max(n, 1), 4)
 
-                // Convert uploaded image to CGImage
-                guard let inputCGImage = Self.dataToCGImage(imageData) else {
-                    throw NovaMLXError.apiError("Failed to decode input image")
-                }
-                let maskCGImage = maskData.flatMap { Self.dataToCGImage($0) }
-
-                // Auto-load check
+                // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {
+                    if Self.wantsNoAutoload(request) {
+                        throw NovaMLXError.modelNotResident
+                    }
                     guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
                         throw NovaMLXError.modelNotFound(model)
                     }
@@ -1676,6 +1694,34 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
                     _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
                 }
+                if let refusal = inference.imageGenerationService.editRefusal(modelId: model) {
+                    throw NovaMLXError.apiError(refusal)
+                }
+                if Self.wantsAsyncImage(request) {
+                    let job = inference.imageTaskService.submitEdit(
+                        model: model,
+                        prompt: prompt,
+                        negativePrompt: negativePrompt,
+                        n: resolvedN,
+                        width: width,
+                        height: height,
+                        seed: seed.map { UInt64($0) },
+                        steps: steps,
+                        responseFormat: format,
+                        imageData: imageData,
+                        maskData: maskData,
+                        strength: strength
+                    )
+                    return try Self.jsonResponse(
+                        MediaTaskResponse(image: job, progress: nil),
+                        httpStatus: .accepted)
+                }
+
+                // Convert uploaded image to CGImage
+                guard let inputCGImage = Self.dataToCGImage(imageData) else {
+                    throw NovaMLXError.apiError("Failed to decode input image")
+                }
+                let maskCGImage = maskData.flatMap { Self.dataToCGImage($0) }
 
                 let editStart = Date()
                 let result = try await inference.imageGenerationService.edit(
@@ -1719,7 +1765,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let response = ImageGenerationResponse(
                     created: Int(Date().timeIntervalSince1970),
                     data: imageDataResp,
-                    model: model
+                    model: model,
+                    usage: .billed(from: result, images: imageDataResp.count)
                 )
                 return try Self.jsonResponse(response)
             }
@@ -1745,6 +1792,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let n = Int(parts["n"].flatMap { String(data: $0.body, encoding: .utf8) } ?? "1") ?? 1
                 let size = parts["size"].flatMap { String(data: $0.body, encoding: .utf8) }
                 let responseFormat = parts["response_format"].flatMap { String(data: $0.body, encoding: .utf8) }
+                let steps = parts["steps"].flatMap { Int(String(data: $0.body, encoding: .utf8) ?? "") }
 
                 let (width, height) = ImageVariationRequest(
                     image: imageData, model: model, n: n, size: size, responseFormat: responseFormat
@@ -1757,8 +1805,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     throw NovaMLXError.apiError("Failed to decode input image")
                 }
 
-                // Auto-load check
+                // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {
+                    if Self.wantsNoAutoload(request) {
+                        throw NovaMLXError.modelNotResident
+                    }
                     guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
                         throw NovaMLXError.modelNotFound(model)
                     }
@@ -1775,7 +1826,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     image: inputCGImage,
                     n: resolvedN,
                     width: width,
-                    height: height
+                    height: height,
+                    steps: steps
                 )
                 if let rid = HTTPHelpers.requestID(from: request) {
                     RequestLogStore.shared.finish(
@@ -1805,7 +1857,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let response = ImageGenerationResponse(
                     created: Int(Date().timeIntervalSince1970),
                     data: imageDataResp,
-                    model: model
+                    model: model,
+                    usage: .billed(from: result, images: imageDataResp.count)
                 )
                 return try Self.jsonResponse(response)
             }
@@ -1984,6 +2037,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let data = try JSONSerialization.data(withJSONObject: response)
                 return Response(status: .ok, headers: [.contentType: "application/json"], body: .init(byteBuffer: ByteBuffer(data: data)))
             }
+
+            // Image and video share this query. Registered from its own
+            // function: the router closure is already at the stack limit.
+            Self.mediaTaskRoutes(inference: inference)
 
             // MARK: - Async Video Generation (OpenRouter-compatible, h3.c backend)
 

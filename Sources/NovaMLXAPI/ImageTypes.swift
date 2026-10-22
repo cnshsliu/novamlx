@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXEngine
 
 struct ImageGenerationRequest: Codable, Sendable {
     let prompt: String
@@ -46,10 +47,65 @@ func novaImageSize(_ size: String?) -> (width: Int, height: Int) {
     }
 }
 
+/// Billing fields for one image call. Pixel size is the first rendered image,
+/// not the request `size` string. Token counts are intentionally absent.
+struct ImageUsage: Codable, Sendable {
+    let images: Int
+    let operation: String
+    let width: Int
+    let height: Int
+    let pixels: Int
+    let sizeTier: String
+    let steps: Int
+    let durationMs: Int
+    let model: String
+
+    enum CodingKeys: String, CodingKey {
+        case images, operation, width, height, pixels, steps, model
+        case sizeTier = "size_tier"
+        case durationMs = "duration_ms"
+    }
+
+    static func billed(
+        images: Int,
+        operation: String,
+        width: Int,
+        height: Int,
+        steps: Int,
+        durationMs: Int,
+        model: String
+    ) -> ImageUsage {
+        ImageUsage(
+            images: images,
+            operation: operation,
+            width: width,
+            height: height,
+            pixels: width * height,
+            sizeTier: "\(width)x\(height)",
+            steps: steps,
+            durationMs: durationMs,
+            model: model
+        )
+    }
+
+    static func billed(from result: ImageGenerationResult, images: Int) -> ImageUsage {
+        billed(
+            images: images,
+            operation: result.operation,
+            width: result.width,
+            height: result.height,
+            steps: result.steps,
+            durationMs: result.durationMs,
+            model: result.model
+        )
+    }
+}
+
 struct ImageGenerationResponse: Codable, Sendable {
     let created: Int
     let data: [ImageData]
     let model: String
+    let usage: ImageUsage
 }
 
 /// `POST /v1/images/matting` — BiRefNet foreground matting over an uploaded

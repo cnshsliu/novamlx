@@ -1,4 +1,5 @@
 import Foundation
+import HTTPTypes
 import Hummingbird
 import NovaMLXCore
 import NovaMLXEngine
@@ -926,6 +927,19 @@ extension NovaMLXAPIServer {
     /// "model not loaded" immediately (the gateway then fails over).
     static func wantsNoAutoload(_ request: Request?) -> Bool {
         guard let request else { return false }
-        return request.headers[.init("X-No-Autoload")!]?.first == "1"
+        // Name subscript is the whole field value. `.first` is one Character,
+        // which only matches the one-character token "1" by accident.
+        return request.headers[HTTPField.Name("X-No-Autoload")!] == "1"
+    }
+
+    /// Marketplace image calls must not hold the HTTP connection open for
+    /// sampling. DashScope's header and the standard Prefer token both opt in.
+    /// Absent either, `POST /v1/images/generations` stays a synchronous OpenAI response.
+    static func wantsAsyncImage(_ request: Request) -> Bool {
+        if request.headers[HTTPField.Name("X-DashScope-Async")!]?.lowercased() == "enable" {
+            return true
+        }
+        let prefer = request.headers[HTTPField.Name("Prefer")!]?.lowercased() ?? ""
+        return prefer.contains("respond-async")
     }
 }

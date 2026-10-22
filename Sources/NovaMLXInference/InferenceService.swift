@@ -47,6 +47,8 @@ public final class InferenceService: @unchecked Sendable {
     public let transcriptionService: TranscriptionService
     public let ttsService: TTSService
     public let imageGenerationService: ImageGenerationService
+    /// Async image jobs. Polled on `GET /v1/tasks/{id}` together with video jobs.
+    public let imageTaskService: ImageTaskService
     public let talkingHeadService: TalkingHeadService
     public let h3VideoService: H3VideoService
     public let decisionService: DecisionService
@@ -78,6 +80,7 @@ public final class InferenceService: @unchecked Sendable {
         self.transcriptionService = TranscriptionService()
         self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
+        self.imageTaskService = ImageTaskService(images: imageGenerationService)
         self.talkingHeadService = TalkingHeadService()
         self.h3VideoService = H3VideoService()
         self.decisionService = DecisionService()
