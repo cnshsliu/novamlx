@@ -624,15 +624,19 @@ struct DSparkTests {
     }
 
     private static func runIterator(
-        target: MockDSparkTarget, maxTokens: Int, prompt: [Int32] = [1, 2, 3]
+        target: MockDSparkTarget, maxTokens: Int, prompt: [Int32] = [1, 2, 3],
+        verifyConfig: AdaptiveVerifyConfig = .fixed,
+        confidences: [Float]? = nil
     ) throws -> (tokens: [Int], iterator: DSparkTokenIterator) {
         let drafter = tinyModel()
         var iterator = try DSparkTokenIterator(
             input: LMInput(text: .init(tokens: MLXArray(prompt))),
             target: target,
             drafter: drafter,
-            parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0)
+            parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
+            verifyConfig: verifyConfig
         )
+        iterator.confidenceScheduleOverride = confidences
         var tokens: [Int] = []
         while let token = iterator.next() {
             tokens.append(token)
@@ -746,6 +750,40 @@ struct DSparkTests {
         // (the final pending anchor is never fed back).
         #expect(specTarget.committed == 3 + maxTokens - 1)
         #expect(iterator.draftCache[0].offset == 3 + maxTokens - 1)
+    }
+
+    @Test("adaptive verify shortens a low-confidence draft and still matches positional decode")
+    func adaptiveVerifyMatchesPositionalDecode() throws {
+        let script = [5, 11, 3, 27, 8, 19, 1]
+        let maxTokens = 12
+        let lowTail: [Float] = [0.99, 0.2, 0.1, 0.1]
+        #expect(
+            AdaptiveVerifyConfig().verifyLength(
+                confidences: lowTail, draftCount: 4, fixedLength: 4) == 1)
+
+        let specTarget = MockDSparkTarget(truth: .positional(script: script))
+        let (specTokens, iterator) = try Self.runIterator(
+            target: specTarget, maxTokens: maxTokens,
+            verifyConfig: AdaptiveVerifyConfig(), confidences: lowTail)
+
+        let denseTarget = MockDSparkTarget(truth: .positional(script: script))
+        var denseTokens: [Int] = []
+        var logits = denseTarget.callAsFunction(MLXArray([Int32(1), 2, 3], [1, 3]), cache: nil)
+        var token = argMax(logits[0, -1]).item(Int.self)
+        denseTokens.append(token)
+        while denseTokens.count < maxTokens {
+            logits = denseTarget.callAsFunction(MLXArray([Int32(token)], [1, 1]), cache: nil)
+            token = argMax(logits[0, -1]).item(Int.self)
+            denseTokens.append(token)
+        }
+
+        #expect(specTokens == denseTokens)
+        let afterPrefill = specTarget.verifyInputs.dropFirst()
+        let speculated = afterPrefill.filter { $0.count > 1 }
+        #expect(!speculated.isEmpty)
+        #expect(speculated.allSatisfy { $0.count == 2 })
+        #expect(iterator.totalProposed < maxTokens)
+        #expect(specTarget.committed == 3 + maxTokens - 1)
     }
 
     // MARK: - Registry (opt-in Qwen3.8 DSpark candidate)

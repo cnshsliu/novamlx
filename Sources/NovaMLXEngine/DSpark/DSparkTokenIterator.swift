@@ -19,9 +19,13 @@ public struct DSparkRoundStats: Sendable {
     public let acceptMs: Double
     public let rollbackMs: Double
 
+    /// Tokens the drafter emitted before confidence scheduling.
+    public let draftLen: Int
+
     public init(
         proposed: Int, accepted: Int, cap: Int,
-        draftMs: Double, verifyMs: Double, acceptMs: Double, rollbackMs: Double
+        draftMs: Double, verifyMs: Double, acceptMs: Double, rollbackMs: Double,
+        draftLen: Int? = nil
     ) {
         self.proposed = proposed
         self.accepted = accepted
@@ -30,6 +34,17 @@ public struct DSparkRoundStats: Sendable {
         self.verifyMs = verifyMs
         self.acceptMs = acceptMs
         self.rollbackMs = rollbackMs
+        self.draftLen = draftLen ?? proposed
+    }
+
+    public var trace: String {
+        "draft=\(draftLen) verified=\(proposed) accepted=\(accepted) cap=\(cap) "
+            + "draftMs=\(Self.ms(draftMs)) verifyMs=\(Self.ms(verifyMs)) "
+            + "acceptMs=\(Self.ms(acceptMs)) rollbackMs=\(Self.ms(rollbackMs))"
+    }
+
+    private static func ms(_ value: Double) -> String {
+        String(format: "%.1f", value)
     }
 }
 
@@ -100,9 +115,11 @@ public final class DSparkDrafterStore: @unchecked Sendable {
     }
 }
 
-/// Greedy speculative decoding with a DSpark block drafter. Fixed cap
-/// (`drafter.kdraft`); acceptance is the DFlash greedy rule — longest matching
-/// prefix of drafts vs target argmax, then the first mismatched (bonus) token.
+/// Greedy speculative decoding with a DSpark block drafter. Acceptance is the
+/// DFlash greedy rule — longest matching prefix of drafts vs target argmax,
+/// then the first mismatched (bonus) token. Adaptive mode drafts up to
+/// `kdraft` and verifies the confidence-scheduled prefix. Fixed mode keeps
+/// the vector-SDPA cap (`vectorSDPAMaxDrafts`).
 public struct DSparkTokenIterator: TokenIteratorProtocol {
     /// Drafts per verify while staying on Metal vector SDPA for GQA-6 / head-256.
     /// Verify width is anchor + drafts, and that kernel requires
@@ -120,6 +137,9 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
     public var totalProposed = 0
     public var totalAccepted = 0
     public var onSpeculationRound: (@Sendable (DSparkRoundStats) -> Void)?
+    /// Replaces the confidence head for verify-length scheduling. Tests use
+    /// this to force a prefix without depending on random head weights.
+    public var confidenceScheduleOverride: [Float]?
 
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
@@ -130,6 +150,7 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
     private let maskId: Int
     private let tap: [Int]
     private let maxCap: Int
+    private let verifyConfig: AdaptiveVerifyConfig
 
     public init(
         input: LMInput,
@@ -137,7 +158,8 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         drafter: DSparkDraftModel,
         mainCache: [KVCache]? = nil,
         parameters: GenerateParameters,
-        processor: LogitProcessor? = nil
+        processor: LogitProcessor? = nil,
+        verifyConfig: AdaptiveVerifyConfig = .resolved()
     ) throws {
         self.target = target
         self.drafter = drafter
@@ -149,6 +171,7 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         self.maskId = drafter.config.maskTokenId
         self.tap = drafter.config.targetLayerIds
         self.maxCap = Swift.max(1, drafter.kdraft)
+        self.verifyConfig = verifyConfig
         // This head ships no embed_tokens / lm_head — run on the target's raw tables.
         drafter.bind(
             embed: { [target] ids in target.dflashEmbed(ids) },
@@ -208,22 +231,29 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
             denseStep()
             return
         }
-        // Joint multi-token verify for all temperatures. At temp==0 this can flip
-        // near-tie argmax vs width-1 ContinuousBatcher decode (SDPA FP |Δ|~0.5) —
-        // accepted tradeoff for ~1.3–1.7× throughput. Bit-identical greedy would
-        // require per-token target forwards (no speedup); see git history
-        // greedyStepwiseRound.
+        // Joint multi-token verify. At temp==0 a long window can flip near-tie
+        // argmax vs width-1 decode when it leaves vector SDPA (query length > 5
+        // for head 256 / GQA 6). Fixed mode stays inside that window. Adaptive
+        // mode may cross it only when the confidence head says the extra drafts
+        // are worth the slower kernel. Acceptance is still the greedy prefix.
         let tDraft = Date()
         let blockIds = [Int32(pending)] + Array(repeating: Int32(maskId), count: blockSize - 1)
         let block = MLXArray(blockIds, [1, blockSize])
-        // Stay on the vector SDPA kernel decode uses. Head 256 / GQA 6 leaves
-        // that kernel only for query length <= 5; a 9-token verify uses generic
-        // SDPA and its later rows diverge from greedy decode.
-        let verifyCap = Swift.min(thisCap, Self.vectorSDPAMaxDrafts)
+        let kernelCap = Swift.min(thisCap, Self.vectorSDPAMaxDrafts)
+        let draftCap: Int
+        if verifyConfig.mode == .adaptive {
+            let ceiling = verifyConfig.maxVerify.map { Swift.min(thisCap, $0) } ?? thisCap
+            draftCap = Swift.max(0, ceiling)
+        } else {
+            draftCap = kernelCap
+        }
         let draft = drafter.selectBlock(
             block: block, pendingFused: nil, cache: draftCache,
-            cap: verifyCap, anchorId: pending)
-        let drafted = draft.tokens
+            cap: draftCap, anchorId: pending)
+        let confidences = confidenceScheduleOverride ?? draft.confidences
+        let verifyLen = verifyConfig.verifyLength(
+            confidences: confidences, draftCount: draft.tokens.count, fixedLength: kernelCap)
+        let drafted = Array(draft.tokens.prefix(verifyLen))
         let draftMs = Date().timeIntervalSince(tDraft) * 1000
 
         let tVerify = Date()
@@ -237,7 +267,7 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         let verifyMs = Date().timeIntervalSince(tVerify) * 1000
         finishRound(
             drafted: drafted, argmax: argmax, fused: vFused,
-            draftMs: draftMs, verifyMs: verifyMs)
+            draftMs: draftMs, verifyMs: verifyMs, draftLen: draft.tokens.count)
     }
 
     /// One target token. Still a tapped `dflashVerify` — the anchor's fused row must
@@ -279,7 +309,7 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
 
     private mutating func finishRound(
         drafted: [Int], argmax: [Int], fused: MLXArray,
-        draftMs: Double, verifyMs: Double
+        draftMs: Double, verifyMs: Double, draftLen: Int
     ) {
         let tAccept = Date()
         let result = DFlashAccept.greedy(drafted: drafted, targetArgmax: argmax)
@@ -310,7 +340,8 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
             DSparkRoundStats(
                 proposed: drafted.count, accepted: n, cap: drafted.count,
                 draftMs: draftMs, verifyMs: verifyMs,
-                acceptMs: acceptMs, rollbackMs: rollbackMs))
+                acceptMs: acceptMs, rollbackMs: rollbackMs,
+                draftLen: draftLen))
     }
 
     public mutating func next() -> Int? {

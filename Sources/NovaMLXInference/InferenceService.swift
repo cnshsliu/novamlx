@@ -185,7 +185,10 @@ public final class InferenceService: @unchecked Sendable {
             includeLogprobs: finalRequest.includeLogprobs,
             topLogprobsCount: finalRequest.topLogprobsCount,
             httpRequestId: finalRequest.httpRequestId,
-            useNativeMtp: finalRequest.useNativeMtp
+            useNativeMtp: finalRequest.useNativeMtp,
+            adaptiveVerify: finalRequest.adaptiveVerify,
+            adaptiveVerifyMin: finalRequest.adaptiveVerifyMin,
+            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax
         )
         finalRequest = autoInjectDraftModel(finalRequest)
         track(finalRequest)
@@ -299,7 +302,10 @@ public final class InferenceService: @unchecked Sendable {
             includeLogprobs: finalRequest.includeLogprobs,
             topLogprobsCount: finalRequest.topLogprobsCount,
             httpRequestId: finalRequest.httpRequestId,
-            useNativeMtp: finalRequest.useNativeMtp
+            useNativeMtp: finalRequest.useNativeMtp,
+            adaptiveVerify: finalRequest.adaptiveVerify,
+            adaptiveVerifyMin: finalRequest.adaptiveVerifyMin,
+            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax
         )
         finalRequest = autoInjectDraftModel(finalRequest)
         track(finalRequest)
@@ -562,7 +568,10 @@ public final class InferenceService: @unchecked Sendable {
             includeLogprobs: request.includeLogprobs,
             topLogprobsCount: request.topLogprobsCount,
             httpRequestId: request.httpRequestId,
-            useNativeMtp: request.useNativeMtp
+            useNativeMtp: request.useNativeMtp,
+            adaptiveVerify: request.adaptiveVerify,
+            adaptiveVerifyMin: request.adaptiveVerifyMin,
+            adaptiveVerifyMax: request.adaptiveVerifyMax
         )
     }
 

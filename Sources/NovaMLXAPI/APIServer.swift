@@ -865,7 +865,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         reasoningEffort: openAIReq.reasoningEffort,
                         logprobs: openAIReq.logprobs,
                         topLogprobs: openAIReq.topLogprobs,
-                        keepAlive: openAIReq.keepAlive
+                        keepAlive: openAIReq.keepAlive,
+                        tag: openAIReq.tag,
+                        draftModel: openAIReq.draftModel,
+                        numDraftTokens: openAIReq.numDraftTokens,
+                        useMtp: openAIReq.useMtp,
+                        adaptiveVerify: openAIReq.adaptiveVerify,
+                        adaptiveVerifyMin: openAIReq.adaptiveVerifyMin,
+                        adaptiveVerifyMax: openAIReq.adaptiveVerifyMax
                     )
                     NovaMLXLog.info("[API] Modelfile resolved: \(resolved.modelfileName) -> base=\(resolved.baseModel)")
                 }

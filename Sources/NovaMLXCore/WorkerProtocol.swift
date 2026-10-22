@@ -29,6 +29,9 @@ public struct CodableInferenceRequest: Codable, Sendable {
     public let draftModel: String?
     public let numDraftTokens: Int?
     public let useNativeMtp: Bool?
+    public let adaptiveVerify: String?
+    public let adaptiveVerifyMin: Int?
+    public let adaptiveVerifyMax: Int?
 
     public init(from request: InferenceRequest) {
         self.id = request.id.uuidString
@@ -69,6 +72,9 @@ public struct CodableInferenceRequest: Codable, Sendable {
         self.draftModel = request.draftModel
         self.numDraftTokens = request.numDraftTokens
         self.useNativeMtp = request.useNativeMtp
+        self.adaptiveVerify = request.adaptiveVerify
+        self.adaptiveVerifyMin = request.adaptiveVerifyMin
+        self.adaptiveVerifyMax = request.adaptiveVerifyMax
     }
 
     public func toInferenceRequest() -> InferenceRequest {
@@ -111,7 +117,10 @@ public struct CodableInferenceRequest: Codable, Sendable {
             preserveThinking: preserveThinking,
             draftModel: draftModel,
             numDraftTokens: numDraftTokens,
-            useNativeMtp: useNativeMtp
+            useNativeMtp: useNativeMtp,
+            adaptiveVerify: adaptiveVerify,
+            adaptiveVerifyMin: adaptiveVerifyMin,
+            adaptiveVerifyMax: adaptiveVerifyMax
         )
     }
 }

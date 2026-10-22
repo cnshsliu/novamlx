@@ -187,6 +187,10 @@ public struct OpenAIRequest: Codable, Sendable {
     public let draftModel: String?
     public let numDraftTokens: Int?
     public let useMtp: Bool?
+    /// `"adaptive"` (default) or `"fixed"` for DFlash2 / DSpark verify length.
+    public let adaptiveVerify: String?
+    public let adaptiveVerifyMin: Int?
+    public let adaptiveVerifyMax: Int?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools, logprobs, tag
@@ -211,6 +215,9 @@ public struct OpenAIRequest: Codable, Sendable {
         case draftModel = "draft_model"
         case numDraftTokens = "num_draft_tokens"
         case useMtp = "use_mtp"
+        case adaptiveVerify = "adaptive_verify"
+        case adaptiveVerifyMin = "adaptive_verify_min"
+        case adaptiveVerifyMax = "adaptive_verify_max"
     }
 
     public init(
@@ -244,7 +251,10 @@ public struct OpenAIRequest: Codable, Sendable {
         tag: String? = nil,
         draftModel: String? = nil,
         numDraftTokens: Int? = nil,
-        useMtp: Bool? = nil
+        useMtp: Bool? = nil,
+        adaptiveVerify: String? = nil,
+        adaptiveVerifyMin: Int? = nil,
+        adaptiveVerifyMax: Int? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -277,6 +287,9 @@ public struct OpenAIRequest: Codable, Sendable {
         self.draftModel = draftModel
         self.numDraftTokens = numDraftTokens
         self.useMtp = useMtp
+        self.adaptiveVerify = adaptiveVerify
+        self.adaptiveVerifyMin = adaptiveVerifyMin
+        self.adaptiveVerifyMax = adaptiveVerifyMax
     }
 
     /// Resolve thinking toggle from multiple client formats:

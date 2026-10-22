@@ -101,6 +101,14 @@ struct DFlashTests {
         let picks = sel.walkGreedy(scores: scores, candidateIds: cand)
         eval(picks)
         #expect(picks.asArray(Int.self) == [12, 20, 31])
+
+        let detail = sel.walkGreedyDetail(scores: scores, candidateIds: cand, marginScale: 2)
+        eval(detail.ids, detail.confidences)
+        #expect(detail.ids.asArray(Int.self) == [12, 20, 31])
+        let conf = detail.confidences.asArray(Float.self)
+        #expect(conf.count == 3)
+        let expected = AdaptiveVerifyConfig.marginProbability(top1: 5, top2: 1, scale: 2)
+        #expect(abs(conf[0] - expected) < 1e-3)
     }
 
     @Test("Greedy selector walk of one step returns that slot's winner")
@@ -193,6 +201,33 @@ struct DFlashTests {
 
         middling.observe(accepted: 5, capUsed: 5)
         #expect(middling.cap == 6)
+    }
+
+    @Test("Adaptive rate scaling does not park a fully accepted short prefix")
+    func capPolicyScalesShortFullAccepts() {
+        var scaled = DFlashCapPolicy(maxCap: 7, minRoundsBeforePark: 3)
+        for _ in 0 ..< 4 {
+            scaled.observe(accepted: 2, capUsed: 2, scaleToMaxCap: true)
+        }
+        #expect(scaled.cap == 7)
+
+        var raw = DFlashCapPolicy(maxCap: 7, minRoundsBeforePark: 3)
+        for _ in 0 ..< 4 {
+            raw.observe(accepted: 2, capUsed: 2)
+        }
+        #expect(raw.cap == 0)
+    }
+
+    @Test("A confidence-truncated matching draft commits the same greedy tokens")
+    func adaptivePrefixMatchesPlainGreedy() {
+        let truth = [1, 2, 3, 4, 5, 6, 7]
+        let conf: [Float] = [0.99, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1]
+        let k = AdaptiveVerifyConfig().verifyLength(
+            confidences: conf, draftCount: truth.count, fixedLength: 7)
+        #expect(k == 1)
+        let lens = Array(repeating: k, count: truth.count)
+        #expect(greedyChain(draftLens: lens, truth: truth) == truth)
+        #expect(greedyChain(draftLens: [7], truth: truth) == truth)
     }
 
     @Test("Context append grows the draft cache offset without a block forward")

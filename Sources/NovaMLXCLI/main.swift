@@ -41,6 +41,8 @@ struct NovaMLXCLI {
                 try await handleTurboQuant(subArgs)
             case "bench":
                 try await handleBench(subArgs)
+            case "adaptive-verify":
+                handleAdaptiveVerify(subArgs)
             case "launch":
                 try await LaunchCommand.handleLaunch(subArgs)
             case "login":
@@ -85,7 +87,12 @@ struct NovaMLXCLI {
           nova delete <model-id>          Delete a downloaded model
 
         INFERENCE
-          nova chat [model-id]            Open interactive chat
+          nova chat [model-id] [--adaptive-verify adaptive|fixed]
+                                      Chat. With the flag, temperature is 0 so
+                                      DFlash2 / DSpark actually verify.
+          nova adaptive-verify [--confidence 0.9,0.2,...]
+                                      Print the scheduled verify length.
+                                      --mode fixed compares against a fixed block.
           nova status                     Show server status & GPU memory
 
         CONFIGURATION
@@ -218,7 +225,11 @@ struct NovaMLXCLI {
     // MARK: - Chat
 
     static func handleChat(_ args: [String]) async throws {
-        let modelId = args.first
+        let parsed = parseAdaptiveFlags(args)
+        let modelId = parsed.rest.first
+        let adaptiveMode = parsed.mode
+        let adaptiveMin = parsed.minVerify
+        let adaptiveMax = parsed.maxVerify
         let modelsResp = try await CLIClient.get("/v1/models")
         guard let data = modelsResp.body.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -251,8 +262,18 @@ struct NovaMLXCLI {
             print("You> ", terminator: "")
             guard let input = readLine(), input != "exit", !input.isEmpty else { break }
 
+            var extra = ""
+            if let mode = adaptiveMode {
+                extra += ",\"temperature\":0,\"adaptive_verify\":\"\(mode)\""
+            }
+            if let adaptiveMin {
+                extra += ",\"adaptive_verify_min\":\(adaptiveMin)"
+            }
+            if let adaptiveMax {
+                extra += ",\"adaptive_verify_max\":\(adaptiveMax)"
+            }
             let body = """
-            {"model":"\(selectedModel)","messages":[{"role":"user","content":"\(input.replacingOccurrences(of: "\"", with: "\\\""))"}],"stream":false}
+            {"model":"\(selectedModel)","messages":[{"role":"user","content":"\(input.replacingOccurrences(of: "\"", with: "\\\""))"}],"stream":false\(extra)}
             """
             let resp = try await CLIClient.post("/v1/chat/completions", body: body)
 
@@ -374,6 +395,116 @@ struct NovaMLXCLI {
             let resp = try await CLIClient.get("/admin/api/turboquant", admin: true)
             CLIClient.printJSON(resp.body)
         }
+    }
+
+    // MARK: - Adaptive verify harness
+
+    /// Prints the confidence-scheduled prefix and the fixed-block length for the
+    /// same draft, using this process’s `NOVAMLX_ADAPTIVE_VERIFY*` environment
+    /// unless a flag overrides it. No model load. A Mac A/B of throughput is
+    /// `nova chat <model> --adaptive-verify adaptive` versus `fixed`, or the
+    /// same strings on `adaptive_verify` in `/v1/chat/completions`.
+    static func handleAdaptiveVerify(_ args: [String]) {
+        let parsed = parseAdaptiveFlags(args)
+        var confidences = parsed.confidences
+        if confidences.isEmpty, !parsed.margins.isEmpty {
+            let scale = parsed.marginScale ?? AdaptiveVerifyConfig().marginScale
+            confidences = AdaptiveVerifyConfig.confidences(fromMargins: parsed.margins, scale: scale)
+        }
+        var config = AdaptiveVerifyConfig.resolved(
+            modeOverride: parsed.mode,
+            minOverride: parsed.minVerify,
+            maxOverride: parsed.maxVerify
+        )
+        if let fixedCost = parsed.fixedCost { config.fixedCost = fixedCost }
+        if let marginal = parsed.marginalCost { config.marginalCost = marginal }
+        if let slow = parsed.slowMarginalCost { config.slowMarginalCost = slow }
+        if let fast = parsed.fastDrafts { config.fastKernelMaxDrafts = fast }
+        if confidences.isEmpty {
+            print(config.summary)
+            print("Pass --confidence 0.92,0.88,0.4 or --margin 4,4,0.2 to schedule a prefix.")
+            print("Fixed block for comparison: --mode fixed")
+            return
+        }
+        var adaptive = config
+        adaptive.mode = .adaptive
+        let adaptiveLen = adaptive.verifyLength(
+            confidences: confidences, draftCount: confidences.count, fixedLength: confidences.count)
+        let fixedLen = AdaptiveVerifyConfig.fixed.verifyLength(
+            confidences: confidences, draftCount: confidences.count, fixedLength: confidences.count)
+        let selected = config.mode == .fixed ? fixedLen : adaptiveLen
+        print(config.summary)
+        let shown = confidences.map { String(format: "%.3f", $0) }.joined(separator: ",")
+        print("confidences=\(shown)")
+        print("adaptive_verify_length=\(adaptiveLen)")
+        print("fixed_block_length=\(fixedLen)")
+        print("selected=\(config.mode.rawValue) \(selected)")
+    }
+
+    private struct AdaptiveFlagParse {
+        var rest: [String] = []
+        var mode: String?
+        var minVerify: Int?
+        var maxVerify: Int?
+        var confidences: [Float] = []
+        var margins: [Float] = []
+        var marginScale: Float?
+        var fixedCost: Double?
+        var marginalCost: Double?
+        var slowMarginalCost: Double?
+        var fastDrafts: Int?
+    }
+
+    private static func parseAdaptiveFlags(_ args: [String]) -> AdaptiveFlagParse {
+        var parsed = AdaptiveFlagParse()
+        var index = 0
+        func take() -> String? {
+            guard index + 1 < args.count else {
+                index += 1
+                return nil
+            }
+            index += 1
+            let value = args[index]
+            index += 1
+            return value
+        }
+        while index < args.count {
+            let arg = args[index]
+            switch arg {
+            case "--adaptive-verify", "--mode":
+                parsed.mode = take()
+            case "--adaptive-verify-min", "--min":
+                parsed.minVerify = take().flatMap(Int.init)
+            case "--adaptive-verify-max", "--max":
+                parsed.maxVerify = take().flatMap(Int.init)
+            case "--confidence":
+                parsed.confidences = take().map(floatList) ?? []
+            case "--margin":
+                parsed.margins = take().map(floatList) ?? []
+            case "--margin-scale":
+                parsed.marginScale = take().flatMap { Float($0) }
+            case "--fixed-cost":
+                parsed.fixedCost = take().flatMap(Double.init)
+            case "--marginal-cost":
+                parsed.marginalCost = take().flatMap(Double.init)
+            case "--slow-marginal-cost":
+                parsed.slowMarginalCost = take().flatMap(Double.init)
+            case "--fast-drafts":
+                parsed.fastDrafts = take().flatMap(Int.init)
+            default:
+                parsed.rest.append(arg)
+                index += 1
+            }
+        }
+        if let mode = parsed.mode?.lowercased(), mode != "adaptive", mode != "fixed" {
+            print("adaptive-verify mode must be adaptive or fixed (got \(mode)).")
+            parsed.mode = nil
+        }
+        return parsed
+    }
+
+    private static func floatList(_ raw: String) -> [Float] {
+        raw.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
     }
 
     // MARK: - Bench
