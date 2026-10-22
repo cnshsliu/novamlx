@@ -33,6 +33,7 @@ This directory is the user-facing documentation, one page per feature.
 | [图像生成 / Image generation](image-generation.md) | FLUX、Qwen-Image、Z-Image 与 MOSS-Image 文生图，输出 Base64 PNG。 | stable |
 | [抠图去背景 / Image matting](matting.md) | BiRefNet 通用与人像版抠图，`POST /v1/images/matting` 出 mask 与透明底。 | preview |
 | [视频生成 / Video generation](video-generation.md) | 本地 h3.c 的异步 `/v1/videos` 任务。 | stable |
+| [3D 生成 / 3D generation](hunyuan3d.md) | 本地 Hunyuan3D-2.1 的图生 3D 任务，`POST /v1/3d/generations` 出 GLB。 | preview |
 | [嵌入与重排 / Embeddings & rerank](embeddings-rerank.md) | `POST /v1/embeddings` 与 `POST /v1/rerank`。 | stable |
 
 <a id="apis"></a>

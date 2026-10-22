@@ -36,6 +36,7 @@ let package = Package(
         .package(path: "vendors/ltx2-swift"),
         .package(name: "MossImage", path: "vendors/moss-image-swift"),
         .package(name: "MLXBiRefNet", path: "vendors/birefnet-swift"),
+        .package(name: "Hunyuan3D-Swift", path: "vendors/hunyuan3d-swift"),
         .package(path: "mlx-swift-lm"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
@@ -130,6 +131,8 @@ let package = Package(
                 .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "DotsTTS", package: "mlx-swift-dots-tts"),
                 .product(name: "LTX2", package: "ltx2-swift"),
+                .product(name: "Hy3DMLX", package: "Hunyuan3D-Swift"),
+                .product(name: "HunyuanPaintMLX", package: "Hunyuan3D-Swift"),
             ],
             resources: [.copy("ChatTemplates")],
             swiftSettings: concurrencySettings
@@ -276,6 +279,7 @@ let package = Package(
             dependencies: [
                 "NovaMLXEngine",
                 "NovaMLXInference",
+                "NovaMLXModelManager",
                 "NovaMLXCore",
                 "NovaMLXUtils",
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
@@ -285,7 +289,7 @@ let package = Package(
         ),
         .testTarget(
             name: "NovaMLXInferenceTests",
-            dependencies: ["NovaMLXInference"],
+            dependencies: ["NovaMLXInference", "NovaMLXModelManager"],
             swiftSettings: concurrencySettings
         ),
         .testTarget(

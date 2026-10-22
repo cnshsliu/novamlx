@@ -49,6 +49,9 @@ public final class InferenceService: @unchecked Sendable {
     public let imageGenerationService: ImageGenerationService
     /// Async image jobs. Polled on `GET /v1/tasks/{id}` together with video jobs.
     public let imageTaskService: ImageTaskService
+    /// Hunyuan3D image-to-3D. Serial queue, answers on `/v1/tasks` as
+    /// `3d.generation` plus the `/v1/3d/generations` aliases.
+    public let hy3DService: Hy3DService
     public let talkingHeadService: TalkingHeadService
     public let h3VideoService: H3VideoService
     public let decisionService: DecisionService
@@ -81,6 +84,7 @@ public final class InferenceService: @unchecked Sendable {
         self.ttsService = TTSService()
         self.imageGenerationService = ImageGenerationService()
         self.imageTaskService = ImageTaskService(images: imageGenerationService)
+        self.hy3DService = Hy3DService()
         self.talkingHeadService = TalkingHeadService()
         self.h3VideoService = H3VideoService()
         self.decisionService = DecisionService()
@@ -644,6 +648,18 @@ public final class InferenceService: @unchecked Sendable {
             return
         }
 
+        // Hunyuan3D (image → mesh) stays on the host Hy3DService.
+        if config.modelType == .threed || config.identifier.family == .hunyuan3d {
+            NovaMLXLog.info(
+                "[InferenceService] Loading 3D model: \(modelId), family=\(config.identifier.family), url=\(url.path)"
+            )
+            try await loadDedup.ensureSingle(modelId: modelId) {
+                try await self.hy3DService.loadModel(from: url, config: config)
+                self.saveLoadedModelsList()
+            }
+            return
+        }
+
         try await loadDedup.ensureSingle(modelId: modelId) { [self] in
             if !asMtpCompanion, config.modelType == .llm || config.modelType == .vlm {
                 await self.evictOthersForExclusive(keeping: modelId)
@@ -1064,6 +1080,12 @@ public final class InferenceService: @unchecked Sendable {
             return
         }
 
+        if hy3DService.isLoaded(resolvedId) {
+            hy3DService.unload(modelId: resolvedId)
+            saveLoadedModelsList()
+            return
+        }
+
         if decisionService.isLoaded(resolvedId) {
             decisionService.unload(modelId: resolvedId)
             saveLoadedModelsList()
@@ -1101,6 +1123,7 @@ public final class InferenceService: @unchecked Sendable {
         if transcriptionService.isLoaded(resolvedId) { return true }
         if ttsService.listLoadedModels().contains(resolvedId) { return true }
         if imageGenerationService.isLoaded(resolvedId) { return true }
+        if hy3DService.isLoaded(resolvedId) { return true }
         if decisionService.isLoaded(resolvedId) { return true }
         return false
     }
@@ -1201,6 +1224,8 @@ public final class InferenceService: @unchecked Sendable {
         models.append(contentsOf: ttsService.listLoadedModels().filter { !models.contains($0) })
         // Include image models
         models.append(contentsOf: imageGenerationService.listLoadedModels().filter { !models.contains($0) })
+        // Include 3D models
+        models.append(contentsOf: hy3DService.listLoadedModels().filter { !models.contains($0) })
         models.append(contentsOf: decisionService.listLoadedModels().filter { !models.contains($0) })
         return models
     }
