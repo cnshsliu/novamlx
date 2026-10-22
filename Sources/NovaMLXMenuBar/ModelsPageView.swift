@@ -38,6 +38,10 @@ struct ModelsPageView: View {
     @State private var redownloadRoots: [NovaMLXPaths.ModelDirStatus] = []
     @State private var redownloadTarget: ModelRecord?
     @State private var showRootPicker = false
+    @State private var moveRoots: [NovaMLXPaths.ModelDirStatus] = []
+    @State private var moveTarget: ModelRecord?
+    @State private var showMovePicker = false
+    @State private var movingModelId: String?
     let memory: ModelsPageMemory
 
     init(appState: MenuBarAppState, inferenceService: InferenceService, modelManager: ModelManager, memory: ModelsPageMemory) {
@@ -188,6 +192,25 @@ struct ModelsPageView: View {
         } message: {
             if let record = redownloadTarget {
                 Text(l10n.tr("models.chooseDiskMessage", record.id))
+            }
+        }
+        .confirmationDialog(
+            l10n.tr("models.chooseMoveDisk"),
+            isPresented: $showMovePicker,
+            titleVisibility: .visible
+        ) {
+            ForEach(moveRoots, id: \.path) { root in
+                Button(rootButtonLabel(root)) {
+                    if let record = moveTarget {
+                        startMove(record, to: URL(fileURLWithPath: root.path, isDirectory: true))
+                    }
+                    moveTarget = nil
+                }
+            }
+            Button(l10n.tr("models.cancel"), role: .cancel) { moveTarget = nil }
+        } message: {
+            if let record = moveTarget {
+                Text(l10n.tr("models.chooseMoveDiskMessage", record.id))
             }
         }
         .onAppear { Task { await refreshDownloaded() } }
@@ -666,24 +689,6 @@ struct ModelsPageView: View {
     @ViewBuilder
     private func tieActions(for modelId: String, isLoaded: Bool) -> some View {
         let status = appState.tieStatus[modelId]?.status
-        if !isLoaded, status == .convertible || status == .incomplete {
-            Button(l10n.tr("models.tieConvert")) {
-                convertingModelId = modelId
-                Task {
-                    do {
-                        try await appState.convertTIE(modelId: modelId)
-                        refreshTrigger.toggle()
-                    } catch {
-                        alertMessage = error.localizedDescription
-                        showAlert = true
-                    }
-                    convertingModelId = nil
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help(l10n.tr("models.tieConvertHint"))
-        }
         if (status == .ready || status == .incomplete) && !isLoaded {
             Button(l10n.tr("models.tieDelete"), role: .destructive) {
                 tieToDelete = modelId
@@ -699,6 +704,111 @@ struct ModelsPageView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .help("Unload, then remove TIE layout")
+        }
+    }
+
+    /// Load stays a button. Convert to TIE, move, and delete live in More,
+    /// immediately to its right. Delete keeps the confirmation dialog and
+    /// the destructive role. Convert stays available for the same layouts.
+    @ViewBuilder
+    private func downloadedMoreMenu(for record: ModelRecord) -> some View {
+        let status = appState.tieStatus[record.id]?.status
+        let busy = loadingModelId == record.id
+            || convertingModelId == record.id
+            || status == .converting
+        let canConvert = !busy && (status == .convertible || status == .incomplete)
+        let canMove = !busy && !inferenceService.isModelLoaded(record.id)
+        Menu {
+            if canConvert {
+                Button(l10n.tr("models.tieConvert")) {
+                    startTIEConversion(record.id)
+                }
+                .help(l10n.tr("models.tieConvertHint"))
+            } else {
+                Button(l10n.tr("models.tieConvert")) {}
+                    .disabled(true)
+            }
+            Button(l10n.tr("models.moveToDisk")) {
+                requestMove(record)
+            }
+            .disabled(!canMove)
+            .help(l10n.tr("models.moveToDiskHelp"))
+            Divider()
+            Button(l10n.tr("models.delete"), role: .destructive) {
+                modelToDelete = record.id
+                showDeleteConfirmation = true
+            }
+        } label: {
+            Text(l10n.tr("models.more"))
+        }
+        .menuStyle(.borderedButton)
+        .controlSize(.small)
+        .fixedSize()
+        .accessibilityIdentifier("models-row-more")
+    }
+
+    private func startTIEConversion(_ modelId: String) {
+        convertingModelId = modelId
+        Task {
+            do {
+                try await appState.convertTIE(modelId: modelId)
+                refreshTrigger.toggle()
+            } catch {
+                alertMessage = error.localizedDescription
+                showAlert = true
+            }
+            convertingModelId = nil
+        }
+    }
+
+    /// Other mounted, writable model roots. The disk picker is the
+    /// confirmation; cancel leaves the files where they are.
+    private func requestMove(_ record: ModelRecord) {
+        let destinations = ModelRootFilter.moveDestinations(
+            modelURL: record.localURL,
+            statuses: NovaMLXPaths.modelDirStatuses()
+        )
+        guard !destinations.isEmpty else {
+            alertMessage = l10n.tr("models.moveNoDest")
+            showAlert = true
+            return
+        }
+        moveTarget = record
+        moveRoots = destinations
+        showMovePicker = true
+    }
+
+    private func startMove(_ record: ModelRecord, to dest: URL) {
+        guard movingModelId == nil else { return }
+        guard let source = ModelRootFilter.containingRoot(
+            of: record.localURL,
+            roots: NovaMLXPaths.configuredModelsDirs
+        ) else {
+            alertMessage = l10n.tr("models.moveNoDest")
+            showAlert = true
+            return
+        }
+        movingModelId = record.id
+        let manager = modelManager
+        let modelId = record.id
+        Task {
+            let failure: String? = await Task.detached { () -> String? in
+                do {
+                    try manager.moveModel(modelId, from: source, to: dest)
+                    return nil
+                } catch {
+                    return error.localizedDescription
+                }
+            }.value
+            if let failure {
+                alertMessage = failure
+                showAlert = true
+            } else {
+                refreshTrigger.toggle()
+            }
+            if movingModelId == modelId {
+                movingModelId = nil
+            }
         }
     }
 
@@ -780,8 +890,18 @@ struct ModelsPageView: View {
                         subtitle: "\(record.family.rawValue)  \(record.sizeBytes > 0 ? record.sizeBytes.bytesFormatted : "")",
                         isLoaded: false,
                         actions: {
-                            if convertingModelId == record.id || appState.tieStatus[record.id]?.status == .converting {
+                            if movingModelId == record.id {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text(l10n.tr("models.moving"))
+                                        .font(.caption)
+                                        .foregroundColor(NovaTheme.Colors.accent)
+                                        .lineLimit(1)
+                                }
+                            } else if convertingModelId == record.id || appState.tieStatus[record.id]?.status == .converting {
                                 tieConvertingLabel(for: record.id)
+                                downloadedMoreMenu(for: record)
                             } else if loadingModelId == record.id {
                                 HStack(spacing: 8) {
                                     ProgressView()
@@ -790,6 +910,7 @@ struct ModelsPageView: View {
                                         .font(.caption).foregroundColor(NovaTheme.Colors.accent)
                                         .lineLimit(1)
                                 }
+                                downloadedMoreMenu(for: record)
                             } else {
                                 specCompanionToggle(for: record.id)
                                 specBoostBadge(for: record.id)
@@ -818,16 +939,8 @@ struct ModelsPageView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
+                                downloadedMoreMenu(for: record)
                             }
-
-                            Button(role: .destructive) {
-                                modelToDelete = record.id
-                                showDeleteConfirmation = true
-                            } label: {
-                                Image(systemName: "trash").font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
                         }
                     )
                 }
