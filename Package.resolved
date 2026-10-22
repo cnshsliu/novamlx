@@ -1,5 +1,5 @@
 {
-  "originHash" : "dd8c9c62288ec37b87c62f6e120c0682b308caca696fb37952323ef67d4f9306",
+  "originHash" : "6f2345318cbcf832a67982977de40ec188b77aa5df57a478ba3c957f3a3d436a",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "3a5b74a58782c3b4c1f0bc75e9b67b10c2494e8f",
         "version" : "1.33.1"
+      }
+    },
+    {
+      "identity" : "designscaffold",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/DesignScaffold",
+      "state" : {
+        "revision" : "510e8fda8e68e42edb3d808d5f721d799547786f",
+        "version" : "0.25.0"
       }
     },
     {

@@ -67,6 +67,7 @@ curl http://127.0.0.1:6590/v1/images/generations \
 - 不做视频生成。
 - 请求里不能改 CFG。固定为 3。
 - 目录状态是 preview。这次没有在 Nova 里重跑出图计时或内存曲线。
+- DiT 整步 compile：按文本长度、格点、skip 层缓存图。`NOVA_MOSS_IMAGE_COMPILE=0` 关闭。
 
 No image edits, no prompt enhancer, no training UI, no video.
 
