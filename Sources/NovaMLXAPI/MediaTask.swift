@@ -9,12 +9,14 @@ import NovaMLXEngine
 /// cancelled, expired.
 struct MediaTaskUsage: Codable, Sendable {
     var images: Int?
+    /// 3D jobs count meshes instead of images.
+    var meshes: Int?
     var sizeTier: String?
     var cost: Double?
     var isByok: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case images, cost
+        case images, meshes, cost
         case sizeTier = "size_tier"
         case isByok = "is_byok"
     }
@@ -75,5 +77,23 @@ struct MediaTaskResponse: Codable, Sendable {
         error = job.error
         contentUrl = job.status == .completed ? "/v1/tasks/\(job.id)/content" : nil
         usage = job.status == .completed ? MediaTaskUsage(images: nil, sizeTier: nil, cost: 0, isByok: false) : nil
+    }
+
+    init(threeD job: Hy3DJob, progress: Hy3DProgress?) {
+        id = job.id
+        object = "task"
+        task = "3d.generation"
+        status = job.status.rawValue
+        pollingUrl = "/v1/tasks/\(job.id)"
+        model = job.model
+        createdAt = Int(job.createdAt.timeIntervalSince1970)
+        self.progress = progress.map {
+            VideoJobProgress(phase: $0.phase, completed: $0.completed, total: $0.total, percent: $0.percent)
+        }
+        error = job.error
+        contentUrl = job.status == .completed ? "/v1/tasks/\(job.id)/content" : nil
+        usage = job.status == .completed
+            ? MediaTaskUsage(images: nil, meshes: 1, sizeTier: job.sizeTier ?? "shape", cost: 0, isByok: false)
+            : nil
     }
 }

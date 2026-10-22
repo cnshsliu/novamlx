@@ -215,6 +215,10 @@ public final class ModelDiscovery: Sendable {
                 if let model = registerLaya(at: subdir, id: subdir.lastPathComponent) {
                     models.append(model)
                 }
+            } else if Self.isHunyuan3DDirectory(subdir) {
+                if let model = registerHunyuan3D(at: subdir, id: subdir.lastPathComponent) {
+                    models.append(model)
+                }
             } else if Self.isQwen21TurboDirectory(subdir) {
                 if let model = registerQwen21Turbo(at: subdir, id: subdir.lastPathComponent) {
                     models.append(model)
@@ -242,6 +246,13 @@ public final class ModelDiscovery: Sendable {
                         let orgPrefix = subdir.lastPathComponent
                         let modelId = "\(orgPrefix)/\(child.lastPathComponent)"
                         if let model = registerLaya(at: child, id: modelId) {
+                            models.append(model)
+                        }
+                        continue
+                    }
+                    if Self.isHunyuan3DDirectory(child) {
+                        let modelId = "\(subdir.lastPathComponent)/\(child.lastPathComponent)"
+                        if let model = registerHunyuan3D(at: child, id: modelId) {
                             models.append(model)
                         }
                         continue
@@ -524,6 +535,57 @@ public final class ModelDiscovery: Sendable {
             && fm.fileExists(atPath: url.appendingPathComponent("model.safetensors").path)
     }
 
+    /// Hunyuan3D-2.1 MLX shape checkpoints ship a single `.safetensors` plus a
+    /// `config.yaml` (depth/num_latents keys), and no `config.json` — the same
+    /// special-directory situation as Laya, just sniffed by config.yaml keys.
+    private static func isHunyuan3DShapeDirectory(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.appendingPathComponent("config.yaml").path),
+              !fm.fileExists(atPath: url.appendingPathComponent("config.json").path)
+        else { return false }
+        guard let yaml = try? String(contentsOf: url.appendingPathComponent("config.yaml"), encoding: .utf8)
+        else { return false }
+        guard yaml.contains("depth_single_blocks") || yaml.contains("num_latents") else { return false }
+        let hasWeights = (try? fm.contentsOfDirectory(atPath: url.path))?.contains {
+            $0.lowercased().hasSuffix(".safetensors")
+        } ?? false
+        return hasWeights
+    }
+
+    /// Hunyuan3D-2.1 MLX paint weights are diffusers-layout (`unet/`, `vae/`)
+    /// plus a `dinov2/` conditioner dir and no root `config.json`. The dinov2
+    /// subdir is what separates them from SD-family image models.
+    private static func isHunyuan3DPaintDirectory(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.appendingPathComponent("unet/config.json").path),
+              fm.fileExists(atPath: url.appendingPathComponent("dinov2").appendingPathComponent("config.json").path),
+              !fm.fileExists(atPath: url.appendingPathComponent("config.json").path)
+        else { return false }
+        return true
+    }
+
+    private static func isHunyuan3DDirectory(_ url: URL) -> Bool {
+        isHunyuan3DShapeDirectory(url) || isHunyuan3DPaintDirectory(url)
+    }
+
+    private func registerHunyuan3D(at path: URL, id: String) -> DiscoveredModel? {
+        let size = estimateSize(at: path)
+        let complete = Self.checkCompleteness(at: path, isAdapter: false)
+        let slot = Self.isHunyuan3DShapeDirectory(path) ? "Hy3DShapePipeline" : "Hy3DPaintPipeline"
+        NovaMLXLog.info("[Discovery] Discovered Hunyuan3D \(id) (\(slot)): size=\(size.bytesFormatted) complete=\(complete)")
+        return DiscoveredModel(
+            modelId: id,
+            modelPath: path,
+            modelType: .threed,
+            family: .hunyuan3d,
+            estimatedSizeBytes: size,
+            architectures: [slot],
+            configModelType: "hunyuan3d",
+            isAdapter: false,
+            isComplete: complete
+        )
+    }
+
     private func registerLaya(at path: URL, id: String) -> DiscoveredModel? {
         let size = estimateSize(at: path)
         let complete = Self.checkCompleteness(at: path, isAdapter: false)
@@ -543,6 +605,7 @@ public final class ModelDiscovery: Sendable {
 
     private func detectModelType(config: HFConfig, path: URL) -> ModelType {
         if Self.isLayaDirectory(path) { return .decision }
+        if Self.isHunyuan3DDirectory(path) { return .threed }
         let architectures = config.architectures ?? []
         let rawType = (config.modelType ?? "").lowercased().replacingOccurrences(of: "-", with: "_")
 
@@ -655,6 +718,10 @@ public final class ModelDiscovery: Sendable {
         let idLower = modelId.lowercased()
         if MossImageSupport.matches(id: modelId) {
             return .mossImage
+        }
+        // Hunyuan3D checkpoints (image → mesh) before the LLM "hunyuan" substring.
+        if idLower.contains("hunyuan3d") || idLower.contains("hy3d") {
+            return .hunyuan3d
         }
         if QwenImage21Support.matches(id: modelId) {
             return .qwenImage21

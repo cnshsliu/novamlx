@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-21T00:00:00Z",
+  "updatedAt": "2026-10-22T15:57:33Z",
   "models": [
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
@@ -1046,6 +1046,75 @@
       "format": "mlx",
       "status": "preview",
       "addedAt": "2026-10-21T00:00:00Z"
+    },
+    {
+      "id": "zimengxiong/hunyuan3d-mlx-shape-small",
+      "url": "https://huggingface.co/zimengxiong/hunyuan3d-mlx-shape-small",
+      "name": "Hunyuan3D-2.1 Shape Small (MLX)",
+      "description": "Image-to-3D shape model (hunyuan3d-dit-v2-mini, MLX fp16). ~21 s and ~5.6 GB peak per mesh on Apple Silicon. Weights converted from official tencent/Hunyuan3D-2.1; Tencent Hunyuan3D Community License.",
+      "size": "~3.8 GB",
+      "tags": [
+        "MLX",
+        "Hunyuan3D",
+        "3D",
+        "image-to-3D"
+      ],
+      "category": "threed",
+      "sizeBytes": 3819958234,
+      "minRamGB": 16,
+      "family": "hunyuan3d",
+      "format": "mlx",
+      "capabilities": [
+        "image-to-3d"
+      ],
+      "status": "preview"
+    },
+    {
+      "id": "zimengxiong/hunyuan3d-mlx-shape-large",
+      "url": "https://huggingface.co/zimengxiong/hunyuan3d-mlx-shape-large",
+      "name": "Hunyuan3D-2.1 Shape Large (MLX)",
+      "description": "Image-to-3D shape model (hunyuan3d-dit-v2-0-turbo, 8-step distilled, MLX). ~22 s and ~7.3 GB peak per mesh. Weights converted from official tencent/Hunyuan3D-2.1; Tencent Hunyuan3D Community License.",
+      "size": "~4.9 GB",
+      "tags": [
+        "MLX",
+        "Hunyuan3D",
+        "3D",
+        "image-to-3D",
+        "turbo"
+      ],
+      "category": "threed",
+      "sizeBytes": 4930777530,
+      "minRamGB": 24,
+      "family": "hunyuan3d",
+      "format": "mlx",
+      "capabilities": [
+        "image-to-3d"
+      ],
+      "status": "preview"
+    },
+    {
+      "id": "zimengxiong/hunyuan3d-mlx-paint-large",
+      "url": "https://huggingface.co/zimengxiong/hunyuan3d-mlx-paint-large",
+      "name": "Hunyuan3D-2.1 Paint PBR Large (MLX)",
+      "description": "Texture companion for the shape models (hunyuan3d-paintpbr-v2-1, PBR). Load it and POST /v1/3d/generations with texture=true to get a textured GLB. Peaks ~39 GB — 64 GB+ Macs recommended. Weights converted from official tencent/Hunyuan3D-2.1; Tencent Hunyuan3D Community License.",
+      "size": "~8.7 GB",
+      "tags": [
+        "MLX",
+        "Hunyuan3D",
+        "3D",
+        "texture",
+        "PBR"
+      ],
+      "category": "threed",
+      "sizeBytes": 8704935787,
+      "minRamGB": 64,
+      "family": "hunyuan3d",
+      "format": "mlx",
+      "capabilities": [
+        "image-to-3d",
+        "texture"
+      ],
+      "status": "preview"
     }
   ]
 }

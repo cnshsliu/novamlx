@@ -4,6 +4,22 @@ import MLXLLM
 import MLXLMCommon
 import NovaMLXCore
 import Testing
+@testable import NovaMLXEngine
+
+// mlx-swift-lm's MLXLLM/MLXLMCommon also export DFlash* types (an older copy
+// without the selector walk / cap-scale APIs these tests lock down). File-scope
+// aliases pin every unqualified use to NovaMLXEngine's implementation.
+private typealias DFlashConfig = NovaMLXEngine.DFlashConfig
+private typealias DFlashLimits = NovaMLXEngine.DFlashLimits
+private typealias DFlashCandidateSelector = NovaMLXEngine.DFlashCandidateSelector
+private typealias DFlashGroupedConv = NovaMLXEngine.DFlashGroupedConv
+private typealias DFlashCapPolicy = NovaMLXEngine.DFlashCapPolicy
+private typealias DFlashBlockCheck = NovaMLXEngine.DFlashBlockCheck
+private typealias DFlashAccept = NovaMLXEngine.DFlashAccept
+
+private func dflashDraftCandidates(forMainId id: String) -> [String] { NovaMLXEngine.dflashDraftCandidates(forMainId: id) }
+private func isDFlashDraftConfig(at url: URL) -> Bool { NovaMLXEngine.isDFlashDraftConfig(at: url) }
+private func isMtpDraftConfig(at url: URL) -> Bool { NovaMLXEngine.isMtpDraftConfig(at: url) }
 
 @Suite("DFlash2")
 struct DFlashTests {

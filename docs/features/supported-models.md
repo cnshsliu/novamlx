@@ -6,7 +6,7 @@
 
 「支持」指「精确权重」一节中的 id。该 id 与 `nova download <id>` 相同。名字相近而 id 不同的仓库可能无法加载。
 
-本页与应用内目录一致，数据日期 2026-10-21。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
+本页与应用内目录一致，数据日期 2026-10-22。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
 
 ## 下载 / Download
 
@@ -111,6 +111,16 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 |------|-----------|--------------|------|----------|------|--------------|
 | Laya Multilingual | `aac6fef/laya-multilingual-mlx` | ~700 MB / fp16 | verified | 4 GB | `nova download aac6fef/laya-multilingual-mlx` | [Hugging Face](https://huggingface.co/aac6fef/laya-multilingual-mlx) |
 
+<a id="threed"></a>
+
+### threed
+
+| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
+|------|-----------|--------------|------|----------|------|--------------|
+| Hunyuan3D-2.1 Shape Small (MLX) | `zimengxiong/hunyuan3d-mlx-shape-small` | ~3.8 GB | preview | 16 GB | `nova download zimengxiong/hunyuan3d-mlx-shape-small` | [Hugging Face](https://huggingface.co/zimengxiong/hunyuan3d-mlx-shape-small) |
+| Hunyuan3D-2.1 Shape Large (MLX) | `zimengxiong/hunyuan3d-mlx-shape-large` | ~4.9 GB | preview | 24 GB | `nova download zimengxiong/hunyuan3d-mlx-shape-large` | [Hugging Face](https://huggingface.co/zimengxiong/hunyuan3d-mlx-shape-large) |
+| Hunyuan3D-2.1 Paint PBR Large (MLX) | `zimengxiong/hunyuan3d-mlx-paint-large` | ~8.7 GB | preview | 64 GB | `nova download zimengxiong/hunyuan3d-mlx-paint-large` | [Hugging Face](https://huggingface.co/zimengxiong/hunyuan3d-mlx-paint-large) |
+
 ## 家族浏览 / Family browse
 
 这些条目的 id 以 `*` 结尾，或对应 Hugging Face 搜索页，表示一族权重。用 `nova search` 列出具体 `org/repo`，再 `nova download` 那个 id。「精确权重」一节只收录具体 id。
@@ -131,4 +141,4 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 - `mzbac/flux1.schnell.4bit.mlx` — Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.
 
-表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-21）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。
+表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-22）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。

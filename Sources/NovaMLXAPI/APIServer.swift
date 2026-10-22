@@ -641,6 +641,7 @@ private extension String {
             || self.hasPrefix("/v1/images/matting")
             || self.hasPrefix("/v1/video/talking-head")
             || self.hasPrefix("/v1/videos")
+            || self.hasPrefix("/v1/3d")
     }
 }
 
@@ -2041,6 +2042,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             // Image and video share this query. Registered from its own
             // function: the router closure is already at the stack limit.
             Self.mediaTaskRoutes(inference: inference)
+
+            // MARK: - Task-style 3D Generation (Hunyuan3D-2.1)
+
+            Self.threeDRoutes(inference: inference, modelManager: modelManager)
 
             // MARK: - Async Video Generation (OpenRouter-compatible, h3.c backend)
 

@@ -52,6 +52,9 @@ extension NovaMLXAPIServer {
                 if inference.h3VideoService.job(id: taskId) != nil {
                     return try Self.videoFileResponse(jobId: taskId, inference: inference, index: 0)
                 }
+                if inference.hy3DService.job(id: taskId) != nil {
+                    return try Self.glbFileResponse(jobId: taskId, hy3d: inference.hy3DService)
+                }
                 throw NovaMLXError.modelNotFound("task '\(taskId)'")
             }
 
@@ -64,6 +67,10 @@ extension NovaMLXAPIServer {
                 if let job = inference.h3VideoService.job(id: taskId) {
                     return try Self.jsonResponse(
                         MediaTaskResponse(video: job, progress: inference.h3VideoService.progress(id: taskId)))
+                }
+                if let job = inference.hy3DService.job(id: taskId) {
+                    return try Self.jsonResponse(
+                        MediaTaskResponse(threeD: job, progress: inference.hy3DService.progress(id: taskId)))
                 }
                 throw NovaMLXError.modelNotFound("task '\(taskId)'")
             }
@@ -79,6 +86,11 @@ extension NovaMLXAPIServer {
                     let job = try inference.h3VideoService.cancel(id: taskId)
                     return try Self.jsonResponse(
                         MediaTaskResponse(video: job, progress: inference.h3VideoService.progress(id: taskId)))
+                }
+                if inference.hy3DService.job(id: taskId) != nil {
+                    let job = try inference.hy3DService.cancel(id: taskId)
+                    return try Self.jsonResponse(
+                        MediaTaskResponse(threeD: job, progress: inference.hy3DService.progress(id: taskId)))
                 }
                 throw NovaMLXError.modelNotFound("task '\(taskId)'")
             }

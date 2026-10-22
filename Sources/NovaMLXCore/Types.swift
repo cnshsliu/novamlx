@@ -106,6 +106,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case deepseek
     case nemotron
     case hunyuan
+    case hunyuan3d
     case gptOss
     case whisper
     case qwen3Asr
@@ -134,6 +135,7 @@ public enum ModelType: String, Codable, Sendable, CaseIterable {
     case embedding
     case audio
     case image
+    case threed
     case decision
 }
 
