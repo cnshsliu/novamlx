@@ -100,3 +100,4 @@ This directory is the user-facing documentation, one page per feature.
 | 功能 / Feature | 一句话 / Pitch | 状态 |
 |----------------|----------------|------|
 | [Nemotron 3.5 Bolt 文本 / Nemotron 3.5 Bolt text](nemotron-bolt-text.md) | 本地 74B 级异构 MoE，仅文本，思考默认开启。 | preview |
+| [GLM-5.3-Flash 文本 / GLM-5.3-Flash text](glm-5-3-flash.md) | 本地 glm5_next 文本对话。4-bit 约 256 GB，混合 2-bit 约 128 GB。 | preview |
