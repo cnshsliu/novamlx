@@ -222,6 +222,22 @@ public final class ImageGenerationService: @unchecked Sendable {
         }
     }
 
+    /// Why this loaded model cannot edit. Nil when it can, or when it is not loaded yet.
+    public func editRefusal(modelId: String) -> String? {
+        guard let container = lock.withLock({ containers[modelId] }), container.isLoaded else {
+            return nil
+        }
+        if container.identifier.family == .mossImage {
+            return "Image editing is not supported for MOSS-Image. Use POST /v1/images/generations."
+        }
+        if container.pipeline is QwenImage21Pipeline { return nil }
+        if container.isFlux {
+            return "Image editing is not supported by FLUX models"
+        }
+        if container.pipeline is SDPipeline { return nil }
+        return "Image editing requires a StableDiffusion pipeline"
+    }
+
     public func edit(
         modelId: String,
         image: CGImage,
@@ -235,14 +251,11 @@ public final class ImageGenerationService: @unchecked Sendable {
         steps: Int? = nil,
         strength: Double? = nil
     ) async throws -> ImageGenerationResult {
+        if let refusal = editRefusal(modelId: modelId) {
+            throw NovaMLXError.apiError(refusal)
+        }
         guard let container = lock.withLock({ containers[modelId] }), container.isLoaded else {
             throw NovaMLXError.modelNotFound(modelId)
-        }
-
-        if container.identifier.family == .mossImage {
-            throw NovaMLXError.apiError(
-                "Image editing is not supported for MOSS-Image. Use POST /v1/images/generations."
-            )
         }
 
         if container.pipeline is QwenImage21Pipeline {
@@ -261,10 +274,6 @@ public final class ImageGenerationService: @unchecked Sendable {
                     strength: strength
                 )
             }
-        }
-
-        guard !container.isFlux else {
-            throw NovaMLXError.apiError("Image editing is not supported by FLUX models")
         }
 
         guard let sdPipeline = container.pipeline as? SDPipeline else {

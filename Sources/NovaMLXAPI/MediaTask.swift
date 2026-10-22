@@ -43,7 +43,7 @@ struct MediaTaskResponse: Codable, Sendable {
     init(image job: ImageTaskJob, progress: ImageTaskProgress?) {
         id = job.id
         object = "task"
-        task = "image.generation"
+        task = job.operation == "edit" ? "image.edit" : "image.generation"
         status = job.status.rawValue
         pollingUrl = "/v1/tasks/\(job.id)"
         model = job.model

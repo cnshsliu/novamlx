@@ -170,5 +170,18 @@ struct ImageGenerationTests {
         #expect(json["status"] as? String == "cancelled")
         #expect(json["polling_url"] as? String == "/v1/tasks/\(job.id)")
         #expect(json["content_url"] == nil)
+
+        let edit = service.submitEdit(
+            model: "Qwen/Qwen-Image-2.1", prompt: "make it blue", negativePrompt: "",
+            n: 1, width: 1024, height: 1024, seed: nil, steps: nil,
+            responseFormat: "b64_json", imageData: Data([0x89]), maskData: nil, strength: 0.4)
+        #expect(edit.id.hasPrefix("edt-"))
+        #expect(edit.status == .pending)
+        let editJson = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(MediaTaskResponse(image: edit, progress: nil))
+        ) as! [String: Any]
+        #expect(editJson["task"] as? String == "image.edit")
+        #expect(editJson["polling_url"] as? String == "/v1/tasks/\(edit.id)")
+        #expect(try service.cancel(id: edit.id).status == .cancelled)
     }
 }

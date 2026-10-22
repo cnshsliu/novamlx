@@ -1599,12 +1599,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let format = responseFormat ?? "b64_json"
                 let resolvedN = min(max(n, 1), 4)
 
-                // Convert uploaded image to CGImage
-                guard let inputCGImage = Self.dataToCGImage(imageData) else {
-                    throw NovaMLXError.apiError("Failed to decode input image")
-                }
-                let maskCGImage = maskData.flatMap { Self.dataToCGImage($0) }
-
                 // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {
                     if Self.wantsNoAutoload(request) {
@@ -1619,6 +1613,34 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
                     _ = try await inference.imageGenerationService.loadModel(from: record.localURL, config: config)
                 }
+                if let refusal = inference.imageGenerationService.editRefusal(modelId: model) {
+                    throw NovaMLXError.apiError(refusal)
+                }
+                if Self.wantsAsyncImage(request) {
+                    let job = inference.imageTaskService.submitEdit(
+                        model: model,
+                        prompt: prompt,
+                        negativePrompt: negativePrompt,
+                        n: resolvedN,
+                        width: width,
+                        height: height,
+                        seed: seed.map { UInt64($0) },
+                        steps: steps,
+                        responseFormat: format,
+                        imageData: imageData,
+                        maskData: maskData,
+                        strength: strength
+                    )
+                    return try Self.jsonResponse(
+                        MediaTaskResponse(image: job, progress: nil),
+                        httpStatus: .accepted)
+                }
+
+                // Convert uploaded image to CGImage
+                guard let inputCGImage = Self.dataToCGImage(imageData) else {
+                    throw NovaMLXError.apiError("Failed to decode input image")
+                }
+                let maskCGImage = maskData.flatMap { Self.dataToCGImage($0) }
 
                 let editStart = Date()
                 let result = try await inference.imageGenerationService.edit(
