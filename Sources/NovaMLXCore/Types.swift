@@ -105,6 +105,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case bailing
     case deepseek
     case nemotron
+    case minimax
     case hunyuan
     case hunyuan3d
     case gptOss

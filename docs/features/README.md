@@ -102,3 +102,4 @@ This directory is the user-facing documentation, one page per feature.
 | 功能 / Feature | 一句话 / Pitch | 状态 |
 |----------------|----------------|------|
 | [Nemotron 3.5 Bolt 文本 / Nemotron 3.5 Bolt text](nemotron-bolt-text.md) | 本地 74B 级异构 MoE，仅文本，思考默认开启。 | preview |
+| [MiniMax-M3.1-Flash 文本 / MiniMax-M3.1-Flash text](minimax-m3-1-flash.md) | 文本量化：256 GB 可常驻 3-bit，128 GB 用 TIE 流式专家。 | preview |

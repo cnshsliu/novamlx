@@ -21,6 +21,6 @@
 
 **Chat 模板：** `ChatTemplateProcessorRegistry` 按 `(ModelFamily, ChatTemplateFormat)` 路由。家族处理器负责控制令牌、隐式思考检测、停止序列注入。
 
-草稿模型推荐也写在该注册表里。见 [推测解码](speculative-decoding.md)。Nemotron Bolt 文本使用单独的 `nemotron_h_puzzle` 注册，不在上表默认行中。见 [Nemotron 3.5 Bolt 文本](nemotron-bolt-text.md)。
+草稿模型推荐也写在该注册表里。见 [推测解码](speculative-decoding.md)。Nemotron Bolt 文本使用单独的 `nemotron_h_puzzle` 注册，不在上表默认行中。见 [Nemotron 3.5 Bolt 文本](nemotron-bolt-text.md)。MiniMax-M3.1-Flash 文本使用单独的 `minimax_m3_vl` 注册（`ModelFamily.minimax`）。见 [MiniMax-M3.1-Flash 文本](minimax-m3-1-flash.md)。
 
 正文来自 `features.zh-CN.md`「模型架构」；标题与 pitch 为英文。
