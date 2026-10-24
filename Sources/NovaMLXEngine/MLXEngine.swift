@@ -933,13 +933,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                       mt == "nemotron_h_puzzle" || mt == "nemotron_h" {
                 container.config.hasLinearAttention = true
                 NovaMLXLog.info("[Engine] Detected \(mt) hybrid Mamba model — will use ContinuousBatcher")
-            } else if let mt = tc["model_type"] as? String, mt == "flint" {
-                // Flint's hybrid (RotatingKVCache + KVCacheSimple) loads fine
-                // under FusedBatchScheduler, but the fused streaming path has
-                // no ToolCallProcessor — GLM4-dialect tool calls would leak as
-                // raw text. ContinuousBatcher wires tool parsing.
-                container.config.hasLinearAttention = true
-                NovaMLXLog.info("[Engine] Detected flint model — will use ContinuousBatcher (fused path lacks tool-call parsing)")
             }
         }
 
