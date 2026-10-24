@@ -116,6 +116,77 @@ struct ActiveStreamSequence: @unchecked Sendable {
     var accumulatedTokenIds: [Int] = []
     var lastDecodedText: String = ""
 
+    /// Reference box: the sequence struct is copied across the decode loop
+    /// and prefill, so tool-parsing state must be shared, not value-copied.
+    /// Nil when the model declares no tool-call format — identical to the
+    /// pre-tool-parsing behavior.
+    final class ToolStreamState: @unchecked Sendable {
+        let processor: ToolCallProcessor
+        var emittedToolCall = false
+        init(processor: ToolCallProcessor) {
+            self.processor = processor
+        }
+    }
+
+    var toolStream: ToolStreamState? = nil
+
+    /// Route one decoded text chunk through the tool parser and yield response
+    /// text / tool calls. Falls through untouched when no state is attached.
+    /// `logprob` attaches to the first response output.
+    func yieldProcessed(_ decoded: String, logprob: (Float, [TopLogprob])? = nil) {
+        guard let state = toolStream else {
+            if !decoded.isEmpty {
+                safeYield(Token(id: 0, text: decoded, logprob: logprob?.0, topLogprobs: logprob?.1))
+            }
+            return
+        }
+        var first = true
+        for out in state.processor.processChunkOutputs(decoded) {
+            switch out {
+            case .response(let text):
+                if !text.isEmpty {
+                    safeYield(Token(id: 0, text: text,
+                        logprob: first ? logprob?.0 : nil,
+                        topLogprobs: first ? logprob?.1 : nil))
+                }
+            case .toolCall(let tc):
+                state.emittedToolCall = true
+                safeYield(Token(id: 0, text: "", toolCall: Self.toolCallResult(tc)))
+            case .rejectedToolCall:
+                break
+            }
+            first = false
+        }
+    }
+
+    /// Flush buffered text / pending calls at end of stream.
+    func drainToolProcessor() {
+        guard let state = toolStream else { return }
+        for out in state.processor.processEOSOutputs() {
+            switch out {
+            case .response(let text):
+                if !text.isEmpty { safeYield(Token(id: 0, text: text)) }
+            case .toolCall(let tc):
+                state.emittedToolCall = true
+                safeYield(Token(id: 0, text: "", toolCall: Self.toolCallResult(tc)))
+            case .rejectedToolCall:
+                break
+            }
+        }
+    }
+
+    /// Mirror of MLXEngine's iterator mapping: mlx-lm ToolCall → NovaMLX
+    /// ToolCallResult with stable id and JSON-string arguments.
+    static func toolCallResult(_ tc: MLXLMCommon.ToolCall) -> ToolCallResult {
+        let argsData = try? JSONSerialization.data(
+            withJSONObject: tc.function.arguments.mapValues { $0.anyValue })
+        return ToolCallResult(
+            id: "call_\(UUID().uuidString.prefix(8).lowercased())",
+            functionName: tc.function.name,
+            arguments: argsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        )
+    }
+
     /// Harmony channel state: tracks whether the previous token was a scrubbed control token.
     /// When the model outputs <|channel|>final<|message|>, these arrive as 3 separate tokens.
     /// <|channel|> is scrubbed to "", "final" passes through, <|message|> is scrubbed to "".
@@ -327,9 +398,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         var text = ""
         var completionTokens = 0
         var finishReason: FinishReason = .stop
+        var collectedToolCalls: [ToolCallResult] = []
 
         for try await token in stream {
             if let fr = token.finishReason { finishReason = fr }
+            if let tc = token.toolCall { collectedToolCalls.append(tc) }
             if !token.text.isEmpty { text += token.text; completionTokens += 1 }
         }
 
@@ -346,6 +419,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         return InferenceResult(
             id: request.id, model: modelId, text: text,
+            toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls,
             tokensPerSecond: tps, promptTokens: promptTokensBox.value,
             completionTokens: completionTokens, finishReason: finishReason
         )
@@ -547,6 +621,70 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     // MARK: - Prefill
 
+
+    /// Build the per-sequence tool-call processor from the model's declared
+    /// dialect (container configuration) and the request's tool specs. Nil for
+    /// models with no format — identical to the pre-tool-parsing behavior.
+    nonisolated static func makeToolProcessor(
+        mlxContainer: MLXLMCommon.ModelContainer,
+        request: InferenceRequest
+    ) async -> ActiveStreamSequence.ToolStreamState? {
+        guard let format = await mlxContainer.configuration.toolCallFormat else { return nil }
+        let toolSpecs: [[String: any Sendable]]? = request.tools?.map { tool in
+            tool.mapValues { value in
+                Self.anyToSendable(value)
+            }
+        }
+        return ActiveStreamSequence.ToolStreamState(
+            processor: ToolCallProcessor(format: format, tools: toolSpecs))
+    }
+
+    private nonisolated static func anyToSendable(_ value: Any) -> any Sendable {
+        switch value {
+        case let s as String: return s
+        case let n as NSNumber: return n
+        case let b as Bool: return b
+        case let a as [Any]: return a.map(anyToSendable)
+        case let d as [String: Any]:
+            return d.mapValues(anyToSendable)
+        case let s as any Sendable: return s
+        default: return String(describing: value)
+        }
+    }
+
+    /// Pre-shared-state variant of `ActiveStreamSequence.yieldProcessed` for the
+    /// first-token yields in prefill (sequence not constructed yet).
+    nonisolated static func emitProcessed(
+        _ state: ActiveStreamSequence.ToolStreamState?,
+        _ text: String,
+        continuation: AsyncThrowingStream<Token, Error>.Continuation,
+        logprob: (Float, [TopLogprob])? = nil
+    ) {
+        guard let state else {
+            if !text.isEmpty {
+                continuation.yield(Token(id: 0, text: text, logprob: logprob?.0, topLogprobs: logprob?.1))
+            }
+            return
+        }
+        var first = true
+        for out in state.processor.processChunkOutputs(text) {
+            switch out {
+            case .response(let t):
+                if !t.isEmpty {
+                    continuation.yield(Token(id: 0, text: t,
+                        logprob: first ? logprob?.0 : nil,
+                        topLogprobs: first ? logprob?.1 : nil))
+                }
+            case .toolCall(let tc):
+                state.emittedToolCall = true
+                continuation.yield(Token(id: 0, text: "", toolCall: ActiveStreamSequence.toolCallResult(tc)))
+            case .rejectedToolCall:
+                break
+            }
+            first = false
+        }
+    }
+
     private func prefillSequence(
         request: InferenceRequest,
         continuation: AsyncThrowingStream<Token, Error>.Continuation
@@ -556,6 +694,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             throw NovaMLXError.modelNotFound(request.model)
         }
 
+        let toolStream = await Self.makeToolProcessor(mlxContainer: mlxContainer, request: request)
         let hasImages = request.messages.contains { $0.images?.isEmpty == false }
         let userInput = try await engine.buildUserInput(request: request, hasImages: hasImages)
         let input = try await mlxContainer.prepare(input: userInput)
@@ -755,9 +894,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         // SAFE: pre-shared-state yields — seq hasn't entered activeByModel yet
         let scrubbedFirstToken = MLXEngine.scrubControlTokens(firstTokenText)
         if !isEOS && !scrubbedFirstToken.isEmpty {
-            continuation.yield(Token(id: 0, text: scrubbedFirstToken,
-                logprob: resolvedLogprobs?.logprob,
-                topLogprobs: resolvedLogprobs?.topLogprobs))
+            Self.emitProcessed(toolStream, scrubbedFirstToken,
+                continuation: continuation,
+                logprob: resolvedLogprobs.map { ($0.logprob, $0.topLogprobs) })
         }
 
         let completionCount: Int
@@ -772,7 +911,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             isFinished = false
         }
 
-        return ActiveStreamSequence(
+        var seq = ActiveStreamSequence(
             id: request.id,
             request: request,
             caches: caches,
@@ -795,6 +934,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             lastDecodedText: initialDecodedText,
             previousTokenWasControl: scrubbedFirstToken.isEmpty && !firstTokenText.isEmpty
         )
+        seq.toolStream = toolStream
+        return seq
     }
 
     /// Prefill only the remaining tokens after a prefix cache hit.
@@ -873,14 +1014,15 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
 
         // SAFE: pre-shared-state yield — seq hasn't entered activeByModel yet
+        let toolStream = await Self.makeToolProcessor(mlxContainer: mlxContainer, request: request)
         let scrubbedPrefixToken = MLXEngine.scrubControlTokens(firstTokenText)
         if !scrubbedPrefixToken.isEmpty {
-            continuation.yield(Token(id: 0, text: scrubbedPrefixToken,
-                logprob: prefixLogprobs?.logprob,
-                topLogprobs: prefixLogprobs?.topLogprobs))
+            Self.emitProcessed(toolStream, scrubbedPrefixToken,
+                continuation: continuation,
+                logprob: prefixLogprobs.map { ($0.logprob, $0.topLogprobs) })
         }
 
-        return ActiveStreamSequence(
+        var seq = ActiveStreamSequence(
             id: request.id,
             request: request,
             caches: restoredCaches,
@@ -902,6 +1044,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             accumulatedTokenIds: prefixAccumulatedIds,
             lastDecodedText: prefixDecodedText
         )
+        seq.toolStream = toolStream
+        return seq
     }
 
     // MARK: - Logprob Helper
@@ -1478,13 +1622,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         seq.previousTokenWasControl = false
                     }
                     seq.generatedText = seq.lastDecodedText
-                    if !decoded.isEmpty {
+                    if !decoded.isEmpty || seq.toolStream != nil {
                         // Attach logprobs to the first (real decode) token only
                         let tokenLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? =
                             (tokenIdx == 0) ? result.logprobs : nil
-                        seq.safeYield(Token(id: 0, text: decoded,
-                            logprob: tokenLogprobs?.logprob,
-                            topLogprobs: tokenLogprobs?.topLogprobs))
+                        seq.yieldProcessed(decoded, logprob: tokenLogprobs)
                     }
 
                     lock.withLock { totalTokensViaFused += 1 }
@@ -1527,7 +1669,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     }
 
                     if isEOS || atMax || hitStop || hitControlToken {
-                        let finishReason: FinishReason = atMax ? .length : .stop
+                        // Flush any tool-call buffer the parser still holds, then
+                        // mirror the ContinuousBatcher finish semantics: a stop
+                        // that produced tool calls reports finish_reason=tool_calls.
+                        seq.drainToolProcessor()
+                        var finishReason: FinishReason = atMax ? .length : .stop
+                        if seq.toolStream?.emittedToolCall == true && finishReason == .stop {
+                            finishReason = .toolCalls
+                        }
                         // Harmony: if generation ends while still in the
                         // analysis channel (no `<|channel|>final<|message|>`
                         // emitted yet), close the open `<think>` block so
