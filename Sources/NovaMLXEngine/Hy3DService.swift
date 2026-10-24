@@ -177,6 +177,7 @@ public final class Hy3DService: @unchecked Sendable {
         let container: Hy3DContainer
         if isPaint {
             NovaMLXLog.info("[Hy3D] Registering paint model \(modelId) at \(url.path) (weights load per job)")
+            try Self.ensurePaintPackageLayout(url)
             container = Hy3DContainer(modelId: modelId, directory: url, isPaint: true, generator: nil)
         } else {
             guard let weights = Self.shapeWeightsURL(in: url) else {
@@ -221,6 +222,28 @@ public final class Hy3DService: @unchecked Sendable {
         return fm.fileExists(atPath: url.appendingPathComponent("unet/config.json").path)
             && fm.fileExists(atPath: url.appendingPathComponent("dinov2").appendingPathComponent("config.json").path)
             && !fm.fileExists(atPath: url.appendingPathComponent("config.json").path)
+    }
+
+    /// The MLX paint repos are flat (`unet/`, `vae/`, `dinov2/`, `realesrgan/`),
+    /// but `PaintPipeline` expects the upstream weights-package layout
+    /// (`hunyuan3d-paintpbr-v2-1/unet/…`, `hunyuan3d-paint-v2-0/vae/…`,
+    /// `dinov2-giant/…`). Bridge the two with idempotent symlinks inside the
+    /// model directory so a plain `nova download` works without manual layout
+    /// surgery.
+    static func ensurePaintPackageLayout(_ dir: URL) throws {
+        let fm = FileManager.default
+        func bridge(_ packaged: String, to existing: String) throws {
+            let link = dir.appendingPathComponent(packaged)
+            guard !fm.fileExists(atPath: link.path) else { return }
+            try fm.createDirectory(
+                at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.createSymbolicLink(
+                at: link, withDestinationURL: dir.appendingPathComponent(existing))
+        }
+        try bridge("hunyuan3d-paintpbr-v2-1/unet", to: "unet")
+        try bridge("hunyuan3d-paint-v2-0/unet", to: "unet")
+        try bridge("hunyuan3d-paint-v2-0/vae", to: "vae")
+        try bridge("dinov2-giant", to: "dinov2")
     }
 
     private static func shapeWeightsURL(in directory: URL) -> URL? {

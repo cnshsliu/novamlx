@@ -132,4 +132,27 @@ struct ThreeDGenerationTests {
         #expect(!Hy3DService.isValidId("img-abc"))
         #expect(Hy3DService.isValidId("h3d-abc-123"))
     }
+
+    @Test("paint package layout bridges the flat HF repo to the upstream layout")
+    func testPaintLayoutBridge() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hy3d_paint_test_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        for sub in ["unet", "vae", "dinov2", "realesrgan"] {
+            try fm.createDirectory(at: dir.appendingPathComponent(sub), withIntermediateDirectories: true)
+        }
+        try Data([1]).write(to: dir.appendingPathComponent("unet/config.json"))
+
+        try Hy3DService.ensurePaintPackageLayout(dir)
+
+        // PaintPipeline's expected paths now resolve through the symlinks.
+        #expect(fm.fileExists(atPath: dir.appendingPathComponent("hunyuan3d-paintpbr-v2-1/unet/config.json").path))
+        #expect(fm.fileExists(atPath: dir.appendingPathComponent("hunyuan3d-paint-v2-0/unet/config.json").path))
+        #expect(fm.fileExists(atPath: dir.appendingPathComponent("hunyuan3d-paint-v2-0/vae").path))
+        #expect(fm.fileExists(atPath: dir.appendingPathComponent("dinov2-giant").path))
+
+        // Idempotent: a second bridge pass does not throw or duplicate.
+        try Hy3DService.ensurePaintPackageLayout(dir)
+    }
 }
