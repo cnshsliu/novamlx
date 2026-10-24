@@ -6,7 +6,7 @@
 
 「支持」指「精确权重」一节中的 id。该 id 与 `nova download <id>` 相同。名字相近而 id 不同的仓库可能无法加载。
 
-本页与应用内目录一致，数据日期 2026-10-22。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
+本页与应用内目录一致，数据日期 2026-10-24。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
 
 ## 下载 / Download
 
@@ -48,6 +48,7 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 | Kimi-K2.7-Code | `mlx-community/Kimi-K2.7-Code-4bit` | ~10 GB | preview | — | `nova download mlx-community/Kimi-K2.7-Code-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Kimi-K2.7-Code-4bit) |
 | GPT-OSS-120B | `mlx-community/gpt-oss-120b-MXFP4-Q8` | ~75 GB | preview | — | `nova download mlx-community/gpt-oss-120b-MXFP4-Q8` | [Hugging Face](https://huggingface.co/mlx-community/gpt-oss-120b-MXFP4-Q8) |
 | DeepSeek-V4-Flash | `mlx-community/DeepSeek-V4-Flash-4bit` | ~30 GB | preview | — | `nova download mlx-community/DeepSeek-V4-Flash-4bit` | [Hugging Face](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-4bit) |
+| Flint 40B A2.5B (OptiQ 4-bit) | `mlx-community/flint-OptiQ-4bit` | ~27.5 GB | preview | 48 GB | `nova download mlx-community/flint-OptiQ-4bit` | [Hugging Face](https://huggingface.co/mlx-community/flint-OptiQ-4bit) |
 
 <a id="vlm"></a>
 
@@ -141,4 +142,4 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 - `mzbac/flux1.schnell.4bit.mlx` — Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.
 
-表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-22）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。
+表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-24）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。
