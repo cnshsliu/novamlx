@@ -578,6 +578,7 @@ private func kindBadge(_ kind: InferenceKind?, placeholder: Color? = nil) -> som
         case .tts: return .purple
         case .image: return .pink
         case .video: return .orange
+        case .threed: return .indigo
         case .vlm: return .teal
         case .llm: return NovaTheme.Colors.accent
         case nil: return placeholder ?? NovaTheme.Colors.textTertiary

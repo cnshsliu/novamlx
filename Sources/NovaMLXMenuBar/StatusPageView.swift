@@ -337,6 +337,7 @@ struct StatusPageView: View {
         case .tts: return "speaker.wave.2"
         case .image: return "photo"
         case .video: return "video.fill"
+        case .threed: return "cube.transparent"
         case .vlm: return "eye"
         case .llm: return "bolt.fill"
         case nil: return "bolt.fill"
