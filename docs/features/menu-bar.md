@@ -14,7 +14,7 @@
 
 | 页面 | 内容 |
 |------|------|
-| **Status** | 实时 TPS 曲线（90 个采样、峰值、零值裁剪）、CPU / 内存 / GPU、设备信息、峰值 TPS |
+| **Status** | 实时 TPS 曲线（90 个采样、峰值、零值裁剪）、CPU / 内存 / GPU、设备信息、峰值 TPS。页脚一行：Debug 或 Release、版本、构建时间（到秒）、`.app` 路径 |
 | **Dashboard** | 已加载模型、活跃请求、内存、uptime、快速加载 |
 | **Local Inference** | 已激活模型：盯住（Pin）、卸载、复制名称、Play 到 Playground。盯住打开时卸载按钮不出现，重启仍加载。已下载、尚未加载：类型分栏（全部 / LLM / VLM / Embed / Audio / Image）、按磁盘筛选、显示辅助模型（默认隐藏 DSpark / DFlash / MTP）。模型卡 |
 | **Downloads** | 分类、推荐模型卡、分阶段进度、卡顿检测、镜像配置 |

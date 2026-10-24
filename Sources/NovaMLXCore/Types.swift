@@ -4,7 +4,7 @@ import Logging
 
 public enum NovaMLX {}
 
-public let version = "1.6.0"
+public let version = "1.7.0"
 
 public var buildTimestamp: String {
     AppBuildIdentity.current.stamp

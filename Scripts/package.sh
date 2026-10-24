@@ -7,13 +7,18 @@ VERSION="${1:-$(grep 'public let version' Sources/NovaMLXCore/Types.swift 2>/dev
 # Pull-request refs are "11/merge". A slash breaks sed and the DMG path.
 VERSION="${VERSION//\//-}"
 ARCH="$(uname -m)"
-# SwiftPM 6.2 names the product directory with the deployment target
-# (.build/arm64-apple-macosx26.0/release). Older toolchains omit the version.
+# SwiftPM has used the triple dir and .build/out/Products/Release. A stale
+# triple dir still contains NovaMLX, so pick the newest host binary.
 BUILD_DIR=""
-for candidate in ".build/${ARCH}-apple-macosx"*/release ".build/release"; do
-	if [ -f "$candidate/NovaMLX" ]; then
-		BUILD_DIR="$candidate"
-		break
+BEST_MTIME=0
+for candidate in .build/${ARCH}-apple-macosx*/release ".build/release" ".build/out/Products/Release"; do
+	if [ ! -f "$candidate/NovaMLX" ]; then
+		continue
+	fi
+	mtime=$(stat -f %m "$candidate/NovaMLX" 2>/dev/null || echo 0)
+	if [ "$mtime" -gt "$BEST_MTIME" ]; then
+		BEST_MTIME=$mtime
+		BUILD_DIR=$candidate
 	fi
 done
 if [ -z "$BUILD_DIR" ]; then
