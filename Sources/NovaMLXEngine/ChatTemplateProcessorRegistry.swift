@@ -23,6 +23,9 @@ enum ChatTemplateProcessorRegistry {
         // GPT-OSS: uses <|start|>role<|channel|>type<|message|> format (OpenAI Harmony)
         case (.gptOss, _):          return HarmonyProcessor()
 
+        // Recursive Flint: <|system|>/<|user|>/<|assistant|>/<|observation|> headers
+        case (.flint, _):           return FlintProcessor()
+
         // HunYuan (Hy-MT2 translation models): ｜hy_User｜ / ｜hy_Assistant｜
         case (.hunyuan, _):         return HunyuanProcessor()
 

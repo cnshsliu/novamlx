@@ -2,7 +2,6 @@
   "$schema": "https://novamlx.dev/chat-template-registry.v1.json",
   "version": 1,
   "_doc": "Data-driven chat-template & family configuration. Loaded by ChatTemplateLibrary at startup. User overrides at ~/.nova/templates/registry.json are merged on top of this file (user takes precedence per-key).",
-
   "templateOverrides": {
     "_doc": "Force a bundled .jinja template for a specific model id. Used when the upstream repo ships a stripped or wrong template.",
     "exact": {
@@ -21,14 +20,18 @@
       "mlx-community/gemma-4-31b": "gemma4_channel_thinking"
     }
   },
-
   "families": {
     "_doc": "Per-family interpretation rules. Loaded by per-family ChatTemplateProcessors and TurnStopProcessor. All regex patterns are POSIX-extended/ICU-compatible.",
-
     "qwen": {
       "label": "Qwen 2/3/3.5 (ChatML)",
-      "expectedFormats": ["imStartEnd", "turnRole"],
-      "expectedEosTokens": ["<|im_end|>", "<|endoftext|>"],
+      "expectedFormats": [
+        "imStartEnd",
+        "turnRole"
+      ],
+      "expectedEosTokens": [
+        "<|im_end|>",
+        "<|endoftext|>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*user\\s*\\n",
         "(?m)^\\s*assistant\\s*\\n",
@@ -40,16 +43,25 @@
         "<\\|begin_of_thought\\|?>",
         "<\\|end_of_thought\\|?>"
       ],
-      "thinkingMarkers": ["<think>", "</think>", "<|begin_of_thought|>", "<|end_of_thought|>"],
+      "thinkingMarkers": [
+        "<think>",
+        "</think>",
+        "<|begin_of_thought|>",
+        "<|end_of_thought|>"
+      ],
       "preserveThinkingSupported": true,
       "softSwitchSupported": true,
       "_notes": "softSwitch (/think /no_think) supported by Qwen3 base; Qwen3.5/3.6 dropped soft switch but kept enable_thinking via chat_template_kwargs."
     },
-
     "gemma": {
       "label": "Gemma 2/3/4 (start_of_turn)",
-      "expectedFormats": ["startOfTurn"],
-      "expectedEosTokens": ["<end_of_turn>", "<eos>"],
+      "expectedFormats": [
+        "startOfTurn"
+      ],
+      "expectedEosTokens": [
+        "<end_of_turn>",
+        "<eos>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*user\\s*\\n",
         "(?m)^\\s*model\\s*\\n"
@@ -59,15 +71,23 @@
         "<end_of_turn>",
         "<\\|channel\\|>"
       ],
-      "thinkingMarkers": ["<|channel|>thought", "<think>", "</think>"],
+      "thinkingMarkers": [
+        "<|channel|>thought",
+        "<think>",
+        "</think>"
+      ],
       "preserveThinkingSupported": false,
       "softSwitchSupported": false
     },
-
     "bailing": {
       "label": "Bailing / Ling (turn-role native)",
-      "expectedFormats": ["turnRole"],
-      "expectedEosTokens": ["<|turn>user", "<|endoftext|>"],
+      "expectedFormats": [
+        "turnRole"
+      ],
+      "expectedEosTokens": [
+        "<|turn>user",
+        "<|endoftext|>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*user\\s*\\n",
         "(?m)^\\s*assistant\\s*\\n",
@@ -77,16 +97,25 @@
         "<\\|/turn\\|?>",
         "<\\|endoftext\\|?>"
       ],
-      "thinkingMarkers": ["<think>", "</think>", "<|begin_of_thought|>", "<|end_of_thought|>"],
+      "thinkingMarkers": [
+        "<think>",
+        "</think>",
+        "<|begin_of_thought|>",
+        "<|end_of_thought|>"
+      ],
       "preserveThinkingSupported": false,
       "softSwitchSupported": false,
       "_notes": "Bailing/Ling LEGITIMATELY uses <|turn> in chat template — do NOT add it to leakageBlacklist."
     },
-
     "gptOss": {
       "label": "GPT-OSS (OpenAI Harmony)",
-      "expectedFormats": ["harmony"],
-      "expectedEosTokens": ["<|return|>", "<|endoftext|>"],
+      "expectedFormats": [
+        "harmony"
+      ],
+      "expectedEosTokens": [
+        "<|return|>",
+        "<|endoftext|>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*user\\s*\\n",
         "(?m)^\\s*assistant\\s*\\n"
@@ -96,35 +125,54 @@
         "<\\|end\\|?>",
         "<\\|return\\|?>"
       ],
-      "thinkingMarkers": ["<|channel|>analysis", "<|message|>", "<|channel|>", "<|constrain|>", "<|call|>"],
+      "thinkingMarkers": [
+        "<|channel|>analysis",
+        "<|message|>",
+        "<|channel|>",
+        "<|constrain|>",
+        "<|call|>"
+      ],
       "preserveThinkingSupported": false,
       "softSwitchSupported": false,
       "_notes": "Harmony format ALWAYS thinks (analysis channel). leakageBlacklist intentionally narrow because <|channel|>, <|message|> are structural and must pass through."
     },
-
     "deepseek": {
       "label": "DeepSeek (R1 / V3 / V4)",
-      "expectedFormats": ["deepSeek"],
-      "expectedEosTokens": ["<\uff5cend\u2581of\u2581sentence\uff5c>", "<|endoftext|>"],
+      "expectedFormats": [
+        "deepSeek"
+      ],
+      "expectedEosTokens": [
+        "<｜end▁of▁sentence｜>",
+        "<|endoftext|>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*user\\s*\\n",
         "(?m)^\\s*assistant\\s*\\n"
       ],
       "leakageBlacklist": [
-        "<\uff5cbegin\u2581of\u2581sentence\uff5c>",
-        "<\uff5cend\u2581of\u2581sentence\uff5c>",
-        "<\uff5cUser\uff5c>",
-        "<\uff5cAssistant\uff5c>"
+        "<｜begin▁of▁sentence｜>",
+        "<｜end▁of▁sentence｜>",
+        "<｜User｜>",
+        "<｜Assistant｜>"
       ],
-      "thinkingMarkers": ["<think>", "</think>"],
+      "thinkingMarkers": [
+        "<think>",
+        "</think>"
+      ],
       "preserveThinkingSupported": false,
       "softSwitchSupported": false
     },
-
     "llama": {
       "label": "Llama (instruct chat)",
-      "expectedFormats": ["imStartEnd", "unknown"],
-      "expectedEosTokens": ["<|eot_id|>", "</s>", "<|end_of_text|>"],
+      "expectedFormats": [
+        "imStartEnd",
+        "unknown"
+      ],
+      "expectedEosTokens": [
+        "<|eot_id|>",
+        "</s>",
+        "<|end_of_text|>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*user\\s*\\n",
         "(?m)^\\s*assistant\\s*\\n"
@@ -139,11 +187,14 @@
       "preserveThinkingSupported": false,
       "softSwitchSupported": false
     },
-
     "mistral": {
       "label": "Mistral / Mixtral (INST)",
-      "expectedFormats": ["unknown"],
-      "expectedEosTokens": ["</s>"],
+      "expectedFormats": [
+        "unknown"
+      ],
+      "expectedEosTokens": [
+        "</s>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*\\[INST\\]"
       ],
@@ -157,11 +208,15 @@
       "preserveThinkingSupported": false,
       "softSwitchSupported": false
     },
-
     "phi": {
       "label": "Phi (microsoft)",
-      "expectedFormats": ["imStartEnd"],
-      "expectedEosTokens": ["<|end|>", "<|endoftext|>"],
+      "expectedFormats": [
+        "imStartEnd"
+      ],
+      "expectedEosTokens": [
+        "<|end|>",
+        "<|endoftext|>"
+      ],
       "hallucinationPatterns": [
         "(?m)^\\s*user\\s*\\n",
         "(?m)^\\s*assistant\\s*\\n"
@@ -176,32 +231,42 @@
       "preserveThinkingSupported": false,
       "softSwitchSupported": false
     },
-
     "starcoder": {
       "label": "Starcoder (code completion)",
-      "expectedFormats": ["unknown"],
-      "expectedEosTokens": ["<|endoftext|>"],
+      "expectedFormats": [
+        "unknown"
+      ],
+      "expectedEosTokens": [
+        "<|endoftext|>"
+      ],
       "hallucinationPatterns": [],
-      "leakageBlacklist": ["<\\|endoftext\\|?>"],
+      "leakageBlacklist": [
+        "<\\|endoftext\\|?>"
+      ],
       "thinkingMarkers": [],
       "preserveThinkingSupported": false,
       "softSwitchSupported": false
     },
-
     "claude": {
       "label": "Claude (Anthropic) — locally-hosted finetunes",
-      "expectedFormats": ["unknown"],
+      "expectedFormats": [
+        "unknown"
+      ],
       "expectedEosTokens": [],
       "hallucinationPatterns": [
         "(?m)^\\s*Human:\\s*",
         "(?m)^\\s*Assistant:\\s*"
       ],
       "leakageBlacklist": [],
-      "thinkingMarkers": ["<scratchpad>", "</scratchpad>", "<thinking>", "</thinking>"],
+      "thinkingMarkers": [
+        "<scratchpad>",
+        "</scratchpad>",
+        "<thinking>",
+        "</thinking>"
+      ],
       "preserveThinkingSupported": false,
       "softSwitchSupported": false
     },
-
     "other": {
       "label": "Unknown family — conservative defaults",
       "expectedFormats": [],
@@ -215,9 +280,37 @@
       "preserveThinkingSupported": false,
       "softSwitchSupported": false,
       "_notes": "Default fallback. Does NOT auto-strip family-specific tokens to avoid corrupting legitimate outputs from unknown architectures."
+    },
+    "flint": {
+      "label": "Recursive Flint",
+      "expectedFormats": [
+        "flint"
+      ],
+      "expectedEosTokens": [
+        "<|end_of_text|>",
+        "<|user|>",
+        "<|observation|>",
+        "<|developer|>"
+      ],
+      "hallucinationPatterns": [],
+      "leakageBlacklist": [
+        "<\\|begin_of_text\\|?>",
+        "<\\|end_of_text\\|?>",
+        "<\\|system\\|?>",
+        "<\\|user\\|?>",
+        "<\\|assistant\\|?>",
+        "<\\|observation\\|?>",
+        "<\\|developer\\|?>"
+      ],
+      "thinkingMarkers": [
+        "<think>",
+        "</think>"
+      ],
+      "preserveThinkingSupported": true,
+      "softSwitchSupported": false,
+      "_notes": "Llama-3-style pipe role headers; role headers are eos ids and turn boundaries. Tool calls use the GLM4 dialect (handled by the glm4 streaming parser, envelope excluded from the stop set)."
     }
   },
-
   "familyDetection": {
     "_doc": "Extends ModelDiscovery's hardcoded maps without recompiling. Merged with the built-in Swift maps; this file's entries take precedence.",
     "byModelType": {

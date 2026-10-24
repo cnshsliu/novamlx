@@ -541,6 +541,16 @@ struct DownloadsPageView: View {
                             .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
+                    if result.verified == true {
+                        Text(l10n.tr("models.verifiedBadge"))
+                            .font(.caption2.weight(.bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(NovaTheme.Colors.statusOK.opacity(0.18))
+                            .foregroundColor(NovaTheme.Colors.statusOK)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .help("In the NovaMLX verified catalog — tested and supported.")
+                    }
                 }
                 if !result.tags.isEmpty {
                     HStack(spacing: 4) {
@@ -1150,7 +1160,10 @@ struct DownloadsPageView: View {
 
                     var results = resultsArray.compactMap { r -> HFSearchResult? in
                         guard let id = r["id"] as? String else { return nil }
-                        return HFSearchResult(id: id, tags: r["tags"] as? [String] ?? [])
+                        return HFSearchResult(
+                            id: id,
+                            tags: r["tags"] as? [String] ?? [],
+                            verified: r["verified"] as? Bool)
                     }
                     if searchMlxOnly {
                         results = results.filter {

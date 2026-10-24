@@ -102,6 +102,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case hunyuan
     case hunyuan3d
     case gptOss
+    case flint
     case whisper
     case qwen3Asr
     case qwen3Tts

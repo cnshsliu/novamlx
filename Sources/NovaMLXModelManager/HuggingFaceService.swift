@@ -14,6 +14,10 @@ public struct HFModelInfo: Codable, Sendable {
     public let lastModified: String?
     public let privateRepo: Bool?
     public let gated: Bool?
+    /// True when the repo id is in the NovaMLX verified catalog (supported).
+    /// Tagged by the search route when "Allow unverified downloads" is on, so
+    /// the Downloads UI can badge Hub results that are known-good.
+    public var verified: Bool?
 
     public init(
         id: String,
@@ -26,7 +30,8 @@ public struct HFModelInfo: Codable, Sendable {
         createdAt: String? = nil,
         lastModified: String? = nil,
         privateRepo: Bool? = false,
-        gated: Bool? = false
+        gated: Bool? = false,
+        verified: Bool? = nil
     ) {
         self.id = id
         self.author = author
@@ -39,6 +44,7 @@ public struct HFModelInfo: Codable, Sendable {
         self.lastModified = lastModified
         self.privateRepo = privateRepo
         self.gated = gated
+        self.verified = verified
     }
 }
 

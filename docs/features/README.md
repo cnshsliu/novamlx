@@ -34,6 +34,7 @@ This directory is the user-facing documentation, one page per feature.
 | [抠图去背景 / Image matting](matting.md) | BiRefNet 通用与人像版抠图，`POST /v1/images/matting` 出 mask 与透明底。 | preview |
 | [视频生成 / Video generation](video-generation.md) | 本地 h3.c 的异步 `/v1/videos` 任务。 | stable |
 | [3D 生成 / 3D generation](hunyuan3d.md) | 本地 Hunyuan3D-2.1 的图生 3D 任务，`POST /v1/3d/generations` 出 GLB。 | preview |
+| [Flint（Recursive）](flint.md) | 40B agent 推理模型：思考链 + 工具调用 + 256K，本地 MLX。 | preview |
 | [嵌入与重排 / Embeddings & rerank](embeddings-rerank.md) | `POST /v1/embeddings` 与 `POST /v1/rerank`。 | stable |
 
 <a id="apis"></a>

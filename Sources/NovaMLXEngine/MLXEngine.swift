@@ -385,6 +385,28 @@ public final class ModelContainer: @unchecked Sendable {
             }
         }
 
+        // An open-tag literal only counts as an INJECTION when it sits in the
+        // generation-prompt block (emitted as a prompt prefix). Templates that
+        // render `<think>…</think>` pairs inside message-history rendering —
+        // e.g. Flint's `{% if m.reasoning_content %}<think>{{ … }}</think>`
+        // — replay past reasoning for the model to read; they never open a
+        // fresh think for the assistant, so the model is EXPLICIT. Scope the
+        // search to the text after the `add_generation_prompt` conditional.
+        if hasInjectedOpen {
+            if let genRange = template.range(of: "add_generation_prompt") {
+                let generationBlock = template[genRange.upperBound...]
+                let injectedInGenerationBlock = injectionLiterals.contains {
+                    generationBlock.contains($0)
+                }
+                    || generationBlock.contains("<think>\n")
+                    || generationBlock.contains("<thinking>\n")
+                if !injectedInGenerationBlock {
+                    NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): `<think>` only in history rendering, generation block clean → false (explicit)")
+                    return false
+                }
+            }
+        }
+
         // NovaMLX-TIE: V4 (and similar) templates use `<think>` only inside a
         // `mode == 'thinking'` conditional. Default chat mode renders `</think>`
         // (close-only), so output should NOT be treated as implicit thinking.
@@ -911,6 +933,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                       mt == "nemotron_h_puzzle" || mt == "nemotron_h" {
                 container.config.hasLinearAttention = true
                 NovaMLXLog.info("[Engine] Detected \(mt) hybrid Mamba model — will use ContinuousBatcher")
+            } else if let mt = tc["model_type"] as? String, mt == "flint" {
+                // Flint's hybrid (RotatingKVCache + KVCacheSimple) loads fine
+                // under FusedBatchScheduler, but the fused streaming path has
+                // no ToolCallProcessor — GLM4-dialect tool calls would leak as
+                // raw text. ContinuousBatcher wires tool parsing.
+                container.config.hasLinearAttention = true
+                NovaMLXLog.info("[Engine] Detected flint model — will use ContinuousBatcher (fused path lacks tool-call parsing)")
             }
         }
 
@@ -1333,14 +1362,31 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
                 if let name = msg.name { m["name"] = name }
                 if let tcs = msg.toolCalls {
-                    m["tool_calls"] = tcs.map { tc in
-                        ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
-                    }
+                    m["tool_calls"] = tcs.map(Self.toolCallMessageDict)
                 }
                 return m
             }
             return UserInput(prompt: .messages(messages), tools: toolSpecs, additionalContext: additionalContext)
         }
+    }
+
+
+    /// HF chat-template convention passes tool-call `arguments` as a dict
+    /// (templates iterate `fn.arguments.items()`); the OpenAI wire format
+    /// carries it as a JSON string. Parse when possible so GLM4/Flint-style
+    /// templates render multi-turn tool history.
+    nonisolated static func toolCallMessageDict(_ tc: ToolCallResult) -> [String: any Sendable] {
+        var arguments: any Sendable = tc.arguments
+        if let data = tc.arguments.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data),
+           let dict = parsed as? [String: any Sendable] {
+            arguments = dict
+        }
+        return [
+            "id": tc.id,
+            "type": "function",
+            "function": ["name": tc.functionName, "arguments": arguments] as [String: any Sendable],
+        ]
     }
 
     private func deferredClearCache() {
@@ -1722,6 +1768,20 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 warnDefensiveEosInjection(
                     modelId: container.identifier.id,
                     family: "gemma",
+                    missing: missing
+                )
+                ids.formUnion(canonical)
+            }
+        case .flint:
+            // Flint canonical: <|end_of_text|>=150001 plus the role headers
+            // <|user|>=150003, <|observation|>=150005, <|developer|>=150018 —
+            // generating the next turn's header is the stop signal.
+            let canonical: Set<Int> = [150001, 150003, 150005, 150018]
+            let missing = canonical.subtracting(ids)
+            if !missing.isEmpty {
+                warnDefensiveEosInjection(
+                    modelId: container.identifier.id,
+                    family: "flint",
                     missing: missing
                 )
                 ids.formUnion(canonical)
@@ -4048,9 +4108,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
             if let name = msg.name { m["name"] = name }
             if let tcs = msg.toolCalls {
-                m["tool_calls"] = tcs.map { tc in
-                    ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
-                }
+                m["tool_calls"] = tcs.map(Self.toolCallMessageDict)
             }
             return m
         }
@@ -4256,9 +4314,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
                         if let name = msg.name { m["name"] = name }
                         if let tcs = msg.toolCalls {
-                            m["tool_calls"] = tcs.map { tc in
-                                ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
-                            }
+                            m["tool_calls"] = tcs.map(Self.toolCallMessageDict)
                         }
                         return m
                     }

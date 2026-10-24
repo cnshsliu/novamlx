@@ -1169,6 +1169,9 @@ struct ModelTypeFilterBar: View {
 struct HFSearchResult {
     let id: String
     let tags: [String]
+    /// True when the repo is in the NovaMLX verified catalog (tagged by the
+    /// admin search route in allow-unlisted mode).
+    var verified: Bool? = nil
 }
 
 // MARK: - Model Card Data
