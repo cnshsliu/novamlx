@@ -4,7 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
-## [1.7.0] - 2026-10-24
+## [1.8.0] - 2026-10-24
+
+**Core change: Flint (RecursiveSI) model support** — see the Flint entry below.
 
 ### Added
 - **Running build on Status** — the Status page footer is one line: Debug or Release, version, build time to the second, and the `.app` path. That distinguishes `/Applications/NovaMLX.app` from a copy under the repo. The menu bar title includes Debug or Release, and the menu lists the same line and path. Settings → About shows configuration and location. `./build.sh` installs the newest host binary when SwiftPM has written more than one output directory. Intro: [menu bar](docs/features/menu-bar.md), [feature brief](docs/feature-briefs/2026-10-24-build-identity.md).
