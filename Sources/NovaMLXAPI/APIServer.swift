@@ -2732,7 +2732,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         )
                     }
 
-                    let config = ModelConfig(
+                    var config = ModelConfig(
                         identifier: ModelIdentifier(id: req.modelId, family: record.family),
                         modelType: record.modelType
                     )
@@ -2742,6 +2742,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     let candidates = models.candidateLoadURLs(for: req.modelId)
                     var lastLoadError: Error?
                     for (index, url) in candidates.enumerated() {
+                        // Hunyuan3D: the disk layout is authoritative. A registry
+                        // record written by an older build can carry a stale
+                        // modelType, which routes the load into the LLM engine
+                        // and dies on the missing config.json — re-sniff instead
+                        // of trusting the record. Only this family is overridden;
+                        // every other family keeps using the registry type.
+                        if ModelDiscovery.isHunyuan3DDirectory(url) {
+                            config = ModelConfig(
+                                identifier: ModelIdentifier(id: req.modelId, family: .hunyuan3d),
+                                modelType: .threed
+                            )
+                        }
                         if index > 0 {
                             NovaMLXLog.warning(
                                 "[Admin] \(req.modelId): retrying load from fallback location \(url.path)")

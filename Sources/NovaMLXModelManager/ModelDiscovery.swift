@@ -564,7 +564,10 @@ public final class ModelDiscovery: Sendable {
         return true
     }
 
-    private static func isHunyuan3DDirectory(_ url: URL) -> Bool {
+    /// Public so the admin load path can re-sniff on disk: registry records
+    /// written by older builds can carry a stale modelType, which routes the
+    /// load into the LLM engine and fails on the missing config.json.
+    public static func isHunyuan3DDirectory(_ url: URL) -> Bool {
         isHunyuan3DShapeDirectory(url) || isHunyuan3DPaintDirectory(url)
     }
 
