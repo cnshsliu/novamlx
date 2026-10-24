@@ -1362,14 +1362,31 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
                 if let name = msg.name { m["name"] = name }
                 if let tcs = msg.toolCalls {
-                    m["tool_calls"] = tcs.map { tc in
-                        ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
-                    }
+                    m["tool_calls"] = tcs.map(Self.toolCallMessageDict)
                 }
                 return m
             }
             return UserInput(prompt: .messages(messages), tools: toolSpecs, additionalContext: additionalContext)
         }
+    }
+
+
+    /// HF chat-template convention passes tool-call `arguments` as a dict
+    /// (templates iterate `fn.arguments.items()`); the OpenAI wire format
+    /// carries it as a JSON string. Parse when possible so GLM4/Flint-style
+    /// templates render multi-turn tool history.
+    nonisolated static func toolCallMessageDict(_ tc: ToolCallResult) -> [String: any Sendable] {
+        var arguments: any Sendable = tc.arguments
+        if let data = tc.arguments.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data),
+           let dict = parsed as? [String: any Sendable] {
+            arguments = dict
+        }
+        return [
+            "id": tc.id,
+            "type": "function",
+            "function": ["name": tc.functionName, "arguments": arguments] as [String: any Sendable],
+        ]
     }
 
     private func deferredClearCache() {
@@ -4091,9 +4108,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
             if let name = msg.name { m["name"] = name }
             if let tcs = msg.toolCalls {
-                m["tool_calls"] = tcs.map { tc in
-                    ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
-                }
+                m["tool_calls"] = tcs.map(Self.toolCallMessageDict)
             }
             return m
         }
@@ -4299,9 +4314,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
                         if let name = msg.name { m["name"] = name }
                         if let tcs = msg.toolCalls {
-                            m["tool_calls"] = tcs.map { tc in
-                                ["function": ["name": tc.functionName, "arguments": tc.arguments]] as [String: any Sendable]
-                            }
+                            m["tool_calls"] = tcs.map(Self.toolCallMessageDict)
                         }
                         return m
                     }

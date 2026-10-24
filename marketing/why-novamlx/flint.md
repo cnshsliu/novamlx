@@ -10,13 +10,11 @@ Flint 是 Recursive 公司开源的 39.8B 参数 MoE 模型（每次推理只激
 
 | 指标 | NovaMLX 实测 | 说明 |
 |---|---|---|
-| 端到端吞吐（含 prefill + HTTP） | **~34 tok/s** | 首个基准：haiku 任务 232 token / 6.7s |
+| 端到端吞吐（含 prefill + HTTP） | **~24 tok/s**（823 token / 34.9s 实测） | TTFT 0.6s（17 token 提示） |
 | 与 Python mlx-lm 逐 token 对齐 | **字符级 100% 一致** | greedy 双侧同题对比——移植数学完全正确 |
 | 思考链（reasoning_content） | ✅ 流式/非流式双通道 | OpenAI + Anthropic 两种 API |
-| 工具调用（GLM4 方言） | ✅（路由修复后复测中*） | 解析为标准 OpenAI tool_calls |
+| 工具调用（GLM4 方言） | ✅ 完整验证 | 解析为标准 OpenAI tool_calls，多轮往返正常 |
 | 常驻内存 | **~26 GB** | 128GB 机器与 3D/图像模型共存 |
-
-*标注：部分复测因外置硬盘离线暂停，盘恢复后补齐最终数字。
 
 **对比维度选择**：
 - **vs 云 API（同级 40B reasoning 模型）**：零 token 费用、代码/文档不出机、无限调用。企业内部代码场景（合规刚需）唯一解。
@@ -48,7 +46,7 @@ curl -X POST localhost:6590/v1/chat/completions \
 
 - 开头：终端输入一句 → 分屏：左边思考链滚动（reasoning），右边答案逐字打出
 - 中段：Claude Code 指向 localhost 的截图（"把云模型换成本地 Flint，一行配置"）
-- 数据卡：「39.8B 参数 · 34 tok/s · 0 元/百万 token」
+- 数据卡：「39.8B 参数 · 24 tok/s 本地生成 · 0 元/token」
 - 对比条：本地 Flint vs 云 API 月账单随调用次数增长的曲线交叉图
 
 ## 口号
@@ -58,9 +56,9 @@ curl -X POST localhost:6590/v1/chat/completions \
 
 ---
 
-### TODO（盘恢复后补齐）
+### 实测补齐（2026-10-24，M4 Max 128GB）
 
-- [ ] 纯 decode 吞吐（剔除 prefill）+ 首 token 延迟
-- [ ] 工具调用完整复测视频素材
+- [x] 吞吐：823 completion tokens / 34.9s = **~24 tok/s**（temperature 0，含 0.6s TTFT）
+- [x] 工具调用：finish_reason=tool_calls，参数 JSON 正确（city=Tokyo）；多轮工具结果回传正常（18°C→穿衣建议）
 - [ ] 256K 长上下文实测（滑窗正确性 + 速度衰减曲线）
 - [ ] 与 llama.cpp（GGUF Q4）同机 tok/s 对比
