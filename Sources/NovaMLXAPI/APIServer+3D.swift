@@ -64,7 +64,7 @@ extension NovaMLXAPIServer {
                 )
                 if let rid = HTTPHelpers.requestID(from: request) {
                     RequestLogStore.shared.finish(
-                        model: job.model, kind: .image, status: .success,
+                        model: job.model, kind: .threed, status: .success,
                         tps: 0, promptTokens: 0, completionTokens: 0,
                         durationMs: 0, requestId: rid)
                 }
