@@ -12,6 +12,7 @@ public enum ChatTemplateFormat: Sendable, Equatable {
     case deepSeek      // ｜User｜ / ｜Assistant｜  (DeepSeek V4+)
     case hunyuan       // ｜hy_User｜ / ｜hy_Assistant｜  (HunYuan / Hy-MT2)
     case harmony       // <|start|>role<|channel|>type<|message|>  (GPT-OSS / OpenAI Harmony)
+    case flint         // <|system|>/<|user|>/<|assistant|>/<|observation|>  (Recursive Flint)
     case unknown
 
     /// Human-readable label for logs/diagnostics.
@@ -23,6 +24,7 @@ public enum ChatTemplateFormat: Sendable, Equatable {
         case .deepSeek:    return "deepSeek"
         case .hunyuan:     return "hunyuan (Hy)"
         case .harmony:     return "harmony (GPT-OSS)"
+        case .flint:       return "flint (Recursive)"
         case .unknown:     return "unknown"
         }
     }
@@ -65,6 +67,10 @@ public enum ChatTemplateFormat: Sendable, Equatable {
             (.deepSeek, ["｜User｜", "｜Assistant｜", "｜begin▁of▁sentence｜", "｜end▁of▁sentence｜"]),
             // HunYuan / Hy-MT2: fullwidth-pipe markers with the hy_ prefix.
             (.hunyuan, ["｜hy_User｜", "｜hy_Assistant｜", "｜hy_begin▁of▁sentence｜", "｜hy_place▁holder▁no▁3｜"]),
+            // Recursive Flint: Llama-3-style pipe role headers. `<|observation|>` /
+            // `<|developer|>` are unique to Flint; `<|assistant|>` alone would
+            // not collide with ChatML (`<|im_start|>`) or Llama-3 headers either.
+            (.flint, ["<|assistant|>", "<|observation|>", "<|developer|>", "<|user|>", "<|system|>"]),
         ]
 
         for (format, markers) in probes {

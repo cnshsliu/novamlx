@@ -39,5 +39,8 @@ enum CustomModelRegistration {
                     NemotronHPuzzleConfiguration.self, from: data)
                 return NemotronHPuzzleModel(configuration)
             })
+        await LLMTypeRegistry.shared.registerModelType(
+            "flint",
+            creator: createCustom(FlintConfiguration.self, FlintModel.init))
     }
 }
