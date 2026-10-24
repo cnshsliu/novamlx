@@ -251,14 +251,20 @@ for arg in "$@"; do
 done
 
 ARCH="$(uname -m)"
-# Prefer the directory that actually contains the host binary. SwiftPM 6.2
-# appends the deployment target (arm64-apple-macosx26.0); the unversioned
-# triple is where this script writes mlx.metallib.
+# SwiftPM has used both the triple dir (.build/arm64-apple-macosx/debug) and
+# .build/out/Products/Debug. A stale triple dir still contains NovaMLX, so
+# pick the newest host binary instead of the first match.
+PRODUCTS_CONFIG="$(printf '%s' "$CONFIG" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
 BUILD_BIN_DIR=""
-for candidate in ".build/${ARCH}-apple-macosx"*/"${CONFIG}" ".build/${CONFIG}"; do
-	if [ -f "$candidate/NovaMLX" ]; then
-		BUILD_BIN_DIR="$candidate"
-		break
+BEST_MTIME=0
+for candidate in .build/${ARCH}-apple-macosx*/${CONFIG} ".build/${CONFIG}" ".build/out/Products/${PRODUCTS_CONFIG}"; do
+	if [ ! -f "$candidate/NovaMLX" ]; then
+		continue
+	fi
+	mtime=$(stat -f %m "$candidate/NovaMLX" 2>/dev/null || echo 0)
+	if [ "$mtime" -gt "$BEST_MTIME" ]; then
+		BEST_MTIME=$mtime
+		BUILD_BIN_DIR=$candidate
 	fi
 done
 

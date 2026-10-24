@@ -32,7 +32,13 @@ struct NovaMLXApp: App {
 
     var body: some Scene {
         let l10n = L10n.shared
-        return MenuBarExtra("NovaMLX", systemImage: "brain.head.profile.fill") {
+        let identity = AppBuildIdentity.current
+        return MenuBarExtra("NovaMLX \(identity.configurationLabel)", systemImage: "brain.head.profile.fill") {
+            Button(identity.summaryLine) {}
+                .disabled(true)
+            Button(identity.bundlePath) {}
+                .disabled(true)
+            Divider()
             Button { appDelegate.openMainWindow(to: .status) } label: {
                 Label(l10n.tr("app.status"), systemImage: "gauge.with.dots.needle.bottom.50percent")
             }

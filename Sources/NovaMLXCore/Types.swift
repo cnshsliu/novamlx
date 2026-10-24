@@ -7,13 +7,7 @@ public enum NovaMLX {}
 public let version = "1.6.0"
 
 public var buildTimestamp: String {
-    guard let execURL = Bundle.main.executableURL,
-          let attrs = try? FileManager.default.attributesOfItem(atPath: execURL.path),
-          let modDate = attrs[.modificationDate] as? Date
-    else { return "Unknown" }
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    return formatter.string(from: modDate)
+    AppBuildIdentity.current.stamp
 }
 
 public enum NovaMLXError: Error, LocalizedError {

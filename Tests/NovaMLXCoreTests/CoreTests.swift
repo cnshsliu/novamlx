@@ -659,3 +659,41 @@ struct ResponseFormatTests {
         #expect(plain.responseFormat == nil)
     }
 }
+
+@Suite("App build identity")
+struct AppBuildIdentityTests {
+    @Test("stamp is local clock to the second")
+    func stampIncludesClock() {
+        var calendar = Calendar(identifier: .gregorian)
+        let zone = TimeZone(identifier: "Asia/Shanghai")!
+        calendar.timeZone = zone
+        let date = calendar.date(from: DateComponents(
+            year: 2026, month: 10, day: 23, hour: 15, minute: 4, second: 7
+        ))!
+        #expect(AppBuildIdentity.stamp(for: date, timeZone: zone) == "2026-10-23 15:04:07")
+        #expect(AppBuildIdentity.stamp(for: nil, timeZone: zone) == "Unknown")
+    }
+
+    @Test("running process reports a configuration and a path")
+    func currentIdentity() {
+        let identity = AppBuildIdentity.current
+        #expect(identity.configuration == .debug || identity.configuration == .release)
+        #expect(identity.configurationLabel == identity.configuration.label)
+        #expect(identity.bundlePath.hasPrefix("/"))
+        #expect(identity.summaryLine.contains(identity.configurationLabel))
+        #expect(identity.summaryLine.contains(identity.stamp))
+        #expect(NovaMLXCore.buildTimestamp == identity.stamp)
+    }
+
+    @Test("stamp follows the executable modification time")
+    func executableModificationTime() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("novamlx-build-identity-\(UUID().uuidString)")
+        try Data("x".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let date = try #require(AppBuildIdentity.modificationDate(of: url))
+        let delta = abs(date.timeIntervalSinceNow)
+        #expect(delta < 5)
+        #expect(AppBuildIdentity.modificationDate(of: nil) == nil)
+    }
+}

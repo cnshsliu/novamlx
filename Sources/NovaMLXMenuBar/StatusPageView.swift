@@ -14,14 +14,20 @@ struct StatusPageView: View {
     @State private var hoveredX: CGFloat?
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                serverStatusHero
-                tpsChart
-                metricsGrid
-                deviceSection
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: 20) {
+                    serverStatusHero
+                    tpsChart
+                    metricsGrid
+                    deviceSection
+                }
+                .padding(24)
             }
-            .padding(24)
+            Divider()
+            AppBuildIdentityView(style: .footer)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 8)
         }
         .onAppear {
             if deviceInfo == nil { deviceInfo = DeviceInfo.current() }

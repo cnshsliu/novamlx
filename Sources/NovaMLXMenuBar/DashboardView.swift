@@ -41,14 +41,12 @@ public struct DashboardView: View {
     private var headerSection: some View {
         let l10n = L10n.shared
         return HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(l10n.tr("app.nova")).foregroundColor(.primary) +
-                Text(l10n.tr("app.mlx")).foregroundColor(NovaTheme.Colors.accent)
-                Text("v\(NovaMLXCore.version)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                (Text(l10n.tr("app.nova")).foregroundColor(.primary) +
+                Text(l10n.tr("app.mlx")).foregroundColor(NovaTheme.Colors.accent))
+                    .font(.title2.bold())
+                AppBuildIdentityView()
             }
-            .font(.title2.bold())
 
             Spacer()
 

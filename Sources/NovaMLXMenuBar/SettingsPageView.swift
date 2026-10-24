@@ -1230,7 +1230,19 @@ struct SettingsPageView: View {
             sectionHeader(l10n.tr("settings.about"), icon: "info.circle")
 
             settingsRow(l10n.tr("settings.version"), value: NovaMLXCore.version)
+            settingsRow(l10n.tr("settings.buildConfig"), value: AppBuildIdentity.current.configurationLabel)
             settingsRow(l10n.tr("settings.build"), value: NovaMLXCore.buildTimestamp)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(l10n.tr("settings.appLocation"))
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                Text(AppBuildIdentity.current.bundlePath)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             settingsRow(l10n.tr("settings.license"), value: l10n.tr("settings.licenseValue"))
             settingsRow(l10n.tr("settings.platform"), value: "macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
 
