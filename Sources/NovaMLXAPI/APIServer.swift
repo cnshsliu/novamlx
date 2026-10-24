@@ -3608,7 +3608,20 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             }()
 
                             let result = try await searchService.searchModels(query: q, limit: limit, mlxOnly: mlxOnly)
-                            return try Self.jsonResponse(result)
+                            // Allow-unlisted mode searches the whole Hub; badge
+                            // which results are actually in the verified catalog
+                            // so users don't waste downloads on unsupported repos.
+                            let catalog = self.catalogEntries()
+                            let verifiedIds = Set(
+                                catalog.filter { $0.status != .unsupported }.map(\.id))
+                            let tagged = HFSearchResult(
+                                models: result.models.map { info in
+                                    var info = info
+                                    info.verified = verifiedIds.contains(info.id)
+                                    return info
+                                },
+                                total: result.total)
+                            return try Self.jsonResponse(tagged)
                         } catch {
                             NovaMLXLog.error("HF search failed: \(error)")
                             return try Self.jsonResponse(["error": error.localizedDescription])
