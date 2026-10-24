@@ -6,7 +6,7 @@
 
 「支持」指「精确权重」一节中的 id。该 id 与 `nova download <id>` 相同。名字相近而 id 不同的仓库可能无法加载。
 
-本页与应用内目录一致，数据日期 2026-10-22。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
+本页与应用内目录一致，数据日期 2026-10-23。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
 
 ## 下载 / Download
 
@@ -43,7 +43,8 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 | Gemma-4-31B | `mlx-community/gemma-4-31B-it-OptiQ-4bit` | ~17 GB | preview | — | `nova download mlx-community/gemma-4-31B-it-OptiQ-4bit` | [Hugging Face](https://huggingface.co/mlx-community/gemma-4-31B-it-OptiQ-4bit) |
 | Qwen3.6-35B-A3B | `mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit` | ~18 GB | preview | — | `nova download mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit) |
 | Nemotron-Cascade-2-30B | `mlx-community/Nemotron-Cascade-2-30B-A3B-4bit` | ~16 GB | preview | — | `nova download mlx-community/Nemotron-Cascade-2-30B-A3B-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Nemotron-Cascade-2-30B-A3B-4bit) |
-| MiniMax-M3 | `mlx-community/MiniMax-M3-4bit` | ~20 GB | preview | — | `nova download mlx-community/MiniMax-M3-4bit` | [Hugging Face](https://huggingface.co/mlx-community/MiniMax-M3-4bit) |
+| MiniMax-M3.1-Flash Text 3-bit | `mlx-community/MiniMax-M3.1-Flash-Text-3bit` | ~186.5 GB (3-bit) | preview | 128 GB | `nova download mlx-community/MiniMax-M3.1-Flash-Text-3bit` | [Hugging Face](https://huggingface.co/mlx-community/MiniMax-M3.1-Flash-Text-3bit) |
+| MiniMax-M3.1-Flash Text 4-bit | `mlx-community/MiniMax-M3.1-Flash-Text-4bit` | ~248.4 GB (4-bit) | preview | 128 GB | `nova download mlx-community/MiniMax-M3.1-Flash-Text-4bit` | [Hugging Face](https://huggingface.co/mlx-community/MiniMax-M3.1-Flash-Text-4bit) |
 | Granite-4.1-8B | `mlx-community/granite-4.1-8b-8bit` | ~8 GB | preview | — | `nova download mlx-community/granite-4.1-8b-8bit` | [Hugging Face](https://huggingface.co/mlx-community/granite-4.1-8b-8bit) |
 | Kimi-K2.7-Code | `mlx-community/Kimi-K2.7-Code-4bit` | ~10 GB | preview | — | `nova download mlx-community/Kimi-K2.7-Code-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Kimi-K2.7-Code-4bit) |
 | GPT-OSS-120B | `mlx-community/gpt-oss-120b-MXFP4-Q8` | ~75 GB | preview | — | `nova download mlx-community/gpt-oss-120b-MXFP4-Q8` | [Hugging Face](https://huggingface.co/mlx-community/gpt-oss-120b-MXFP4-Q8) |
@@ -141,4 +142,4 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 - `mzbac/flux1.schnell.4bit.mlx` — Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.
 
-表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-22）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。
+表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-23）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。

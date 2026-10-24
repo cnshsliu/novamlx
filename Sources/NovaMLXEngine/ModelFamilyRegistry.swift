@@ -116,6 +116,13 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
             headDim: 256,
             samplingDefaults: FamilySamplingDefaults(temperature: 1.0, topP: 0.95, topK: 64)
         ),
+        .minimax: ModelFamilyOptimization(
+            defaultKVBits: nil,
+            prefillStepSize: 512,
+            recommendedContextLength: 8192,
+            headDim: 128,
+            samplingDefaults: FamilySamplingDefaults(temperature: 1.0, topP: 0.95)
+        ),
         .starcoder: ModelFamilyOptimization(
             defaultKVBits: 4,
             prefillStepSize: 1024,

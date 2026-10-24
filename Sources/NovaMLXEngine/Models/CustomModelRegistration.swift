@@ -31,6 +31,9 @@ enum CustomModelRegistration {
                     DeepseekV4Configuration.self, from: flat)
                 return DeepseekV4Model(configuration)
             })
+        await LLMTypeRegistry.shared.registerModelType(
+            "minimax_m3_vl",
+            creator: createCustom(MiniMaxM3Configuration.self, MiniMaxM3Model.init))
         // Decodable-only: Bolt's time_step_limit uses {"__float__": "Infinity"}.
         await LLMTypeRegistry.shared.registerModelType(
             "nemotron_h_puzzle",

@@ -65,11 +65,17 @@ public enum ExpertShardConverter {
         guard let data = try? Data(contentsOf: modelDir.appendingPathComponent("config.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }
+        let text = json["text_config"] as? [String: Any]
         let experts = (json["n_routed_experts"] as? Int)
             ?? (json["num_experts"] as? Int)
             ?? (json["num_local_experts"] as? Int)
+            ?? (text?["n_routed_experts"] as? Int)
+            ?? (text?["num_experts"] as? Int)
+            ?? (text?["num_local_experts"] as? Int)
             ?? 0
-        let layers = (json["num_hidden_layers"] as? Int) ?? 0
+        let layers = (json["num_hidden_layers"] as? Int)
+            ?? (text?["num_hidden_layers"] as? Int)
+            ?? 0
         return experts > 0 || layers > 0
     }
 
@@ -352,9 +358,14 @@ public enum ExpertShardConverter {
             return .skip
         }
         if nbytes > 2_000_000_000 { return .skip }
+        // DeepSeek keeps attn/ffn/kv/q norms and the final model norm.
+        // MiniMax-M3.1-Flash also needs Gemma RMSNorms (`input_layernorm`,
+        // `post_attention_layernorm`) and per-head `k_norm` / `index_k_norm`.
+        // `q_norm` already matches the index-q and query norms.
         if name.hasSuffix(".norm.weight")
             && !name.contains("attn_norm") && !name.contains("ffn_norm")
             && !name.contains("kv_norm") && !name.contains("q_norm")
+            && !name.contains("k_norm") && !name.contains("layernorm")
             && name != "norm.weight" && !name.hasSuffix("model.norm.weight")
             && name != "language_model.norm.weight"
         {

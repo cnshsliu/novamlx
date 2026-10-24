@@ -760,6 +760,21 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 throw NovaMLXError.configurationError(message)
             }
         }
+        if let configJson, MiniMaxM3Memory.isTextCheckpoint(configJson) {
+            let tieReady = MiniMaxM3Memory.hasTieManifest(at: url)
+            let weightBytes = MiniMaxM3Memory.indexedWeightBytes(at: url)
+                ?? Self.estimateModelWeightSize(at: url)
+                ?? 0
+            if let message = MiniMaxM3Memory.refusalMessage(
+                modelId: config.identifier.id,
+                weightBytes: weightBytes,
+                physicalBytes: ProcessInfo.processInfo.physicalMemory,
+                tieReady: tieReady
+            ) {
+                NovaMLXLog.error("[MemoryGate] \(message)")
+                throw NovaMLXError.configurationError(message)
+            }
+        }
         // Check ProcessMemoryEnforcer soft limit BEFORE loading weights.
         // If we can't fit the new model under the soft limit, evict LRU unpinned
         // models to make room. If that's not enough, fail fast with a clear error
