@@ -19,7 +19,7 @@ import NovaMLXUtils
 /// Milestone state: kernel invocation over banks dumped by the reference
 /// Python packer (`/tmp/dump_packed.py`); the Swift-native packer is the
 /// next step. Validated against the reference engine's 196.8 tok/s decode.
-final class FlintRecKernel: @unchecked Sendable {
+public final class FlintRecKernel: @unchecked Sendable {
     // Rendered for: workers=36, mlp=32, head=32 (M4-class g16s profile).
     private static let deviceWorkers = 36
     private static let decodeThreads = 256
@@ -82,6 +82,15 @@ final class FlintRecKernel: @unchecked Sendable {
             header: Self.writeHeader,
             ensureRowContiguous: true
         )
+    }
+
+    /// Build from the Swift-native packer output (production path).
+    convenience init(packed: FlintRecPacker.Packed) {
+        self.init(
+            banks: packed.banks,
+            metadata: MLXArray(packed.metadata.flatMap { $0 }, [50, 64]),
+            silu: packed.siluTable,
+            configuration: packed.configuration)
     }
 
     /// Load a packing produced by the reference packer dump.

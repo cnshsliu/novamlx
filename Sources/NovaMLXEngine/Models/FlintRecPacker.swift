@@ -18,13 +18,20 @@ import NovaMLXUtils
 /// `RecursiveSI/flint-int4` checkpoint already ships in that layout, so
 /// packing is mostly re-layout (offset bookkeeping + bank assembly)
 /// rather than requantization.
-enum FlintRecPacker {
+public enum FlintRecPacker {
 
-    struct Packed {
-        var banks: [MLXArray]
-        var metadata: [[UInt32]]
-        var siluTable: MLXArray
-        var configuration: MLXArray
+    public struct Packed {
+        public var banks: [MLXArray]
+        public var metadata: [[UInt32]]
+        public var siluTable: MLXArray
+        public var configuration: MLXArray
+
+        public init(banks: [MLXArray], metadata: [[UInt32]], siluTable: MLXArray, configuration: MLXArray) {
+            self.banks = banks
+            self.metadata = metadata
+            self.siluTable = siluTable
+            self.configuration = configuration
+        }
     }
 
     static let weightAlignment = 256
@@ -35,7 +42,7 @@ enum FlintRecPacker {
 
     /// Pack from an already-loaded official-INT4 `FlintModel`.
     /// Mirrors FullModel(model) with the M4-class schedule baked in.
-    static func pack(_ flint: FlintModel) throws -> Packed {
+    public static func pack(_ flint: FlintModel) throws -> Packed {
         let model = flint.model
         let layers = model.layers
         precondition(layers.count == 49)
