@@ -130,6 +130,98 @@ struct FlintSpeedTests {
             return String(format: "%.3f ms", Date().timeIntervalSince(t0) / Double(N) * 1000)
         }
         print("SPEED-ROTUPD:", rotUpd)
+        // Mega-decode probe: single compiled call per token.
+        let mega = try await container.perform { context -> [String] in
+            let m = context.model as! FlintModel
+            let md = FlintMegaDecode(model: m.model, args: m.model.config)
+            var st = md.initialState()
+            // Prefill token-by-token (eager functional), capturing logits head.
+            var lastId = 0
+            for (i, t) in promptIds.enumerated() {
+                let hidden = md.prefillToken(tokenId: t, state: &st)
+                if i == promptIds.count - 1 {
+                    let logits = m.lmHead != nil ? m.lmHead!(hidden) : m.model.embedTokens.asLinear(hidden)
+                    eval(logits)
+                    lastId = Int(argMax(logits[0, 0]).item(Int.self))
+                }
+            }
+            func step(_ id: Int) -> Int {
+                let hidden = md.decodeHidden(tokenId: id, state: &st)
+                let logits = m.lmHead != nil ? m.lmHead!(hidden) : m.model.embedTokens.asLinear(hidden)
+                eval(logits)
+                return Int(argMax(logits[0, 0]).item(Int.self))
+            }
+            // Warmup (compile trace)
+            for _ in 0 ..< 10 { lastId = step(lastId) }
+            // Bucketed timing: detect per-call retrace vs steady state.
+            var buckets: [String] = []
+            var t0 = Date()
+            var count = 0
+            for i in 0 ..< 400 {
+                lastId = step(lastId)
+                count += 1
+                if i % 50 == 49 {
+                    let dt = Date().timeIntervalSince(t0)
+                    buckets.append(String(format: "%d-%d: %.1f tok/s", i - 49, i, Double(count) / dt))
+                    t0 = Date()
+                    count = 0
+                }
+            }
+            return ["MEGA-BUCKETS: " + buckets.joined(separator: " | ")]
+        }
+        for line in mega { print(line) }
+
+        // rec megakernel probe: reference-packed banks + Swift kernel invocation.
+        let rec = try await container.perform { context -> [String] in
+            let fm = try FlintRecKernel.load(dumped: URL(fileURLWithPath: "/tmp/flint_rec_packed"))
+            let state = fm.makeKVState(capacity: 65536)
+            var lastId = 150000  // <|begin_of_text|>
+            // Warmup: trace + shader compile.
+            for _ in 0 ..< 10 {
+                let logits = try fm.forward(state: state, token: lastId)
+                eval(logits)
+                lastId = Int(argMax(logits).item(Int.self))
+            }
+            let N = 128
+            let t0 = Date()
+            for _ in 0 ..< N {
+                let logits = try fm.forward(state: state, token: lastId)
+                eval(logits)
+                lastId = Int(argMax(logits).item(Int.self))
+            }
+            let dt = Date().timeIntervalSince(t0)
+            return [String(format: "REC-RESULT: %.2f s for %d tokens = %.1f tok/s", dt, N, Double(N) / dt)]
+        }
+        for line in rec { print(line) }
+
+        // Native packer probe: pack from the loaded model, compare to reference dump.
+        let packed = try await container.perform { context -> [String] in
+            let flint = context.model as! FlintModel
+            let p = try FlintRecPacker.pack(flint)
+            // Compare against reference dump banks.
+            var results: [String] = []
+            for i in 0 ..< p.banks.count {
+                let ref = try MLX.loadArrays(url: URL(fileURLWithPath: "/tmp/flint_rec_packed/bank\(i).safetensors"))["bank\(i)"]!
+                let mine = p.banks[i]
+                let diff = abs(mine.asType(.float32) - ref.asType(.float32)).max()
+                let match = mine.shape == ref.shape && (diff.item(Float.self)) < 1e-6
+                results.append("bank\(i): shape \(mine.shape) vs \(ref.shape) match=\(match)")
+            }
+            // Metadata compare
+            let refMeta = try MLX.loadArrays(url: URL(fileURLWithPath: "/tmp/flint_rec_packed/meta.safetensors"))["metadata"]!
+            let refRows = refMeta.asArray(UInt32.self)
+            let mineFlat = p.metadata.flatMap { $0 }
+            let metaMatch = zip(mineFlat, refRows).allSatisfy { $0 == $1 }
+            var mismatches = 0
+            for (idx, (a, b)) in zip(mineFlat, refRows).enumerated() where a != b {
+                if mismatches < 8 { results.append("meta mismatch @\(idx): \(a) vs \(b) (row \(idx/64) slot \(idx%64))") }
+                mismatches += 1
+            }
+            results.append("metadata: \(mismatches) mismatches of 3200")
+            return results
+        }
+        for line in packed { print("PACK:", line) }
+
         print("SPEED-QMM-START")
         // Single QuantizedLinear probe (2048 -> 4096, 4-bit, group 64), matching Python.
         // Standalone module — no container access needed.
