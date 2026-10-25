@@ -130,6 +130,47 @@ struct FlintSpeedTests {
             return String(format: "%.3f ms", Date().timeIntervalSince(t0) / Double(N) * 1000)
         }
         print("SPEED-ROTUPD:", rotUpd)
+        // Mega-decode probe: single compiled call per token.
+        let mega = try await container.perform { context -> [String] in
+            let m = context.model as! FlintModel
+            let md = FlintMegaDecode(model: m.model, args: m.model.config)
+            var st = md.initialState()
+            // Prefill token-by-token (eager functional), capturing logits head.
+            var lastId = 0
+            for (i, t) in promptIds.enumerated() {
+                let hidden = md.prefillToken(tokenId: t, state: &st)
+                if i == promptIds.count - 1 {
+                    let logits = m.lmHead != nil ? m.lmHead!(hidden) : m.model.embedTokens.asLinear(hidden)
+                    eval(logits)
+                    lastId = Int(argMax(logits[0, 0]).item(Int.self))
+                }
+            }
+            func step(_ id: Int) -> Int {
+                let hidden = md.decodeHidden(tokenId: id, state: &st)
+                let logits = m.lmHead != nil ? m.lmHead!(hidden) : m.model.embedTokens.asLinear(hidden)
+                eval(logits)
+                return Int(argMax(logits[0, 0]).item(Int.self))
+            }
+            // Warmup (compile trace)
+            for _ in 0 ..< 10 { lastId = step(lastId) }
+            // Bucketed timing: detect per-call retrace vs steady state.
+            var buckets: [String] = []
+            var t0 = Date()
+            var count = 0
+            for i in 0 ..< 400 {
+                lastId = step(lastId)
+                count += 1
+                if i % 50 == 49 {
+                    let dt = Date().timeIntervalSince(t0)
+                    buckets.append(String(format: "%d-%d: %.1f tok/s", i - 49, i, Double(count) / dt))
+                    t0 = Date()
+                    count = 0
+                }
+            }
+            return ["MEGA-BUCKETS: " + buckets.joined(separator: " | ")]
+        }
+        for line in mega { print(line) }
+
         print("SPEED-QMM-START")
         // Single QuantizedLinear probe (2048 -> 4096, 4-bit, group 64), matching Python.
         // Standalone module — no container access needed.
