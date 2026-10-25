@@ -171,6 +171,29 @@ struct FlintSpeedTests {
         }
         for line in mega { print(line) }
 
+        // rec megakernel probe: reference-packed banks + Swift kernel invocation.
+        let rec = try await container.perform { context -> [String] in
+            let fm = try FlintRecKernel.load(dumped: URL(fileURLWithPath: "/tmp/flint_rec_packed"))
+            let state = fm.makeKVState(capacity: 65536)
+            var lastId = 150000  // <|begin_of_text|>
+            // Warmup: trace + shader compile.
+            for _ in 0 ..< 10 {
+                let logits = try fm.forward(state: state, token: lastId)
+                eval(logits)
+                lastId = Int(argMax(logits).item(Int.self))
+            }
+            let N = 128
+            let t0 = Date()
+            for _ in 0 ..< N {
+                let logits = try fm.forward(state: state, token: lastId)
+                eval(logits)
+                lastId = Int(argMax(logits).item(Int.self))
+            }
+            let dt = Date().timeIntervalSince(t0)
+            return [String(format: "REC-RESULT: %.2f s for %d tokens = %.1f tok/s", dt, N, Double(N) / dt)]
+        }
+        for line in rec { print(line) }
+
         print("SPEED-QMM-START")
         // Single QuantizedLinear probe (2048 -> 4096, 4-bit, group 64), matching Python.
         // Standalone module — no container access needed.
