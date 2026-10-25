@@ -194,6 +194,34 @@ struct FlintSpeedTests {
         }
         for line in rec { print(line) }
 
+        // Native packer probe: pack from the loaded model, compare to reference dump.
+        let packed = try await container.perform { context -> [String] in
+            let flint = context.model as! FlintModel
+            let p = try FlintRecPacker.pack(flint)
+            // Compare against reference dump banks.
+            var results: [String] = []
+            for i in 0 ..< p.banks.count {
+                let ref = try MLX.loadArrays(url: URL(fileURLWithPath: "/tmp/flint_rec_packed/bank\(i).safetensors"))["bank\(i)"]!
+                let mine = p.banks[i]
+                let diff = abs(mine.asType(.float32) - ref.asType(.float32)).max()
+                let match = mine.shape == ref.shape && (diff.item(Float.self)) < 1e-6
+                results.append("bank\(i): shape \(mine.shape) vs \(ref.shape) match=\(match)")
+            }
+            // Metadata compare
+            let refMeta = try MLX.loadArrays(url: URL(fileURLWithPath: "/tmp/flint_rec_packed/meta.safetensors"))["metadata"]!
+            let refRows = refMeta.asArray(UInt32.self)
+            let mineFlat = p.metadata.flatMap { $0 }
+            let metaMatch = zip(mineFlat, refRows).allSatisfy { $0 == $1 }
+            var mismatches = 0
+            for (idx, (a, b)) in zip(mineFlat, refRows).enumerated() where a != b {
+                if mismatches < 8 { results.append("meta mismatch @\(idx): \(a) vs \(b) (row \(idx/64) slot \(idx%64))") }
+                mismatches += 1
+            }
+            results.append("metadata: \(mismatches) mismatches of 3200")
+            return results
+        }
+        for line in packed { print("PACK:", line) }
+
         print("SPEED-QMM-START")
         // Single QuantizedLinear probe (2048 -> 4096, 4-bit, group 64), matching Python.
         // Standalone module — no container access needed.
