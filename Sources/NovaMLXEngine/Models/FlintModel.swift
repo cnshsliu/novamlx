@@ -38,6 +38,9 @@ public struct FlintConfiguration: Codable {
     /// Transformers nests the theta in `rope_parameters` instead of the
     /// top-level `rope_theta`; the nested value wins when present.
     var ropeParameters: [String: Double]?
+    /// Official RecursiveSI/flint-int4 export markers (bits=4, embedding 8,
+    /// routed experts 4). Present ⇒ the rec megakernel path can engage.
+    var mlxExport: [String: Double]?
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
@@ -58,6 +61,7 @@ public struct FlintConfiguration: Codable {
         case vocabularySize = "vocab_size"
         case ropeTheta = "rope_theta"
         case ropeParameters = "rope_parameters"
+        case mlxExport = "mlx_export"
         case maxPositionEmbeddings = "max_position_embeddings"
         case tieWordEmbeddings = "tie_word_embeddings"
     }
@@ -531,6 +535,43 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             return lmHead(out)
         }
         return model.embedTokens.asLinear(out)
+    }
+
+    // MARK: - rec megakernel gate (official INT4 only)
+
+    nonisolated(unsafe) private(set) var recKernel: FlintRecKernel?
+    nonisolated(unsafe) private var recKernelTried = false
+    let recLock = NSLock()
+
+    /// True when the checkpoint carries the official RecursiveSI/flint-int4
+    /// export markers (bits 4 / embedding 8 / group 64). Only that layout is
+    /// guaranteed to match the rec megakernel's weight contract.
+    public var isOfficialInt4: Bool {
+        guard let e = configuration.mlxExport else { return false }
+        return e["bits"] == 4 && e["embedding_bits"] == 8 && e["routed_expert_bits"] == 4
+    }
+
+    /// Build (once) the rec megakernel from the loaded weights. Returns nil
+    /// for non-official layouts — the eager path stays authoritative.
+    public func recKernelIfAvailable() -> FlintRecKernel? {
+        recLock.lock()
+        defer { recLock.unlock() }
+        if recKernelTried { return recKernel }
+        recKernelTried = true
+        guard isOfficialInt4 else {
+            NovaMLXLog.info("[Flint] rec megakernel off: not the official INT4 export")
+            return nil
+        }
+        do {
+            let packed = try FlintRecPacker.pack(self)
+            let kernel = FlintRecKernel(packed: packed)
+            recKernel = kernel
+            NovaMLXLog.info("[Flint] rec megakernel armed (official INT4)")
+            return kernel
+        } catch {
+            NovaMLXLog.error("[Flint] rec pack failed, staying eager: \(error)")
+            return nil
+        }
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {

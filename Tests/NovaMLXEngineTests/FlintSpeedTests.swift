@@ -222,6 +222,31 @@ struct FlintSpeedTests {
         }
         for line in packed { print("PACK:", line) }
 
+        // Milestone 4 probe: load gate → native pack → decode closed loop.
+        let m4 = try await container.perform { context -> [String] in
+            let flint = context.model as! FlintModel
+            guard let rec = flint.recKernelIfAvailable() else {
+                return ["M4: gate declined (not official INT4?)"]
+            }
+            let state = rec.makeKVState(capacity: 65536)
+            var lastId = 150000
+            for _ in 0 ..< 10 {
+                let logits = try rec.forward(state: state, token: lastId)
+                eval(logits)
+                lastId = Int(argMax(logits).item(Int.self))
+            }
+            let N = 128
+            let t0 = Date()
+            for _ in 0 ..< N {
+                let logits = try rec.forward(state: state, token: lastId)
+                eval(logits)
+                lastId = Int(argMax(logits).item(Int.self))
+            }
+            let dt = Date().timeIntervalSince(t0)
+            return [String(format: "M4-RESULT: load-gate → native-pack → decode = %.1f tok/s", Double(N) / dt)]
+        }
+        for line in m4 { print(line) }
+
         print("SPEED-QMM-START")
         // Single QuantizedLinear probe (2048 -> 4096, 4-bit, group 64), matching Python.
         // Standalone module — no container access needed.
