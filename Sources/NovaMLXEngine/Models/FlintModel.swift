@@ -1,8 +1,10 @@
 import Foundation
+import os
 import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
+import NovaMLXUtils
 
 // Flint (RecursiveSI/flint) — ported from mlx-lm mlx_lm/models/flint.py.
 //
@@ -274,7 +276,112 @@ class FlintDecoderLayer: Module {
     }
 }
 
-// MARK: - Model
+// MARK: - Compiled decode (single token)
+
+/// Compiled single-token decode path. The Swift eager per-op overhead is
+/// ~3x Python mlx-lm's (measured on M4 Max: layer 2.9ms vs 0.8ms with equal
+/// single-op kernels), so at decode batch=1 the loop is CPU-dispatch bound.
+/// Compiling the two static-shape halves of every layer removes it: segment
+/// A fuses norms + projections + per-head QK norms + RoPE (position passed
+/// as an input tensor so the trace is not frozen to one offset); the cache
+/// update + SDPA stay outside (mutating state / varying S); segment B fuses
+/// the output projection, residuals, and the whole MoE block.
+///
+/// RoPE here is the plain non-interleaved form (base = ropeTheta, half-split
+/// rotation), matching `initializeRope(traditional: false)` — verified by
+/// FlintModelTests against `applyRotaryPosition`.
+final class FlintCompiledLayer {
+    private let layer: FlintDecoderLayer
+    private let attention: FlintAttention
+    private let args: FlintConfiguration
+    private var segA: ((MLXArray, MLXArray) -> (MLXArray, MLXArray, MLXArray))?
+    private var segB: ((MLXArray, MLXArray) -> MLXArray)?
+    private let invFreq: MLXArray
+
+    init(_ layer: FlintDecoderLayer, args: FlintConfiguration) {
+        self.layer = layer
+        self.attention = layer.selfAttn
+        self.args = args
+        // inv_freq = base^(-2i/D), i in 0..<D/2 — Flint uses plain RoPE.
+        let dim = args.headDim
+        let exponent = (0 ..< dim / 2).map { i -> Float in
+            -Float(2 * i) / Float(dim)
+        }
+        self.invFreq = pow(MLXArray(Float(args.ropeTheta)), MLXArray(exponent))
+    }
+
+    /// angles = pos * invFreq for a scalar position tensor.
+    private func ropeAngles(_ pos: MLXArray) -> MLXArray {
+        pos.asType(.float32) * invFreq
+    }
+
+    private func applyRoPE(_ x: MLXArray, angles: MLXArray) -> MLXArray {
+        // x: [B, H, L, D]; non-interleaved half-split rotation.
+        let d = x.dim(-1)
+        let x1 = x[.ellipsis, 0 ..< d / 2]
+        let x2 = x[.ellipsis, (d / 2)...]
+        let cosA = MLX.cos(angles).reshaped(1, 1, 1, d / 2).asType(x.dtype)
+        let sinA = MLX.sin(angles).reshaped(1, 1, 1, d / 2).asType(x.dtype)
+        let r1 = x1 * cosA - x2 * sinA
+        let r2 = x2 * cosA + x1 * sinA
+        return concatenated([r1, r2], axis: -1)
+    }
+
+    private func buildSegments() {
+        let attn = attention
+        let dim = args.headDim
+        let sliding = layer.useSliding
+
+        // A(x, pos) -> (q, k, v), all shapes static at L=1.
+        segA = compile { [self] (x: MLXArray, pos: MLXArray) in
+            let (B, L) = (x.dim(0), x.dim(1))
+            var q = attn.qNorm(attn.qProj(x).reshaped(B, L, args.attentionHeads, -1))
+                .transposed(0, 2, 1, 3)
+            var k = attn.kNorm(attn.kProj(x).reshaped(B, L, args.kvHeads, -1))
+                .transposed(0, 2, 1, 3)
+            let v = attn.vProj(x).reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
+            if sliding {
+                let angles = ropeAngles(pos)
+                q = applyRoPE(q, angles: angles)
+                k = applyRoPE(k, angles: angles)
+            }
+            _ = dim
+            return (q, k, v)
+        }
+
+        // B(attnOut, residual) -> nextX.
+        let layer = self.layer
+        segB = compile { (attnOut: MLXArray, residual: MLXArray) in
+            let h = residual + layer.selfAttn.oProj(attnOut.swappedAxes(1, 2).reshaped(residual.dim(0), residual.dim(1), -1))
+            let normed = layer.postNorm(h)
+            if let moe = layer.mlp as? FlintSparseMoeBlock {
+                return h + moe(normed)
+            }
+            return h + (layer.mlp as! FlintMLP)(normed)
+        }
+    }
+
+    /// One compiled decode step through this layer. `pos` is the absolute
+    /// position of the token being decoded (scalar tensor).
+    func callAsFunction(_ x: MLXArray, pos: MLXArray, cache: KVCache?) -> MLXArray {
+        if segA == nil { buildSegments() }
+        var (q, k, v) = segA!(x, pos)
+        // No mask at L=1: every cached position is in the past, and the
+        // rotating cache bounds sliding layers to the window.
+        if let cache {
+            (k, v) = cache.update(keys: k, values: v)
+        }
+        let out = MLXFast.scaledDotProductAttention(
+            queries: q, keys: k, values: v,
+            scale: pow(Float(args.headDim), -0.5),
+            mask: .none,
+            sinks: attention.softmaxOffset
+        )
+        return segB!(out, x)
+    }
+}
+
+
 
 public class FlintModelInner: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
@@ -285,7 +392,12 @@ public class FlintModelInner: Module {
     let slidingAttentionIndex: Int
     let fullAttentionIndex: Int
 
+    /// Lazily-built compiled single-token decode path (nil until first use).
+    nonisolated(unsafe) private(set) var compiledLayers: [FlintCompiledLayer]?
+    let config: FlintConfiguration
+
     init(_ config: FlintConfiguration) {
+        self.config = config
         _embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabularySize, dimensions: config.hiddenSize)
         _norm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -294,6 +406,23 @@ public class FlintModelInner: Module {
         self.windowSize = config.slidingWindow
         self.slidingAttentionIndex = layerTypes.firstIndex(of: "sliding_attention") ?? 0
         self.fullAttentionIndex = layerTypes.firstIndex(of: "full_attention") ?? 0
+    }
+
+    /// Single-token compiled decode: (tokenIds [1,1], position offset pair) -> logits-side hidden.
+    /// Returns nil when the fast path is not applicable (multi-token prefill).
+    func compiledDecode(
+        _ inputs: MLXArray, cache: [KVCache], slidingPos: MLXArray, fullPos: MLXArray
+    ) -> MLXArray? {
+        guard inputs.dim(1) == 1, cache.count == layers.count else { return nil }
+        if compiledLayers == nil {
+            compiledLayers = layers.map { FlintCompiledLayer($0, args: config) }
+        }
+        var x = embedTokens(inputs)
+        for (i, cl) in compiledLayers!.enumerated() {
+            let pos = layerTypes[i] == "full_attention" ? fullPos : slidingPos
+            x = cl(x, pos: pos, cache: cache[i])
+        }
+        return norm(x)
     }
 
     public func callAsFunction(
@@ -329,6 +458,17 @@ public class FlintModelInner: Module {
 }
 
 public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
+    static let _compiledHitLog = OSAllocatedUnfairLock(initialState: false)
+
+    /// Per-layer compiled segments measured SLOWER than eager (55 vs 51 ms per
+    /// token): 98 small compiled calls pay ~0.3 ms Swift wrapper overhead each,
+    /// eating the fusion win (a standalone compiled op-chain is 5.4x faster, so
+    /// the mechanism works — the segmentation granularity is wrong). Disabled
+    /// until the Qwen3Next-style whole-model segments (KV state as updatable
+    /// inputs/outputs) land. Opt in with NOVA_FLINT_COMPILED_DECODE=1.
+    static let compiledDecodeEnabled =
+        ProcessInfo.processInfo.environment["NOVA_FLINT_COMPILED_DECODE"] == "1"
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -357,6 +497,26 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        // Compiled single-token fast path: the eager loop is CPU-dispatch
+        // bound in Swift (~3x Python mlx-lm). Only for plain caches — the
+        // quantized-cache path needs its own SDPA and stays eager.
+        if Self.compiledDecodeEnabled, inputs.dim(1) == 1, let cache,
+            cache.count == model.layers.count, !(cache[0] is QuantizedKVCacheProtocol)
+        {
+            if !FlintModel._compiledHitLog.withLock({ $0 }) {
+                FlintModel._compiledHitLog.withLock { $0 = true }
+                NovaMLXLog.info("[Flint] compiled decode path ACTIVE")
+            }
+            let pos = MLXArray(Int32(max(0, cache[model.slidingAttentionIndex].offset)))
+            if let hidden = model.compiledDecode(
+                inputs, cache: cache, slidingPos: pos, fullPos: pos)
+            {
+                if let lmHead {
+                    return lmHead(hidden)
+                }
+                return model.embedTokens.asLinear(hidden)
+            }
+        }
         let out = model(inputs, cache: cache)
         if let lmHead {
             return lmHead(out)
