@@ -600,7 +600,8 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             let packed = try FlintRecPacker.pack(self)
             let kernel = FlintRecKernel(packed: packed)
             recKernel = kernel
-            NovaMLXLog.info("[Flint] rec megakernel armed (official INT4)")
+            NovaMLXLog.info(
+                "[Flint] rec megakernel armed (official INT4, \(kernel.launch.label) workers)")
             return kernel
         } catch {
             NovaMLXLog.error("[Flint] rec pack failed, staying eager: \(error)")
@@ -674,17 +675,23 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             }
         }
 
-        let tokens = inputs.asType(.int32).asArray(Int32.self)
-        guard tokens.count == seq else {
-            NovaMLXLog.error("[Flint] rec decode off: token read \(tokens.count) != \(seq)")
-            return nil
+        let tokens: [Int]
+        if seq == 1 {
+            tokens = [Self.recScalarToken(inputs)]
+        } else {
+            let flat = inputs.asType(.int32).asArray(Int32.self)
+            guard flat.count == seq else {
+                NovaMLXLog.error("[Flint] rec decode off: token read \(flat.count) != \(seq)")
+                return nil
+            }
+            tokens = flat.map { Int($0) }
         }
         var rows: [MLXArray] = []
         rows.reserveCapacity(seq)
         var committed = 0
         do {
             for id in tokens {
-                let flat = try kernel.forward(state: session.state, token: Int(id))
+                let flat = try kernel.forward(state: session.state, token: id)
                 guard flat.dim(0) == vocabularySize else {
                     session.state.position = max(0, session.state.position - 1)
                     throw NovaMLXError.inferenceFailed(
@@ -710,6 +717,21 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             return rows[0].reshaped(1, 1, vocabularySize)
         }
         return stacked(rows, axis: 0).reshaped(1, rows.count, vocabularySize)
+    }
+
+    /// One decode token, without a dtype-cast kernel when the id is already
+    /// an integer array (the generate loop passes `Int32`).
+    private static func recScalarToken(_ inputs: MLXArray) -> Int {
+        switch inputs.dtype {
+        case .int32:
+            return Int(inputs.item(Int32.self))
+        case .uint32:
+            return Int(inputs.item(UInt32.self))
+        case .int64:
+            return Int(inputs.item(Int64.self))
+        default:
+            return Int(inputs.asType(.int32).item(Int32.self))
+        }
     }
 
     /// True when this forward should run on the megakernel.

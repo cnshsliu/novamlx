@@ -18,6 +18,7 @@ struct FlintSpeedTests {
         var seconds: Double
         var steps: Int
         var official: Bool
+        var launch: String
     }
 
     @Test("raw model decode ~128 tokens")
@@ -80,14 +81,15 @@ struct FlintSpeedTests {
             let flint = context.model as! FlintModel
             let seconds = segTimes.reduce(0, +) / 4 / 1000 * Double(n)
             return SendableBox(LoopStats(
-                seconds: seconds, steps: flint.recDecodeSteps, official: flint.isOfficialInt4))
+                seconds: seconds, steps: flint.recDecodeSteps, official: flint.isOfficialInt4,
+                launch: flint.recKernel?.launch.label ?? "none"))
         }
         let stats = dtBox.value
         let dt = stats.seconds
         print(String(format: "SPEED-RESULT: raw model decode %.2f s for %d tokens = %.1f tok/s", dt, n, Double(n) / dt))
         print(String(
-            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@)",
-            Double(n) / dt, stats.steps, stats.official ? "yes" : "no"))
+            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@, launch=%@)",
+            Double(n) / dt, stats.steps, stats.official ? "yes" : "no", stats.launch))
         // The first single-token forward stays eager (it may be the prefill
         // tail). Warmup plus the timed loop are the kernel steps.
         #expect(stats.official)

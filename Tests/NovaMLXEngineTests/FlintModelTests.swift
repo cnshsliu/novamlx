@@ -198,6 +198,28 @@ struct FlintModelTests {
         #expect(proxy.offset == prefill + 1)
     }
 
+    @Test("rec launch profile follows the chip name, with an explicit override")
+    func testRecLaunchProfile() {
+        #expect(FlintRecLaunch.resolve(deviceName: "Apple M4 Pro") == .pro)
+        #expect(FlintRecLaunch.resolve(deviceName: "Apple M5 Pro") == .pro)
+        #expect(FlintRecLaunch.resolve(deviceName: "Apple M4 Max") == .max)
+        #expect(FlintRecLaunch.resolve(deviceName: "Apple M5 Max") == .max)
+        #expect(FlintRecLaunch.resolve(deviceName: "") == .pro)
+        #expect(FlintRecLaunch.resolve(deviceName: "Apple M4 Max", override: "36") == .pro)
+        #expect(FlintRecLaunch.resolve(deviceName: "Apple M4 Pro", override: "76") == .max)
+        #expect(FlintRecLaunch.resolve(deviceName: "Apple M4 Pro", override: "nope") == .pro)
+        #expect(FlintRecLaunch.pro.label == "36/32/32")
+        #expect(FlintRecLaunch.max.label == "76/64/64")
+        // 36 uses 4 KV teams of 9. 76 uses 4 teams of 19 and a 64-wide head.
+        #expect(FlintRecKernelSources.bodyPro.contains("kv_team=group/9"))
+        #expect(FlintRecKernelSources.bodyMax.contains("work/19"))
+        #expect(FlintRecKernelSources.headerMax.contains("group/19"))
+        #expect(FlintRecKernelSources.bodyMax.contains("if(group<64) q4_local<2048>(weight_matrix(tail,final+30)"))
+        #expect(FlintRecKernelSources.bodyPro.contains("if(group<32) q4_local<2048>(weight_matrix(tail,final+30)"))
+        #expect(FlintRecKernelSources.bodyPro.contains("#define routing routing_rw"))
+        #expect(FlintRecKernelSources.bodyMax.contains("#define routing routing_rw"))
+    }
+
     @Test("rec handoff waits until one single-token forward has landed")
     func testRecHandoffReady() {
         // Wide prefill, and the first one-token call (prompt tail or first
