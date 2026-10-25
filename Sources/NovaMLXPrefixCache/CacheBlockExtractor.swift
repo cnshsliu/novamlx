@@ -2,7 +2,29 @@ import Foundation
 import MLX
 import MLXLMCommon
 
+/// A cache wrapper whose stored prefix-cache identity is another layer.
+///
+/// Decode proxies keep the scheduler's trim target stable, but prefix cache
+/// records the concrete class (`RotatingKVCache` vs full-attention `KVCache`).
+/// Classifying the wrapper itself restores a sliding window as full attention.
+public protocol PrefixCacheLayerUnwrapping: KVCache {
+    var prefixCacheLayer: any KVCache { get }
+}
+
 public enum CacheBlockExtractor {
+
+    /// The layer prefix cache should record. Wrappers unwrap once.
+    public static func canonicalLayer(_ layer: KVCache) -> KVCache {
+        if let unwrapping = layer as? any PrefixCacheLayerUnwrapping {
+            return unwrapping.prefixCacheLayer
+        }
+        return layer
+    }
+
+    /// True when any layer is a sliding-window ring, including through a wrapper.
+    public static func usesRotatingKV(_ cache: [KVCache]) -> Bool {
+        cache.contains { canonicalLayer($0) is RotatingKVCache }
+    }
 
     public static func extractBlockSlices(
         cache: [KVCache],
@@ -12,7 +34,8 @@ public enum CacheBlockExtractor {
         var result: [[MLXArray]] = []
         result.reserveCapacity(cache.count)
 
-        for layer in cache {
+        for wrapped in cache {
+            let layer = canonicalLayer(wrapped)
             let state = layer.state
             var sliced: [MLXArray] = []
             sliced.reserveCapacity(state.count)
@@ -123,8 +146,8 @@ public enum CacheBlockExtractor {
     }
 
     public static func getLayerClasses(from cache: [KVCache]) -> [String] {
-        cache.map { layer -> String in
-            switch layer {
+        cache.map { wrapped -> String in
+            switch canonicalLayer(wrapped) {
             case is ChunkedKVCache: "ChunkedKVCache"
             case is KVCacheSimple: "KVCache"
             case is RotatingKVCache: "RotatingKVCache"
@@ -138,6 +161,6 @@ public enum CacheBlockExtractor {
     }
 
     public static func getMetaStates(from cache: [KVCache]) -> [[String]] {
-        cache.map { $0.metaState }
+        cache.map { canonicalLayer($0).metaState }
     }
 }

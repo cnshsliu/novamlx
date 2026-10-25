@@ -16,9 +16,11 @@ import NovaMLXUtils
 /// for the M4-class device profile) and replicates the host-side packing
 /// and invocation. Flint-only: no other model family touches this path.
 ///
-/// Milestone state: kernel invocation over banks dumped by the reference
-/// Python packer (`/tmp/dump_packed.py`); the Swift-native packer is the
-/// next step. Validated against the reference engine's 196.8 tok/s decode.
+/// Decode-only, matching `QATSession`: prefill stays on the eager model,
+/// which fills MLX caches; those caches are copied into this KV state and
+/// `initial` is frozen at the prompt length. Each `forward` then consumes
+/// one token. Host scratch is still allocated per call — that, plus the
+/// fixed 36-worker M4 profile, is the remaining gap versus rec's ~197 tok/s.
 public final class FlintRecKernel: @unchecked Sendable {
     // Rendered for: workers=36, mlp=32, head=32 (M4-class g16s profile).
     private static let deviceWorkers = 36
@@ -44,6 +46,9 @@ public final class FlintRecKernel: @unchecked Sendable {
         let globalElements: Int
         let localElements: Int
         var position: Int = 0
+        /// Prompt length captured when prefill handed off. Sliding-window
+        /// insert is `(position - initial) % cap` once `initial >= cap`.
+        var initial: Int = 0
         init(banks: [MLXArray], metadata: MLXArray, capacity: Int, globalElements: Int, localElements: Int) {
             self.banks = banks
             self.metadata = metadata
@@ -149,16 +154,114 @@ public final class FlintRecKernel: @unchecked Sendable {
 
     // MARK: decode step
 
+    /// Grow global KV blocks up to the kernel's 4 × 65536-token ceiling.
+    func ensureCapacity(_ state: KVState, tokens: Int) throws {
+        let needed = max(tokens, 1)
+        if needed <= state.capacity, !state.banks.isEmpty { return }
+        let count = (needed + Self.blockTokens - 1) / Self.blockTokens
+        guard count <= Self.kvBlocks else {
+            throw NovaMLXError.inferenceFailed(
+                "rec KV needs \(needed) tokens, past \(Self.kvBlocks * Self.blockTokens)")
+        }
+        while state.banks.count < count {
+            let index = state.banks.count
+            let size = state.globalElements + (index == 0 ? state.localElements : 0)
+            let block = MLXArray.zeros([size / 1024, 1024], dtype: .bfloat16)
+            eval(block)
+            state.banks.append(block)
+        }
+        state.capacity = state.banks.count * Self.blockTokens
+    }
+
+    /// Copy prefill K/V into the block layout the decode kernel reads.
+    /// `keys`/`values` are `[1, 4, S, 128]` or `[4, S, 128]`, temporal order
+    /// (oldest at the front). Global layers append at `tokenOffset`; sliding
+    /// layers are a single ring written at offset 0.
+    func writeKV(
+        state: KVState, layer: Int, tokenOffset: Int, keys: MLXArray, values: MLXArray
+    ) throws {
+        var key = try Self.kvMatrix(keys)
+        var value = try Self.kvMatrix(values)
+        guard key.dim(1) == value.dim(1) else {
+            throw NovaMLXError.inferenceFailed("rec KV key/value lengths differ")
+        }
+        let rows = state.metadata.asArray(UInt32.self)
+        let base = layer * 64
+        guard base + 62 < rows.count else {
+            throw NovaMLXError.inferenceFailed("rec KV metadata missing layer \(layer)")
+        }
+        let start = Int(rows[base + 61])
+        let cap = Int(rows[base + 62])
+        let global = rows[base + 1] != 0
+        guard cap > 0 else {
+            throw NovaMLXError.inferenceFailed("rec KV layer \(layer) has no capacity")
+        }
+        if !global, key.dim(1) > cap {
+            let drop = key.dim(1) - cap
+            key = key[.ellipsis, drop..., 0...]
+            value = value[.ellipsis, drop..., 0...]
+        }
+        let seq = key.dim(1)
+        if seq == 0 { return }
+        let limit = global ? state.capacity : cap
+        guard tokenOffset >= 0, tokenOffset + seq <= limit else {
+            throw NovaMLXError.inferenceFailed(
+                "rec KV write layer \(layer) offset \(tokenOffset)+\(seq) past \(limit)")
+        }
+        var begin = 0
+        while begin < seq {
+            let absolute = tokenOffset + begin
+            let block = absolute / cap
+            let position = absolute % cap
+            let size = min(seq - begin, cap - position)
+            guard block < state.banks.count else {
+                throw NovaMLXError.inferenceFailed("rec KV block \(block) is not allocated")
+            }
+            let layout = MLXArray(
+                [UInt32(start), UInt32(cap), UInt32(position), UInt32(size)], [4])
+            let done = writeKernel(
+                [
+                    state.banks[block],
+                    key[.ellipsis, begin ..< (begin + size), 0...],
+                    value[.ellipsis, begin ..< (begin + size), 0...],
+                    layout,
+                ],
+                grid: (size * 512, 1, 1),
+                threadGroup: (256, 1, 1),
+                outputShapes: [[1]],
+                outputDTypes: [.uint32]
+            )
+            eval(done)
+            begin += size
+        }
+    }
+
+    private static func kvMatrix(_ array: MLXArray) throws -> MLXArray {
+        var a = array
+        if a.ndim == 4 {
+            guard a.dim(0) == 1 else {
+                throw NovaMLXError.inferenceFailed("rec KV batch \(a.dim(0)) is not 1")
+            }
+            a = a.reshaped(a.dim(1), a.dim(2), a.dim(3))
+        }
+        guard a.ndim == 3, a.dim(0) == 4, a.dim(2) == 128 else {
+            throw NovaMLXError.inferenceFailed("rec KV shape \(array.shape) is not [1,4,S,128]")
+        }
+        return a.asType(.bfloat16)
+    }
+
     /// One fused decode step. Returns logits [vocab] (bf16).
     @discardableResult
     func forward(state: KVState, token: Int, layerCount: Int = 49) throws -> MLXArray {
+        try ensureCapacity(state, tokens: state.position + 1)
         let control = MLXArray.zeros([1024], dtype: .uint32)
 
-        // [token, position, initial, layer_count]
+        // [token, position, initial, layer_count]. `initial` is the prefill
+        // handoff, not the live position — see KVState.initial.
         let p = MLXArray(
-            [UInt32(token), UInt32(state.position), UInt32(state.position), UInt32(layerCount)],
+            [UInt32(token), UInt32(state.position), UInt32(state.initial), UInt32(layerCount)],
             [4])
-_ = control
+        _ = control
 
         let workspace = 78848
         let partials = 32 * 1024 * 128 / 2

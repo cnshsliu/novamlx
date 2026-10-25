@@ -7,11 +7,17 @@ import Testing
 
 @testable import NovaMLXEngine
 
-/// Manual speed probe: bypasses NovaMLX's schedulers entirely and times the
-/// raw model decode loop, matching Python mlx-lm's generate() shape. Runs
-/// only when the weights are on disk (skips otherwise).
+/// Manual speed probe. The primary measurement is the real model call:
+/// eager prefill, then `FlintRecKernel` decode for official INT4. Runs only
+/// when the weights are on disk (skips otherwise).
 @Suite("Flint raw decode speed")
 struct FlintSpeedTests {
+
+    private struct LoopStats: Sendable {
+        var seconds: Double
+        var steps: Int
+        var official: Bool
+    }
 
     @Test("raw model decode ~128 tokens")
     func testRawDecodeSpeed() async throws {
@@ -40,7 +46,8 @@ struct FlintSpeedTests {
         }
         print("SPEED-DTYPE:", dtypeInfo)
 
-        // Raw decode, entirely inside one perform block (no per-token hops).
+        // Closed loop: eager prefill, then single-token decode through the
+        // armed rec kernel (the same call the app's generate loop makes).
         let n = 128
         let dtBox = try await container.perform { context in
             let caches = try context.model.newCache(parameters: nil)
@@ -69,10 +76,21 @@ struct FlintSpeedTests {
                 segTimes.append(Date().timeIntervalSince(t0) / Double(per) * 1000)
             }
             print("SPEED-SEGS ms/token:", segTimes.map { String(format: "%.1f", $0) }.joined(separator: " "))
-            return SendableBox(segTimes.reduce(0, +) / 4 / 1000 * Double(n))
+            let flint = context.model as! FlintModel
+            let seconds = segTimes.reduce(0, +) / 4 / 1000 * Double(n)
+            return SendableBox(LoopStats(
+                seconds: seconds, steps: flint.recDecodeSteps, official: flint.isOfficialInt4))
         }
-        let dt = dtBox.value
+        let stats = dtBox.value
+        let dt = stats.seconds
         print(String(format: "SPEED-RESULT: raw model decode %.2f s for %d tokens = %.1f tok/s", dt, n, Double(n) / dt))
+        print(String(
+            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@)",
+            Double(n) / dt, stats.steps, stats.official ? "yes" : "no"))
+        // The first single-token forward stays eager (it may be the prefill
+        // tail). Warmup plus the timed loop are the kernel steps.
+        #expect(stats.official)
+        #expect(stats.steps >= n)
 
         // Per-block microbench (no cache), mirroring the Python probe.
         let micro = await container.perform { context -> String in
@@ -171,8 +189,19 @@ struct FlintSpeedTests {
         }
         for line in mega { print(line) }
 
+        // Reference-dump probes. The closed loop above does not need them.
+        let dump = URL(fileURLWithPath: "/tmp/flint_rec_packed")
+        var dumpIsDir: ObjCBool = false
+        let haveDump = FileManager.default.fileExists(atPath: dump.path, isDirectory: &dumpIsDir)
+            && dumpIsDir.boolValue
+        if !haveDump {
+            print("REC-SKIP: reference dump not present; closed loop is the primary probe")
+        }
+
         // rec megakernel probe: reference-packed banks + Swift kernel invocation.
-        let rec = try await container.perform { context -> [String] in
+        let rec: [String]
+        if haveDump {
+            rec = try await container.perform { context -> [String] in
             let fm = try FlintRecKernel.load(dumped: URL(fileURLWithPath: "/tmp/flint_rec_packed"))
             let state = fm.makeKVState(capacity: 65536)
             var lastId = 150000  // <|begin_of_text|>
@@ -191,11 +220,16 @@ struct FlintSpeedTests {
             }
             let dt = Date().timeIntervalSince(t0)
             return [String(format: "REC-RESULT: %.2f s for %d tokens = %.1f tok/s", dt, N, Double(N) / dt)]
+            }
+        } else {
+            rec = ["REC-SKIP"]
         }
         for line in rec { print(line) }
 
         // Native packer probe: pack from the loaded model, compare to reference dump.
-        let packed = try await container.perform { context -> [String] in
+        let packed: [String]
+        if haveDump {
+            packed = try await container.perform { context -> [String] in
             let flint = context.model as! FlintModel
             let p = try FlintRecPacker.pack(flint)
             // Compare against reference dump banks.
@@ -217,35 +251,13 @@ struct FlintSpeedTests {
                 if mismatches < 8 { results.append("meta mismatch @\(idx): \(a) vs \(b) (row \(idx/64) slot \(idx%64))") }
                 mismatches += 1
             }
-            results.append("metadata: \(mismatches) mismatches of 3200")
+            results.append("metadata: \(mismatches) mismatches of 3200 match=\(metaMatch)")
             return results
+            }
+        } else {
+            packed = ["PACK-SKIP"]
         }
         for line in packed { print("PACK:", line) }
-
-        // Milestone 4 probe: load gate → native pack → decode closed loop.
-        let m4 = try await container.perform { context -> [String] in
-            let flint = context.model as! FlintModel
-            guard let rec = flint.recKernelIfAvailable() else {
-                return ["M4: gate declined (not official INT4?)"]
-            }
-            let state = rec.makeKVState(capacity: 65536)
-            var lastId = 150000
-            for _ in 0 ..< 10 {
-                let logits = try rec.forward(state: state, token: lastId)
-                eval(logits)
-                lastId = Int(argMax(logits).item(Int.self))
-            }
-            let N = 128
-            let t0 = Date()
-            for _ in 0 ..< N {
-                let logits = try rec.forward(state: state, token: lastId)
-                eval(logits)
-                lastId = Int(argMax(logits).item(Int.self))
-            }
-            let dt = Date().timeIntervalSince(t0)
-            return [String(format: "M4-RESULT: load-gate → native-pack → decode = %.1f tok/s", Double(N) / dt)]
-        }
-        for line in m4 { print(line) }
 
         print("SPEED-QMM-START")
         // Single QuantizedLinear probe (2048 -> 4096, 4-bit, group 64), matching Python.

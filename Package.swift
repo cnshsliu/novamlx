@@ -278,6 +278,7 @@ let package = Package(
             name: "NovaMLXEngineTests",
             dependencies: [
                 "NovaMLXEngine",
+                "NovaMLXPrefixCache",
                 "NovaMLXInference",
                 "NovaMLXModelManager",
                 "NovaMLXCore",
