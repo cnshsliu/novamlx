@@ -2290,9 +2290,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         // Probe model cache type. If any layer is RotatingKVCache (sliding window),
         // prefix cache is incompatible — skip fetch to avoid wasted SSD I/O.
+        // usesRotatingKV sees through decode wrappers so a proxy cannot turn this off.
         let isVLM = container.config.modelType == .vlm
         let probeCache = try model.value.newCache(parameters: parameters)
-        let modelUsesRotating = probeCache.contains { $0 is RotatingKVCache }
+        let modelUsesRotating = CacheBlockExtractor.usesRotatingKV(probeCache)
 
         // Report live activity so the status panel shows this non-streaming
         // LLM/VLM request is in progress (model name + kind).
@@ -3018,9 +3019,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     // Probe model cache type. If any layer is RotatingKVCache (sliding window),
                     // prefix cache is incompatible — skip fetch to avoid wasted SSD I/O.
+                    // usesRotatingKV sees through decode wrappers so a proxy cannot turn this off.
                     let isVLM = container.config.modelType == .vlm
                     let probeCache = try model.value.newCache(parameters: parameters)
-                    let modelUsesRotating = probeCache.contains { $0 is RotatingKVCache }
+                    let modelUsesRotating = CacheBlockExtractor.usesRotatingKV(probeCache)
 
                     // Capture prompt tokens for prefix cache storage + loading.
                     // Skip VLM, RotatingKVCache, and GatedDeltaNet (hybrid conv

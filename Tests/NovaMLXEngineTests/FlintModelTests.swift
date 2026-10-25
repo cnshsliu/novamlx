@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import NovaMLXPrefixCache
 import Testing
 
 @testable import NovaMLXEngine
@@ -10,7 +11,9 @@ struct FlintModelTests {
 
     /// RecursiveSI/flint config.json with the standard num_hidden_layers
     /// spelled out and the 49-entry layer_types list.
-    static func configJSON(numHiddenLayers: Int = 49, ropeOverride: String? = nil) -> String {
+    static func configJSON(
+        numHiddenLayers: Int = 49, ropeOverride: String? = nil, extra: String = ""
+    ) -> String {
         let layerTypes = ([
             "full_attention", "full_attention", "sliding_attention", "sliding_attention",
             "sliding_attention", "full_attention", "sliding_attention", "sliding_attention",
@@ -47,10 +50,22 @@ struct FlintModelTests {
           "vocab_size": 150144,
           \(rope)
           "tie_word_embeddings": false,
-          "layer_types": [\(layerTypes)]
+          "layer_types": [\(layerTypes)]\(extra.isEmpty ? "" : ",\n" + extra)
         }
         """
     }
+
+    /// Official RecursiveSI/flint-int4 `mlx_export`: numeric markers plus a
+    /// layer-index array and a string scale rule.
+    static let officialExport = """
+        "mlx_export": {
+          "bits": 4,
+          "embedding_bits": 8,
+          "routed_expert_bits": 4,
+          "scale_rule": "mse",
+          "full_attention_layers": [0, 1, 48]
+        }
+        """
 
     @Test("configuration decodes the real RecursiveSI/flint config")
     func testConfigDecode() throws {
@@ -68,6 +83,25 @@ struct FlintModelTests {
         #expect(model.vocabularySize == 150144)
         #expect(model.kvHeads.count == 49)
         #expect(model.kvHeads.allSatisfy { $0 == 4 })
+        #expect(!model.isOfficialInt4)
+    }
+
+    @Test("mlx_export numeric markers survive the mixed official layout")
+    func testOfficialInt4Markers() throws {
+        let config = try JSONDecoder.json5().decode(
+            FlintConfiguration.self,
+            from: Data(Self.configJSON(extra: Self.officialExport).utf8))
+        #expect(config.mlxExport?["bits"] == 4)
+        #expect(config.mlxExport?["embedding_bits"] == 8)
+        #expect(config.mlxExport?["routed_expert_bits"] == 4)
+        #expect(config.mlxExport?["scale_rule"] == nil)
+        let model = FlintModel(config)
+        #expect(model.isOfficialInt4)
+
+        let other = try JSONDecoder.json5().decode(
+            FlintConfiguration.self,
+            from: Data(Self.configJSON(extra: #""mlx_export": {"bits": 8, "embedding_bits": 8, "routed_expert_bits": 4}"#).utf8))
+        #expect(!FlintModel(other).isOfficialInt4)
     }
 
     @Test("rope_parameters.rope_theta overrides the top-level rope_theta")
@@ -124,5 +158,84 @@ struct FlintModelTests {
         packed["model.layers.2.mlp.experts.0.gate_proj.scales"] = MLXRandom.normal([1024])
         let viewed = model.sanitize(weights: packed)
         #expect(viewed["model.layers.2.mlp.experts.0.gate_proj.weight"]?.dtype == .uint32)
+    }
+
+    @Test("official INT4 newCache wraps eager caches for rec trim")
+    func testOfficialCacheProxy() throws {
+        let config = try JSONDecoder.json5().decode(
+            FlintConfiguration.self,
+            from: Data(Self.configJSON(extra: Self.officialExport).utf8))
+        let model = FlintModel(config)
+        let caches = try model.newCache(parameters: nil)
+        let proxies = caches.compactMap { $0 as? FlintRecCacheProxy }
+        #expect(proxies.count == 49)
+        #expect(proxies.map(\.inner).filter { $0 is RotatingKVCache }.count == 35)
+        #expect(proxies.map(\.inner).filter { !($0 is RotatingKVCache) }.count == 14)
+        // Prefix cache must still see the sliding rings through the proxy,
+        // or the rotating-cache skip turns off and a later restore flattens them.
+        let classes = CacheBlockExtractor.getLayerClasses(from: caches)
+        #expect(classes.filter { $0 == "RotatingKVCache" }.count == 35)
+        #expect(classes.filter { $0 == "KVCache" }.count == 14)
+        #expect(CacheBlockExtractor.usesRotatingKV(caches))
+        #expect(!CacheBlockExtractor.usesRotatingKV(Array(caches.prefix(2))))
+    }
+
+    @Test("rec trim drops the decode suffix and leaves eager prefill in place")
+    func testRecTrimKeepsPrefill() throws {
+        let config = try JSONDecoder.json5().decode(
+            FlintConfiguration.self,
+            from: Data(Self.configJSON(extra: Self.officialExport).utf8))
+        let model = FlintModel(config)
+        let caches = try model.newCache(parameters: nil)
+        let proxy = try #require(caches[0] as? FlintRecCacheProxy)
+        let prefill = proxy.inner.offset
+        proxy.noteRecStep()
+        proxy.noteRecStep()
+        #expect(proxy.offset == prefill + 2)
+        #expect(proxy.trim(1) == 1)
+        #expect(proxy.recAhead == 1)
+        #expect(proxy.inner.offset == prefill)
+        #expect(proxy.offset == prefill + 1)
+    }
+
+    @Test("rec handoff waits until one single-token forward has landed")
+    func testRecHandoffReady() {
+        // Wide prefill, and the first one-token call (prompt tail or first
+        // decode — they look the same), stay eager.
+        #expect(!FlintModel.recHandoffReady(seq: 200, cacheOffset: 0, continuing: false, sawSingleToken: false))
+        #expect(!FlintModel.recHandoffReady(seq: 1, cacheOffset: 0, continuing: false, sawSingleToken: false))
+        #expect(!FlintModel.recHandoffReady(seq: 1, cacheOffset: 100, continuing: false, sawSingleToken: false))
+        #expect(!FlintModel.recHandoffReady(seq: 1, cacheOffset: 512, continuing: false, sawSingleToken: false))
+        // The next one-token call is decode. The eager token is already in KV.
+        #expect(FlintModel.recHandoffReady(seq: 1, cacheOffset: 101, continuing: false, sawSingleToken: true))
+        #expect(FlintModel.recHandoffReady(seq: 1, cacheOffset: 513, continuing: false, sawSingleToken: true))
+        // An in-flight session also verifies multi-token drafts.
+        #expect(FlintModel.recHandoffReady(seq: 5, cacheOffset: 100, continuing: true, sawSingleToken: true))
+        #expect(!FlintModel.recHandoffReady(seq: 5, cacheOffset: 100, continuing: false, sawSingleToken: true))
+    }
+
+    @Test("sliding KV unwind puts the oldest token first")
+    func testSlidingUnwind() {
+        func feed(_ cache: RotatingKVCache, count: Int) {
+            for t in 0 ..< count {
+                var raw = [Float](repeating: 0, count: 4 * 128)
+                raw[0] = Float(t)
+                let token = MLXArray(raw).reshaped(1, 4, 1, 128).asType(.bfloat16)
+                _ = cache.update(keys: token, values: token)
+            }
+        }
+        func seq(_ cache: KVCache) -> [Float] {
+            let pair = FlintRecCacheBridge.orderedPair(from: cache)!
+            let keys = pair.0.asType(.float32)
+            return (0 ..< keys.dim(2)).map { keys[0, 0, $0, 0].item(Float.self) }
+        }
+
+        let warm = RotatingKVCache(maxSize: 4, step: 4)
+        feed(warm, count: 3)
+        #expect(seq(warm) == [0, 1, 2])
+
+        let wrapped = RotatingKVCache(maxSize: 4, step: 4)
+        feed(wrapped, count: 6)
+        #expect(seq(wrapped) == [2, 3, 4, 5])
     }
 }

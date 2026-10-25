@@ -4,6 +4,7 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
+import NovaMLXCore
 import NovaMLXUtils
 
 // Flint (RecursiveSI/flint) — ported from mlx-lm mlx_lm/models/flint.py.
@@ -101,6 +102,18 @@ public struct FlintConfiguration: Codable {
         }
         maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
         tieWordEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        // mlx_export mixes numeric markers with a layer-index array and a
+        // string scale rule. A strict [String: Double] decode throws and the
+        // whole config fails; skipping the key leaves the INT4 gate dark.
+        // Keep only the numeric fields the gate reads.
+        var export: [String: Double] = [:]
+        if let raw = try c.decodeIfPresent([String: AnyCodable].self, forKey: .mlxExport) {
+            for (k, v) in raw {
+                if let d = v.value as? Double { export[k] = d }
+                else if let i = v.value as? Int { export[k] = Double(i) }
+            }
+        }
+        mlxExport = export.isEmpty ? nil : export
     }
 }
 
@@ -510,9 +523,19 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        // Pack during prefill so the first decode token is not also the
+        // first time the banks are built. Nil when this is not official INT4.
+        if cache != nil {
+            _ = recKernelIfAvailable()
+        }
+        if let rec = recDecodeLogits(inputs, cache: cache) {
+            return rec
+        }
         // Compiled single-token fast path: the eager loop is CPU-dispatch
         // bound in Swift (~3x Python mlx-lm). Only for plain caches — the
         // quantized-cache path needs its own SDPA and stays eager.
+        // Gated off (NOVA_FLINT_COMPILED_DECODE). Rec decode above is the
+        // official-INT4 path; this stays as the unused experiment.
         if Self.compiledDecodeEnabled, inputs.dim(1) == 1, let cache,
             cache.count == model.layers.count, !(cache[0] is QuantizedKVCacheProtocol)
         {
@@ -543,9 +566,20 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     nonisolated(unsafe) private var recKernelTried = false
     let recLock = NSLock()
 
+    nonisolated(unsafe) private var recSession: FlintRecDecodeSession?
+    nonisolated(unsafe) private var recDecodeDisabled = false
+    nonisolated(unsafe) private(set) var recDecodeSteps = 0
+    nonisolated(unsafe) private var recQuantFallbackLogged = false
+    nonisolated(unsafe) private var recIngestFailedCache: ObjectIdentifier?
+    nonisolated(unsafe) private var recActiveLogged = false
+    /// Non-proxy caches only. Proxies keep this on themselves so two live
+    /// sequences do not steal each other's handoff.
+    nonisolated(unsafe) private var recSawSingleToken: ObjectIdentifier?
+
     /// True when the checkpoint carries the official RecursiveSI/flint-int4
-    /// export markers (bits 4 / embedding 8 / group 64). Only that layout is
-    /// guaranteed to match the rec megakernel's weight contract.
+    /// export markers (`bits` 4, `embedding_bits` 8, `routed_expert_bits` 4).
+    /// Group size lives on the checkpoint's `quantization` block, not in
+    /// `mlx_export` — requiring it here false-negatives the real config.
     public var isOfficialInt4: Bool {
         guard let e = configuration.mlxExport else { return false }
         return e["bits"] == 4 && e["embedding_bits"] == 8 && e["routed_expert_bits"] == 4
@@ -575,12 +609,217 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
-        try model.layerTypes.map { layerType in
+        let raw = try model.layerTypes.map { layerType in
             try makeHybridAttentionKVCache(
                 parameters: parameters,
                 slidingWindow: configuration.slidingWindow,
                 usesSlidingWindow: layerType != "full_attention")
         }
+        // Quantized KV cannot be copied into the megakernel's bf16 rings.
+        // Leave those caches unwrapped so eager SDPA keeps its quant path.
+        guard isOfficialInt4, parameters?.kvBits == nil else { return raw }
+        guard !raw.contains(where: { $0 is QuantizedKVCacheProtocol }) else { return raw }
+        return raw.enumerated().map { index, cache in
+            FlintRecCacheProxy(inner: cache, layer: index, model: self)
+        }
+    }
+
+    /// Prefill stays eager (rec is decode-only, same split as `QATSession`).
+    /// After one eager single-token forward on a cache, further single-token
+    /// decode — and any later multi-token verify on that same cache — runs
+    /// `FlintRecKernel.forward`. The first one-token call stays eager because
+    /// balanced prefill reserves the last prompt token as its own forward,
+    /// and the fused scheduler's tail can be one token too. A failure before
+    /// a token is committed falls back to eager; a failure after that
+    /// disables rec for this model so the next step does not mix the two KV
+    /// stores.
+    private func recDecodeLogits(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray? {
+        guard !recDecodeDisabled, let kernel = recKernel else { return nil }
+        guard inputs.ndim == 2, inputs.dim(0) == 1 else { return nil }
+        let seq = inputs.dim(1)
+        guard seq >= 1, let cache, cache.count == model.layers.count else { return nil }
+        if cache[0] is QuantizedKVCacheProtocol {
+            if !recQuantFallbackLogged {
+                recQuantFallbackLogged = true
+                NovaMLXLog.info("[Flint] rec decode off: quantized KV cache")
+            }
+            return nil
+        }
+        guard let anchor = cache[0] as? AnyObject else { return nil }
+        let cacheID = ObjectIdentifier(anchor)
+        if recIngestFailedCache == cacheID { return nil }
+
+        let continuing = recSessionMatches(cache)
+        let offset = FlintRecCacheBridge.concrete(cache[0]).offset
+        let sawSingleToken = (cache[0] as? FlintRecCacheProxy)?.sawSingleToken
+            ?? (recSawSingleToken == cacheID)
+        guard Self.recHandoffReady(
+            seq: seq, cacheOffset: offset, continuing: continuing,
+            sawSingleToken: sawSingleToken)
+        else {
+            if seq == 1 { noteSawSingleToken(cache, cacheID: cacheID) }
+            return nil
+        }
+
+        let session: FlintRecDecodeSession
+        if continuing, let existing = recSession {
+            session = existing
+        } else {
+            do {
+                session = try ingestRecSession(cache: cache, kernel: kernel, cacheID: cacheID)
+            } catch {
+                recIngestFailedCache = cacheID
+                NovaMLXLog.error("[Flint] rec KV ingest failed, staying eager: \(error)")
+                return nil
+            }
+        }
+
+        let tokens = inputs.asType(.int32).asArray(Int32.self)
+        guard tokens.count == seq else {
+            NovaMLXLog.error("[Flint] rec decode off: token read \(tokens.count) != \(seq)")
+            return nil
+        }
+        var rows: [MLXArray] = []
+        rows.reserveCapacity(seq)
+        var committed = 0
+        do {
+            for id in tokens {
+                let flat = try kernel.forward(state: session.state, token: Int(id))
+                guard flat.dim(0) == vocabularySize else {
+                    session.state.position = max(0, session.state.position - 1)
+                    throw NovaMLXError.inferenceFailed(
+                        "rec logits \(flat.dim(0)) != vocab \(vocabularySize)")
+                }
+                noteRecStep(cache, session: session)
+                committed += 1
+                rows.append(flat)
+                if !recActiveLogged {
+                    recActiveLogged = true
+                    NovaMLXLog.info("[Flint] rec megakernel decode ACTIVE")
+                }
+                recDecodeSteps += 1
+            }
+        } catch {
+            undoRecSteps(cache, session: session, n: committed)
+            recDecodeDisabled = true
+            invalidateRecSession()
+            NovaMLXLog.error("[Flint] rec decode failed, falling back to eager: \(error)")
+            return nil
+        }
+        if rows.count == 1 {
+            return rows[0].reshaped(1, 1, vocabularySize)
+        }
+        return stacked(rows, axis: 0).reshaped(1, rows.count, vocabularySize)
+    }
+
+    /// True when this forward should run on the megakernel.
+    /// Wide chunks are prefill. The first one-token call on a cache stays
+    /// eager: it may be the last prompt token. The following one-token call
+    /// is decode and hands off, with that token already in the MLX cache.
+    static func recHandoffReady(
+        seq: Int, cacheOffset: Int, continuing: Bool, sawSingleToken: Bool
+    ) -> Bool {
+        if continuing { return true }
+        guard seq == 1, cacheOffset > 0, sawSingleToken else { return false }
+        return true
+    }
+
+    private func noteSawSingleToken(_ cache: [KVCache], cacheID: ObjectIdentifier) {
+        var wrapped = false
+        for case let proxy as FlintRecCacheProxy in cache {
+            proxy.sawSingleToken = true
+            wrapped = true
+        }
+        if !wrapped { recSawSingleToken = cacheID }
+    }
+
+    private func recSessionMatches(_ cache: [KVCache]) -> Bool {
+        guard let session = recSession, let anchor = cache.first as? AnyObject else { return false }
+        guard session.cacheID == ObjectIdentifier(anchor) else { return false }
+        if let proxy = cache[0] as? FlintRecCacheProxy {
+            return proxy.inner.offset == session.mlxOffset && proxy.recAhead == session.recAhead
+        }
+        return cache[0].offset == session.mlxOffset
+    }
+
+    private func ingestRecSession(
+        cache: [KVCache], kernel: FlintRecKernel, cacheID: ObjectIdentifier
+    ) throws -> FlintRecDecodeSession {
+        let prompt = FlintRecCacheBridge.concrete(cache[0]).offset
+        let window = configuration.slidingWindow
+        for (index, layer) in cache.enumerated() {
+            let concrete = FlintRecCacheBridge.concrete(layer)
+            guard concrete.offset == prompt else {
+                throw NovaMLXError.inferenceFailed(
+                    "rec ingest layer \(index) offset \(concrete.offset) != \(prompt)")
+            }
+            if let rotating = concrete as? RotatingKVCache, rotating.maxSize != window {
+                throw NovaMLXError.inferenceFailed(
+                    "rec sliding window is \(window), cache is \(rotating.maxSize.map(String.init) ?? "nil")")
+            }
+        }
+        let state = kernel.makeKVState(capacity: max(prompt + 1, 1))
+        try kernel.ensureCapacity(state, tokens: max(prompt + 1, 1))
+        if prompt > 0 {
+            for (index, layer) in cache.enumerated() {
+                guard let pair = FlintRecCacheBridge.orderedPair(from: layer) else {
+                    throw NovaMLXError.inferenceFailed("rec ingest layer \(index) has no KV")
+                }
+                let global = model.layerTypes[index] == "full_attention"
+                let seq = pair.0.ndim == 4 ? pair.0.dim(2) : pair.0.dim(-2)
+                let expect = global ? prompt : min(prompt, window)
+                guard seq == expect else {
+                    throw NovaMLXError.inferenceFailed(
+                        "rec ingest layer \(index) length \(seq) != \(expect)")
+                }
+                try kernel.writeKV(
+                    state: state, layer: index, tokenOffset: 0, keys: pair.0, values: pair.1)
+            }
+        }
+        state.position = prompt
+        state.initial = prompt
+        let proxies = cache.count == cache.compactMap({ $0 as? FlintRecCacheProxy }).count
+            ? cache.compactMap { $0 as? FlintRecCacheProxy } : []
+        let session = FlintRecDecodeSession(
+            cacheID: cacheID, state: state, mlxOffset: prompt, proxies: proxies)
+        recSession = session
+        return session
+    }
+
+    private func noteRecStep(_ cache: [KVCache], session: FlintRecDecodeSession) {
+        for layer in cache {
+            (layer as? FlintRecCacheProxy)?.noteRecStep()
+        }
+        session.recAhead += 1
+    }
+
+    private func undoRecSteps(_ cache: [KVCache], session: FlintRecDecodeSession, n: Int) {
+        guard n > 0 else { return }
+        for layer in cache {
+            (layer as? FlintRecCacheProxy)?.undoRecSteps(n)
+        }
+        session.state.position = max(session.mlxOffset, session.state.position - n)
+        session.recAhead = max(0, session.recAhead - n)
+    }
+
+    /// Eager prefill wrote into the MLX caches. Drop the rec snapshot and
+    /// put proxy offsets back on the inner cache.
+    func invalidateRecSession() {
+        recSession?.proxies.forEach { $0.resetRecAhead() }
+        recSession = nil
+    }
+
+    /// The caller trimmed into the eager prefix. Proxies update themselves.
+    func abandonRecSession() {
+        recSession = nil
+    }
+
+    /// Speculative verify rejected a suffix. The kernel writes KV before the
+    /// caller knows which tokens were kept, so rewind the position counter.
+    func rewindRecSession(by n: Int) {
+        guard n > 0, let session = recSession else { return }
+        session.state.position = max(session.mlxOffset, session.state.position - n)
+        session.recAhead = max(0, session.recAhead - n)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
