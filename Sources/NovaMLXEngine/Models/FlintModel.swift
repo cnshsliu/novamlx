@@ -4,6 +4,7 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXNN
+import NovaMLXCore
 import NovaMLXUtils
 
 // Flint (RecursiveSI/flint) — ported from mlx-lm mlx_lm/models/flint.py.

@@ -117,7 +117,10 @@ final class FlintRecCacheProxy: KVCache, PrefixCacheLayerUnwrapping {
     public var state: [MLXArray] {
         get { inner.state }
         set {
-            inner.state = newValue
+            // `any KVCache` setters need a mutable existential. The concrete
+            // cache is a class, so the write lands on the same instance.
+            var cache = inner
+            cache.state = newValue
             recAhead = 0
             offset = inner.offset
         }
@@ -125,7 +128,10 @@ final class FlintRecCacheProxy: KVCache, PrefixCacheLayerUnwrapping {
 
     public var metaState: [String] {
         get { inner.metaState }
-        set { inner.metaState = newValue }
+        set {
+            var cache = inner
+            cache.metaState = newValue
+        }
     }
 
     public var isTrimmable: Bool { recAhead > 0 || inner.isTrimmable }
