@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-24T20:02:59Z",
+  "updatedAt": "2026-10-25T06:58:39Z",
   "models": [
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
@@ -1117,21 +1117,22 @@
       "status": "preview"
     },
     {
-      "id": "mlx-community/flint-OptiQ-4bit",
-      "url": "https://huggingface.co/mlx-community/flint-OptiQ-4bit",
-      "name": "Flint 40B A2.5B (OptiQ 4-bit)",
-      "description": "Recursive's Flint agent/coding MoE — 39.8B params, ~2.5B active, reasoning + multi-turn tool calls, 256K context (35 sliding-window + 14 full-attention layers, attention sinks). MLX OptiQ 4-bit; greedy output verified token-identical to Python mlx-lm. ~26 GB resident, ~34 tok/s end-to-end on M4 Max.",
-      "size": "~27.5 GB",
+      "id": "RecursiveSI/flint-int4",
+      "url": "https://huggingface.co/RecursiveSI/flint-int4",
+      "name": "Flint 40B A2.5B (Official INT4)",
+      "description": "Recursive's official INT4 Flint — 39.8B MoE (~2.5B active), reasoning + multi-turn tool calls, 256K context (35 sliding-window + 14 full-attention layers, attention sinks). Official INT4 recipe incl. 4-bit lm_head; greedy decode verified token-identical to Python mlx-lm. The community OptiQ-4bit build was used for early verification and is no longer the default.",
+      "size": "~22.6 GB",
       "tags": [
         "MLX",
-        "4-bit",
+        "INT4",
         "MoE",
         "agent",
         "reasoning",
-        "tools"
+        "tools",
+        "official"
       ],
       "category": "llm",
-      "sizeBytes": 27494406808,
+      "sizeBytes": 22580201966,
       "minRamGB": 48,
       "family": "flint",
       "format": "mlx",

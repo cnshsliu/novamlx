@@ -80,8 +80,17 @@ public struct FlintConfiguration: Codable {
         slidingWindow = try c.decode(Int.self, forKey: .slidingWindow)
         rmsNormEps = try c.decode(Float.self, forKey: .rmsNormEps)
         vocabularySize = try c.decode(Int.self, forKey: .vocabularySize)
-        ropeParameters = try c.decodeIfPresent([String: Double].self, forKey: .ropeParameters)
-        if let nested = ropeParameters, let theta = nested["rope_theta"] {
+        // rope_parameters may carry string enums (e.g. rope_type: "default");
+        // decode tolerantly and only read numeric rope_theta.
+        var nested: [String: Double] = [:]
+        if let raw = try c.decodeIfPresent([String: AnyCodable].self, forKey: .ropeParameters) {
+            for (k, v) in raw {
+                if let d = v.value as? Double { nested[k] = d }
+                else if let i = v.value as? Int { nested[k] = Double(i) }
+            }
+        }
+        ropeParameters = nested.isEmpty ? nil : nested
+        if let theta = nested["rope_theta"] {
             ropeTheta = Float(theta)
         } else {
             ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10000.0

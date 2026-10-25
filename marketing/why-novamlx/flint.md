@@ -6,7 +6,7 @@
 
 Flint 是 Recursive 公司开源的 39.8B 参数 MoE 模型（每次推理只激活 ~2.5B，所以快）：会先在 `<think>` 里推理、再回答，支持多轮工具调用，256K 上下文，Apache-2.0 随便商用。定位是"50B 以下最强 agent 编码 MoE"之一。
 
-## 实测数据（M4 Max 128GB 笔记本，4-bit OptiQ 量化）
+## 实测数据（M4 Max 128GB 笔记本，官方 INT4 量化）
 
 | 指标 | NovaMLX 实测 | 说明 |
 |---|---|---|
@@ -14,7 +14,7 @@ Flint 是 Recursive 公司开源的 39.8B 参数 MoE 模型（每次推理只激
 | 与 Python mlx-lm 逐 token 对齐 | **字符级 100% 一致** | greedy 双侧同题对比——移植数学完全正确 |
 | 思考链（reasoning_content） | ✅ 流式/非流式双通道 | OpenAI + Anthropic 两种 API |
 | 工具调用（GLM4 方言） | ✅ 完整验证 | 解析为标准 OpenAI tool_calls，多轮往返正常 |
-| 常驻内存 | **~26 GB** | 128GB 机器与 3D/图像模型共存 |
+| 常驻内存 | **~22.6 GB** | 128GB 机器与 3D/图像模型共存 |
 
 **对比维度选择**：
 - **vs 云 API（同级 40B reasoning 模型）**：零 token 费用、代码/文档不出机、无限调用。企业内部代码场景（合规刚需）唯一解。
@@ -34,7 +34,7 @@ Flint 是 Recursive 公司开源的 39.8B 参数 MoE 模型（每次推理只激
 ```bash
 curl -X POST localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model": "mlx-community/flint-OptiQ-4bit",
+  -d '{"model": "RecursiveSI/flint-int4",
        "messages": [{"role": "user", "content": "What is 17*23? Think step by step."}],
        "max_tokens": 500, "temperature": 0}'
 # 返回：reasoning（分步推理）+ content（"= 391"）双通道
@@ -56,7 +56,7 @@ curl -X POST localhost:6590/v1/chat/completions \
 
 ---
 
-### 实测补齐（2026-10-24，M4 Max 128GB）
+### 实测补齐（2026-10-24/25，M4 Max 128GB；默认权重已切换为官方 INT4，早期数字出自社区 OptiQ 构建）
 
 - [x] 吞吐：823 completion tokens / 34.9s = **~24 tok/s**（temperature 0，含 0.6s TTFT）
 - [x] 工具调用：finish_reason=tool_calls，参数 JSON 正确（city=Tokyo）；多轮工具结果回传正常（18°C→穿衣建议）

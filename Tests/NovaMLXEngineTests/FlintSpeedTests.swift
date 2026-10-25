@@ -15,7 +15,7 @@ struct FlintSpeedTests {
 
     @Test("raw model decode ~128 tokens")
     func testRawDecodeSpeed() async throws {
-        let dir = URL(fileURLWithPath: "/Volumes/Samsung768/Models/mlx-community/flint-OptiQ-4bit")
+        let dir = URL(fileURLWithPath: "/Volumes/Samsung768/Models/RecursiveSI/flint-int4")
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
         else {
@@ -31,7 +31,7 @@ struct FlintSpeedTests {
         let promptIds = try tokenizer.applyChatTemplate(
             messages: [["role": "user", "content": "Write a detailed 400-word essay about the history of computing."]])
 
-        // Dtype probe — Python loads bf16 activations (OptiQ quant).
+        // Dtype probe — official INT4: bf16 activations, 4-bit packed weights.
         let dtypeInfo = await container.perform { context -> String in
             let m = context.model as! FlintModel
             let l = m.model.layers[2]

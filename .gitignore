@@ -69,3 +69,4 @@ vendors/
 *.tar.gz
 .aider*
 opencode.json
+mlx-swift-lm

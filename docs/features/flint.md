@@ -16,17 +16,17 @@
 | **能力** | `<think>` 推理（`reasoning_content` 独立通道）、多轮工具调用（GLM4 方言自动归一为标准 OpenAI tool_calls）、256K 上下文（滑窗 KV） |
 | **API** | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`，流式/非流式；eos = `<|end_of_text|>` 及角色头 token（自动停止+清洗，不泄漏） |
 | **调度** | ContinuousBatcher（连续批处理路径；fused 路径暂无工具解析） |
-| **量化** | 推荐 `mlx-community/flint-OptiQ-4bit`（~26 GB 常驻） |
-| **性能参考** | M4 Max 128GB：端到端 ~34 tok/s（含 prefill），实测口径 |
+| **量化** | 官方 `RecursiveSI/flint-int4`（~22.6 GB；社区 OptiQ-4bit 曾用于早期验证，现已弃用为默认） |
+| **性能参考** | M4 Max 128GB：裸 decode 基线见 Gate 0 报告（eager 路径 ~20 tok/s 量级，优化进行中）；此前 OptiQ 权重上的端到端 ~34 tok/s 口径已随默认权重切换作废 |
 
 ## How to try
 
 ```bash
-nova download mlx-community/flint-OptiQ-4bit
+nova download RecursiveSI/flint-int4
 # 加载后在 Local Inference 页选择，或：
 curl -X POST localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model": "mlx-community/flint-OptiQ-4bit",
+  -d '{"model": "RecursiveSI/flint-int4",
        "messages": [{"role": "user", "content": "What is 17*23? Think step by step."}],
        "max_tokens": 500, "temperature": 0}'
 # → reasoning_content（分步推理）+ content（答案）双通道
