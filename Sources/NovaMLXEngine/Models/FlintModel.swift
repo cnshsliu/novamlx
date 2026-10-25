@@ -101,6 +101,18 @@ public struct FlintConfiguration: Codable {
         }
         maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
         tieWordEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        // mlx_export mixes numeric markers with a layer-index array and a
+        // string scale rule. A strict [String: Double] decode throws and the
+        // whole config fails; skipping the key leaves the INT4 gate dark.
+        // Keep only the numeric fields the gate reads.
+        var export: [String: Double] = [:]
+        if let raw = try c.decodeIfPresent([String: AnyCodable].self, forKey: .mlxExport) {
+            for (k, v) in raw {
+                if let d = v.value as? Double { export[k] = d }
+                else if let i = v.value as? Int { export[k] = Double(i) }
+            }
+        }
+        mlxExport = export.isEmpty ? nil : export
     }
 }
 
@@ -544,8 +556,9 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     let recLock = NSLock()
 
     /// True when the checkpoint carries the official RecursiveSI/flint-int4
-    /// export markers (bits 4 / embedding 8 / group 64). Only that layout is
-    /// guaranteed to match the rec megakernel's weight contract.
+    /// export markers (`bits` 4, `embedding_bits` 8, `routed_expert_bits` 4).
+    /// Group size lives on the checkpoint's `quantization` block, not in
+    /// `mlx_export` — requiring it here false-negatives the real config.
     public var isOfficialInt4: Bool {
         guard let e = configuration.mlxExport else { return false }
         return e["bits"] == 4 && e["embedding_bits"] == 8 && e["routed_expert_bits"] == 4

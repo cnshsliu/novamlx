@@ -10,7 +10,9 @@ struct FlintModelTests {
 
     /// RecursiveSI/flint config.json with the standard num_hidden_layers
     /// spelled out and the 49-entry layer_types list.
-    static func configJSON(numHiddenLayers: Int = 49, ropeOverride: String? = nil) -> String {
+    static func configJSON(
+        numHiddenLayers: Int = 49, ropeOverride: String? = nil, extra: String = ""
+    ) -> String {
         let layerTypes = ([
             "full_attention", "full_attention", "sliding_attention", "sliding_attention",
             "sliding_attention", "full_attention", "sliding_attention", "sliding_attention",
@@ -47,10 +49,22 @@ struct FlintModelTests {
           "vocab_size": 150144,
           \(rope)
           "tie_word_embeddings": false,
-          "layer_types": [\(layerTypes)]
+          "layer_types": [\(layerTypes)]\(extra.isEmpty ? "" : ",\n" + extra)
         }
         """
     }
+
+    /// Official RecursiveSI/flint-int4 `mlx_export`: numeric markers plus a
+    /// layer-index array and a string scale rule.
+    static let officialExport = """
+        "mlx_export": {
+          "bits": 4,
+          "embedding_bits": 8,
+          "routed_expert_bits": 4,
+          "scale_rule": "mse",
+          "full_attention_layers": [0, 1, 48]
+        }
+        """
 
     @Test("configuration decodes the real RecursiveSI/flint config")
     func testConfigDecode() throws {
@@ -68,6 +82,25 @@ struct FlintModelTests {
         #expect(model.vocabularySize == 150144)
         #expect(model.kvHeads.count == 49)
         #expect(model.kvHeads.allSatisfy { $0 == 4 })
+        #expect(!model.isOfficialInt4)
+    }
+
+    @Test("mlx_export numeric markers survive the mixed official layout")
+    func testOfficialInt4Markers() throws {
+        let config = try JSONDecoder.json5().decode(
+            FlintConfiguration.self,
+            from: Data(Self.configJSON(extra: Self.officialExport).utf8))
+        #expect(config.mlxExport?["bits"] == 4)
+        #expect(config.mlxExport?["embedding_bits"] == 8)
+        #expect(config.mlxExport?["routed_expert_bits"] == 4)
+        #expect(config.mlxExport?["scale_rule"] == nil)
+        let model = FlintModel(config)
+        #expect(model.isOfficialInt4)
+
+        let other = try JSONDecoder.json5().decode(
+            FlintConfiguration.self,
+            from: Data(Self.configJSON(extra: #""mlx_export": {"bits": 8, "embedding_bits": 8, "routed_expert_bits": 4}"#).utf8))
+        #expect(!FlintModel(other).isOfficialInt4)
     }
 
     @Test("rope_parameters.rope_theta overrides the top-level rope_theta")
