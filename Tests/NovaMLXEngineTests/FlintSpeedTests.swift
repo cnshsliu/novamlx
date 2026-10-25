@@ -9,7 +9,8 @@ import Testing
 
 /// Manual speed probe. The primary measurement is the real model call:
 /// eager prefill, then `FlintRecKernel` decode for official INT4. Runs only
-/// when the weights are on disk (skips otherwise).
+/// when the weights are on disk (skips otherwise). Stops after `LOOP-RESULT`.
+/// `NOVA_FLINT_MEGA_DECODE=1` also runs the obsolete MegaDecode probe.
 @Suite("Flint raw decode speed")
 struct FlintSpeedTests {
 
@@ -91,6 +92,14 @@ struct FlintSpeedTests {
         // tail). Warmup plus the timed loop are the kernel steps.
         #expect(stats.official)
         #expect(stats.steps >= n)
+
+        // MegaDecode is an obsolete compile experiment. After a successful rec
+        // loop it still launches and GPU-timeouts, which fails this suite.
+        // The microbench / dump probes below it are the same optional A/B.
+        guard ProcessInfo.processInfo.environment["NOVA_FLINT_MEGA_DECODE"] == "1" else {
+            print("MEGA-SKIP: obsolete MegaDecode probe gated off (set NOVA_FLINT_MEGA_DECODE=1)")
+            return
+        }
 
         // Per-block microbench (no cache), mirroring the Python probe.
         let micro = await container.perform { context -> String in
