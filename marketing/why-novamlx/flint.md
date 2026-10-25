@@ -18,7 +18,7 @@ Flint 是 Recursive 公司开源的 39.8B 参数 MoE 模型（每次推理只激
 
 **对比维度选择**：
 - **vs 云 API（同级 40B reasoning 模型）**：零 token 费用、代码/文档不出机、无限调用。企业内部代码场景（合规刚需）唯一解。
-- **vs llama.cpp / Ollama**：NovaMLX 有**连续批处理 + OpenAI/Anthropic 双协议 + 任务式全家桶**——同一个服务里 text/image/video/3D 全能调；llama.cpp 生态里工具调用协议各模型一坨方言，NovaMLX 帮你归一成标准 OpenAI tool_calls。
+- **vs llama.cpp / Ollama**（同机实测 M4 Max，2026-10-25）：裸解码速度 llama.cpp 赢（Q4_K_XL 84.9 tok/s vs NovaMLX ~24 tok/s，差距来自我们尚未做算子融合，路线图在补）。但 NovaMLX 赢在**引擎之外的一切**：OpenAI/Anthropic 双协议开箱、GLM4 方言工具调用自动归一成标准 tool_calls、连续批处理多请求并发、请求日志/API key/多模型热切换，以及同一个服务里 text/image/video/3D 全家桶——这些 llama.cpp 都要自己造。要"最快的裸 token"今天选 llama.cpp；要"能直接接产品的本地推理服务"选 NovaMLX。
 - **vs Python mlx-lm**：同样快（我们逐 token 对齐证明同源性能），但 NovaMLX 是常驻服务：批处理并发、请求日志、API key 管理、多模型热切换、Webhook——这些 Python 脚本都得自己写。
 
 ## 为什么是 NovaMLX
@@ -61,4 +61,4 @@ curl -X POST localhost:6590/v1/chat/completions \
 - [x] 吞吐：823 completion tokens / 34.9s = **~24 tok/s**（temperature 0，含 0.6s TTFT）
 - [x] 工具调用：finish_reason=tool_calls，参数 JSON 正确（city=Tokyo）；多轮工具结果回传正常（18°C→穿衣建议）
 - [ ] 256K 长上下文实测（滑窗正确性 + 速度衰减曲线）
-- [ ] 与 llama.cpp（GGUF Q4）同机 tok/s 对比
+- [x] llama.cpp 同机对比（2026-10-25，llama.cpp master+Metal，UD-Q4_K_XL 23.3GiB，llama-bench 3 次均值）：pp512 = 1555 tok/s，tg256 = **84.9 tok/s**——裸解码 3.5× 于当前 NovaMLX，主因是我方未做编译解码段（eager 逐算子 dispatch）；该工作已列为最高优先级性能项，理论空间 2-3×。**视频口径：不单打 tok/s，打"质量逐 token 可验证 + 双协议 + 工具归一 + 全家桶 + 并发"。**
