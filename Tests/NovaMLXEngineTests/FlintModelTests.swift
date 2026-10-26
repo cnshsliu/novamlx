@@ -220,8 +220,8 @@ struct FlintModelTests {
         #expect(FlintRecKernelSources.bodyMax.contains("#define routing routing_rw"))
     }
 
-    @Test("greedy resident body is the single-token shader looped eight times")
-    func testGreedyResidentBody() {
+    @Test("greedy resident body loops the single-token shader for one packet")
+    func testGreedyResidentBody() throws {
         let maxBody = FlintRecResident.body(from: FlintRecKernelSources.bodyMax, workers: 76)
         let proBody = FlintRecResident.body(from: FlintRecKernelSources.bodyPro, workers: 36)
         #expect(maxBody != nil)
@@ -246,11 +246,76 @@ struct FlintModelTests {
         #expect(!maxBody.contains("block_trace"))
         #expect(maxBody.contains("#define trace trace_rw"))
         #expect(maxBody.contains("#define statistics statistics_rw"))
-        #expect(maxBody.contains("profile[16]=block_step+1u"))
+        #expect(maxBody.contains("profile[\(FlintRecResident.producedSlot)]=block_step+1u"))
         #expect(maxBody.contains("if(stop)break;"))
         #expect(maxBody.components(separatedBy: "diagnostic[group]=0;").count - 1 == 1)
+        #expect(maxBody.contains("logits_rw"))
+        #expect(maxBody.contains("#define logits logits_rw"))
+        #expect(maxBody.components(separatedBy: "release_control(control,tid)").count - 1 == 1)
+        let release = try #require(maxBody.range(of: "release_control(control,tid)"))
+        let earlyStop = try #require(maxBody.range(of: "if(stop)break;"))
+        #expect(release.lowerBound > earlyStop.upperBound)
+        #expect(!FlintRecKernelSources.bodyMax.contains("release_control("))
+        #expect(!FlintRecKernelSources.bodyPro.contains("release_control("))
+        #expect(FlintRecKernelSources.headerMax.contains("n+1u==76u"))
+        #expect(FlintRecKernelSources.headerPro.contains("n+1u==36u"))
+        #expect(FlintRecKernelSources.headerMax.contains("uint2 packed"))
+        #expect(FlintRecKernelSources.headerPro.contains("uint2 packed"))
+        #expect(FlintRecKernelSources.headerMax.contains("return dot16(w,x,s,b,sum);"))
+        #expect(FlintRecResident.width == 16)
+        #expect(FlintRecResident.producedSlot == 32)
+        #expect(FlintRecResident.profileWords == 33)
         #expect(FlintRecResident.body(from: "not a shader", workers: 76) == nil)
         #expect(FlintRecResident.body(from: FlintRecKernelSources.bodyMax, workers: 40) == nil)
+    }
+
+    @Test("int4 nibble conversion matches the unshifted ushort dot")
+    func testInt4NibbleDotMatchesUshortLoop() {
+        func nibble(_ bits: UInt32) -> Float {
+            Float(bitPattern: 0x4b00_0000 | bits) - 8_388_608
+        }
+        func dotOld(_ x: [Float], _ p: [UInt32]) -> Float {
+            var a: Float = 0
+            for j in 0 ..< 4 {
+                let word = p[j]
+                a += x[4 * j] * Float(word & 15) + x[4 * j + 1] * Float(word & 240)
+                    + x[4 * j + 2] * Float(word & 3840) + x[4 * j + 3] * Float(word & 61440)
+            }
+            return a
+        }
+        func dotNew(_ x: [Float], _ words: [UInt32]) -> Float {
+            // Two uints, four ushorts, same left-associative sum as dot16.
+            var a: Float = 0
+            let halves = [words[0], words[0] >> 16, words[1], words[1] >> 16]
+            for (j, half) in halves.enumerated() {
+                let b = half & 0xffff
+                a += x[4 * j] * nibble(b & 15) + x[4 * j + 1] * nibble(b & 240)
+                    + x[4 * j + 2] * nibble(b & 3840) + x[4 * j + 3] * nibble(b & 61440)
+            }
+            return a
+        }
+        var state: UInt64 = 0x1234_5678
+        func next() -> UInt32 {
+            state = state &* 6364136223846793005 &+ 1
+            return UInt32(truncatingIfNeeded: state >> 32)
+        }
+        for _ in 0 ..< 200 {
+            var raw = [Float](repeating: 0, count: 16)
+            for i in 0 ..< 16 {
+                let unit = Float(next() % 10_000) / 1000 - 5
+                raw[i] = unit
+            }
+            var shifted = [Float](repeating: 0, count: 16)
+            for i in stride(from: 0, to: 16, by: 4) {
+                shifted[i] = raw[i]
+                shifted[i + 1] = raw[i + 1] / 16
+                shifted[i + 2] = raw[i + 2] / 256
+                shifted[i + 3] = raw[i + 3] / 4096
+            }
+            let p = (0 ..< 4).map { _ in next() & 0xffff }
+            let packed = [p[0] | (p[1] << 16), p[2] | (p[3] << 16)]
+            #expect(dotOld(shifted, p) == dotNew(shifted, packed))
+        }
     }
 
     @Test("rec handoff waits until one single-token forward has landed")

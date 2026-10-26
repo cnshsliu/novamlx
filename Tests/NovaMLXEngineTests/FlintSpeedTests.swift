@@ -9,10 +9,14 @@ import Testing
 
 /// Manual speed probe. Official INT4 decode is timed two ways. `SINGLE-RESULT`
 /// is one `model()` call plus a host argmax per token. `LOOP-RESULT` is rec's
-/// greedy resident packet (8 tokens per launch, argmax on device), which is
-/// the path behind the ~197 tok/s INT4 figure. Runs only when the weights are
-/// on disk. Stops after `LOOP-RESULT`. `NOVA_FLINT_MEGA_DECODE=1` also runs
-/// the obsolete MegaDecode probe.
+/// greedy resident packet (`FlintRecResident.width` tokens per launch, argmax
+/// on device). The published baseline on MacMaxPro M4 Max at packet 8 is
+/// 214.7 tok/s (`e8e7b27`). Re-run on that machine with
+/// `./build.sh test --filter FlintSpeedTests` and read `PARITY`,
+/// `SINGLE-RESULT`, `LOOP-RESULT`. `NOVA_FLINT_REC_FRESH_CONTROL=1` restores
+/// the per-launch zero upload. Runs only when the weights are on disk.
+/// Stops after `LOOP-RESULT`. `NOVA_FLINT_MEGA_DECODE=1` also runs the
+/// obsolete MegaDecode probe.
 @Suite("Flint raw decode speed")
 struct FlintSpeedTests {
 
@@ -109,8 +113,10 @@ struct FlintSpeedTests {
             var packetLast = arm(packetCaches)
             var resident: [Int] = []
             resident.reserveCapacity(16)
-            for _ in 0 ..< 2 {
-                let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: 8)
+            let packetWidth = FlintRecResident.width
+            while resident.count < 16 {
+                let take = min(packetWidth, 16 - resident.count)
+                let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: take)
                 resident.append(contentsOf: ids)
                 packetLast = ids[ids.count - 1]
             }
@@ -124,7 +130,7 @@ struct FlintSpeedTests {
                 let t0 = Date()
                 var left = per
                 while left > 0 {
-                    let take = min(8, left)
+                    let take = min(FlintRecResident.width, left)
                     let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: take)
                     packetLast = ids[ids.count - 1]
                     left -= ids.count
@@ -149,8 +155,8 @@ struct FlintSpeedTests {
         let packetRate = Double(n) / stats.packetSeconds
         print(String(format: "SINGLE-RESULT: one launch + host argmax %.1f tok/s (%d rec steps)", singleRate, stats.singleSteps))
         print(String(
-            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@, launch=%@, packet=8)",
-            packetRate, stats.packetSteps, stats.official ? "yes" : "no", stats.launch))
+            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@, launch=%@, packet=%d)",
+            packetRate, stats.packetSteps, stats.official ? "yes" : "no", stats.launch, FlintRecResident.width))
         // The first single-token forward stays eager (it may be the prefill
         // tail). Both timed windows are rec steps after that handoff.
         #expect(stats.official)

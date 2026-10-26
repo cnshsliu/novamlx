@@ -721,9 +721,10 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     }
 
     /// Continue an active rec session with one greedy resident packet
-    /// (1...8 tokens, argmax inside the kernel). The session must already
-    /// have been handed off by a single-token `callAsFunction`. Empty
-    /// `eosTokenIds` runs the full count. Sampled decode stays on `forward`.
+    /// (1...`FlintRecResident.width` tokens, argmax inside the kernel). The
+    /// session must already have been handed off by a single-token
+    /// `callAsFunction`. Empty `eosTokenIds` runs the full count. Sampled
+    /// decode stays on `forward`.
     func recGreedyPacket(
         cache: [KVCache], token: Int, count: Int, eosTokenIds: [Int] = []
     ) throws -> [Int] {
