@@ -10,7 +10,8 @@ struct FlintPattern: Equatable, Sendable {
     let source: String
     private let start: Int
     private let accept: Int
-    private let edges: [Edge]
+    /// Adjacency list. `edges[state]` is the outgoing edges of that state.
+    private let edges: [[Edge]]
 
     struct Edge: Equatable, Sendable {
         enum Kind: Equatable, Sendable {
@@ -123,7 +124,7 @@ struct FlintPattern: Equatable, Sendable {
 }
 
 extension FlintPattern {
-    fileprivate enum Node {
+    fileprivate indirect enum Node {
         case empty
         case char(Character)
         case any

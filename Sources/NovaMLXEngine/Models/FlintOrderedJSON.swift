@@ -4,12 +4,33 @@ import Foundation
 /// Flint schema compilation uses this so property order matches the request body
 /// and xgrammar `any_order=False`.
 package enum FlintOrderedJSON: Equatable, Sendable {
+    /// Tuples do not synthesize `Equatable`, so object equality is manual.
     case object([(String, FlintOrderedJSON)])
     case array([FlintOrderedJSON])
     case string(String)
     case number(String)
     case bool(Bool)
     case null
+
+    package static func == (lhs: FlintOrderedJSON, rhs: FlintOrderedJSON) -> Bool {
+        switch (lhs, rhs) {
+        case (.null, .null):
+            return true
+        case (.bool(let left), .bool(let right)):
+            return left == right
+        case (.number(let left), .number(let right)):
+            return left == right
+        case (.string(let left), .string(let right)):
+            return left == right
+        case (.array(let left), .array(let right)):
+            return left == right
+        case (.object(let left), .object(let right)):
+            guard left.count == right.count else { return false }
+            return zip(left, right).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
+        default:
+            return false
+        }
+    }
 
     static func parse(_ data: Data) -> FlintOrderedJSON? {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
