@@ -502,10 +502,10 @@ struct FlintChatDecodeTests {
             policy(temperature: 1, topP: 0.95, topK: 20, frequencyPenalty: 0.1, usesStructuralGrammar: true)
         ) == .singleStep)
         #expect(FlintChatDecode.residentRoute(policy(repetitionPenalty: 1.1)) == .singleStep)
-        #expect(FlintChatDecode.residentRoute(policy(minP: 0.05, temperature: 1)) == .singleStep)
-        #expect(FlintChatDecode.residentRoute(policy(wantsLogprobs: true, temperature: 1)) == .singleStep)
-        #expect(FlintChatDecode.residentRoute(policy(batchWidth: 2, temperature: 1)) == .singleStep)
-        #expect(FlintChatDecode.residentRoute(policy(usesGrammar: true, temperature: 0)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, minP: 0.05)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, wantsLogprobs: true)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, batchWidth: 2)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 0, usesGrammar: true)) == .singleStep)
         #expect(FlintChatDecode.residentRoute(policy(temperature: 1, topP: 1.1)) == .singleStep)
         #expect(FlintChatDecode.residentRoute(policy(presencePenalty: 3)) == .singleStep)
     }
@@ -546,7 +546,7 @@ struct FlintChatDecodeTests {
 
         func finish(on id: Int, tools: Bool, prelude: [Int]) -> FlintChatDecode.FilteredPacketResult {
             var grammar: FlintStructuralGrammar? = FlintStructuralGrammar(allowsTools: tools)
-            var script = prelude + [id, 99]
+            let script = prelude + [id, 99]
             var index = 0
             return FlintChatDecode.acceptFilteredPacket(grammar: &grammar, stopIds: stops) { _ in
                 let next = script[index]
@@ -584,9 +584,12 @@ struct FlintChatDecodeTests {
     @Test("grammar mask drops a second think below the argmax")
     func testFilteredArgmaxSkipsSecondThink() {
         var grammar = FlintStructuralGrammar(allowsTools: false)
-        #expect(grammar.consume(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>"))
-        #expect(grammar.consume(tokenId: FlintStructuralGrammar.thinkCloseId, text: "</think>"))
-        #expect(grammar.consume(tokenId: 12, text: "Hello"))
+        let openedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>")
+        #expect(openedThink)
+        let closedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkCloseId, text: "</think>")
+        #expect(closedThink)
+        let hello = grammar.consume(tokenId: 12, text: "Hello")
+        #expect(hello)
 
         let vocab = FlintStructuralGrammar.developerId + 1
         var values = [Float](repeating: 0, count: vocab)
