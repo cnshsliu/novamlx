@@ -572,6 +572,7 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     nonisolated(unsafe) private var recQuantFallbackLogged = false
     nonisolated(unsafe) private var recIngestFailedCache: ObjectIdentifier?
     nonisolated(unsafe) private var recActiveLogged = false
+    nonisolated(unsafe) private var recPacketLogged = false
     /// Non-proxy caches only. Proxies keep this on themselves so two live
     /// sequences do not steal each other's handoff.
     nonisolated(unsafe) private var recSawSingleToken: ObjectIdentifier?
@@ -717,6 +718,40 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             return rows[0].reshaped(1, 1, vocabularySize)
         }
         return stacked(rows, axis: 0).reshaped(1, rows.count, vocabularySize)
+    }
+
+    /// Continue an active rec session with one greedy resident packet
+    /// (1...8 tokens, argmax inside the kernel). The session must already
+    /// have been handed off by a single-token `callAsFunction`. Empty
+    /// `eosTokenIds` runs the full count. Sampled decode stays on `forward`.
+    func recGreedyPacket(
+        cache: [KVCache], token: Int, count: Int, eosTokenIds: [Int] = []
+    ) throws -> [Int] {
+        guard !recDecodeDisabled, let kernel = recKernel else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet: kernel is not armed")
+        }
+        guard recSessionMatches(cache), let session = recSession else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet: no active session for this cache")
+        }
+        let ids: [Int]
+        do {
+            ids = try kernel.forwardGreedy(
+                state: session.state, token: token, count: count, eosTokenIds: eosTokenIds)
+        } catch {
+            invalidateRecSession()
+            recDecodeDisabled = true
+            NovaMLXLog.error("[Flint] rec greedy packet failed, falling back to eager: \(error)")
+            throw error
+        }
+        for _ in ids {
+            noteRecStep(cache, session: session)
+        }
+        recDecodeSteps += ids.count
+        if !recPacketLogged {
+            recPacketLogged = true
+            NovaMLXLog.info("[Flint] rec greedy resident packet active (width \(FlintRecResident.width))")
+        }
+        return ids
     }
 
     /// One decode token, without a dtype-cast kernel when the id is already

@@ -56,8 +56,10 @@ struct FlintRecLaunch: Equatable, Sendable {
 ///
 /// Decode-only, matching `QATSession`: prefill stays on the eager model,
 /// which fills MLX caches; those caches are copied into this KV state and
-/// `initial` is frozen at the prompt length. Each `forward` then consumes
-/// one token.
+/// `initial` is frozen at the prompt length. `forward` consumes one token
+/// and returns logits. `forwardGreedy` is rec's resident packet: up to 8
+/// greedy tokens per launch, argmax on device, which is the path behind
+/// the published ~197 tok/s INT4 number.
 ///
 /// The shader is rendered for two resident pools (see `FlintRecKernelSources`).
 /// Large scratch (workspace, attention partials, statistics, routing, trace)
@@ -73,6 +75,9 @@ public final class FlintRecKernel: @unchecked Sendable {
 
     let launch: FlintRecLaunch
     private let kernel: MLXFast.MLXFastKernel
+    /// Nil when the resident-packet source did not match this shader.
+    /// Single-token `forward` does not need it.
+    private let greedyKernel: MLXFast.MLXFastKernel?
     private let writeKernel: MLXFast.MLXFastKernel
     /// Bound for KV blocks this session has not grown into. The shader only
     /// dereferences block 0 below 65536 tokens.
@@ -157,6 +162,22 @@ public final class FlintRecKernel: @unchecked Sendable {
             header: sources.0,
             ensureRowContiguous: true
         )
+        if let resident = FlintRecResident.body(from: sources.1, workers: launch.workers) {
+            self.greedyKernel = MLXFast.metalKernel(
+                name: "flint_int4_greedy_resident8_\(launch.workers)",
+                inputNames: (0..<13).map { "bank\($0)" } + [
+                    "metadata", "kv0", "kv1", "kv2", "kv3",
+                    "parameters", "silu_table", "private_control", "sampling",
+                    "trace", "workspace", "partials", "statistics", "routing",
+                ],
+                outputNames: ["logits", "diagnostic", "profile"],
+                source: resident,
+                header: sources.0,
+                ensureRowContiguous: true
+            )
+        } else {
+            self.greedyKernel = nil
+        }
         self.writeKernel = MLXFast.metalKernel(
             name: "flint_write_kv_swift",
             inputNames: ["storage", "keys", "values", "layout"],
@@ -378,6 +399,87 @@ public final class FlintRecKernel: @unchecked Sendable {
         return out[0]
     }
 
+    /// Greedy resident packet. One launch runs `count` tokens (1...8) and
+    /// returns the sampled ids. `eosTokenIds` (at most 4) stops the packet
+    /// early, matching rec's sampler; an empty list runs the full count.
+    /// The 1024-word control buffer is still a fresh zero upload per launch.
+    func forwardGreedy(
+        state: KVState, token: Int, count: Int, eosTokenIds: [Int] = [], layerCount: Int = 49
+    ) throws -> [Int] {
+        guard let greedyKernel else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet shader is not available")
+        }
+        guard (1...FlintRecResident.width).contains(count) else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet count \(count) is not 1...8")
+        }
+        guard eosTokenIds.count <= 4 else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet accepts at most 4 eos ids")
+        }
+        try ensureCapacity(state, tokens: state.position + count)
+        let control = MLXArray.zeros([1024], dtype: .uint32)
+        // float32 holds token ids through the vocab (150144 < 2^24).
+        var sample = [Float](repeating: 0, count: 6)
+        sample[0] = Float(count)
+        sample[1] = Float(eosTokenIds.count)
+        for (index, id) in eosTokenIds.enumerated() {
+            sample[2 + index] = Float(id)
+        }
+        let sampling = MLXArray(sample)
+        let scratch = state.scratch
+        let p = MLXArray(
+            [UInt32(token), UInt32(state.position), UInt32(state.initial), UInt32(layerCount)],
+            [4])
+        let out = greedyKernel(
+            [
+                banks[0], banks[1], banks[2], banks[3], banks[4], banks[5], banks[6],
+                banks[7], banks[8], banks[9], banks[10], banks[11], banks[12],
+                state.metadata,
+                kvBank(state, 0), kvBank(state, 1), kvBank(state, 2), kvBank(state, 3),
+                p,
+                siluTable,
+                control,
+                sampling,
+                scratch.trace,
+                scratch.workspace,
+                scratch.partials,
+                scratch.statistics,
+                scratch.routing,
+            ],
+            grid: (Self.decodeThreads * launch.workers, 1, 1),
+            threadGroup: (Self.decodeThreads, 1, 1),
+            outputShapes: [[150144], [launch.workers], [17]],
+            outputDTypes: [.bfloat16, .uint32, .uint32]
+        )
+        eval(out)
+        let diagnostic = out[1].asArray(Int.self)
+        if diagnostic.contains(where: { $0 != 0 }) {
+            throw NovaMLXError.inferenceFailed("rec greedy packet GPU sync failure: \(diagnostic)")
+        }
+        let packet = out[2].asArray(Int.self)
+        guard packet.count >= 17 else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet profile \(packet.count) < 17")
+        }
+        let produced = packet[16]
+        guard (1...count).contains(produced) else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet produced \(produced) for count \(count)")
+        }
+        var ids: [Int] = []
+        ids.reserveCapacity(produced)
+        var previous = token
+        for step in 0..<produced {
+            let input = packet[step * 2]
+            let output = packet[step * 2 + 1]
+            guard input == previous, output >= 0 else {
+                throw NovaMLXError.inferenceFailed(
+                    "rec greedy chain broke at step \(step): \(input) -> \(output), expected input \(previous)")
+            }
+            ids.append(output)
+            previous = output
+        }
+        state.position += produced
+        return ids
+    }
+
     // MARK: KV write kernel
 
     static let writeHeader: String = "#include <metal_stdlib>\nusing namespace metal;"
@@ -393,4 +495,121 @@ public final class FlintRecKernel: @unchecked Sendable {
         }
         if(i==0)done[0]=0;
     """
+}
+
+// MARK: - Resident greedy packet
+
+/// Source transform from rec `resident_block.py` plus the greedy edits in
+/// `sampling.py`. The loop is the single-token body, eight times, with the
+/// argmax inside the launch so the host does not read logits between tokens.
+///
+/// Official names the per-step dumps `block_logits` and `block_trace`. This
+/// port keeps one logits buffer and the session trace: the argmax finishes
+/// before the next step overwrites logits, and trace is write-only. That
+/// avoids the `#define trace trace_rw` alias colliding with a shadow pointer.
+enum FlintRecResident {
+    static let width = 8
+
+    private static let argmax = """
+            // All original vocabulary-head writes precede the complete argmax.
+            SYNC();
+            float best=-as_type<float>(0x7f800000u);
+            uint selected=0xffffffffu;
+            for(uint word=index;word<150144u;word+=10240u) {
+                float value=float(logits[word]);
+                if(value>best || (value==best && word<selected)) {
+                    best=value;selected=word;
+                }
+            }
+            float peak=simd_max(best);
+            uint first=simd_min(best==peak?selected:0xffffffffu);
+            if(lane==0) {
+                reduction[simdgroup_index_in_threadgroup]=peak;
+                layer_descriptor[simdgroup_index_in_threadgroup]=first;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if(simdgroup_index_in_threadgroup==0) {
+                float value=lane<8?reduction[lane]:-as_type<float>(0x7f800000u);
+                uint word=lane<8?layer_descriptor[lane]:0xffffffffu;
+                float maximum=simd_max(value);
+                uint choice=simd_min(value==maximum?word:0xffffffffu);
+                if(lane==0) {
+                    statistics[group*2]=maximum;
+                    ((device uint*)statistics)[group*2+1]=choice;
+                }
+            }
+            // Publish every group's maximum before any group chooses the next input.
+            SYNC();
+            if(simdgroup_index_in_threadgroup==0) {
+                float value=-as_type<float>(0x7f800000u);
+                uint word=0xffffffffu;
+                for(uint peer=lane;peer<40;peer+=32) {
+                    float other=statistics[peer*2];
+                    uint other_word=((device uint*)statistics)[peer*2+1];
+                    if(other>value || (other==value && other_word<word)) {
+                        value=other;word=other_word;
+                    }
+                }
+                float maximum=simd_max(value);
+                uint choice=simd_min(value==maximum?word:0xffffffffu);
+                if(lane==0)layer_descriptor[0]=choice;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            block_input_token=layer_descriptor[0];
+            if(index==0)profile[block_step*2+1]=block_input_token;
+    """
+
+    /// Nil if `body` is not the rendered single-token shader this transform expects.
+    static func body(from body: String, workers: Int) -> String? {
+        guard workers == 36 || workers == 76 else { return nil }
+        guard let embed = body.range(of: "Matrix embedding="),
+              let loop = body.range(
+                of: "    for(uint j=0;j<8;++j) {",
+                range: embed.upperBound..<body.endIndex),
+              let diagnostic = body.range(
+                of: "    if(tid==0)diagnostic[group]=0;",
+                range: loop.lowerBound..<body.endIndex)
+        else { return nil }
+
+        let suffix = body[diagnostic.lowerBound...]
+        guard suffix.components(separatedBy: "diagnostic[group]=0;").count - 1 == 1,
+              suffix.contains("0 && tid==0")
+        else { return nil }
+
+        var core = String(body[loop.lowerBound..<diagnostic.lowerBound])
+        guard !core.contains("16384.0f"),
+              core.components(separatedBy: "size_t row=uint(token);").count - 1 == 1,
+              core.components(separatedBy: "uint(position)").count - 1 == 6,
+              core.components(separatedBy: "expert_team_handoff(routing,control,tid,group,layer,phase,ready)").count - 1 == 1
+        else { return nil }
+
+        core = core.replacingOccurrences(of: "size_t row=uint(token);", with: "size_t row=block_input_token;")
+        core = core.replacingOccurrences(of: "uint(position)", with: "uint(block_position)")
+        core = core.replacingOccurrences(
+            of: "expert_team_handoff(routing,control,tid,group,layer,phase,ready)",
+            with: "expert_team_handoff(routing,control,tid,group,block_step*49u+layer,phase,ready)")
+
+        let stride = workers * 256
+        let reduced = Self.argmax
+            .replacingOccurrences(of: "10240u", with: "\(stride)u")
+            .replacingOccurrences(of: "peer<40", with: "peer<\(workers)")
+        let header = """
+            uint block_input_token=uint(token);
+            #pragma clang loop unroll(disable)
+            for(uint block_step=0;block_step<uint(sampling[0]);++block_step) {
+                uint block_position=uint(position)+block_step;
+                if(index==0)profile[block_step*2]=block_input_token;
+
+        """
+        let stop = """
+                if(index==0)profile[16]=block_step+1u;
+                bool stop=false;
+                for(uint j=0;j<uint(sampling[1]);++j)stop=stop||block_input_token==uint(sampling[2+j]);
+                if(stop)break;
+            }
+            if(tid==0)diagnostic[group]=0;
+
+        """
+        return String(body[..<loop.lowerBound]) + header + core + reduced + stop
+    }
 }

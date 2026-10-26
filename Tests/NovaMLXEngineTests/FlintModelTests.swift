@@ -220,6 +220,39 @@ struct FlintModelTests {
         #expect(FlintRecKernelSources.bodyMax.contains("#define routing routing_rw"))
     }
 
+    @Test("greedy resident body is the single-token shader looped eight times")
+    func testGreedyResidentBody() {
+        let maxBody = FlintRecResident.body(from: FlintRecKernelSources.bodyMax, workers: 76)
+        let proBody = FlintRecResident.body(from: FlintRecKernelSources.bodyPro, workers: 36)
+        #expect(maxBody != nil)
+        #expect(proBody != nil)
+        guard let maxBody, let proBody else { return }
+        #expect(maxBody.contains("word+=19456u"))
+        #expect(proBody.contains("word+=9216u"))
+        #expect(maxBody.contains("peer<76"))
+        #expect(proBody.contains("peer<36"))
+        #expect(maxBody.contains("block_step<uint(sampling[0])"))
+        #expect(maxBody.contains("block_step*49u+layer"))
+        #expect(proBody.contains("block_step*49u+layer"))
+        #expect(maxBody.contains("size_t row=block_input_token;"))
+        #expect(!maxBody.contains("size_t row=uint(token);"))
+        #expect(maxBody.contains("uint block_position=uint(position)+block_step;"))
+        // The live cursor is block_position. The kernel parameter is read once.
+        #expect(maxBody.components(separatedBy: "uint(position)").count - 1 == 1)
+        #expect(!maxBody.contains("uint(position)+1"))
+        #expect(maxBody.contains("uint(block_position)+"))
+        #expect(maxBody.contains("uint(initial_position)"))
+        #expect(!maxBody.contains("block_logits"))
+        #expect(!maxBody.contains("block_trace"))
+        #expect(maxBody.contains("#define trace trace_rw"))
+        #expect(maxBody.contains("#define statistics statistics_rw"))
+        #expect(maxBody.contains("profile[16]=block_step+1u"))
+        #expect(maxBody.contains("if(stop)break;"))
+        #expect(maxBody.components(separatedBy: "diagnostic[group]=0;").count - 1 == 1)
+        #expect(FlintRecResident.body(from: "not a shader", workers: 76) == nil)
+        #expect(FlintRecResident.body(from: FlintRecKernelSources.bodyMax, workers: 40) == nil)
+    }
+
     @Test("rec handoff waits until one single-token forward has landed")
     func testRecHandoffReady() {
         // Wide prefill, and the first one-token call (prompt tail or first
