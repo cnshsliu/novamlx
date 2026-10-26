@@ -9,7 +9,7 @@ import NovaMLXCore
 /// `chat.py` `normalize_messages` strips injected role and think markers
 /// before the template. `parse_tool_call` types arguments from the tool
 /// schema, and `seeded_tool_parser` derives call ids from the seed.
-enum FlintAlignment {
+package enum FlintAlignment {
 
     // MARK: - Omitted max_tokens
 
@@ -199,14 +199,14 @@ enum FlintAlignment {
 
     /// Request flag wins. An omitted flag uses `NOVA_ENFORCE_TOOL_SCHEMAS`
     /// (`1` / `true` / `yes`) and otherwise the server config, which defaults off.
-    static func resolvedEnforceToolSchemas(requestFlag: Bool?, serverConfig: Bool) -> Bool {
+    package static func resolvedEnforceToolSchemas(requestFlag: Bool?, serverConfig: Bool) -> Bool {
         resolvedEnforceToolSchemas(
             requestFlag: requestFlag,
             serverConfig: serverConfig,
             environment: ProcessInfo.processInfo.environment["NOVA_ENFORCE_TOOL_SCHEMAS"])
     }
 
-    static func resolvedEnforceToolSchemas(
+    package static func resolvedEnforceToolSchemas(
         requestFlag: Bool?,
         serverConfig: Bool,
         environment: String?
