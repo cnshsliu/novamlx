@@ -80,6 +80,8 @@ public final class FlintRecKernel: @unchecked Sendable {
     /// Nil when the resident-packet source did not match this shader.
     /// Single-token `forward` does not need it.
     private let greedyKernel: MLXFast.MLXFastKernel?
+
+    var hasGreedyResidentPacket: Bool { greedyKernel != nil }
     private let writeKernel: MLXFast.MLXFastKernel
     /// Bound for KV blocks this session has not grown into. The shader only
     /// dereferences block 0 below 65536 tokens.

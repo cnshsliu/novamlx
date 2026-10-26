@@ -45,6 +45,16 @@ public final class TurnStopProcessor: LogitProcessor, @unchecked Sendable {
         self.decode = decode
     }
 
+    /// True once a stop pattern has been seen and the next sample must be EOS.
+    var isConstraining: Bool {
+        switch state {
+        case .active:
+            return false
+        case .stopDetected, .done:
+            return true
+        }
+    }
+
     public func prompt(_ prompt: MLXArray) {
         state = .active
         tokenBuffer = []

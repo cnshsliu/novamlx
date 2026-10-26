@@ -15,9 +15,10 @@ import Testing
 /// `./build.sh test --filter FlintSpeedTests` and read `PARITY`,
 /// `SINGLE-RESULT`, `LOOP-RESULT`, and `PARITY-STEP0` (host argmax of the
 /// greedy logits output versus the device profile and the single-token id).
+/// After `LOOP-RESULT`, prints `FLINT-CHAT` for 128 more packet steps with
+/// one tokenizer decode per packet. That line is not asserted.
 /// Runs only when the weights are on disk.
-/// Stops after `LOOP-RESULT`. `NOVA_FLINT_MEGA_DECODE=1` also runs the
-/// obsolete MegaDecode probe.
+/// `NOVA_FLINT_MEGA_DECODE=1` also runs the obsolete MegaDecode probe.
 @Suite("Flint raw decode speed")
 struct FlintSpeedTests {
 
@@ -32,6 +33,9 @@ struct FlintSpeedTests {
         var step0Single: Int
         var step0Device: Int
         var step0Host: Int
+        var chatSeconds: Double
+        var chatTokens: Int
+        var chatLaunches: Int
     }
 
     /// Official INT4 snapshot. Local disk first, then the removable volume
@@ -163,6 +167,27 @@ struct FlintSpeedTests {
             let packetSteps = flint.recDecodeSteps - packetBefore
             print("PACKET-SEGS ms/token:", packetSegs.map { String(format: "%.1f", $0) }.joined(separator: " "))
 
+            // Chat-shaped window. LOOP-RESULT above does not include this.
+            // One tokenizer.decode of the accumulated ids per packet, which
+            // is the fused fast path when the packet has no stop text.
+            var chatIds: [Int] = []
+            chatIds.reserveCapacity(n)
+            let chatT0 = Date()
+            var chatProduced = 0
+            var chatLaunches = 0
+            while chatProduced < n {
+                let take = min(FlintRecResident.width, n - chatProduced)
+                let ids = try flint.recGreedyPacket(
+                    cache: packetCaches, token: packetLast, count: take)
+                if ids.isEmpty { break }
+                chatIds.append(contentsOf: ids)
+                _ = context.tokenizer.decode(tokenIds: chatIds)
+                packetLast = ids[ids.count - 1]
+                chatProduced += ids.count
+                chatLaunches += 1
+            }
+            let chatSeconds = Date().timeIntervalSince(chatT0)
+
             func seconds(_ segs: [Double]) -> Double {
                 segs.reduce(0, +) / 4 / 1000 * Double(n)
             }
@@ -174,7 +199,10 @@ struct FlintSpeedTests {
                 parity: parity,
                 step0Single: reference[0],
                 step0Device: step0Device,
-                step0Host: step0Host))
+                step0Host: step0Host,
+                chatSeconds: chatSeconds,
+                chatTokens: chatProduced,
+                chatLaunches: chatLaunches))
         }
         let stats = dtBox.value
         let singleRate = Double(n) / stats.singleSeconds
@@ -183,6 +211,12 @@ struct FlintSpeedTests {
         print(String(
             format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@, launch=%@, packet=%d)",
             packetRate, stats.packetSteps, stats.official ? "yes" : "no", stats.launch, FlintRecResident.width))
+        if let line = FlintChatDecode.line(
+            decodeTokens: stats.chatTokens, seconds: stats.chatSeconds,
+            packetTokens: stats.chatTokens, singleTokens: 0, launches: stats.chatLaunches)
+        {
+            print(line)
+        }
         // The first single-token forward stays eager (it may be the prefill
         // tail). Both timed windows are rec steps after that handoff.
         #expect(stats.official)
@@ -191,6 +225,7 @@ struct FlintSpeedTests {
         #expect(stats.step0Device == stats.step0Host)
         #expect(stats.singleSteps == n)
         #expect(stats.packetSteps == n)
+        #expect(stats.chatTokens == n)
 
         // MegaDecode is an obsolete compile experiment. After a successful rec
         // loop it still launches and GPU-timeouts, which fails this suite.

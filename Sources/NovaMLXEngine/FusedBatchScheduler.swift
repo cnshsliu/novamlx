@@ -14,6 +14,12 @@ final class FusedCachesBox: @unchecked Sendable {
     init(caches: [KVCache]) { self.caches = caches }
 }
 
+/// One fused decode launch: a Flint resident packet, or one host sample.
+private enum FusedDecodeHit: Sendable {
+    case packet([Int])
+    case single(Int, RawLogprobData?)
+}
+
 /// Result of a single-token decode (fallback path, no speculation).
 struct DecodeResult: Sendable {
     let tokenId: Int
@@ -31,6 +37,8 @@ struct SpecDecodeResult: Sendable {
     let sequenceId: UUID
     /// Logprob data for the first accepted token (the real decode token).
     let logprobs: (logprob: Float, topLogprobs: [TopLogprob])?
+    /// Flint greedy resident packet. Argmax ran on device for every id.
+    var fromResidentPacket: Bool = false
 }
 
 /// Sampler configuration passed into perform closure.
@@ -129,6 +137,14 @@ struct ActiveStreamSequence: @unchecked Sendable {
     }
 
     var toolStream: ToolStreamState? = nil
+
+    /// Wall clock for decode steps only. Nil until the first decode launch.
+    var decodeWindowStart: Date? = nil
+    /// Tokens emitted by decode steps, excluding the prefill-sampled token and EOS.
+    var decodeTokens: Int = 0
+    var packetTokens: Int = 0
+    var singleTokens: Int = 0
+    var packetLaunches: Int = 0
 
     /// Route one decoded text chunk through the tool parser and yield response
     /// text / tool calls. Falls through untouched when no state is attached.
@@ -1158,6 +1174,106 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
     }
 
+    private enum FastPacketApply {
+        /// Leave the sequence untouched. The per-token loop handles this packet.
+        case skip
+        /// Tokens are committed. `finished` means max length was reached.
+        case applied(finished: Bool)
+    }
+
+    /// One tokenizer decode for a clean Flint greedy packet.
+    ///
+    /// Returns `.skip` with no writes when the packet may stop, when the new
+    /// text contains `<` (tool or think markup), or when scrubbing would
+    /// change the chunk. A clean packet updates the same fields the slow
+    /// loop would, in one decode, then yields through the tool parser.
+    private func fastFlintPacket(
+        seq: inout ActiveStreamSequence,
+        tokens: [Int],
+        eosIds: Set<Int>,
+        tokenizer: Tokenizer?,
+        controlPatterns: [String],
+        processor: ChatTemplateProcessor?,
+        specDecoder: SpeculativeDecoder
+    ) -> FastPacketApply {
+        guard !tokens.isEmpty, let tokenizer else { return .skip }
+        if tokens.contains(where: { eosIds.contains($0) }) { return .skip }
+
+        let probeIds = seq.accumulatedTokenIds + tokens
+        let fullText = tokenizer.decode(probeIds)
+        let prior = seq.lastDecodedText
+        if let stops = seq.request.stop {
+            for stop in stops where !stop.isEmpty {
+                let appeared = fullText.contains(stop) && !prior.contains(stop)
+                if appeared || fullText.hasSuffix(stop) { return .skip }
+            }
+        }
+        if controlPatterns.contains(where: { pattern in
+            !pattern.isEmpty && fullText.contains(pattern) && !prior.contains(pattern)
+        }) {
+            return .skip
+        }
+        let futureCount = seq.completionTokens + tokens.count
+        if processor?.shouldStopForHallucination(
+            generatedText: fullText, completionTokenCount: futureCount) == true
+        {
+            return .skip
+        }
+        let openedControl = (fullText.contains("<|") && !prior.contains("<|"))
+            || (fullText.contains("|>") && !prior.contains("|>"))
+        if openedControl { return .skip }
+
+        let deltaLength = fullText.count - prior.count
+        if deltaLength < 0 { return .skip }
+        let rawDelta = deltaLength > 0 ? String(fullText.suffix(deltaLength)) : ""
+        // Flint always installs the GLM4 tool parser. A `<` in this chunk can
+        // be a tool tag, a think tag, or a partial tag the parser must see
+        // token by token. Prose with no `<` is one decode.
+        if seq.toolStream != nil && rawDelta.contains("<") { return .skip }
+        var scrubbed = MLXEngine.scrubControlTokens(rawDelta)
+        if let familyScrub = processor?.scrubControlTokens(scrubbed) {
+            scrubbed = familyScrub
+        }
+        if scrubbed != rawDelta { return .skip }
+
+        seq.accumulatedTokenIds = probeIds
+        seq.lastDecodedText = fullText
+        seq.generatedText = fullText
+        for id in tokens {
+            seq.lastTokenId = id
+            seq.recentTokenIds.append(id)
+            if seq.recentTokenIds.count > 128 {
+                seq.recentTokenIds = Array(seq.recentTokenIds.suffix(64))
+            }
+            seq.completionTokens += 1
+            seq.decodeTokens += 1
+            seq.packetTokens += 1
+            specDecoder.recordToken(id)
+        }
+        lock.withLock { totalTokensViaFused += UInt64(tokens.count) }
+        seq.previousTokenWasControl = false
+        if !scrubbed.isEmpty {
+            seq.yieldProcessed(scrubbed)
+        }
+
+        guard seq.completionTokens >= seq.maxTokens else {
+            return .applied(finished: false)
+        }
+        seq.drainToolProcessor()
+        if seq.harmonyInThinking {
+            seq.safeYield(Token(id: 0, text: "</think>"))
+            seq.harmonyInThinking = false
+        }
+        seq.safeYield(Token(
+            id: 0, text: "", finishReason: .length, promptTokens: seq.promptTokenCount))
+        let finishedByUs = seq.safeFinish()
+        seq.isFinished = true
+        seq._finishedByDecodeStep = finishedByUs
+        NovaMLXLog.debug(
+            "[DecodeStep] flint packet seq \(seq.id.uuidString.prefix(8)) finished owned=\(finishedByUs) reason=length")
+        return .applied(finished: true)
+    }
+
     /// Sort queued items by priority (high first), then by enqueue time (oldest first).
     private func prioritizedQueue<T>(
         _ items: [T],
@@ -1355,8 +1471,15 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
             let specDecoder = engine.specDecoder
             var specResults: [SpecDecodeResult] = []
+            var firstDecodeStart: [UUID: Date] = [:]
+            let flintStopIds: Set<Int> = container.identifier.family == .flint
+                ? Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+                : []
 
             for seq in active {
+                if seq.decodeWindowStart == nil {
+                    firstDecodeStart[seq.id] = Date()
+                }
                 // Logprobs require per-step logits — bypass spec decoding when requested
                 // so every accepted token has logprob data (avoids silent gaps in the API).
                 let wantLogprobs = seq.request.includeLogprobs
@@ -1368,14 +1491,47 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                 if draftTokens.isEmpty {
                     // No draft — standard single-token decode (zero overhead).
+                    // Official Flint INT4 greedy, one sequence, no logprobs:
+                    // one resident packet (up to FlintRecResident.width tokens, argmax on device)
+                    // instead of a host logit read per token. Fused sampling
+                    // does not apply repetition or presence penalties.
                     let token = MLXArray(Int32(seq.lastTokenId)).reshaped(1, 1)
                     let seqCaches = seq.caches
                     let seqSampler = seq.sampler
                     let recentIds = seq.recentTokenIds
                     let freqPen = seq.frequencyPenalty
                     let logprobTopK = seq.request.topLogprobsCount ?? 0
+                    let allowPacket = container.identifier.family == .flint
+                        && FlintChatDecode.allowsResidentPacket(
+                            FlintChatDecode.Policy(
+                                temperature: seq.sampler.isGreedy ? 0 : 1,
+                                frequencyPenalty: freqPen,
+                                repetitionPenalty: 0,
+                                presencePenalty: 0,
+                                wantsLogprobs: wantLogprobs,
+                                batchWidth: active.count,
+                                usesGrammar: false))
+                    let packetCount = min(
+                        FlintRecResident.width, max(1, seq.maxTokens - seq.completionTokens))
+                    let packetStops = FlintChatDecode.packetStopIds(tokenizerEOS: eosId)
+                    let inputToken = seq.lastTokenId
                     let tidBox = await mlxContainer.perform(nonSendable: (token, seqCaches)) { context, values in
                         let (tokenInput, caches) = values
+                        if allowPacket, let flint = context.model as? FlintModel,
+                            flint.recGreedyPacketReady(cache: caches)
+                        {
+                            do {
+                                let ids = try flint.recGreedyPacket(
+                                    cache: caches, token: inputToken, count: packetCount,
+                                    eosTokenIds: packetStops)
+                                if !ids.isEmpty {
+                                    return SendableBox(FusedDecodeHit.packet(ids))
+                                }
+                            } catch {
+                                // recGreedyPacket disables rec after a kernel failure.
+                                // The single-token forward below is the eager fallback.
+                            }
+                        }
                         let logits = context.model(tokenInput, cache: caches)
                         eval(logits)
                         var lastLogits = logits[0..., -1, 0...]
@@ -1398,17 +1554,22 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             ? Self.computeRawLogprobs(from: lastLogits, sampledTokenId: sampledId, topK: logprobTopK)
                             : nil
 
-                        return SendableBox((sampledId, rawLogprobs))
+                        return SendableBox(FusedDecodeHit.single(sampledId, rawLogprobs))
                     }
-                    let (tid, decodeRawLogprobs) = tidBox.value
-                    // Resolve logprob token IDs to text using tokenizer
-                    let decodedLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? = decodeRawLogprobs.map {
-                        Self.resolveLogprobs($0, tokenizer: container.tokenizer)
+                    switch tidBox.value {
+                    case .packet(let ids):
+                        specResults.append(SpecDecodeResult(
+                            acceptedTokens: ids, draftAccepted: 0, draftProposed: 0,
+                            sequenceId: seq.id, logprobs: nil, fromResidentPacket: true))
+                    case .single(let tid, let decodeRawLogprobs):
+                        let decodedLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? = decodeRawLogprobs.map {
+                            Self.resolveLogprobs($0, tokenizer: container.tokenizer)
+                        }
+                        specResults.append(SpecDecodeResult(
+                            acceptedTokens: [tid], draftAccepted: 0, draftProposed: 0, sequenceId: seq.id,
+                            logprobs: decodedLogprobs
+                        ))
                     }
-                    specResults.append(SpecDecodeResult(
-                        acceptedTokens: [tid], draftAccepted: 0, draftProposed: 0, sequenceId: seq.id,
-                        logprobs: decodedLogprobs
-                    ))
                 } else {
                     // Speculative decode: [lastToken] + draftTokens in one forward pass.
                     let allTokens = [seq.lastTokenId] + draftTokens
@@ -1498,18 +1659,56 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 if result.draftProposed > 0 {
                     specDecoder.recordAccepted(tokens: result.acceptedTokens, accepted: result.draftAccepted)
                 }
+                if seq.decodeWindowStart == nil, let start = firstDecodeStart[seq.id] {
+                    seq.decodeWindowStart = start
+                }
+
+                var emitTokens = result.acceptedTokens
+                if result.fromResidentPacket {
+                    seq.packetLaunches += 1
+                    let split = FlintChatDecode.keptPrefix(tokenIds: emitTokens, stopIds: flintStopIds)
+                    if split.unused > 0 {
+                        FlintChatDecode.trim(seq.caches, unused: split.unused)
+                        emitTokens = split.kept
+                    }
+                }
 
                 // Yield all accepted tokens.
                 var sequenceFinished = false
-                for (tokenIdx, tokenId) in result.acceptedTokens.enumerated() {
+                var consumed = 0
+                var usedFast = false
+                if result.fromResidentPacket, container.identifier.family != .gptOss {
+                    switch fastFlintPacket(
+                        seq: &seq, tokens: emitTokens, eosIds: flintStopIds,
+                        tokenizer: container.tokenizer, controlPatterns: controlPatterns,
+                        processor: container.chatTemplateProcessor, specDecoder: specDecoder)
+                    {
+                    case .skip:
+                        break
+                    case .applied(let finished):
+                        usedFast = true
+                        sequenceFinished = finished
+                    }
+                }
+                if !usedFast {
+                for (tokenIdx, tokenId) in emitTokens.enumerated() {
+                    consumed = tokenIdx + 1
                     // EOS FIRST, before any decode or yield: some tokenizers
                     // (Hy-MT2's TokenizersBackend) decode the eos token as its
                     // literal text (<｜hy_place▁holder▁no▁2｜>) instead of
                     // skipping it — yielding before the check leaked the
                     // stop marker into every streamed reply.
-                    let isEOSNow = (eosId == tokenId)
+                    let isEOSNow = (eosId == tokenId) || flintStopIds.contains(tokenId)
                     seq.lastTokenId = tokenId
-                    if !isEOSNow { seq.completionTokens += 1 }
+                    if !isEOSNow {
+                        seq.completionTokens += 1
+                        seq.decodeTokens += 1
+                    }
+                    if result.fromResidentPacket {
+                        seq.packetTokens += 1
+                    } else if !isEOSNow {
+                        seq.singleTokens += 1
+                    }
 
                     // Update N-gram context buffer.
                     seq.recentTokenIds.append(tokenId)
@@ -1697,6 +1896,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         break
                     }
                 }
+                if result.fromResidentPacket {
+                    let unused = emitTokens.count - consumed
+                    if unused > 0 {
+                        FlintChatDecode.trim(seq.caches, unused: unused)
+                    }
+                }
+                }
 
                 if !sequenceFinished {
                     updatedActive[i] = seq
@@ -1733,6 +1939,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // Only release budget if WE finished the sequence in this decode step.
                 // Preempt/abort paths release budget themselves; skip to avoid double-release.
                 guard seq._finishedByDecodeStep else { continue }
+                if container.identifier.family == .flint, let start = seq.decodeWindowStart {
+                    let seconds = Date().timeIntervalSince(start)
+                    if let line = FlintChatDecode.line(
+                        decodeTokens: seq.decodeTokens, seconds: seconds,
+                        packetTokens: seq.packetTokens, singleTokens: seq.singleTokens,
+                        launches: seq.packetLaunches)
+                    {
+                        NovaMLXLog.info(line)
+                    }
+                }
                 await budgetTracker.release(sequenceId: seq.id)
                 assert(seq._finishedByDecodeStep, "BUG: budget released for sequence not owned by decode step — double-release")
                 NovaMLXLog.debug("[BudgetRelease] seq=\(seq.id.uuidString.prefix(8)) model=\(modelId) path=decodeStep")

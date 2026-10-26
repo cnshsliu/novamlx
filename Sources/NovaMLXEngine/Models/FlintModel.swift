@@ -791,6 +791,16 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
         return (ids, logitsArgmax)
     }
 
+    /// True when `recGreedyPacket` can run for this cache without ingesting
+    /// or disabling rec. The chat decode path uses this so a not-yet-handed-off
+    /// sequence stays on the single-token forward instead of throwing.
+    func recGreedyPacketReady(cache: [KVCache]) -> Bool {
+        guard !recDecodeDisabled, let kernel = recKernel, kernel.hasGreedyResidentPacket else {
+            return false
+        }
+        return recSessionMatches(cache)
+    }
+
     /// One decode token, without a dtype-cast kernel when the id is already
     /// an integer array (the generate loop passes `Int32`).
     private static func recScalarToken(_ inputs: MLXArray) -> Int {
