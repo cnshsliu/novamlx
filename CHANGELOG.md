@@ -4,7 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
-## [1.8.0] - 2026-10-24
+## [1.8.0] - 2026-10-25
+
+**Headline: Flint official INT4 packet decode, 214.7 tok/s.** MacMaxPro M4 Max, `RecursiveSI/flint-int4`, `./build.sh test --filter FlintSpeedTests` at `e8e7b27`. LOOP-RESULT is **214.7 tok/s** (128 rec steps, launch 76/64/64, greedy packet=8, argmax on device). Same run, one launch plus host argmax: **181.6 tok/s**. Recursive’s published Mac INT4 rec reference is **196.8 tok/s** (1K context / 256 decoded tokens — a different window, not a re-run of this suite). llama.cpp on the same machine was ~89.7 tok/s in an earlier reference and was not re-run. 214.7 is the shader timing window after compile, not HTTP end-to-end. Intro: [Flint](docs/features/flint.md), [brief](docs/feature-briefs/2026-10-25-flint.md).
 
 **Core change: Flint (RecursiveSI) model support** — see the Flint entry below.
 
