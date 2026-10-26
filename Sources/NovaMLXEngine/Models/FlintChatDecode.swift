@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import NovaMLXCore
+import NovaMLXUtils
 
 // MARK: - Policy and report
 
@@ -209,7 +210,7 @@ struct FlintGreedyTokenIterator: TokenIteratorProtocol {
         if FlintChatDecode.processorAllowsPacket(processor),
             model.recGreedyPacketReady(cache: cache)
         {
-            let count = min(FlintRecResident.width, room)
+            let count = Swift.min(FlintRecResident.width, room)
             do {
                 let ids = try model.recGreedyPacket(
                     cache: cache, token: lastToken, count: count, eosTokenIds: kernelStopIds)
