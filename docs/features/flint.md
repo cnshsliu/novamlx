@@ -17,7 +17,7 @@
 | **API** | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`，流式/非流式；eos = `<|end_of_text|>` 及角色头 token（自动停止+清洗，不泄漏） |
 | **调度** | ContinuousBatcher（连续批处理路径；fused 路径暂无工具解析） |
 | **量化** | 官方 `RecursiveSI/flint-int4`（~22.6 GB；社区 OptiQ-4bit 曾用于早期验证，现已弃用为默认） |
-| **性能参考** | M4 Max 128GB：裸 decode 基线见 Gate 0 报告（eager 路径 ~20 tok/s 量级，优化进行中）；此前 OptiQ 权重上的端到端 ~34 tok/s 口径已随默认权重切换作废 |
+| **性能参考** | 官方 INT4 走 rec megakernel。MacMaxPro M4 Max，`e8e7b27`，`FlintSpeedTests`：单步 **181.6 tok/s**；packet=8 闭环 **214.7 tok/s**。口径、对照和柱状图见 [Speed](#speed)。 |
 
 ## How to try
 
@@ -34,14 +34,53 @@ curl -X POST localhost:6590/v1/chat/completions \
 
 推荐采样：temperature 1.0、top-p 0.95、top-k 20（官方推荐）；精确复现用 temperature 0。
 
+## Speed
+
+下面只写这次列出的 tok/s，以及标明来源的对照。没有另跑的数不进表。
+
+本次 NovaMLX 测量：MacMaxPro M4 Max，权重 `RecursiveSI/flint-int4`，`./build.sh test --filter FlintSpeedTests`，PR #35 合入点 `e8e7b27`。
+
+- **PARITY:** match 16（单步 host argmax 与 resident packet 接下来的 16 个 greedy token 一致）
+- **SINGLE-RESULT:** 一次 launch + host argmax，**181.6 tok/s**（128 rec steps）
+- **LOOP-RESULT:** load→pack→decode，**214.7 tok/s**（128 rec steps，official=yes，launch=76/64/64，packet=8）
+- **MEGA-SKIP:** MegaDecode 仍被门控，这次没有 mega 的 tok/s
+
+| 路径 | tok/s | 口径 | 来源 |
+|------|------:|------|------|
+| llama.cpp | ~89.7 | INT4-class Flint decode | 团队既有参考。这次测量没有重跑 |
+| Official Recursive rec | 196.8 | Mac INT4 rec，1K ctx / 256 tok decode | 官方参考，NovaMLX 对标它。不是这次的 Mac 新跑，也不是 NovaMLX 的成绩 |
+| NovaMLX single | 181.6 | 一次 launch + host argmax，128 rec steps | 本次 SINGLE-RESULT，`e8e7b27` |
+| NovaMLX packet | 214.7 | load→pack→decode，128 rec steps，packet=8 | 本次 LOOP-RESULT，`e8e7b27` |
+
+三条对照：llama.cpp、官方 rec、NovaMLX packet。单步 181.6 只在表里。
+
+```mermaid
+xychart-beta
+    title "Flint decode tok/s (three labeled sources)"
+    x-axis ["llama.cpp", "Official rec", "NovaMLX packet"]
+    y-axis "tok/s" 0 --> 250
+    bar [89.7, 196.8, 214.7]
+```
+
+柱高是 **89.7**、**196.8**、**214.7**。214.7 是 NovaMLX 这次的 packet 闭环，不是官方博客上的数字。官方 **196.8** 的窗口是 1K ctx / 256 tok decode；NovaMLX 这次是 128 rec steps。两列不是同一套 bench 的复跑。
+
+同机、更早的提交（不是上表这一行）：
+
+- PR #34 合入点 `cbc5fef`：闭环 ~167.5 tok/s
+- #35 里 host/scratch 与 76 pool 先落地、packet 尚未进去时：185.2 tok/s
+
+181.6 和 214.7 都是 `FlintSpeedTests` 里 shader 编译完成之后的 rec decode 计时窗口，不是 HTTP 端到端。214.7 是 greedy resident packet（argmax 在设备上，packet=8）。同一次跑的单步路径是一次 launch、host argmax。采样解码不走 packet。
+
 ## Limits / notes
 
 - 工具调用走 ContinuousBatcher 路径（fused 批处理暂不解析工具协议）。
 - 纯 text-to-3D 之类与 Flint 无关；Flint 是文本 agent 模型。
 - TurboQuant KV 缓存会丢弃 attention sinks（与 GPT-OSS 相同的取舍），默认不启用。
+- [Speed](#speed) 里的 181.6 / 214.7 是 `FlintSpeedTests` 的 rec decode。官方 196.8 与 llama.cpp ~89.7 是标明来源的对照，不是这次重跑。
 
 ## Related
 
 - [API 兼容 / API compatibility](api-compatibility.md)
 - [工具调用 / Tool calling](tool-calling.md)
+- [功能简报 / Feature brief](../feature-briefs/2026-10-25-flint.md)
 - `FlintModel.swift`、`FlintProcessor.swift`（`NovaMLXEngine`）
