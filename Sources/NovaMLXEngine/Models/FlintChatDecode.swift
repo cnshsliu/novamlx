@@ -256,15 +256,41 @@ enum FlintChatDecode {
         FlintStructuralGrammar.observationId,
     ]
 
-    /// Grammar on: the three grammar stops. Grammar off: the checkpoint
-    /// multi-EOS set, including `<|developer|>`.
+    /// Grammar on: `grammar.stops` plus the checkpoint multi-EOS set.
+    /// `<|developer|>` is not a grammar stop and the answer mask still
+    /// rejects it. It remains a checkpoint EOS, so a sample during think
+    /// finishes the turn. Grammar off is the checkpoint set alone.
     static func generationFinishStopIds(
         grammarOn: Bool,
         checkpoint: Set<Int>,
         tokenizerEOS: Int?
     ) -> Set<Int> {
-        if grammarOn { return Set(grammarStopIds) }
-        return hostFinishStopIds(checkpoint: checkpoint, tokenizerEOS: tokenizerEOS)
+        let checkpointStops = hostFinishStopIds(checkpoint: checkpoint, tokenizerEOS: tokenizerEOS)
+        if grammarOn { return Set(grammarStopIds).union(checkpointStops) }
+        return checkpointStops
+    }
+
+    /// Which launch `FlintGreedyTokenIterator.fill` takes.
+    ///
+    /// Structural grammar is the filtered packet even when the device packet
+    /// would have been vetoed (`blocksResidentPacket`) and no sampler was
+    /// stored on the iterator. That veto is what records
+    /// `packetTokens=0`, `launches=0`, `singleTokens` for the whole decode.
+    enum SerialFill: Equatable, Sendable {
+        case filteredPacket
+        case greedyDevicePacket
+        case singleStep
+    }
+
+    static func serialFillKind(
+        hasSampler: Bool,
+        structuralGrammar: Bool,
+        devicePacketAllowed: Bool,
+        recReady: Bool
+    ) -> SerialFill {
+        if hasSampler || structuralGrammar { return .filteredPacket }
+        if devicePacketAllowed && recReady { return .greedyDevicePacket }
+        return .singleStep
     }
 
     /// At most four stop ids, tokenizer EOS first, then the Flint canonical set.
@@ -790,24 +816,27 @@ struct FlintGreedyTokenIterator: TokenIteratorProtocol {
     private mutating func fill() {
         let room = maxTokens.map { $0 - tokenCount - pending.count } ?? FlintRecResident.width
         guard room > 0 else { return }
-        if sampler != nil {
-            filteredFill(room: room)
-            return
-        }
-        if FlintChatDecode.processorAllowsPacket(processor),
-            model.recGreedyPacketReady(cache: cache)
+        switch FlintChatDecode.serialFillKind(
+            hasSampler: sampler != nil,
+            structuralGrammar: FlintChatDecode.processorUsesStructuralGrammar(processor),
+            devicePacketAllowed: FlintChatDecode.processorAllowsPacket(processor),
+            recReady: model.recGreedyPacketReady(cache: cache))
         {
+        case .filteredPacket:
+            filteredFill(room: room)
+        case .greedyDevicePacket:
             let count = Swift.min(FlintRecResident.width, room)
             do {
                 let ids = try model.recGreedyPacket(
                     cache: cache, token: lastToken, count: count, eosTokenIds: kernelStopIds)
                 notePacket(ids)
-                return
             } catch {
                 NovaMLXLog.error("[Flint] chat resident packet failed, one-token step: \(error)")
+                singleStep()
             }
+        case .singleStep:
+            singleStep()
         }
-        singleStep()
     }
 
     private mutating func notePacket(_ ids: [Int]) {

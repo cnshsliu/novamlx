@@ -7,10 +7,14 @@ import MLXLMCommon
 /// an optional single `<think>…</think>` at the start, then answer text and,
 /// when tools were supplied, a GLM tool-call body. Think tags and the other
 /// protocol markers are excluded from the answer (their logits are masked).
-/// With structural grammar on, the turn finishes on `grammar.stops`
-/// (`<|end_of_text|>`, `<|user|>`, `<|observation|>`). `<|developer|>` is
-/// masked in the answer and is not one of those stops. Grammar off keeps the
-/// checkpoint multi-EOS set, including developer.
+/// With structural grammar on, `<|end_of_text|>` and `<|user|>` are legal
+/// terminals in the start, think, and answer phases. `<|observation|>` is a
+/// grammar stop too: it stays sampleable inside the open think (a tool call
+/// cannot already have happened there) and in the start and answer after a
+/// tool call. Sampling one finishes the turn. `<|developer|>` is masked in
+/// the answer and is not one of those grammar stops. It stays sampleable
+/// during think, and the host finishes on it because it is a checkpoint EOS
+/// id. Grammar off keeps the same checkpoint multi-EOS set.
 ///
 /// `FlintChatDecode.ThinkReentryGuard` is the fallback when this grammar is
 /// not installed (another request constraint such as JSON schema). A custom
@@ -72,8 +76,10 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
         Marker(tokenId: observationId, text: "<|observation|>"),
     ]
 
-    /// Think-body excludes in rec: `</think>` plus `_STOP_MARKERS`.
-    /// `</think>` is the tag end, so it stays sampleable. The stop markers do not.
+    /// Think-body text excludes: `</think>` plus `_STOP_MARKERS`.
+    /// `</think>` is the tag end. The stop token ids are legal terminals
+    /// (`legalStopIds`), so they stay sampleable and finish the turn.
+    /// Spelled-out copies of those markers are still rejected.
     public static let thinkBodyExcludes: [Marker] = [
         Marker(tokenId: thinkCloseId, text: "</think>"),
         Marker(tokenId: endOfTextId, text: "<|end_of_text|>"),
@@ -210,6 +216,10 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
                 held = ""
                 return true
             }
+            if legalStopIds().contains(tokenId) {
+                held = ""
+                return true
+            }
             held = Self.retainedPrefix(held + text, markers: excludedMarkerTexts())
             return true
         case .answer:
@@ -279,15 +289,22 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
         excludedMarkers().map(\.text)
     }
 
-    /// Stops the grammar itself accepts as an ending. The host still finishes
-    /// on the full checkpoint EOS set when one of those ids is sampled.
+    /// Stops the grammar itself accepts as an ending. Empty during a tool
+    /// body. The think body accepts every `grammar.stops` id, including
+    /// `<|observation|>`: `sawToolCall` is still false there, because a tool
+    /// call is only entered from the start or the answer, and a second
+    /// `<think>` is masked after that. Start and answer keep observation
+    /// until a tool call has been accepted. The host also finishes on the
+    /// checkpoint EOS set, including `<|developer|>`, when that id is sampled.
     func legalStopIds() -> Set<Int> {
         switch phase {
+        case .inThink:
+            return [Self.endOfTextId, Self.userId, Self.observationId]
         case .start, .answer:
             var ids: Set<Int> = [Self.endOfTextId, Self.userId]
             if sawToolCall { ids.insert(Self.observationId) }
             return ids
-        case .inThink, .inTool:
+        case .inTool:
             return []
         }
     }

@@ -1802,7 +1802,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             usesStructuralGrammar: FlintChatDecode.processorUsesStructuralGrammar(processor))
         if let flint = model as? FlintModel {
             let effectiveStops = policy.usesStructuralGrammar
-                ? FlintChatDecode.grammarStopIds
+                ? Array(Set(FlintChatDecode.grammarStopIds).union(stopIds))
                 : stopIds
             switch FlintChatDecode.residentRoute(policy) {
             case .greedyDevice:
