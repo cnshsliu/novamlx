@@ -293,7 +293,8 @@ struct FlintChatDecodeTests {
     @Test("a fast prose packet arms the think-reentry guard")
     func testFastPacketThenThinkStops() {
         var state = FlintChatDecode.ThinkReentryGuard()
-        #expect(state.observeFastPacket("Hello! How can I help you today?"))
+        let armed = state.observeFastPacket("Hello! How can I help you today?")
+        #expect(armed)
         let step = FlintChatDecode.tokenDecision(
             tokenId: FlintChatDecode.thinkOpenTokenId, decoded: "<think>",
             primaryEOS: 150001, stopIds: stops(), state: &state)
@@ -302,7 +303,8 @@ struct FlintChatDecodeTests {
         #expect(!step.isEOS)
 
         var untouched = FlintChatDecode.ThinkReentryGuard()
-        #expect(!untouched.observeFastPacket("Hello<"))
+        let heldPrefix = untouched.observeFastPacket("Hello<")
+        #expect(!heldPrefix)
         #expect(!untouched.hasVisibleContent)
     }
 }
