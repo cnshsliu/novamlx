@@ -100,6 +100,38 @@ public struct CatalogEntry: Codable, Sendable, Identifiable, Equatable {
         }
         return parts.joined(separator: " · ")
     }
+
+    /// Model name with the quant suffix removed, so two weights of one model share a title.
+    public var verifiedModelTitle: String {
+        var title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffixes = [
+            #"\s+\d+(?:\.\d+)?-bit$"#,
+            #"\s+\([^)]*(?:INT\d|\d-bit|bit)[^)]*\)$"#,
+        ]
+        for pattern in suffixes {
+            if let range = title.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
+                title.removeSubrange(range)
+            }
+        }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? name : trimmed
+    }
+}
+
+/// One verified model and the exact weights that passed a NovaMLX test.
+public struct VerifiedModelGroup: Sendable, Equatable, Identifiable {
+    public let name: String
+    public let family: ModelFamily
+    public let weights: [CatalogEntry]
+
+    public var id: String { "\(family.rawValue)|\(name)" }
+
+    /// NovaMLX version when every weight in the group was tested on the same release.
+    public var sharedTestedOn: String? {
+        let versions = Set(weights.compactMap(\.testedOn).filter { !$0.isEmpty })
+        guard versions.count == 1, let only = versions.first else { return nil }
+        return only
+    }
 }
 
 public struct CatalogFile: Codable, Sendable, Equatable {
@@ -194,6 +226,28 @@ public enum ModelCatalogPolicy {
 
     public static func refuseMessage(id: String) -> String {
         "\(id) is not in the NovaMLX verified catalog. Turn on Download Models → Allow unverified downloads if you want to try it anyway."
+    }
+
+    /// Groups verified exact weights under the model they belong to. Preview rows and family globs stay out.
+    public static func verifiedModelGroups(from entries: [CatalogEntry]) -> [VerifiedModelGroup] {
+        let verified = entries.filter { $0.status == .verified && !isIdPattern($0.id) }
+        var order: [String] = []
+        var buckets: [String: [CatalogEntry]] = [:]
+        for entry in verified {
+            let key = "\(entry.family.rawValue)|\(entry.verifiedModelTitle)"
+            if buckets[key] == nil {
+                order.append(key)
+            }
+            buckets[key, default: []].append(entry)
+        }
+        return order.compactMap { key in
+            guard let weights = buckets[key], let first = weights.first else { return nil }
+            return VerifiedModelGroup(
+                name: first.verifiedModelTitle,
+                family: first.family,
+                weights: weights
+            )
+        }
     }
 
     public static func search(

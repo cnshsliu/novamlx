@@ -94,8 +94,8 @@ struct DownloadsPageView: View {
                 VStack(spacing: 20) {
                     searchSection
 
-                    if !testedWeightModels.isEmpty {
-                        testedWeightsSection
+                    if !verifiedModelGroups.isEmpty {
+                        verifiedModelsSection
                     }
 
                     // Hub list after an Advanced / family-glob search. Empty Hub
@@ -104,10 +104,8 @@ struct DownloadsPageView: View {
                     if hubSearchAttempted || !searchResults.isEmpty {
                         searchResultsSection
                     }
-                    if !catalogCardModels.isEmpty || testedWeightModels.isEmpty {
-                        if searchResults.isEmpty || !displayedCatalogModels.isEmpty {
-                            catalogModelsSection
-                        }
+                    if !catalogCardModels.isEmpty {
+                        catalogModelsSection
                     }
 
                     if !activeOrFailed.isEmpty || isSearching {
@@ -330,55 +328,67 @@ struct DownloadsPageView: View {
         }
     }
 
-    // MARK: - Tested weights
+    // MARK: - Verified models and their tested weights
 
-    private var testedWeightModels: [CatalogEntry] {
-        displayedCatalogModels.filter {
-            $0.status == .verified && !ModelCatalogPolicy.isIdPattern($0.id)
-        }
+    private var verifiedModelGroups: [VerifiedModelGroup] {
+        ModelCatalogPolicy.verifiedModelGroups(from: displayedCatalogModels)
     }
 
-    private var testedWeightsSection: some View {
-        let models = testedWeightModels
-        return VStack(alignment: .leading, spacing: 8) {
-            sectionHeader(l10n.tr("models.testedWeightsTitle"), icon: "checkmark.seal.fill", count: models.count)
+    private var verifiedModelsSection: some View {
+        let groups = verifiedModelGroups
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(l10n.tr("models.verifiedTitle"), icon: "checkmark.seal.fill", count: groups.count)
             Text(l10n.tr("models.testedWeightsHint"))
                 .font(.caption)
                 .foregroundColor(.secondary)
-            ForEach(models) { model in
-                testedWeightRow(model)
+            ForEach(groups) { group in
+                verifiedModelBlock(group)
             }
         }
         .sectionCard()
     }
 
-    private func testedWeightRow(_ model: CatalogEntry) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(model.name)
+    private func verifiedModelBlock(_ group: VerifiedModelGroup) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(group.name)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(2)
-                testedField(l10n.tr("models.testedVersion"), model.testedVersionLabel)
-                testedField(l10n.tr("models.testedWeight"), model.id, mono: true)
+                Text(verifiedModelSubtitle(group))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            downloadActionButton(for: model.id)
+            ForEach(group.weights) { weight in
+                testedWeightRow(weight)
+            }
         }
-        .rowCard()
     }
 
-    private func testedField(_ title: String, _ value: String, mono: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.secondary)
-                .frame(width: 88, alignment: .leading)
-            Text(value)
-                .font(mono ? .system(size: 11, design: .monospaced) : .system(size: 11))
-                .foregroundColor(mono ? NovaTheme.Colors.accent : NovaTheme.Colors.textPrimary)
-                .lineLimit(2)
-                .textSelection(.enabled)
+    private func verifiedModelSubtitle(_ group: VerifiedModelGroup) -> String {
+        if let testedOn = group.sharedTestedOn {
+            return "\(group.family.rawValue) · NovaMLX \(testedOn)"
         }
+        return group.family.rawValue
+    }
+
+    private func testedWeightRow(_ weight: CatalogEntry) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                if let quant = weight.quant, !quant.isEmpty {
+                    Text(quant)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(NovaTheme.Colors.textPrimary)
+                }
+                Text(weight.id)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(NovaTheme.Colors.accent)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            downloadActionButton(for: weight.id)
+        }
+        .rowCard()
     }
 
     // MARK: - Verified Catalog
@@ -418,7 +428,7 @@ struct DownloadsPageView: View {
         let models = catalogCardModels
         let catalogTitle = (hubSearchAttempted && appState.allowUnlistedDownloads)
             ? "Also in catalog"
-            : l10n.tr("models.verifiedTitle")
+            : l10n.tr("models.previewCatalog")
 
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader(catalogTitle, icon: "checkmark.seal.fill", count: models.count)

@@ -332,6 +332,39 @@ struct ModelCatalogTests {
         #expect(untested.testedVersionLabel == "flint · int4")
     }
 
+    @Test("Verified models group multiple tested weights under one name")
+    func verifiedModelGroups() {
+        func entry(_ id: String, _ name: String, _ status: CatalogStatus, family: ModelFamily = .qwen, quant: String? = nil) -> CatalogEntry {
+            CatalogEntry(
+                id: id,
+                url: "https://huggingface.co/\(id)",
+                name: name,
+                category: .llm,
+                family: family,
+                format: .mlx,
+                quant: quant,
+                testedOn: "1.8.1",
+                status: status
+            )
+        }
+        let catalog = [
+            entry("mlx-community/Qwen3.8-27B-8bit", "Qwen3.8-27B 8-bit", .verified, quant: "8bit"),
+            entry("mlx-community/Qwen3.8-27B-4bit", "Qwen3.8-27B 4-bit", .verified, quant: "4bit"),
+            entry("orcarouter/Qwen3.8-27B-Uncensored-MLX", "Qwen3.8-27B Uncensored", .verified, quant: "4bit"),
+            entry("RecursiveSI/flint-int4", "Flint 40B A2.5B (Official INT4)", .verified, family: .flint, quant: "int4"),
+            entry("mlx-community/Qwen3.5-9B-OptiQ-4bit", "Qwen3.5 preview", .preview),
+            entry("mlx-community/Qwen3.8-*", "Qwen3.8 family", .verified),
+        ]
+        let groups = ModelCatalogPolicy.verifiedModelGroups(from: catalog)
+        #expect(groups.map(\.name) == ["Qwen3.8-27B", "Qwen3.8-27B Uncensored", "Flint 40B A2.5B"])
+        #expect(groups[0].weights.map(\.id) == [
+            "mlx-community/Qwen3.8-27B-8bit",
+            "mlx-community/Qwen3.8-27B-4bit",
+        ])
+        #expect(groups[0].sharedTestedOn == "1.8.1")
+        #expect(groups[2].weights.map(\.id) == ["RecursiveSI/flint-int4"])
+    }
+
     @Test("Family glob allows every matching Hub id")
     func prefixAllowsFamily() {
         let family = CatalogEntry(
