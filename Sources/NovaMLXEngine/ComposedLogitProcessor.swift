@@ -88,6 +88,22 @@ public final class ComposedLogitProcessor: LogitProcessor, @unchecked Sendable {
         )
     }
 
+    /// Resident greedy packets are safe only while every slot is a no-op on
+    /// the next sample. A penalty or grammar slot rewrites logits on every
+    /// step. Turn-stop and thinking-budget masks turn on only after a trigger.
+    var blocksResidentPacket: Bool {
+        if grammarProcessor != nil || penaltyProcessor != nil { return true }
+        if let turn = turnStopProcessor {
+            guard let turn = turn as? TurnStopProcessor, !turn.isConstraining else { return true }
+        }
+        if let budget = thinkingBudgetProcessor {
+            guard let budget = budget as? ThinkingBudgetProcessor, !budget.isConstraining else {
+                return true
+            }
+        }
+        return false
+    }
+
     public func prompt(_ prompt: MLXArray) {
         grammarProcessor?.prompt(prompt)
         penaltyProcessor?.prompt(prompt)

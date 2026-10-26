@@ -1698,6 +1698,56 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return params
     }
 
+    /// Flint serial decode uses the resident packet when sampling is greedy
+    /// and nothing rewrites logits. Every other request keeps `TokenIterator`.
+    static func openDecodeIterator(
+        input: LMInput,
+        model: any LanguageModel,
+        cache: [KVCache]?,
+        processor: (any LogitProcessor)?,
+        sampler: LogitSampler,
+        parameters: GenerateParameters,
+        maxTokens: Int?,
+        request: InferenceRequest,
+        stopIds: [Int]
+    ) throws -> any TokenIteratorProtocol {
+        let grammar = request.jsonSchemaDef != nil
+            || request.responseFormat == .jsonObject
+            || request.regexPattern != nil
+            || request.gbnfGrammar != nil
+        let policy = FlintChatDecode.Policy(
+            temperature: parameters.temperature,
+            frequencyPenalty: parameters.frequencyPenalty ?? 0,
+            repetitionPenalty: parameters.repetitionPenalty ?? 0,
+            presencePenalty: parameters.presencePenalty ?? 0,
+            wantsLogprobs: request.includeLogprobs,
+            batchWidth: 1,
+            usesGrammar: grammar)
+        if let flint = model as? FlintModel, FlintChatDecode.allowsResidentPacket(policy) {
+            NovaMLXLog.info(
+                "[Flint] serial decode will use the resident packet when the rec session is live")
+            return try FlintGreedyTokenIterator(
+                input: input,
+                model: flint,
+                cache: cache,
+                processor: processor,
+                prefill: parameters.prefill,
+                maxTokens: maxTokens,
+                eosTokenIds: stopIds)
+        }
+        return try TokenIterator(
+            input: input, model: model, cache: cache,
+            processor: processor, sampler: sampler, maxTokens: maxTokens)
+    }
+
+    static func chatStopIds(modelConfig: ModelConfiguration, container: ModelContainer) -> [Int] {
+        var ids = defensiveEosTokenIds(for: modelConfig, container: container)
+        if let eos = container.tokenizer?.eosTokenId {
+            ids.insert(eos)
+        }
+        return Array(ids)
+    }
+
     // MARK: - Control Token Stop Detection
 
     private static let controlTokenLock = NSLock()
@@ -2863,23 +2913,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         iterator = mtpIterator
                         NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] native MTP numDraft=\(numDraft)")
                     } else {
-                        iterator = try TokenIterator(
+                        iterator = try Self.openDecodeIterator(
                             input: effectiveInput, model: model.value,
                             cache: kvCache,
                             processor: processor, sampler: sampler,
-                            maxTokens: maxTokens
-                        )
+                            parameters: parameters, maxTokens: maxTokens,
+                            request: request,
+                            stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
                     }
                 } catch {
                     NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
                     let freshCache = try model.value.newCache(parameters: parameters)
                     kvCacheBox.value = freshCache
-                    iterator = try TokenIterator(
+                    iterator = try Self.openDecodeIterator(
                         input: input, model: model.value,
                         cache: freshCache,
                         processor: processor, sampler: sampler,
-                        maxTokens: maxTokens
-                    )
+                        parameters: parameters, maxTokens: maxTokens,
+                        request: request,
+                        stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
                 }
             }
         }
@@ -3508,23 +3560,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 iterator = mtpIterator
                                 NovaMLXLog.info("[STREAM:\(mtpTag)] native MTP numDraft=\(numDraft)")
                             } else {
-                                iterator = try TokenIterator(
+                                iterator = try Self.openDecodeIterator(
                                     input: effectiveInput, model: model.value,
                                     cache: kvCache,
                                     processor: processor, sampler: sampler,
-                                    maxTokens: maxTokens
-                                )
+                                    parameters: parameters, maxTokens: maxTokens,
+                                    request: request,
+                                    stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
                             }
                         } catch {
                             NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
                             let freshCache = try model.value.newCache(parameters: parameters)
                             kvCacheBox.value = freshCache
-                            iterator = try TokenIterator(
+                            iterator = try Self.openDecodeIterator(
                                 input: input, model: model.value,
                                 cache: freshCache,
                                 processor: processor, sampler: sampler,
-                                maxTokens: maxTokens
-                            )
+                                parameters: parameters, maxTokens: maxTokens,
+                                request: request,
+                                stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
                         }
                     }
 

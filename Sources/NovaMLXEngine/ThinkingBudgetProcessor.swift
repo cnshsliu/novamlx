@@ -69,6 +69,18 @@ public final class ThinkingBudgetProcessor: LogitProcessor, @unchecked Sendable 
         self.minResponseTokens = max(0, minResponseTokens)
     }
 
+    /// True when the next `process` call will mask logits (force a close
+    /// marker, or hold EOS during the response floor). Greedy resident
+    /// packets skip the host logit read, so they only run while this is false.
+    var isConstraining: Bool {
+        switch state {
+        case .active, .closed:
+            return false
+        case .forceClose, .responding:
+            return true
+        }
+    }
+
     public func prompt(_ prompt: MLXArray) {
         // Reset state for each generation. The processor is reused across requests
         // when composed via ComposedLogitProcessor; without reset, prior request
