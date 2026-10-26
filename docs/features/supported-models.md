@@ -6,7 +6,7 @@
 
 "Supported" means an id in [Exact weights](#exact-weights). That id is the same string as `nova download <id>`. A repo with a similar name and a different id may fail to load.
 
-This page matches the in-app catalog. Data date 2026-10-25. `verified` entries have been tested; `preview` is in the catalog and is not marked verified. `unsupported` is listed at the end, and NovaMLX will not download or load it.
+This page matches the in-app catalog. Data date 2026-10-26. `verified` entries have been tested; `preview` is in the catalog and is not marked verified. `unsupported` is listed at the end, and NovaMLX will not download or load it.
 
 ## Download
 
@@ -50,7 +50,7 @@ Each id below is one repository.
 | Kimi-K2.7-Code | `mlx-community/Kimi-K2.7-Code-4bit` | ~10 GB | preview | — | `nova download mlx-community/Kimi-K2.7-Code-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Kimi-K2.7-Code-4bit) |
 | GPT-OSS-120B | `mlx-community/gpt-oss-120b-MXFP4-Q8` | ~75 GB | preview | — | `nova download mlx-community/gpt-oss-120b-MXFP4-Q8` | [Hugging Face](https://huggingface.co/mlx-community/gpt-oss-120b-MXFP4-Q8) |
 | DeepSeek-V4-Flash | `mlx-community/DeepSeek-V4-Flash-4bit` | ~30 GB | preview | — | `nova download mlx-community/DeepSeek-V4-Flash-4bit` | [Hugging Face](https://huggingface.co/mlx-community/DeepSeek-V4-Flash-4bit) |
-| Flint 40B A2.5B (Official INT4) | `RecursiveSI/flint-int4` | ~22.6 GB | preview | 48 GB | `nova download RecursiveSI/flint-int4` | [Hugging Face](https://huggingface.co/RecursiveSI/flint-int4) |
+| Flint 40B A2.5B (Official INT4) | `RecursiveSI/flint-int4` | ~22.6 GB / int4 | verified | 48 GB | `nova download RecursiveSI/flint-int4` | [Hugging Face](https://huggingface.co/RecursiveSI/flint-int4) |
 
 <a id="vlm"></a>
 
@@ -144,4 +144,4 @@ Ids with status `unsupported` stay in the catalog so they can be recognized. Nov
 
 - `mzbac/flux1.schnell.4bit.mlx` — Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.
 
-Tables are generated from [`catalog/models.json`](../../catalog/models.json) (`updatedAt` 2026-10-25). Regenerate with `python3 Scripts/generate-supported-models-doc.py`.
+Tables are generated from [`catalog/models.json`](../../catalog/models.json) (`updatedAt` 2026-10-26). Regenerate with `python3 Scripts/generate-supported-models-doc.py`.

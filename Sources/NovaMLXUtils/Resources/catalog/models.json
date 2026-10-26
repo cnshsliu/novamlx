@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-25T06:58:39Z",
+  "updatedAt": "2026-10-26T11:42:49Z",
   "models": [
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
@@ -1140,7 +1140,9 @@
         "thinking",
         "tools"
       ],
-      "status": "preview"
+      "quant": "int4",
+      "testedOn": "1.8.1",
+      "status": "verified"
     }
   ]
 }

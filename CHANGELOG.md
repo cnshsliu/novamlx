@@ -6,6 +6,7 @@ All notable changes to NovaMLX will be documented in this file.
 
 ### Added
 - **Tested weights on Downloads** — the Downloads page lists every catalog entry with status `verified`: name, model version (family, quant, NovaMLX version that passed), and the exact weight id. One click downloads that weight.
+- **Flint official INT4 is verified** — `RecursiveSI/flint-int4` is in that list (`testedOn` 1.8.1).
 
 ## [1.8.1] - 2026-10-26
 
