@@ -11,9 +11,10 @@
 // and the M4 Max measurements in recursive-oss/rec#17).
 //
 // Scratch aliases: workspace, partials, statistics, routing, and trace are
-// session inputs. MLX marks inputs const; the kernel already const-casts KV
-// the same way. Logits, the sync diagnostic, the 4-byte profile slot, and
-// the zeroed control buffer stay per launch.
+// session inputs. MLX marks inputs const; the kernel const-casts them the
+// same way as KV. Logits stay a kernel output. The INT4 inner loop is the
+// ushort form from the parity-clean packet: the always_inline uint2 dequant
+// compiled inside the resident loop and disagreed with single-token decode.
 enum FlintRecKernelSources {
     static let headerPro: String = #"""
 

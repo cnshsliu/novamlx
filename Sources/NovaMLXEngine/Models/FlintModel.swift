@@ -721,9 +721,10 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     }
 
     /// Continue an active rec session with one greedy resident packet
-    /// (1...8 tokens, argmax inside the kernel). The session must already
-    /// have been handed off by a single-token `callAsFunction`. Empty
-    /// `eosTokenIds` runs the full count. Sampled decode stays on `forward`.
+    /// (1...`FlintRecResident.width` tokens, argmax inside the kernel). The
+    /// session must already have been handed off by a single-token
+    /// `callAsFunction`. Empty `eosTokenIds` runs the full count. Sampled
+    /// decode stays on `forward`.
     func recGreedyPacket(
         cache: [KVCache], token: Int, count: Int, eosTokenIds: [Int] = []
     ) throws -> [Int] {
@@ -736,7 +737,7 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
         let ids: [Int]
         do {
             ids = try kernel.forwardGreedy(
-                state: session.state, token: token, count: count, eosTokenIds: eosTokenIds)
+                state: session.state, token: token, count: count, eosTokenIds: eosTokenIds).ids
         } catch {
             invalidateRecSession()
             recDecodeDisabled = true
@@ -752,6 +753,42 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             NovaMLXLog.info("[Flint] rec greedy resident packet active (width \(FlintRecResident.width))")
         }
         return ids
+    }
+
+    /// One greedy launch plus the host argmax of that launch's logits output.
+    /// `ids` are what the device reduction wrote into the profile. The two
+    /// disagree when the resident argmax does not see the vocabulary head.
+    func recGreedyProbe(
+        cache: [KVCache], token: Int, count: Int, eosTokenIds: [Int] = []
+    ) throws -> (ids: [Int], logitsArgmax: Int) {
+        guard !recDecodeDisabled, let kernel = recKernel else {
+            throw NovaMLXError.inferenceFailed("rec greedy probe: kernel is not armed")
+        }
+        guard recSessionMatches(cache), let session = recSession else {
+            throw NovaMLXError.inferenceFailed("rec greedy probe: no active session for this cache")
+        }
+        let ids: [Int]
+        let logitsArgmax: Int
+        do {
+            let launch = try kernel.forwardGreedy(
+                state: session.state, token: token, count: count, eosTokenIds: eosTokenIds,
+                readLogitsArgmax: true)
+            ids = launch.ids
+            guard let host = launch.logitsArgmax else {
+                throw NovaMLXError.inferenceFailed("rec greedy probe did not read logits")
+            }
+            logitsArgmax = host
+        } catch {
+            invalidateRecSession()
+            recDecodeDisabled = true
+            NovaMLXLog.error("[Flint] rec greedy probe failed, falling back to eager: \(error)")
+            throw error
+        }
+        for _ in ids {
+            noteRecStep(cache, session: session)
+        }
+        recDecodeSteps += ids.count
+        return (ids, logitsArgmax)
     }
 
     /// One decode token, without a dtype-cast kernel when the id is already

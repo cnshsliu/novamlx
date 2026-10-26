@@ -9,10 +9,15 @@ import Testing
 
 /// Manual speed probe. Official INT4 decode is timed two ways. `SINGLE-RESULT`
 /// is one `model()` call plus a host argmax per token. `LOOP-RESULT` is rec's
-/// greedy resident packet (8 tokens per launch, argmax on device), which is
-/// the path behind the ~197 tok/s INT4 figure. Runs only when the weights are
-/// on disk. Stops after `LOOP-RESULT`. `NOVA_FLINT_MEGA_DECODE=1` also runs
-/// the obsolete MegaDecode probe.
+/// greedy resident packet (`FlintRecResident.width` tokens per launch, argmax
+/// on device). The published baseline on MacMaxPro M4 Max at packet 8 is
+/// 214.7 tok/s (`e8e7b27`). Re-run on that machine with
+/// `./build.sh test --filter FlintSpeedTests` and read `PARITY`,
+/// `SINGLE-RESULT`, `LOOP-RESULT`, and `PARITY-STEP0` (host argmax of the
+/// greedy logits output versus the device profile and the single-token id).
+/// Runs only when the weights are on disk.
+/// Stops after `LOOP-RESULT`. `NOVA_FLINT_MEGA_DECODE=1` also runs the
+/// obsolete MegaDecode probe.
 @Suite("Flint raw decode speed")
 struct FlintSpeedTests {
 
@@ -24,17 +29,30 @@ struct FlintSpeedTests {
         var official: Bool
         var launch: String
         var parity: Bool
+        var step0Single: Int
+        var step0Device: Int
+        var step0Host: Int
+    }
+
+    /// Official INT4 snapshot. Local disk first, then the removable volume
+    /// (same roots as `BiRefNetMattingTests`). Shards are `model-0000N`, so
+    /// the sentinel is `config.json`.
+    private static func officialInt4Directory() -> URL? {
+        for root in ["/Users/lucas/Models", "/Volumes/Samsung768/Models"] {
+            let url = URL(fileURLWithPath: root + "/RecursiveSI/flint-int4")
+            let config = url.appendingPathComponent("config.json")
+            if FileManager.default.fileExists(atPath: config.path) { return url }
+        }
+        return nil
     }
 
     @Test("raw model decode ~128 tokens")
     func testRawDecodeSpeed() async throws {
-        let dir = URL(fileURLWithPath: "/Volumes/Samsung768/Models/RecursiveSI/flint-int4")
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
-        else {
+        guard let dir = Self.officialInt4Directory() else {
             print("SPEED-SKIP: weights not present")
             return
         }
+        print("SPEED-WEIGHTS:", dir.path)
 
         await CustomModelRegistration.ensureRegistered()
         let container = try await LLMModelFactory.shared.loadContainer(
@@ -105,12 +123,23 @@ struct FlintSpeedTests {
             let singleSteps = flint.recDecodeSteps - singleBefore
             print("SINGLE-SEGS ms/token:", singleSegs.map { String(format: "%.1f", $0) }.joined(separator: " "))
 
+            // Separate armed session. count=1 so the logits output is step 0,
+            // not the last token of a wider packet.
+            let probeCaches = try context.model.newCache(parameters: nil)
+            let probeToken = arm(probeCaches)
+            let probe = try flint.recGreedyProbe(cache: probeCaches, token: probeToken, count: 1)
+            let step0Device = probe.ids.first ?? -1
+            let step0Host = probe.logitsArgmax
+            print("PARITY-STEP0: single=\(reference[0]) device=\(step0Device) host=\(step0Host)")
+
             let packetCaches = try context.model.newCache(parameters: nil)
             var packetLast = arm(packetCaches)
             var resident: [Int] = []
             resident.reserveCapacity(16)
-            for _ in 0 ..< 2 {
-                let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: 8)
+            let packetWidth = FlintRecResident.width
+            while resident.count < 16 {
+                let take = min(packetWidth, 16 - resident.count)
+                let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: take)
                 resident.append(contentsOf: ids)
                 packetLast = ids[ids.count - 1]
             }
@@ -124,7 +153,7 @@ struct FlintSpeedTests {
                 let t0 = Date()
                 var left = per
                 while left > 0 {
-                    let take = min(8, left)
+                    let take = min(FlintRecResident.width, left)
                     let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: take)
                     packetLast = ids[ids.count - 1]
                     left -= ids.count
@@ -142,19 +171,24 @@ struct FlintSpeedTests {
                 singleSeconds: seconds(singleSegs), singleSteps: singleSteps,
                 official: flint.isOfficialInt4,
                 launch: flint.recKernel?.launch.label ?? "none",
-                parity: parity))
+                parity: parity,
+                step0Single: reference[0],
+                step0Device: step0Device,
+                step0Host: step0Host))
         }
         let stats = dtBox.value
         let singleRate = Double(n) / stats.singleSeconds
         let packetRate = Double(n) / stats.packetSeconds
         print(String(format: "SINGLE-RESULT: one launch + host argmax %.1f tok/s (%d rec steps)", singleRate, stats.singleSteps))
         print(String(
-            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@, launch=%@, packet=8)",
-            packetRate, stats.packetSteps, stats.official ? "yes" : "no", stats.launch))
+            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@, launch=%@, packet=%d)",
+            packetRate, stats.packetSteps, stats.official ? "yes" : "no", stats.launch, FlintRecResident.width))
         // The first single-token forward stays eager (it may be the prefill
         // tail). Both timed windows are rec steps after that handoff.
         #expect(stats.official)
         #expect(stats.parity)
+        #expect(stats.step0Single == stats.step0Device)
+        #expect(stats.step0Device == stats.step0Host)
         #expect(stats.singleSteps == n)
         #expect(stats.packetSteps == n)
 
