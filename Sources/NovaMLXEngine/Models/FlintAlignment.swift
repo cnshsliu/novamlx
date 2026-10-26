@@ -361,7 +361,23 @@ enum FlintJSON: Equatable {
     case double(Double)
     case string(String)
     case array([FlintJSON])
+    /// Key order follows the call; tuples are not Equatable, so `==` is manual.
     case object([(String, FlintJSON)])
+
+    static func == (lhs: FlintJSON, rhs: FlintJSON) -> Bool {
+        switch (lhs, rhs) {
+        case (.null, .null): return true
+        case (.bool(let a), .bool(let b)): return a == b
+        case (.int(let a), .int(let b)): return a == b
+        case (.double(let a), .double(let b)): return a == b
+        case (.string(let a), .string(let b)): return a == b
+        case (.array(let a), .array(let b)): return a == b
+        case (.object(let a), .object(let b)):
+            guard a.count == b.count else { return false }
+            return zip(a, b).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
+        default: return false
+        }
+    }
 
     static func from(_ object: Any) -> FlintJSON {
         if object is NSNull { return .null }

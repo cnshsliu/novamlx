@@ -7,7 +7,7 @@ import NovaMLXCore
 @Suite("Flint rec alignment")
 struct FlintAlignmentTests {
 
-    private static let writeTools: [[String: Any]] = [[
+    nonisolated(unsafe) private static let writeTools: [[String: Any]] = [[
         "type": "function",
         "function": [
             "name": "write",
@@ -272,7 +272,8 @@ struct FlintAlignmentTests {
             presencePenalty: 0, maxTokens: 16, promptTokens: [1])
         let random = unseeded.nextID()
         #expect(random.hasPrefix("call_"))
-        #expect(random != unseeded.nextID())
+        let another = unseeded.nextID()
+        #expect(random != another)
     }
 
     @Test("the fused extractor holds a split tool marker and emits think text")
@@ -281,7 +282,8 @@ struct FlintAlignmentTests {
             seed: 42, temperature: 1, topP: 0.95, topK: 20,
             presencePenalty: 0, maxTokens: 16, promptTokens: [1, 2, 3])
         let extractor = FlintToolCallExtractor(tools: Self.writeTools, identity: identity)
-        #expect(extractor.feed("<tool_").isEmpty)
+        let held = extractor.feed("<tool_")
+        #expect(held.isEmpty)
         let opened = extractor.feed("call>write\n<arg_key>path</arg_key><arg_value>a.py</arg_value></tool_call>")
         #expect(opened == [
             .tool(
@@ -293,8 +295,10 @@ struct FlintAlignmentTests {
         #expect(think == [.response("hello<think>")])
         let broken = extractor.feed("<tool_call>write trailing</tool_call>")
         #expect(broken == [.response("<tool_call>write trailing</tool_call>")])
-        #expect(extractor.feed("<tool_call>write").isEmpty)
-        #expect(extractor.finish() == [.response("<tool_call>write")])
+        let partial = extractor.feed("<tool_call>write")
+        #expect(partial.isEmpty)
+        let flushed = extractor.finish()
+        #expect(flushed == [.response("<tool_call>write")])
         #expect(FlintToolCallExtractor.prefixHold("<tool_", marker: "<tool_call>") == 6)
         #expect(FlintToolCallExtractor.prefixHold("<think>", marker: "<tool_call>") == 0)
     }
