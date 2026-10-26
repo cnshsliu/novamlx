@@ -32,6 +32,7 @@ public struct CodableInferenceRequest: Codable, Sendable {
     public let adaptiveVerify: String?
     public let adaptiveVerifyMin: Int?
     public let adaptiveVerifyMax: Int?
+    public let enforceToolSchemas: Bool
 
     public init(from request: InferenceRequest) {
         self.id = request.id.uuidString
@@ -75,6 +76,7 @@ public struct CodableInferenceRequest: Codable, Sendable {
         self.adaptiveVerify = request.adaptiveVerify
         self.adaptiveVerifyMin = request.adaptiveVerifyMin
         self.adaptiveVerifyMax = request.adaptiveVerifyMax
+        self.enforceToolSchemas = request.enforceToolSchemas
     }
 
     public func toInferenceRequest() -> InferenceRequest {
@@ -120,7 +122,8 @@ public struct CodableInferenceRequest: Codable, Sendable {
             useNativeMtp: useNativeMtp,
             adaptiveVerify: adaptiveVerify,
             adaptiveVerifyMin: adaptiveVerifyMin,
-            adaptiveVerifyMax: adaptiveVerifyMax
+            adaptiveVerifyMax: adaptiveVerifyMax,
+            enforceToolSchemas: enforceToolSchemas
         )
     }
 }

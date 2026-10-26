@@ -137,6 +137,9 @@ public final class NovaDB: @unchecked Sendable {
         configMigrator.registerMigration("v10_exclusive_auto_unload") { db in
             try ConfigDBSchema.v10ExclusiveAutoUnload(in: db)
         }
+        configMigrator.registerMigration("v11_enforce_tool_schemas") { db in
+            try ConfigDBSchema.v11EnforceToolSchemas(in: db)
+        }
         try configMigrator.migrate(configDB)
         log.info("[NovaDB] Config DB migrations complete")
 

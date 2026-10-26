@@ -1030,7 +1030,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     thinkingBudget: anthropicReq.resolvedThinkingBudget,
                     enableThinking: anthropicReq.resolvedEnableThinking,
                     preserveThinking: anthropicReq.resolvedPreserveThinking,
-                    httpRequestId: HTTPHelpers.requestID(from: request)
+                    httpRequestId: HTTPHelpers.requestID(from: request),
+                    enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
+                        requestFlag: anthropicReq.enforceToolSchemas,
+                        serverConfig: cfg.enforceToolSchemas)
                 )
 
                 CurrentInferenceModel.shared.modelID = request.model

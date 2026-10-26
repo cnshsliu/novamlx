@@ -2046,7 +2046,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             grammar = FlintChatDecode.structuralGrammar(
                 tools: request.tools,
                 stop: request.stop,
-                hasRequestConstraint: FlintChatDecode.requestHasOtherConstraint(request))
+                hasRequestConstraint: FlintChatDecode.requestHasOtherConstraint(request),
+                enforceToolSchemas: request.enforceToolSchemas)
         } else {
             grammar = FlintStructuralGrammar(allowsTools: false)
         }
@@ -2054,6 +2055,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         if request != nil {
             NovaMLXLog.info(
                 "[Flint] structural grammar on (official rec flint shape). A second <think> is masked. ThinkReentryGuard is idle for this request.")
+        }
+        if grammar.toolSchema != nil {
+            NovaMLXLog.info(
+                "[Flint] tool schema grammar on (host FSM, not xgrammar). Argument shapes are masked, including strict:false tools when enforce_tool_schemas is set.")
         }
         return FlintGrammarLogitProcessor(grammar: grammar) { id in
             tokenizer.decode([id])

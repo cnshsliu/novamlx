@@ -147,7 +147,9 @@ public final class BatchScheduler: @unchecked Sendable {
         let firstTokenId = container.tokenizer?.encode(firstTokenText).first ?? 0
 
         var flintThink = FlintChatDecode.ThinkReentryGuard()
-        var flintGrammar = FlintChatDecode.chatGrammar(for: req.request, family: container.identifier.family)
+        var flintGrammar = FlintChatDecode.withVocabTexts(
+            FlintChatDecode.chatGrammar(for: req.request, family: container.identifier.family),
+            decodeTokens: container.tokenizer?.decode)
         if container.identifier.family == .flint, !firstTokenText.isEmpty {
             let eosId = container.tokenizer?.eosTokenId
             let stops = FlintChatDecode.hostFinishStopIds(
@@ -259,7 +261,8 @@ public final class BatchScheduler: @unchecked Sendable {
             for (i, var seq) in active.enumerated() {
                 var seqLogits = logits[i][0..., -1, 0...]
                 if let grammar = seq.flintGrammar {
-                    seqLogits = FlintStructuralGrammar.suppress(grammar.maskedTokenIds(), in: seqLogits)
+                    seqLogits = FlintStructuralGrammar.suppress(
+                        grammar.maskedTokenIds(vocabSize: seqLogits.dim(-1)), in: seqLogits)
                 }
                 let sampledToken = seq.sampler.sample(logits: seqLogits)
                 let tokenId = sampledToken.item(Int.self)

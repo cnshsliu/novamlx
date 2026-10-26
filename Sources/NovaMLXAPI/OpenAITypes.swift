@@ -191,6 +191,9 @@ public struct OpenAIRequest: Codable, Sendable {
     public let adaptiveVerify: String?
     public let adaptiveVerifyMin: Int?
     public let adaptiveVerifyMax: Int?
+    /// Flint only. When true, structural grammar constrains tool arguments
+    /// even for `strict: false`. Omitted uses the server / env default.
+    public let enforceToolSchemas: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools, logprobs, tag
@@ -218,6 +221,7 @@ public struct OpenAIRequest: Codable, Sendable {
         case adaptiveVerify = "adaptive_verify"
         case adaptiveVerifyMin = "adaptive_verify_min"
         case adaptiveVerifyMax = "adaptive_verify_max"
+        case enforceToolSchemas = "enforce_tool_schemas"
     }
 
     public init(
@@ -254,7 +258,8 @@ public struct OpenAIRequest: Codable, Sendable {
         useMtp: Bool? = nil,
         adaptiveVerify: String? = nil,
         adaptiveVerifyMin: Int? = nil,
-        adaptiveVerifyMax: Int? = nil
+        adaptiveVerifyMax: Int? = nil,
+        enforceToolSchemas: Bool? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -290,6 +295,7 @@ public struct OpenAIRequest: Codable, Sendable {
         self.adaptiveVerify = adaptiveVerify
         self.adaptiveVerifyMin = adaptiveVerifyMin
         self.adaptiveVerifyMax = adaptiveVerifyMax
+        self.enforceToolSchemas = enforceToolSchemas
     }
 
     /// Resolve thinking toggle from multiple client formats:

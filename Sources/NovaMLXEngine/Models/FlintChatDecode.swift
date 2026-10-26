@@ -177,7 +177,7 @@ enum FlintChatDecode {
             row = applyPresence(row, seen: presenceSeen, penalty: presencePenalty)
         }
         if let grammar {
-            let masked = grammar.maskedTokenIds()
+            let masked = grammar.maskedTokenIds(vocabSize: row.dim(-1))
             if !masked.isEmpty {
                 row = FlintStructuralGrammar.suppress(masked, in: row)
             }
@@ -583,11 +583,21 @@ enum FlintChatDecode {
     static func structuralGrammar(
         tools: [[String: Any]]?,
         stop: [String]?,
-        hasRequestConstraint: Bool
+        hasRequestConstraint: Bool,
+        enforceToolSchemas: Bool = false
     ) -> FlintStructuralGrammar? {
         if hasRequestConstraint { return nil }
         if customStopConflict(stop: stop, hasRequestConstraint: false) != nil { return nil }
-        return FlintStructuralGrammar(allowsTools: !(tools ?? []).isEmpty)
+        switch FlintToolSchemaSession.compile(tools: tools, enforceToolSchemas: enforceToolSchemas) {
+        case .inactive:
+            return FlintStructuralGrammar(allowsTools: !(tools ?? []).isEmpty)
+        case .ready(let session):
+            return FlintStructuralGrammar(allowsTools: true, toolSchema: session)
+        case .rejected:
+            // prepareMessages already rejects this request. A grammar that
+            // still gets built refuses the tool body instead of going loose.
+            return FlintStructuralGrammar(allowsTools: true, toolSchema: .refusing())
+        }
     }
 
     /// Installed grammar for one request, or nil when this family or this
@@ -597,11 +607,27 @@ enum FlintChatDecode {
         let grammar = structuralGrammar(
             tools: request.tools,
             stop: request.stop,
-            hasRequestConstraint: requestHasOtherConstraint(request))
+            hasRequestConstraint: requestHasOtherConstraint(request),
+            enforceToolSchemas: request.enforceToolSchemas)
         if grammar != nil {
             NovaMLXLog.info(
                 "[Flint] structural grammar on (official rec flint shape). A second <think> is masked. ThinkReentryGuard is idle for this request.")
         }
+        if grammar?.toolSchema != nil {
+            NovaMLXLog.info(
+                "[Flint] tool schema grammar on (host FSM, not xgrammar). Argument shapes are masked, including strict:false tools when enforce_tool_schemas is set.")
+        }
+        return grammar
+    }
+
+    /// Attach the request tokenizer so a filtered packet can mask schema
+    /// tokens before the host replays them. Copies share the cache.
+    static func withVocabTexts(
+        _ grammar: FlintStructuralGrammar?,
+        decodeTokens: (@Sendable ([Int]) -> String)?
+    ) -> FlintStructuralGrammar? {
+        guard var grammar, let decodeTokens else { return grammar }
+        grammar.attachVocabTexts { decodeTokens([$0]) }
         return grammar
     }
 

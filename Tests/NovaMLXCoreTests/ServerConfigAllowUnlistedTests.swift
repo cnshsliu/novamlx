@@ -2,6 +2,28 @@ import Testing
 import Foundation
 import NovaMLXCore
 
+@Suite("ServerConfig enforce_tool_schemas")
+struct ServerConfigEnforceToolSchemasTests {
+    @Test("Defaults to false")
+    func defaultOff() {
+        #expect(ServerConfig().enforceToolSchemas == false)
+    }
+
+    @Test("Legacy JSON without the key decodes as false")
+    func legacyJSON() throws {
+        let json = Data(#"{}"#.utf8)
+        let cfg = try JSONDecoder().decode(ServerConfig.self, from: json)
+        #expect(cfg.enforceToolSchemas == false)
+    }
+
+    @Test("Decodes the snake_case key")
+    func decodesTrue() throws {
+        let json = Data(#"{"enforce_tool_schemas":true}"#.utf8)
+        let cfg = try JSONDecoder().decode(ServerConfig.self, from: json)
+        #expect(cfg.enforceToolSchemas == true)
+    }
+}
+
 @Suite("ServerConfig allowUnlistedDownloads")
 struct ServerConfigAllowUnlistedTests {
     @Test("Defaults to false")

@@ -23,6 +23,9 @@ public struct OpenAIResponseRequest: Codable, Sendable {
     public let parallelToolCalls: Bool?
     public let conversation: ResponsesConversationRef?
     public let serviceTier: String?
+    /// Flint only. When true, structural grammar constrains tool arguments
+    /// even for `strict: false`. Omitted uses the server / env default.
+    public let enforceToolSchemas: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case model, input, instructions, tools, temperature, stream, text, reasoning, metadata, store, truncation, conversation
@@ -33,6 +36,7 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         case keepAlive = "keep_alive"
         case parallelToolCalls = "parallel_tool_calls"
         case serviceTier = "service_tier"
+        case enforceToolSchemas = "enforce_tool_schemas"
     }
 
     public init(
@@ -54,7 +58,8 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         truncation: String? = nil,
         parallelToolCalls: Bool? = nil,
         conversation: ResponsesConversationRef? = nil,
-        serviceTier: String? = nil
+        serviceTier: String? = nil,
+        enforceToolSchemas: Bool? = nil
     ) {
         self.model = model
         self.input = input
@@ -75,6 +80,7 @@ public struct OpenAIResponseRequest: Codable, Sendable {
         self.parallelToolCalls = parallelToolCalls
         self.conversation = conversation
         self.serviceTier = serviceTier
+        self.enforceToolSchemas = enforceToolSchemas
     }
 
     /// Resolve conversation.id → previous_response_id. If both are set, previousResponseId wins.
