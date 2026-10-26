@@ -100,6 +100,7 @@ curl -X POST localhost:6590/v1/chat/completions \
 
 ## Limits / notes
 
+- With `thinking_budget` omitted, Flint stops on `max_tokens` (and the usual eos / role-header stops). Pass `thinking_budget` to opt into a close-marker cap. Other thinking families still receive an automatic cap when the field is omitted.
 - Tool calls are parsed on the fused path. Flint always has the GLM4 parser attached. A packet whose new text contains `<` (a tool marker, a think tag, or half a tag) is still decoded token by token. A greedy packet with no `<` is decoded once, then handed to the same parser.
 - Text-to-3D and similar paths are separate from Flint. Flint is a text agent model.
 - TurboQuant KV cache drops attention sinks (the same tradeoff as GPT-OSS) and is off by default.

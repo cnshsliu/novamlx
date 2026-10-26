@@ -1942,14 +1942,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     ///  1. Opt-out: returns nil if `request.enableThinking == false` or
     ///     `request.thinkingBudget == 0` (explicit disable).
     ///  2. Explicit budget: returns processor with `request.thinkingBudget`
-    ///     when > 0, regardless of temperature.
-    ///  3. Smart default: when the model is a thinking model AND user did
+    ///     when > 0, regardless of temperature or family.
+    ///  3. Smart default: when the model is a thinking model AND the user did
     ///     not specify a budget, apply an automatic cap. `temperature == 0`
-    ///     uses `min(1024, max(256, maxTokens / 2))` (greedy CoT can fail to
-    ///     emit `</think>`). Other temperatures use `min(512, max(256, maxTokens / 4))`
-    ///     so `max_tokens=4000` implicit-think requests cannot run until the
-    ///     client HTTP timeout.
-    ///  4. Returns nil if no close-marker token can be resolved from the
+    ///     uses `min(1024, max(256, maxTokens / 2))`. Other temperatures use
+    ///     `min(256, max(128, maxTokens / 8))`.
+    ///  4. Flint exception: family `.flint` (and an unresolved Flint repo id)
+    ///     receives no automatic cap. Official Recursive `rec` and HF Flint
+    ///     have no separate reasoning budget — only `max_tokens`. Pass
+    ///     `thinking_budget` to opt in.
+    ///  5. Returns nil if no close-marker token can be resolved from the
     ///     tokenizer (model has no recognizable thinking format, or close
     ///     markers are multi-token like Harmony's `<|channel|>final<|message|>`
     ///     which require state-machine tracking — out of scope for the
@@ -1961,26 +1963,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         parameters: GenerateParameters,
         modelConfig: ModelConfiguration
     ) -> ThinkingBudgetProcessor? {
-        // Explicit opt-outs
-        if request.enableThinking == false { return nil }
-        if let b = request.thinkingBudget, b == 0 { return nil }
-
         let modelId = container?.identifier.id ?? request.model
+        let family = container?.identifier.family
         let temperature = parameters.temperature
         let maxTokens = parameters.maxTokens ?? container?.config.maxTokens ?? 4096
-
-        // Determine effective budget
-        let effective: Int? = {
-            if let b = request.thinkingBudget, b > 0 { return b }
-            guard ModelContainer.detectThinkingModel(for: modelId) else { return nil }
-            // Implicit thinking models emit CoT until </think> or maxTokens.
-            // temp==0 was the original hang; temp=0.7 + max_tokens=4000 times
-            // out the same way (non-stream clients wait for the whole CoT).
-            if temperature == 0 {
-                return min(1024, max(256, maxTokens / 2))
-            }
-            return min(256, max(128, maxTokens / 8))
-        }()
+        let automatic = ThinkingBudgetPolicy.allowsAutomaticBudget(family: family, modelId: modelId)
+        // Disk read only when an omitted budget might still smart-default.
+        let hasExplicit = request.thinkingBudget.map { $0 > 0 } ?? false
+        let optedOut = request.enableThinking == false || request.thinkingBudget == 0
+        let isThinking = !optedOut && !hasExplicit && automatic
+            && ModelContainer.detectThinkingModel(for: modelId)
+        let effective = ThinkingBudgetPolicy.effectiveBudget(
+            requested: request.thinkingBudget,
+            enableThinking: request.enableThinking,
+            family: family,
+            modelId: modelId,
+            isThinkingModel: isThinking,
+            temperature: temperature,
+            maxTokens: maxTokens
+        )
 
         guard let budget = effective, budget > 0 else { return nil }
 

@@ -5,6 +5,7 @@ All notable changes to NovaMLX will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Flint thinking budget** — an omitted `thinking_budget` no longer smart-defaults a cap (temperature 0 used `min(1024, max(256, max_tokens / 2))`) that can force `</think>` before a long chain of thought finishes. Official Recursive `rec` and Hugging Face Flint have no separate reasoning budget, only `max_tokens`. An explicit `thinking_budget` is still honored. Other thinking families keep the automatic cap.
 - **Flint chat stop** — a role-header eos id other than the tokenizer's primary `eosTokenId` now ends fused generation and `/batch/completions` the same way the primary eos does, including when that token's text was scrubbed. After the assistant has already produced visible text, a new `<think>` (token 150006, or the decoded tag) ends the turn with `finish_reason=stop`. `/demo/chat` sends `max_tokens: 2048`.
 
 ### Added

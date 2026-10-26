@@ -286,3 +286,120 @@ struct ThinkingCloseMarkerResolverTests {
         #expect(ids.isEmpty, "multi-token markers cannot be enforced by single-token mask — must be dropped")
     }
 }
+
+/// Flint (RecursiveSI) has no separate reasoning budget — only `max_tokens`.
+/// An omitted `thinking_budget` must not smart-default a cap. Qwen and other
+/// thinking families keep the previous automatic cap. An explicit budget is
+/// still honored for every family, including Flint.
+@Suite("ThinkingBudgetPolicy")
+struct ThinkingBudgetPolicyTests {
+
+    private func budget(
+        requested: Int? = nil,
+        enableThinking: Bool? = nil,
+        family: ModelFamily? = .qwen,
+        modelId: String = "mlx-community/Qwen3.6-27B-4bit",
+        isThinkingModel: Bool = true,
+        temperature: Float = 0,
+        maxTokens: Int = 4096
+    ) -> Int? {
+        ThinkingBudgetPolicy.effectiveBudget(
+            requested: requested,
+            enableThinking: enableThinking,
+            family: family,
+            modelId: modelId,
+            isThinkingModel: isThinkingModel,
+            temperature: temperature,
+            maxTokens: maxTokens
+        )
+    }
+
+    @Test("Flint request without thinking_budget does not force an automatic cap")
+    func flintOmitsBudget() {
+        #expect(budget(
+            family: .flint,
+            modelId: "RecursiveSI/flint-int4",
+            temperature: 0,
+            maxTokens: 4096
+        ) == nil)
+        #expect(budget(
+            family: .flint,
+            modelId: "RecursiveSI/flint-int4",
+            temperature: 0.7,
+            maxTokens: 4000
+        ) == nil)
+        #expect(ThinkingBudgetPolicy.allowsAutomaticBudget(
+            family: .flint, modelId: "RecursiveSI/flint-int4") == false)
+    }
+
+    @Test("unresolved Flint repo ids also skip the automatic cap")
+    func unresolvedFlintId() {
+        #expect(budget(
+            family: nil,
+            modelId: "RecursiveSI/flint-int4"
+        ) == nil)
+        #expect(budget(
+            family: .other,
+            modelId: "mlx-community/flint-OptiQ-4bit"
+        ) == nil)
+        #expect(ThinkingBudgetPolicy.looksLikeFlintModelId("RecursiveSI/flint-int4"))
+        #expect(ThinkingBudgetPolicy.looksLikeFlintModelId("mlx-community/flint-OptiQ-4bit"))
+        #expect(!ThinkingBudgetPolicy.looksLikeFlintModelId("Qwen/Qwen3-8B"))
+        #expect(!ThinkingBudgetPolicy.looksLikeFlintModelId("org/snowflint"))
+    }
+
+    @Test("Qwen and other thinking families keep the smart default")
+    func otherFamiliesUnchanged() {
+        // temperature 0 → min(1024, max(256, maxTokens / 2))
+        #expect(budget(family: .qwen, temperature: 0, maxTokens: 4096) == 1024)
+        #expect(budget(family: .qwen, temperature: 0, maxTokens: 400) == 256)
+        // other temperatures → min(256, max(128, maxTokens / 8))
+        #expect(budget(family: .qwen, temperature: 0.7, maxTokens: 4000) == 256)
+        #expect(budget(family: .qwen, temperature: 1, maxTokens: 400) == 128)
+        #expect(budget(
+            family: .deepseek,
+            modelId: "deepseek-ai/DeepSeek-R1",
+            temperature: 0,
+            maxTokens: 4096
+        ) == 1024)
+        // A resolved non-Flint family keeps the cap even if the repo leaf looks like Flint.
+        #expect(budget(
+            family: .qwen,
+            modelId: "someone/flint-not-a-flint",
+            temperature: 0,
+            maxTokens: 4096
+        ) == 1024)
+        #expect(budget(family: .qwen, isThinkingModel: false, temperature: 0, maxTokens: 4096) == nil)
+        #expect(budget(
+            family: nil,
+            modelId: "mlx-community/Qwen3.6-27B-4bit",
+            temperature: 0,
+            maxTokens: 4096
+        ) == 1024)
+    }
+
+    @Test("explicit thinking_budget is honored for Flint and for other families")
+    func explicitBudgetHonored() {
+        #expect(budget(
+            requested: 2048,
+            family: .flint,
+            modelId: "RecursiveSI/flint-int4",
+            isThinkingModel: true
+        ) == 2048)
+        #expect(budget(
+            requested: 512,
+            family: .flint,
+            modelId: "RecursiveSI/flint-int4",
+            isThinkingModel: false
+        ) == 512)
+        #expect(budget(requested: 2048, family: .qwen, isThinkingModel: false) == 2048)
+        #expect(budget(requested: 0, family: .flint, modelId: "RecursiveSI/flint-int4") == nil)
+        #expect(budget(requested: 0, family: .qwen) == nil)
+        #expect(budget(
+            requested: 2048,
+            enableThinking: false,
+            family: .flint,
+            modelId: "RecursiveSI/flint-int4"
+        ) == nil)
+    }
+}

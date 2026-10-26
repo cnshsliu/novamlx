@@ -185,6 +185,65 @@ public final class ThinkingBudgetProcessor: LogitProcessor, @unchecked Sendable 
     }
 }
 
+/// Decides whether a request installs a `ThinkingBudgetProcessor`, before
+/// close-marker resolution.
+///
+/// Official Recursive `rec` and Hugging Face Flint have no separate reasoning
+/// budget — only `max_tokens` (`reasoning_effort` and similar knobs are
+/// unsupported; see HF discussion #12). NovaMLX used to smart-default a cap
+/// for every model `detectThinkingModel` accepts, which forced `</think>` on
+/// long Flint chain-of-thought. Flint therefore gets no automatic cap when
+/// the client omits `thinking_budget`. An explicit budget (`> 0`) is still a
+/// product opt-in for Flint and for every other family. `0` and
+/// `enableThinking == false` remain opt-outs.
+enum ThinkingBudgetPolicy {
+
+    /// `false` for family `.flint`, and for an unresolved family whose model
+    /// id is a Flint repo (`RecursiveSI/flint-int4`, `mlx-community/flint-…`).
+    /// A resolved non-Flint family always keeps the automatic cap.
+    static func allowsAutomaticBudget(family: ModelFamily?, modelId: String = "") -> Bool {
+        if family == .flint { return false }
+        if family == nil || family == .other {
+            return !looksLikeFlintModelId(modelId)
+        }
+        return true
+    }
+
+    /// Token cap to enforce, or `nil` when no processor should be built.
+    ///
+    /// Smart default (non-Flint thinking models, budget omitted):
+    /// temperature 0 uses `min(1024, max(256, maxTokens / 2))`; any other
+    /// temperature uses `min(256, max(128, maxTokens / 8))`.
+    static func effectiveBudget(
+        requested: Int?,
+        enableThinking: Bool?,
+        family: ModelFamily?,
+        modelId: String,
+        isThinkingModel: Bool,
+        temperature: Float,
+        maxTokens: Int
+    ) -> Int? {
+        if enableThinking == false { return nil }
+        if let requested {
+            if requested == 0 { return nil }
+            if requested > 0 { return requested }
+        }
+        guard allowsAutomaticBudget(family: family, modelId: modelId) else { return nil }
+        guard isThinkingModel else { return nil }
+        if temperature == 0 {
+            return min(1024, max(256, maxTokens / 2))
+        }
+        return min(256, max(128, maxTokens / 8))
+    }
+
+    /// Repo leaf `flint`, `flint-*`, or `flint_*`.
+    static func looksLikeFlintModelId(_ modelId: String) -> Bool {
+        let leaf = modelId.split(separator: "/").last.map(String.init) ?? modelId
+        let lower = leaf.lowercased()
+        return lower == "flint" || lower.hasPrefix("flint-") || lower.hasPrefix("flint_")
+    }
+}
+
 /// Family-aware close-marker token id resolver.
 ///
 /// Returns the set of token ids that, when emitted, terminate the thinking
