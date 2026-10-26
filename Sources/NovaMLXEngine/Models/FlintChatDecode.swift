@@ -109,6 +109,188 @@ enum FlintChatDecode {
         if let composed = processor as? ComposedLogitProcessor { return !composed.blocksResidentPacket }
         return false
     }
+
+    // MARK: - Turn finish
+
+    /// RecursiveSI added tokens. `<think>` / `</think>` are semantic.
+    /// Role headers and end-of-text are the stop set (`canonicalStopIds`).
+    static let thinkOpenTokenId = 150006
+    static let thinkCloseTokenId = 150007
+    static let toolCallOpenTokenId = 150010
+    static let toolCallCloseTokenId = 150011
+
+    /// Primary tokenizer EOS or any id in the Flint stop set.
+    /// `stopIds` is empty for every other family, which leaves the check
+    /// equal to `primaryEOS == tokenId`.
+    static func isStopToken(_ tokenId: Int, primaryEOS: Int?, stopIds: Set<Int>) -> Bool {
+        if let primaryEOS, tokenId == primaryEOS { return true }
+        return stopIds.contains(tokenId)
+    }
+
+    struct TokenDecision: Equatable, Sendable {
+        var yield: String
+        /// This id is a turn stop. `yield` is empty; the marker was not decoded.
+        var isEOS: Bool
+        /// Visible assistant text already happened, and this token opens another `<think>`.
+        /// `yield` is the text before that tag. The tag itself is omitted.
+        var thinkReentry: Bool
+    }
+
+    /// One decoded token on the Flint fused (and batch) path.
+    ///
+    /// Stop ids finish even when their text was scrubbed to empty. After the
+    /// assistant has produced visible text — following `</think>`, or with no
+    /// think block — a new `<think>` (id 150006 or the decoded tag) ends the
+    /// turn. Text inside an open GLM4 `<tool_call>` is left alone.
+    static func tokenDecision(
+        tokenId: Int,
+        decoded: String,
+        primaryEOS: Int?,
+        stopIds: Set<Int>,
+        state: inout ThinkReentryGuard
+    ) -> TokenDecision {
+        if isStopToken(tokenId, primaryEOS: primaryEOS, stopIds: stopIds) {
+            return TokenDecision(yield: "", isEOS: true, thinkReentry: false)
+        }
+        let outcome = state.consume(tokenId: tokenId, decoded: decoded)
+        return TokenDecision(yield: outcome.yield, isEOS: false, thinkReentry: outcome.stop)
+    }
+
+    /// Visible-answer tracker for one Flint assistant turn.
+    struct ThinkReentryGuard: Equatable, Sendable {
+        private(set) var insideThink = false
+        private(set) var insideToolCall = false
+        private(set) var hasVisibleContent = false
+        /// Proper prefix of a watched tag, withheld until the next chunk.
+        private(set) var held = ""
+
+        private enum Tag: String {
+            case thinkOpen = "<think>"
+            case thinkClose = "</think>"
+            case toolOpen = "<tool_call>"
+            case toolClose = "</tool_call>"
+
+            static let all: [Tag] = [.toolClose, .thinkClose, .toolOpen, .thinkOpen]
+        }
+
+        struct Outcome: Equatable, Sendable {
+            var yield: String
+            var stop: Bool
+        }
+
+        /// Whole-packet prose. Returns false, leaving `self` unchanged, when
+        /// the chunk stops the turn or withholds a tag prefix. The caller
+        /// then decodes that packet token by token.
+        mutating func observeFastPacket(_ text: String) -> Bool {
+            let saved = self
+            let outcome = consume(tokenId: nil, decoded: text)
+            if outcome.stop || !held.isEmpty || outcome.yield != text {
+                self = saved
+                return false
+            }
+            return true
+        }
+
+        /// Text withheld as a tag prefix. Empty after a think-reentry stop.
+        mutating func flushHeld() -> String {
+            let tail = held
+            held = ""
+            return tail
+        }
+
+        mutating func consume(tokenId: Int?, decoded: String) -> Outcome {
+            if let tokenId {
+                if tokenId == FlintChatDecode.thinkOpenTokenId, !decoded.contains("<think>") {
+                    return apply(.thinkOpen)
+                }
+                if tokenId == FlintChatDecode.thinkCloseTokenId, !decoded.contains("</think>") {
+                    return apply(.thinkClose)
+                }
+                if tokenId == FlintChatDecode.toolCallOpenTokenId, !decoded.contains("<tool_call>") {
+                    return apply(.toolOpen)
+                }
+                if tokenId == FlintChatDecode.toolCallCloseTokenId, !decoded.contains("</tool_call>") {
+                    return apply(.toolClose)
+                }
+            }
+            return consumeText(decoded)
+        }
+
+        private mutating func apply(_ tag: Tag) -> Outcome {
+            switch tag {
+            case .thinkOpen:
+                if insideToolCall {
+                    return Outcome(yield: tag.rawValue, stop: false)
+                }
+                if hasVisibleContent && !insideThink {
+                    return Outcome(yield: "", stop: true)
+                }
+                insideThink = true
+                return Outcome(yield: tag.rawValue, stop: false)
+            case .thinkClose:
+                if !insideToolCall {
+                    insideThink = false
+                }
+                return Outcome(yield: tag.rawValue, stop: false)
+            case .toolOpen:
+                insideToolCall = true
+                return Outcome(yield: tag.rawValue, stop: false)
+            case .toolClose:
+                insideToolCall = false
+                if !insideThink {
+                    hasVisibleContent = true
+                }
+                return Outcome(yield: tag.rawValue, stop: false)
+            }
+        }
+
+        private static func matchingTag(_ buffer: String) -> Tag? {
+            var found: Tag?
+            for tag in Tag.all where buffer.hasPrefix(tag.rawValue) {
+                if found == nil || tag.rawValue.count > found!.rawValue.count {
+                    found = tag
+                }
+            }
+            return found
+        }
+
+        private static func holdsPrefix(_ buffer: String) -> Bool {
+            guard !buffer.isEmpty else { return false }
+            for tag in Tag.all {
+                if tag.rawValue.hasPrefix(buffer) && buffer.count < tag.rawValue.count {
+                    return true
+                }
+            }
+            return false
+        }
+
+        private mutating func consumeText(_ decoded: String) -> Outcome {
+            var buffer = held + decoded
+            held = ""
+            var yield = ""
+            while !buffer.isEmpty {
+                if let tag = Self.matchingTag(buffer) {
+                    let outcome = apply(tag)
+                    if outcome.stop {
+                        return Outcome(yield: yield, stop: true)
+                    }
+                    yield += outcome.yield
+                    buffer.removeFirst(tag.rawValue.count)
+                    continue
+                }
+                if Self.holdsPrefix(buffer) {
+                    held = buffer
+                    break
+                }
+                let ch = buffer.removeFirst()
+                yield.append(ch)
+                if !insideThink && !insideToolCall && !ch.isWhitespace {
+                    hasVisibleContent = true
+                }
+            }
+            return Outcome(yield: yield, stop: false)
+        }
+    }
 }
 
 // MARK: - Token iterator

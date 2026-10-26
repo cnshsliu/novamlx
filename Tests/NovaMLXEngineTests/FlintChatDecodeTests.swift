@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import NovaMLXCore
 
 @testable import NovaMLXEngine
 
@@ -117,5 +118,191 @@ struct FlintChatDecodeTests {
             turnStopProcessor: nil,
             thinkingBudgetProcessor: nil)
         #expect(!FlintChatDecode.processorAllowsPacket(penalized))
+    }
+
+    private func stops(primaryEOS: Int = 150001) -> Set<Int> {
+        Set(FlintChatDecode.packetStopIds(tokenizerEOS: primaryEOS))
+    }
+
+    /// Same order as the fused decode step: a stop id ends the turn before
+    /// its text is kept; otherwise the think guard sees the decoded piece.
+    private func reduce(
+        _ tokens: [(id: Int, text: String)],
+        primaryEOS: Int = 150001,
+        maxTokens: Int = 32
+    ) -> (text: String, finish: FinishReason, steps: Int) {
+        var state = FlintChatDecode.ThinkReentryGuard()
+        let stopIds = stops(primaryEOS: primaryEOS)
+        var text = ""
+        var counted = 0
+        for (index, token) in tokens.enumerated() {
+            let step = FlintChatDecode.tokenDecision(
+                tokenId: token.id, decoded: token.text,
+                primaryEOS: primaryEOS, stopIds: stopIds, state: &state)
+            if step.isEOS {
+                return (text, .stop, index + 1)
+            }
+            text += step.yield
+            counted += 1
+            if step.thinkReentry {
+                return (text, .stop, index + 1)
+            }
+            if counted >= maxTokens {
+                return (text, .length, index + 1)
+            }
+        }
+        return (text, .length, tokens.count)
+    }
+
+    @Test("a flint stop id other than the primary eos finishes the turn")
+    func testSecondaryStopIdFinishes() {
+        let stopIds = stops()
+        #expect(FlintChatDecode.isStopToken(150003, primaryEOS: 150001, stopIds: stopIds))
+        #expect(FlintChatDecode.isStopToken(150005, primaryEOS: 150001, stopIds: stopIds))
+        #expect(FlintChatDecode.isStopToken(150018, primaryEOS: 150001, stopIds: stopIds))
+        #expect(FlintChatDecode.isStopToken(150001, primaryEOS: 150001, stopIds: stopIds))
+        #expect(!FlintChatDecode.isStopToken(
+            FlintChatDecode.thinkOpenTokenId, primaryEOS: 150001, stopIds: stopIds))
+        // Other families pass an empty stop set: only the primary eos matches.
+        #expect(FlintChatDecode.isStopToken(2, primaryEOS: 2, stopIds: []))
+        #expect(!FlintChatDecode.isStopToken(150003, primaryEOS: 2, stopIds: []))
+
+        var state = FlintChatDecode.ThinkReentryGuard()
+        let user = FlintChatDecode.tokenDecision(
+            tokenId: 150003, decoded: "<|user|>",
+            primaryEOS: 150001, stopIds: stopIds, state: &state)
+        #expect(user.isEOS)
+        #expect(user.yield.isEmpty)
+        #expect(!user.thinkReentry)
+
+        let developer = FlintChatDecode.tokenDecision(
+            tokenId: 150018, decoded: "<|developer|>",
+            primaryEOS: 150001, stopIds: stopIds, state: &state)
+        #expect(developer.isEOS)
+        #expect(developer.yield.isEmpty)
+
+        let walked = reduce([
+            (12, "Hello"),
+            (150003, "<|user|>"),
+            (13, "should not appear"),
+        ])
+        #expect(walked.finish == .stop)
+        #expect(walked.text == "Hello")
+        #expect(walked.steps == 2)
+    }
+
+    @Test("reopening think after a visible answer stops inside a small bound")
+    func testThinkReentryAfterAnswer() {
+        let open = FlintChatDecode.thinkOpenTokenId
+        let close = FlintChatDecode.thinkCloseTokenId
+        var script: [(id: Int, text: String)] = [
+            (open, "<think>"),
+            (11, "We need to respond to the user."),
+            (close, "</think>"),
+            (12, "Hello! How can I help you today?"),
+            (open, "<think>"),
+        ]
+        script += Array(repeating: (99, "Hello again!"), count: 40)
+
+        let walked = reduce(script, maxTokens: 64)
+        #expect(walked.finish == .stop)
+        #expect(walked.steps == 5)
+        #expect(walked.steps < 16)
+        #expect(walked.text.contains("<think>"))
+        #expect(walked.text.contains("</think>"))
+        #expect(walked.text.contains("Hello! How can I help you today?"))
+        #expect(!walked.text.contains("Hello again"))
+        #expect(walked.text.components(separatedBy: "<think>").count - 1 == 1)
+    }
+
+    @Test("a greeting with no think block stops when think opens")
+    func testThinkReentryWithoutPriorThink() {
+        let open = FlintChatDecode.thinkOpenTokenId
+        let walked = reduce([
+            (12, "Hello! How can I help you today?"),
+            (open, "<think>"),
+            (11, "We need to respond to the user."),
+        ] + Array(repeating: (99, "loop"), count: 30), maxTokens: 64)
+        #expect(walked.finish == .stop)
+        #expect(walked.steps == 2)
+        #expect(walked.text == "Hello! How can I help you today?")
+        #expect(!walked.text.contains("<think>"))
+    }
+
+    @Test("whitespace between think blocks is not a visible answer")
+    func testThinkReentryIgnoresWhitespace() {
+        let open = FlintChatDecode.thinkOpenTokenId
+        let close = FlintChatDecode.thinkCloseTokenId
+        let walked = reduce([
+            (open, "<think>"),
+            (11, "reason"),
+            (close, "</think>"),
+            (2, "\n\n"),
+            (open, "<think>"),
+            (13, "more"),
+            (close, "</think>"),
+            (14, "Hi"),
+        ])
+        #expect(walked.steps == 8)
+        #expect(walked.text == "<think>reason</think>\n\n<think>more</think>Hi")
+    }
+
+    @Test("a split think tag after an answer stops at the boundary")
+    func testSplitThinkTagStops() {
+        let walked = reduce([
+            (12, "Hello"),
+            (3, "<"),
+            (4, "think>"),
+            (99, "loop"),
+        ])
+        #expect(walked.finish == .stop)
+        #expect(walked.text == "Hello")
+        #expect(walked.steps == 3)
+    }
+
+    @Test("GLM4 tool calls still pass through, including a think token inside")
+    func testToolCallSurvivesThinkToken() {
+        let open = FlintChatDecode.thinkOpenTokenId
+        let walked = reduce([
+            (12, "Hello"),
+            (FlintChatDecode.toolCallOpenTokenId, "<tool_call>"),
+            (21, "search"),
+            (open, "<think>"),
+            (22, "q"),
+            (FlintChatDecode.toolCallCloseTokenId, "</tool_call>"),
+            (23, "done"),
+        ])
+        #expect(walked.steps == 7)
+        #expect(walked.text == "Hello<tool_call>search<think>q</tool_call>done")
+    }
+
+    @Test("a think open after a finished tool call stops the turn")
+    func testThinkAfterToolCallStops() {
+        let walked = reduce([
+            (FlintChatDecode.toolCallOpenTokenId, "<tool_call>"),
+            (21, "search"),
+            (FlintChatDecode.toolCallCloseTokenId, "</tool_call>"),
+            (FlintChatDecode.thinkOpenTokenId, "<think>"),
+            (99, "loop"),
+        ])
+        #expect(walked.finish == .stop)
+        #expect(walked.text == "<tool_call>search</tool_call>")
+        #expect(walked.steps == 4)
+    }
+
+    @Test("a fast prose packet arms the think-reentry guard")
+    func testFastPacketThenThinkStops() {
+        var state = FlintChatDecode.ThinkReentryGuard()
+        #expect(state.observeFastPacket("Hello! How can I help you today?"))
+        let step = FlintChatDecode.tokenDecision(
+            tokenId: FlintChatDecode.thinkOpenTokenId, decoded: "<think>",
+            primaryEOS: 150001, stopIds: stops(), state: &state)
+        #expect(step.thinkReentry)
+        #expect(step.yield.isEmpty)
+        #expect(!step.isEOS)
+
+        var untouched = FlintChatDecode.ThinkReentryGuard()
+        #expect(!untouched.observeFastPacket("Hello<"))
+        #expect(!untouched.hasVisibleContent)
     }
 }

@@ -4,6 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Flint chat stop** — a role-header eos id other than the tokenizer's primary `eosTokenId` now ends fused generation and `/batch/completions` the same way the primary eos does, including when that token's text was scrubbed. After the assistant has already produced visible text, a new `<think>` (token 150006, or the decoded tag) ends the turn with `finish_reason=stop`. `/demo/chat` sends `max_tokens: 2048`.
+
 ### Added
 - **Tested weights on Downloads** — the Downloads page lists every catalog entry with status `verified`: name, model version (family, quant, NovaMLX version that passed), and the exact weight id. One click downloads that weight.
 - **Flint official INT4 is verified** — `RecursiveSI/flint-int4` is in that list (`testedOn` 1.8.1).

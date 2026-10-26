@@ -226,6 +226,10 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// stray closing `</think>`.
     var harmonyInThinking: Bool = false
 
+    /// Flint only. Stops a turn that already showed an answer and then opens
+    /// another `<think>`. Other families leave this at the default.
+    var flintThink = FlintChatDecode.ThinkReentryGuard()
+
     /// Yield a token to the stream IFF the sequence has not been finished
     /// by any concurrent path. Silent no-op if already finished.
     func safeYield(_ token: Token) {
@@ -505,11 +509,18 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             Task {
                 do {
                     let seq = try await self.prefillSequence(request: request, continuation: continuation)
-                    self.lock.withLock {
-                        if self.activeByModel[modelId] == nil { self.activeByModel[modelId] = [] }
-                        self.activeByModel[modelId]?.append(seq)
+                    if !seq.isFinished {
+                        self.lock.withLock {
+                            if self.activeByModel[modelId] == nil { self.activeByModel[modelId] = [] }
+                            self.activeByModel[modelId]?.append(seq)
+                        }
+                        self.scheduleRunLoop()
+                    } else {
+                        self.lock.withLock {
+                            self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
+                        }
+                        await self.budgetTracker.release(sequenceId: request.id)
                     }
-                    self.scheduleRunLoop()
                 } catch {
                     // SAFE: pre-prefill error path, continuation is exclusively owned
                     continuation.finish(throwing: error)
@@ -897,9 +908,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             throw NovaMLXError.inferenceFailed("Prefill produced no cache")
         }
 
-        // Check if first token is EOS
+        // Check if first token is EOS. Flint role headers are stops even
+        // when they are not the tokenizer's single eosTokenId.
         let eosId = container.tokenizer?.eosTokenId
-        let isEOS = eosId == firstTokenId
+        let isFlint = container.identifier.family == .flint
+        let flintStopIds: Set<Int> = isFlint
+            ? Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+            : []
 
         // Resolve logprob data (token IDs → text) outside perform
         let resolvedLogprobs: (logprob: Float, topLogprobs: [TopLogprob])? = prefillLogprobs.map {
@@ -909,18 +924,30 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         // Yield first token to client (unless it's EOS and we finish immediately)
         // SAFE: pre-shared-state yields — seq hasn't entered activeByModel yet
         let scrubbedFirstToken = MLXEngine.scrubControlTokens(firstTokenText)
-        if !isEOS && !scrubbedFirstToken.isEmpty {
-            Self.emitProcessed(toolStream, scrubbedFirstToken,
+        var flintThink = FlintChatDecode.ThinkReentryGuard()
+        let firstDecision: FlintChatDecode.TokenDecision
+        if isFlint {
+            firstDecision = FlintChatDecode.tokenDecision(
+                tokenId: firstTokenId, decoded: scrubbedFirstToken,
+                primaryEOS: eosId, stopIds: flintStopIds, state: &flintThink)
+        } else {
+            let eos = FlintChatDecode.isStopToken(firstTokenId, primaryEOS: eosId, stopIds: flintStopIds)
+            firstDecision = FlintChatDecode.TokenDecision(
+                yield: eos ? "" : scrubbedFirstToken, isEOS: eos, thinkReentry: false)
+        }
+        let finishFirst = firstDecision.isEOS || firstDecision.thinkReentry
+        if !firstDecision.yield.isEmpty {
+            Self.emitProcessed(toolStream, firstDecision.yield,
                 continuation: continuation,
                 logprob: resolvedLogprobs.map { ($0.logprob, $0.topLogprobs) })
         }
 
         let completionCount: Int
         let isFinished: Bool
-        if isEOS {
+        if finishFirst {
             continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount))
             continuation.finish()
-            completionCount = 0
+            completionCount = firstDecision.yield.isEmpty ? 0 : 1
             isFinished = true
         } else {
             completionCount = firstTokenText.isEmpty ? 0 : 1
@@ -951,6 +978,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             previousTokenWasControl: scrubbedFirstToken.isEmpty && !firstTokenText.isEmpty
         )
         seq.toolStream = toolStream
+        seq.flintThink = flintThink
         return seq
     }
 
@@ -1032,10 +1060,27 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         // SAFE: pre-shared-state yield — seq hasn't entered activeByModel yet
         let toolStream = await Self.makeToolProcessor(mlxContainer: mlxContainer, request: request)
         let scrubbedPrefixToken = MLXEngine.scrubControlTokens(firstTokenText)
-        if !scrubbedPrefixToken.isEmpty {
-            Self.emitProcessed(toolStream, scrubbedPrefixToken,
+        let isFlint = container.identifier.family == .flint
+        var flintThink = FlintChatDecode.ThinkReentryGuard()
+        var emitText = scrubbedPrefixToken
+        var finishFirst = false
+        if isFlint {
+            let eosId = container.tokenizer?.eosTokenId
+            let stops = Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+            let decision = FlintChatDecode.tokenDecision(
+                tokenId: firstTokenId, decoded: scrubbedPrefixToken,
+                primaryEOS: eosId, stopIds: stops, state: &flintThink)
+            emitText = decision.yield
+            finishFirst = decision.isEOS || decision.thinkReentry
+        }
+        if !emitText.isEmpty {
+            Self.emitProcessed(toolStream, emitText,
                 continuation: continuation,
                 logprob: prefixLogprobs.map { ($0.logprob, $0.topLogprobs) })
+        }
+        if finishFirst {
+            continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount))
+            continuation.finish()
         }
 
         var seq = ActiveStreamSequence(
@@ -1044,7 +1089,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             caches: restoredCaches,
             lastTokenId: firstTokenId,
             generatedText: firstTokenText,
-            completionTokens: firstTokenText.isEmpty ? 0 : 1,
+            completionTokens: finishFirst && emitText.isEmpty ? 0 : (firstTokenText.isEmpty ? 0 : 1),
             maxTokens: maxTokens,
             sampler: sampler,
             continuation: continuation,
@@ -1053,7 +1098,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             promptTokenIds: allTokens,
             startTime: Date(),
             admittedAt: Date(),
-            isFinished: false,
+            isFinished: finishFirst,
             finishGuard: FinishGuard(),
             recentTokenIds: Array(allTokens.suffix(20)),
             frequencyPenalty: freqPenaltyValue,
@@ -1061,6 +1106,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             lastDecodedText: prefixDecodedText
         )
         seq.toolStream = toolStream
+        seq.flintThink = flintThink
         return seq
     }
 
@@ -1235,6 +1281,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             scrubbed = familyScrub
         }
         if scrubbed != rawDelta { return .skip }
+        // A clean packet has no `<`. Record visible prose (or in-think text)
+        // so a later `<think>` can stop the turn. A boundary falls through
+        // to the per-token loop with this guard unchanged.
+        guard seq.flintThink.observeFastPacket(scrubbed) else { return .skip }
 
         seq.accumulatedTokenIds = probeIds
         seq.lastDecodedText = fullText
@@ -1400,9 +1450,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
             do {
                 let seq = try await prefillSequence(request: item.request, continuation: item.continuation)
-                lock.withLock {
-                    if activeByModel[modelId] == nil { activeByModel[modelId] = [] }
-                    activeByModel[modelId]?.append(seq)
+                if !seq.isFinished {
+                    lock.withLock {
+                        if activeByModel[modelId] == nil { activeByModel[modelId] = [] }
+                        activeByModel[modelId]?.append(seq)
+                    }
+                } else {
+                    lock.withLock {
+                        activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                    }
+                    await self.budgetTracker.release(sequenceId: item.request.id)
                 }
             } catch {
                 // SAFE: pre-prefill error path, continuation is exclusively owned
@@ -1698,7 +1755,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     // literal text (<｜hy_place▁holder▁no▁2｜>) instead of
                     // skipping it — yielding before the check leaked the
                     // stop marker into every streamed reply.
-                    let isEOSNow = (eosId == tokenId) || flintStopIds.contains(tokenId)
+                    // Flint role-header ids are stops even when they are not
+                    // tokenizer.eosTokenId. stopIds is empty for other families.
+                    let isEOSNow = FlintChatDecode.isStopToken(
+                        tokenId, primaryEOS: eosId, stopIds: flintStopIds)
                     seq.lastTokenId = tokenId
                     if !isEOSNow {
                         seq.completionTokens += 1
@@ -1719,7 +1779,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     // Record into N-gram cache for future speculation.
                     specDecoder.recordToken(tokenId)
 
-                    let decoded: String
+                    var decoded: String
+                    var hitThinkReentry = false
                     if isEOSNow {
                         // EOS decodes to nothing (some tokenizers would emit its
                         // literal text) — handled entirely by the stop path below.
@@ -1820,6 +1881,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         decoded = ""
                         seq.previousTokenWasControl = false
                     }
+                    if container.identifier.family == .flint {
+                        let step = FlintChatDecode.tokenDecision(
+                            tokenId: tokenId, decoded: decoded,
+                            primaryEOS: eosId, stopIds: flintStopIds, state: &seq.flintThink)
+                        decoded = step.yield
+                        hitThinkReentry = step.thinkReentry
+                    }
                     seq.generatedText = seq.lastDecodedText
                     if !decoded.isEmpty || seq.toolStream != nil {
                         // Attach logprobs to the first (real decode) token only
@@ -1830,7 +1898,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                     lock.withLock { totalTokensViaFused += 1 }
 
-                    let isEOS = eosId == tokenId
+                    // Same set as isEOSNow. A scrubbed Flint stop id still finishes.
+                    let isEOS = isEOSNow
                     let atMax = seq.completionTokens >= seq.maxTokens
 
                     // Check custom stop sequences
@@ -1867,12 +1936,23 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         }
                     }
 
-                    if isEOS || atMax || hitStop || hitControlToken {
+                    if isEOS || atMax || hitStop || hitControlToken || hitThinkReentry {
                         // Flush any tool-call buffer the parser still holds, then
                         // mirror the ContinuousBatcher finish semantics: a stop
                         // that produced tool calls reports finish_reason=tool_calls.
+                        // A think-reentry stop already dropped the new `<think>`.
+                        // Other finishes release a withheld tag prefix (`<` …).
+                        if container.identifier.family == .flint, !hitThinkReentry {
+                            let tail = seq.flintThink.flushHeld()
+                            if !tail.isEmpty { seq.yieldProcessed(tail) }
+                        }
                         seq.drainToolProcessor()
                         var finishReason: FinishReason = atMax ? .length : .stop
+                        // A new `<think>` after visible text is a turn stop, including
+                        // when that token is also the one that reaches maxTokens.
+                        if hitThinkReentry {
+                            finishReason = .stop
+                        }
                         if seq.toolStream?.emittedToolCall == true && finishReason == .stop {
                             finishReason = .toolCalls
                         }

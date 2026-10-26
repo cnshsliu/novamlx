@@ -20,6 +20,8 @@ struct ActiveBatchSequence: @unchecked Sendable {
     let promptTokenCount: Int
     let sampler: any LogitSampler
     let continuation: CheckedContinuation<InferenceResult, Error>
+    /// Flint only. Other families leave this at the default.
+    var flintThink = FlintChatDecode.ThinkReentryGuard()
 }
 
 public final class BatchScheduler: @unchecked Sendable {
@@ -140,6 +142,27 @@ public final class BatchScheduler: @unchecked Sendable {
         let parameters = engine.buildGenerateParameters(request: req.request, config: container.config, settings: engine.settingsProvider?(req.request.model))
         let firstTokenId = container.tokenizer?.encode(firstTokenText).first ?? 0
 
+        var flintThink = FlintChatDecode.ThinkReentryGuard()
+        if container.identifier.family == .flint, !firstTokenText.isEmpty {
+            let eosId = container.tokenizer?.eosTokenId
+            let stops = Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+            let decision = FlintChatDecode.tokenDecision(
+                tokenId: firstTokenId, decoded: firstTokenText,
+                primaryEOS: eosId, stopIds: stops, state: &flintThink)
+            if decision.isEOS || decision.thinkReentry {
+                req.continuation.resume(returning: InferenceResult(
+                    id: req.id,
+                    model: req.request.model,
+                    text: decision.yield,
+                    tokensPerSecond: 0,
+                    promptTokens: promptTokenCount,
+                    completionTokens: decision.yield.isEmpty ? 0 : 1,
+                    finishReason: .stop
+                ))
+                return
+            }
+        }
+
         let seq = ActiveBatchSequence(
             id: req.id,
             request: req.request,
@@ -149,7 +172,8 @@ public final class BatchScheduler: @unchecked Sendable {
             maxTokens: maxTokens,
             promptTokenCount: promptTokenCount,
             sampler: parameters.sampler(),
-            continuation: req.continuation
+            continuation: req.continuation,
+            flintThink: flintThink
         )
 
         lock.withLock {
@@ -218,6 +242,10 @@ public final class BatchScheduler: @unchecked Sendable {
             let logits = logitsBox.value
 
             let eosId = container.tokenizer?.eosTokenId
+            let isFlint = container.identifier.family == .flint
+            let flintStopIds: Set<Int> = isFlint
+                ? Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+                : []
 
             for (i, var seq) in active.enumerated() {
                 let seqLogits = logits[i][0..., -1, 0...]
@@ -225,14 +253,30 @@ public final class BatchScheduler: @unchecked Sendable {
                 let tokenId = sampledToken.item(Int.self)
 
                 seq.generatedTokens.append(tokenId)
-                if let tok = container.tokenizer {
-                    seq.generatedText += tok.decode([tokenId])
+                let rawPiece = container.tokenizer.map { $0.decode([tokenId]) } ?? ""
+                let decision: FlintChatDecode.TokenDecision
+                if isFlint {
+                    decision = FlintChatDecode.tokenDecision(
+                        tokenId: tokenId, decoded: rawPiece,
+                        primaryEOS: eosId, stopIds: flintStopIds, state: &seq.flintThink)
+                    if !decision.isEOS {
+                        seq.generatedText += decision.yield
+                    }
+                } else {
+                    seq.generatedText += rawPiece
+                    decision = FlintChatDecode.TokenDecision(
+                        yield: rawPiece,
+                        isEOS: FlintChatDecode.isStopToken(tokenId, primaryEOS: eosId, stopIds: []),
+                        thinkReentry: false)
                 }
 
-                let isEOS = eosId == tokenId
+                let isEOS = decision.isEOS
                 let atMax = seq.generatedTokens.count >= seq.maxTokens
 
-                if isEOS || atMax {
+                if isEOS || decision.thinkReentry || atMax {
+                    if isFlint && !decision.thinkReentry {
+                        seq.generatedText += seq.flintThink.flushHeld()
+                    }
                     let result = InferenceResult(
                         id: seq.id,
                         model: seq.request.model,
@@ -240,7 +284,7 @@ public final class BatchScheduler: @unchecked Sendable {
                         tokensPerSecond: 0,
                         promptTokens: seq.promptTokenCount,
                         completionTokens: seq.generatedTokens.count,
-                        finishReason: atMax ? .length : .stop
+                        finishReason: decision.thinkReentry ? .stop : (atMax ? .length : .stop)
                     )
                     seq.continuation.resume(returning: result)
                     lock.withLock { _totalTokensViaFused += UInt64(seq.generatedTokens.count) }
