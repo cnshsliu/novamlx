@@ -4,31 +4,33 @@
 
 **Pitch:** Download an exact catalog weight id (`org/repo`), the same string as `nova download`.
 
-「支持」指「精确权重」一节中的 id。该 id 与 `nova download <id>` 相同。名字相近而 id 不同的仓库可能无法加载。
+"Supported" means an id in [Exact weights](#exact-weights). That id is the same string as `nova download <id>`. A repo with a similar name and a different id may fail to load.
 
-本页与应用内目录一致，数据日期 2026-10-25。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。
+This page matches the in-app catalog. Data date 2026-10-25. `verified` entries have been tested; `preview` is in the catalog and is not marked verified. `unsupported` is listed at the end, and NovaMLX will not download or load it.
 
-## 下载 / Download
+## Download
 
 ```bash
 nova download <id>
 nova search "qwen"
 ```
 
-镜像在应用的下载页选择：Official（huggingface.co）、ModelScope，或自定义端点。ModelScope 与 Hugging Face 使用同一个 id。
+Pick a mirror on the app's Downloads page: Official (huggingface.co), ModelScope, or a custom endpoint. ModelScope and Hugging Face use the same id.
 
-Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。下载、取消与续传见 [Hugging Face](huggingface.md)。文件落盘见 [模型管理](model-management.md)。
+Optional Hugging Face links are built from the id: `https://huggingface.co/<id>`. Download, cancel, and resume are covered in [Hugging Face](huggingface.md). Where files land is covered in [Model management](model-management.md).
 
-## 精确权重 / Exact weights
+<a id="exact-weights"></a>
 
-下列 id 各对应一个仓库。
+## Exact weights
+
+Each id below is one repository.
 
 <a id="llm"></a>
 
-### 文本 LLM / Text LLM
+### Text LLM
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
 | Nemotron 3.5 Bolt 74B-A9B 4-bit | `rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit` | ~43 GB (4-bit) | preview | 64 GB | `nova download rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit` | [Hugging Face](https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit) |
 | Nemotron 3.5 Bolt 74B-A9B 3-bit | `rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit` | ~32 GB (3-bit) | preview | 48 GB | `nova download rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit` | [Hugging Face](https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit) |
 | DeepSeek-V4.1-Flash DSpark drafter | `mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter` | ~4.5 GB (2-bit) | verified | 16 GB | `nova download mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter` | [Hugging Face](https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter) |
@@ -52,10 +54,10 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 <a id="vlm"></a>
 
-### 视觉语言 / Vision-language
+### Vision-language
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
 | DeepSeek-V4.1-Flash | `mlx-community/DeepSeek-V4.1-Flash-MLX-2bit` | ~239 GB (2-bit) | verified | 128 GB | `nova download mlx-community/DeepSeek-V4.1-Flash-MLX-2bit` | [Hugging Face](https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-MLX-2bit) |
 | Qwythos-27B-v1 | `Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX` | ~15.2 GB (MXFP4) | verified | 24 GB | `nova download Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX` | [Hugging Face](https://huggingface.co/Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX) |
 | Qwen3.8-Flash-Next Uncensored | `orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX` | ~163 GB (4-bit) | preview | 128 GB | `nova download orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX` | [Hugging Face](https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX) |
@@ -69,10 +71,10 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 <a id="audio"></a>
 
-### 音频 / Audio
+### Audio
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
 | Whisper-Large-V3-Turbo | `mlx-community/whisper-large-v3-turbo` | 0.8 GB | preview | — | `nova download mlx-community/whisper-large-v3-turbo` | [Hugging Face](https://huggingface.co/mlx-community/whisper-large-v3-turbo) |
 | Whisper-Small | `mlx-community/whisper-small` | 0.24 GB | preview | — | `nova download mlx-community/whisper-small` | [Hugging Face](https://huggingface.co/mlx-community/whisper-small) |
 | Dots.TTS | `smcleod/dots.tts-soar-mlx` | 4.0 GB | preview | — | `nova download smcleod/dots.tts-soar-mlx` | [Hugging Face](https://huggingface.co/smcleod/dots.tts-soar-mlx) |
@@ -81,10 +83,10 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 <a id="image"></a>
 
-### 图像 / Image
+### Image
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
 | FLUX.1-dev-4bit | `mzbac/flux1.dev.4bit.mlx` | ~6 GB | preview | — | `nova download mzbac/flux1.dev.4bit.mlx` | [Hugging Face](https://huggingface.co/mzbac/flux1.dev.4bit.mlx) |
 | FLUX.2-klein-4B | `black-forest-labs/FLUX.2-klein-4B` | ~16 GB | preview | — | `nova download black-forest-labs/FLUX.2-klein-4B` | [Hugging Face](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) |
 | Z-Image-Turbo-8bit | `mzbac/Z-Image-Turbo-8bit` | ~7.5 GB | preview | — | `nova download mzbac/Z-Image-Turbo-8bit` | [Hugging Face](https://huggingface.co/mzbac/Z-Image-Turbo-8bit) |
@@ -98,48 +100,48 @@ Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。�
 
 <a id="embedding"></a>
 
-### 嵌入 / Embedding
+### Embedding
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
 | Qwen3-Embedding-0.6B | `mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` | ~335 MB / 4bit | verified | 4 GB | `nova download mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ` | [Hugging Face](https://huggingface.co/mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ) |
 
 <a id="decision"></a>
 
-### 决策 / Decision
+### Decision
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
 | Laya Multilingual | `aac6fef/laya-multilingual-mlx` | ~700 MB / fp16 | verified | 4 GB | `nova download aac6fef/laya-multilingual-mlx` | [Hugging Face](https://huggingface.co/aac6fef/laya-multilingual-mlx) |
 
 <a id="threed"></a>
 
 ### threed
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
 | Hunyuan3D-2.1 Shape Small (MLX) | `zimengxiong/hunyuan3d-mlx-shape-small` | ~3.8 GB | preview | 16 GB | `nova download zimengxiong/hunyuan3d-mlx-shape-small` | [Hugging Face](https://huggingface.co/zimengxiong/hunyuan3d-mlx-shape-small) |
 | Hunyuan3D-2.1 Shape Large (MLX) | `zimengxiong/hunyuan3d-mlx-shape-large` | ~4.9 GB | preview | 24 GB | `nova download zimengxiong/hunyuan3d-mlx-shape-large` | [Hugging Face](https://huggingface.co/zimengxiong/hunyuan3d-mlx-shape-large) |
 | Hunyuan3D-2.1 Paint PBR Large (MLX) | `zimengxiong/hunyuan3d-mlx-paint-large` | ~8.7 GB | preview | 64 GB | `nova download zimengxiong/hunyuan3d-mlx-paint-large` | [Hugging Face](https://huggingface.co/zimengxiong/hunyuan3d-mlx-paint-large) |
 
-## 家族浏览 / Family browse
+## Family browse
 
-这些条目的 id 以 `*` 结尾，或对应 Hugging Face 搜索页，表示一族权重。用 `nova search` 列出具体 `org/repo`，再 `nova download` 那个 id。「精确权重」一节只收录具体 id。
+These ids end in `*`, or point at a Hugging Face search page, and stand for a family of weights. Use `nova search` to list a concrete `org/repo`, then `nova download` that id. [Exact weights](#exact-weights) lists only concrete ids.
 
-| 名称 | Catalog id | 大小 / quant | 状态 | 最低内存 | 浏览 |
-|------|------------|--------------|------|----------|------|
+| Name | Catalog id | Size / quant | Status | Minimum memory | Browse |
+|------|------------|--------------|--------|----------------|--------|
 | Ornith-1.5-35B-A3B family | `ornith-ai/Ornith-1.5-35B-A3B-MLX*` | ~34 GB / 8bit | preview | 48 GB | `nova search Ornith-1.5-35B-A3B-MLX` |
 | Qwen3.8-Flash-Next | `pipenetwork/Qwen3.8-Flash-Next-*` | ~104 GB (4-bit) | preview | 128 GB | `nova search Qwen3.8-Flash-Next` |
 | Qwen3.8-27B MTP heads | `mlx-community/Qwen3.8-27B-MTP-*` | ~0.3 GB | preview | — | `nova search Qwen3.8-27B-MTP` |
 
-## 不加载 / Not loaded
+## Not loaded
 
-状态为 `unsupported` 的 id 留在目录里，便于辨认。NovaMLX 不下载、不加载。
+Ids with status `unsupported` stay in the catalog so they can be recognized. NovaMLX does not download or load them.
 
-| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |
-|------|-----------|--------------|------|----------|------|--------------|
-| FLUX.1-schnell-4bit | `mzbac/flux1.schnell.4bit.mlx` | ~6 GB | unsupported | — | 不下载 | [Hugging Face](https://huggingface.co/mzbac/flux1.schnell.4bit.mlx) |
+| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
+|------|-----------|--------------|--------|----------------|----------|--------------|
+| FLUX.1-schnell-4bit | `mzbac/flux1.schnell.4bit.mlx` | ~6 GB | unsupported | — | will not download | [Hugging Face](https://huggingface.co/mzbac/flux1.schnell.4bit.mlx) |
 
 - `mzbac/flux1.schnell.4bit.mlx` — Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.
 
-表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` 2026-10-25）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。
+Tables are generated from [`catalog/models.json`](../../catalog/models.json) (`updatedAt` 2026-10-25). Regenerate with `python3 Scripts/generate-supported-models-doc.py`.

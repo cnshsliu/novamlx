@@ -1,59 +1,59 @@
-# Flint（Recursive）
+# Flint (Recursive)
 
-**Pitch:** Recursive 的 40B agent 推理模型——思考链、多轮工具调用、256K 上下文，原生跑在本地 MLX 上。
+**Pitch:** Recursive's 40B agent reasoning model — chain of thought, multi-turn tool calls, and a 256K context — running natively on local MLX.
 
-本地推理 RecursiveSI Flint（39.8B MoE，~2.5B 激活），Swift/MLX 原生移植（无 Python）。与 Python mlx-lm **逐 token 对齐**（greedy 同题字符级一致）。
+Local inference for RecursiveSI Flint (39.8B MoE, ~2.5B active): a native Swift/MLX port (no Python). Token-identical to Python mlx-lm (greedy, same prompt, character-level match).
 
 ## Who it is for
 
-要在本地跑带推理和工具调用的 agent/coding 模型、且要求 OpenAI/Anthropic 双协议标准接口的人。
+People who want a local agent/coding model with reasoning and tool calls, and standard OpenAI and Anthropic APIs.
 
 ## What it does
 
 | Feature | Details |
 |---------|---------|
-| **架构** | 49 层：GQA（32q/4kv，head 128）+ per-head QK RMSNorm + learned attention sinks；35 层滑窗(513)+RoPE / 14 层全注意力 NoPE；sigmoid 路由 MoE（6/256 专家 + 无门控共享专家），前 2 层 dense |
-| **能力** | `<think>` 推理（`reasoning_content` 独立通道）、多轮工具调用（GLM4 方言自动归一为标准 OpenAI tool_calls）、256K 上下文（滑窗 KV） |
-| **API** | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`，流式/非流式；eos = `<|end_of_text|>` 及角色头 token（自动停止+清洗，不泄漏） |
-| **调度** | 默认 HTTP 聊天走 FusedBatchScheduler（含工具解析）。temperature 0、单序列、无 logprobs、无 frequency penalty、无 grammar 时走 resident packet。session / grammar / 采样仍走单步 |
-| **量化** | 官方 `RecursiveSI/flint-int4`（~22.6 GB；社区 OptiQ-4bit 曾用于早期验证，现已弃用为默认） |
-| **性能参考** | 官方 INT4 走 rec megakernel。MacMaxPro M4 Max，`RecursiveSI/flint-int4`，packet 宽度 16：LOOP-RESULT **226.8 tok/s**，SINGLE-RESULT **190.7 tok/s**，FLINT-CHAT **217.3 tok/s**。口径、对照和柱状图见 [Speed](#speed)。 |
+| **Architecture** | 49 layers: GQA (32q/4kv, head 128) + per-head QK RMSNorm + learned attention sinks; 35 sliding-window (513) + RoPE layers / 14 full-attention NoPE layers; sigmoid-routed MoE (6/256 experts + an ungated shared expert); the first 2 layers are dense |
+| **Capabilities** | `<think>` reasoning (`reasoning_content` on its own channel), multi-turn tool calls (GLM4 dialect normalized to standard OpenAI tool_calls), 256K context (sliding-window KV) |
+| **API** | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`, streaming and non-streaming; eos = `<|end_of_text|>` and role-header tokens (automatic stop and scrub, no leak) |
+| **Scheduling** | Default HTTP chat goes through FusedBatchScheduler (including tool parsing). Temperature 0, one sequence, no logprobs, no frequency penalty, and no grammar use the resident packet. Session, grammar, and sampling stay on the single-step path |
+| **Quantization** | Official `RecursiveSI/flint-int4` (~22.6 GB; the community OptiQ-4bit build was used for early verification and is no longer the default) |
+| **Performance** | Official INT4 runs on the rec megakernel. MacMaxPro M4 Max, `RecursiveSI/flint-int4`, packet width 16: LOOP-RESULT **226.8 tok/s**, SINGLE-RESULT **190.7 tok/s**, FLINT-CHAT **217.3 tok/s**. Window, comparisons, and the bar chart are in [Speed](#speed). |
 
 ## How to try
 
 ```bash
 nova download RecursiveSI/flint-int4
-# 加载后在 Local Inference 页选择，或：
+# After load, select it on the Local Inference page, or:
 curl -X POST localhost:6590/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"model": "RecursiveSI/flint-int4",
        "messages": [{"role": "user", "content": "What is 17*23? Think step by step."}],
        "max_tokens": 500, "temperature": 0}'
-# → reasoning_content（分步推理）+ content（答案）双通道
+# → reasoning_content (step-by-step reasoning) + content (the answer), two channels
 ```
 
-推荐采样：temperature 1.0、top-p 0.95、top-k 20（官方推荐）；精确复现用 temperature 0。
+Recommended sampling: temperature 1.0, top-p 0.95, top-k 20 (the official recommendation). Use temperature 0 for an exact reproduction.
 
 ## Speed
 
-下面只写这次列出的 tok/s，以及标明来源的对照。没有另跑的数不进表。
+The tok/s figures below are the ones listed for this measurement, plus comparisons whose source is named. Numbers from other runs are not added to the table.
 
-本次 NovaMLX 测量：MacMaxPro M4 Max，权重官方 `RecursiveSI/flint-int4`，`./build.sh test --filter FlintSpeedTests`。#38 合入点 `ef57be1`（packet 宽度 16）；#39 合入点 `313d92f`（FLINT-CHAT）。
+This NovaMLX measurement: MacMaxPro M4 Max, official weights `RecursiveSI/flint-int4`, `./build.sh test --filter FlintSpeedTests`. #38 merge `ef57be1` (packet width 16); #39 merge `313d92f` (FLINT-CHAT).
 
-- **PARITY:** match 16（单步 host argmax 与 resident packet 接下来的 16 个 greedy token 一致）。#38 与 #39 都是 match 16。
-- **SINGLE-RESULT:** 一次 launch + host argmax，**190.7 tok/s**（#38，packet 宽度 16）
-- **LOOP-RESULT:** load→pack→decode，**226.8 tok/s**（kernel packet，宽度 16，#38 / `ef57be1`）。#39 打出 FLINT-CHAT 的那一轮，LOOP-RESULT 是 **223.3 tok/s**（与 226.8 的差是跑间波动）。
-- **FLINT-CHAT:** **217.3 tok/s**（#39 / `313d92f`）。公式 `decodeTokens / wallDecodeSeconds`，packetTokens=128，singleTokens=0。低于同一轮 LOOP-RESULT **223.3**。
+- **PARITY:** match 16 (the next 16 greedy tokens from single-step host argmax match the resident packet). #38 and #39 are both match 16.
+- **SINGLE-RESULT:** one launch + host argmax, **190.7 tok/s** (#38, packet width 16)
+- **LOOP-RESULT:** load→pack→decode, **226.8 tok/s** (kernel packet, width 16, #38 / `ef57be1`). On the run that printed FLINT-CHAT (#39), LOOP-RESULT was **223.3 tok/s** (the gap versus 226.8 is run-to-run variance).
+- **FLINT-CHAT:** **217.3 tok/s** (#39 / `313d92f`). Formula `decodeTokens / wallDecodeSeconds`, packetTokens=128, singleTokens=0. Below the same run's LOOP-RESULT **223.3**.
 
-| 路径 | tok/s | 口径 | 来源 |
+| Path | tok/s | Window | Source |
 |------|------:|------|------|
-| llama.cpp | ~89.7 | INT4-class Flint decode | 团队既有参考。这次测量没有重跑 |
-| Official Recursive rec | 196.8 | Mac INT4 rec，1K ctx / 256 tok decode | 官方参考，NovaMLX 对标它。不是这次的 Mac 新跑，也不是 NovaMLX 的成绩 |
-| NovaMLX single | 190.7 | 一次 launch + host argmax，packet 宽度 16 | SINGLE-RESULT，#38 / `ef57be1` |
-| NovaMLX packet | 226.8 | kernel packet，load→pack→decode，宽度 16 | LOOP-RESULT，#38 / `ef57be1` |
-| NovaMLX FLINT-CHAT | 217.3 | `decodeTokens / wallDecodeSeconds`，packetTokens=128，singleTokens=0 | #39 / `313d92f`。同一轮 LOOP-RESULT 223.3 |
+| llama.cpp | ~89.7 | INT4-class Flint decode | Existing team reference. Not re-run for this measurement |
+| Official Recursive rec | 196.8 | Mac INT4 rec, 1K ctx / 256 tok decode | Official reference. NovaMLX is compared against it. Not a new Mac run this time, and not a NovaMLX result |
+| NovaMLX single | 190.7 | one launch + host argmax, packet width 16 | SINGLE-RESULT, #38 / `ef57be1` |
+| NovaMLX packet | 226.8 | kernel packet, load→pack→decode, width 16 | LOOP-RESULT, #38 / `ef57be1` |
+| NovaMLX FLINT-CHAT | 217.3 | `decodeTokens / wallDecodeSeconds`, packetTokens=128, singleTokens=0 | #39 / `313d92f`. Same run's LOOP-RESULT 223.3 |
 
-三条对照进柱状图：llama.cpp、官方 rec、NovaMLX packet（#38 kernel **226.8**）。单步 190.7 与 FLINT-CHAT 217.3 在表里。FLINT-CHAT 217.3 对照同一轮 LOOP-RESULT **223.3**。
+Three comparisons go on the bar chart: llama.cpp, the official rec, and NovaMLX packet (#38 kernel **226.8**). Single-step 190.7 and FLINT-CHAT 217.3 stay in the table. FLINT-CHAT 217.3 is compared with the same run's LOOP-RESULT **223.3**.
 
 ```mermaid
 xychart-beta
@@ -63,31 +63,31 @@ xychart-beta
     bar [89.7, 196.8, 226.8]
 ```
 
-柱高是 **89.7**、**196.8**、**226.8**。226.8 是 NovaMLX 这次的 kernel packet 闭环（宽度 16）。官方 **196.8** 的窗口是 1K ctx / 256 tok decode；NovaMLX 这次 LOOP 是宽度 16 的 kernel packet。两列是标明来源的对照。纵轴保持 0–250，226.8 在刻度内。
+Bar heights are **89.7**, **196.8**, and **226.8**. 226.8 is this NovaMLX kernel packet closed loop (width 16). The official **196.8** window is 1K ctx / 256 tok decode; this NovaMLX LOOP is a width-16 kernel packet. The two columns are labeled-source comparisons. The axis stays 0–250, so 226.8 is on the scale.
 
-同机、更早的提交（不是上表这一行）：
+Same machine, earlier commits (not the row in the table above):
 
-- PR #34 合入点 `cbc5fef`：闭环 ~167.5 tok/s
-- #35 里 host/scratch 与 76 pool 先落地、packet 尚未进去时：185.2 tok/s
-- 1.8.0 / `e8e7b27`：packet=8，LOOP-RESULT **214.7 tok/s**（128 rec steps，official=yes，launch=76/64/64），SINGLE-RESULT **181.6 tok/s**。MegaDecode 为 MEGA-SKIP，没有 mega tok/s
+- PR #34 merge `cbc5fef`: closed loop ~167.5 tok/s
+- In #35, after host/scratch and the 76 pool landed and before the packet was in: 185.2 tok/s
+- 1.8.0 / `e8e7b27`: packet=8, LOOP-RESULT **214.7 tok/s** (128 rec steps, official=yes, launch=76/64/64), SINGLE-RESULT **181.6 tok/s**. MegaDecode was MEGA-SKIP, with no mega tok/s
 
-190.7 和 226.8 都是 `FlintSpeedTests` 里 shader 编译完成之后的 rec decode 计时窗口，不是 HTTP 端到端。226.8 是 greedy resident packet（argmax 在设备上，宽度 16）。同一次跑的单步路径是一次 launch、host argmax（190.7）。采样解码不走 packet。
+190.7 and 226.8 are both the rec decode timing window inside `FlintSpeedTests` after shader compile, not HTTP end-to-end. 226.8 is the greedy resident packet (argmax on device, width 16). The same run's single-step path is one launch and host argmax (190.7). Sampling decode does not use the packet.
 
-### Chat tok/s（`FLINT-CHAT`）
+### Chat tok/s (`FLINT-CHAT`)
 
-端到端 decode 速率的公式是 **`decodeTokens / wallDecodeSeconds`**。
+The end-to-end decode rate is **`decodeTokens / wallDecodeSeconds`**.
 
-- `decodeTokens`：prefill 采样出的第一个 token 之后，decode 步发出的 token。EOS 不计入。
-- `wallDecodeSeconds`：从第一次 decode launch 之前开始，到这些 token 做完 detokenize 和停止检查。不含权重加载，不含 prefill。串行迭代器的同一行停在最后一个 token id；引擎在 `next()` 之后才把 id 解成文本。
-- 实测：**217.3 tok/s**（#39 / `313d92f`，MacMaxPro M4 Max，`RecursiveSI/flint-int4`，packetTokens=128，singleTokens=0）。对照是同一轮 `FlintSpeedTests` 的 `LOOP-RESULT` **223.3 tok/s**（kernel packet only，无 tokenizer，宽度 16）。217.3 低于这一轮的 kernel 数字。#38（`ef57be1`）另一次 kernel LOOP-RESULT 是 **226.8 tok/s**；223.3 与 226.8 是跑间波动。`e8e7b27` 的 packet=8 记录 **214.7 tok/s** 是更早的宽度。
+- `decodeTokens`: tokens emitted by decode steps after the first token sampled from prefill. EOS is not counted.
+- `wallDecodeSeconds`: from before the first decode launch until those tokens have been detokenized and checked for a stop. Weight load is excluded. Prefill is excluded. The same line on the serial iterator stops at the last token id; the engine turns the id into text after `next()`.
+- Measured: **217.3 tok/s** (#39 / `313d92f`, MacMaxPro M4 Max, `RecursiveSI/flint-int4`, packetTokens=128, singleTokens=0). The comparison is the same run's `FlintSpeedTests` `LOOP-RESULT` **223.3 tok/s** (kernel packet only, no tokenizer, width 16). 217.3 is below that run's kernel number. Another kernel LOOP-RESULT from #38 (`ef57be1`) is **226.8 tok/s**; 223.3 versus 226.8 is run-to-run variance. The packet=8 record at `e8e7b27`, **214.7 tok/s**, is the earlier width.
 
-Mac 上先看速度套件。`LOOP-RESULT` 的计时窗口不变；它打印完之后另有一行 `FLINT-CHAT`，是再跑 128 个 packet token、每个 packet（`FlintRecResident.width`）一次 `tokenizer.decode`：
+On a Mac, start with the speed suite. The `LOOP-RESULT` timing window is unchanged. After it prints, another line, `FLINT-CHAT`, runs 128 more packet tokens with one `tokenizer.decode` per packet (`FlintRecResident.width`):
 
 ```bash
 ./build.sh test --filter FlintSpeedTests
 ```
 
-HTTP 聊天（官方 INT4，temperature 0，一条序列，不要 logprobs，`frequency_penalty` 为 0）在序列结束时把同一行写到 `~/.nova/novamlx.log`。`packetTokens` 应占 decode tokens 的大部分；rec session 建立前的 1–2 个 token 记在 `singleTokens`。temperature > 0、logprobs、frequency penalty、grammar、session、第二条并发序列留在单步。
+HTTP chat (official INT4, temperature 0, one sequence, no logprobs, `frequency_penalty` 0) writes the same line to `~/.nova/novamlx.log` when the sequence finishes. `packetTokens` should be most of the decode tokens; the 1–2 tokens before the rec session is established are counted in `singleTokens`. Temperature > 0, logprobs, frequency penalty, grammar, session, and a second concurrent sequence stay on the single-step path.
 
 ```bash
 curl -X POST localhost:6590/v1/chat/completions \
@@ -95,19 +95,19 @@ curl -X POST localhost:6590/v1/chat/completions \
   -d '{"model": "RecursiveSI/flint-int4",
        "messages": [{"role": "user", "content": "What is 17*23? Think step by step."}],
        "max_tokens": 500, "temperature": 0}'
-# ~/.nova/novamlx.log 里搜 FLINT-CHAT
+# Search ~/.nova/novamlx.log for FLINT-CHAT
 ```
 
 ## Limits / notes
 
-- 工具调用在 fused 路径上解析。Flint 始终挂着 GLM4 解析器。新文本里出现 `<`（工具标记、think 标签，或半个标签）的 packet 仍逐 token 解码；没有 `<` 的 greedy packet 一次 decode，再交给同一个解析器。
-- 纯 text-to-3D 之类与 Flint 无关；Flint 是文本 agent 模型。
-- TurboQuant KV 缓存会丢弃 attention sinks（与 GPT-OSS 相同的取舍），默认不启用。
-- [Speed](#speed) 里的 190.7 / 226.8 是 `FlintSpeedTests` 的 rec decode。FLINT-CHAT **217.3** 是聊天 decode 口径，低于同一轮 LOOP-RESULT **223.3**。官方 196.8 与 llama.cpp ~89.7 是标明来源的对照，不是这次重跑。1.8.0 的 181.6 / 214.7（packet=8）是更早记录。
+- Tool calls are parsed on the fused path. Flint always has the GLM4 parser attached. A packet whose new text contains `<` (a tool marker, a think tag, or half a tag) is still decoded token by token. A greedy packet with no `<` is decoded once, then handed to the same parser.
+- Text-to-3D and similar paths are separate from Flint. Flint is a text agent model.
+- TurboQuant KV cache drops attention sinks (the same tradeoff as GPT-OSS) and is off by default.
+- 190.7 / 226.8 in [Speed](#speed) are `FlintSpeedTests` rec decode. FLINT-CHAT **217.3** is the chat decode window, below the same run's LOOP-RESULT **223.3**. The official 196.8 and llama.cpp ~89.7 are labeled-source comparisons, not a re-run this time. 1.8.0's 181.6 / 214.7 (packet=8) is the earlier record.
 
 ## Related
 
-- [API 兼容 / API compatibility](api-compatibility.md)
-- [工具调用 / Tool calling](tool-calling.md)
-- [功能简报 / Feature brief](../feature-briefs/2026-10-25-flint.md)
-- `FlintModel.swift`、`FlintProcessor.swift`（`NovaMLXEngine`）
+- [API compatibility](api-compatibility.md)
+- [Tool calling](tool-calling.md)
+- [Feature brief](../feature-briefs/2026-10-25-flint.md)
+- `FlintModel.swift`, `FlintProcessor.swift` (`NovaMLXEngine`)

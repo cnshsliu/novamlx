@@ -19,22 +19,22 @@ OUT_PATH = ROOT / "docs" / "features" / "supported-models.md"
 
 # Display order. Unknown categories are appended after these.
 CATEGORY_ORDER = (
-    ("llm", "文本 LLM", "Text LLM"),
-    ("vlm", "视觉语言", "Vision-language"),
-    ("audio", "音频", "Audio"),
-    ("image", "图像", "Image"),
-    ("embedding", "嵌入", "Embedding"),
-    ("decision", "决策", "Decision"),
+    ("llm", "Text LLM"),
+    ("vlm", "Vision-language"),
+    ("audio", "Audio"),
+    ("image", "Image"),
+    ("embedding", "Embedding"),
+    ("decision", "Decision"),
 )
 
 EXACT_HEADER = (
-    "| 名称 | Weight id | 大小 / quant | 状态 | 最低内存 | 下载 | Hugging Face |\n"
-    "|------|-----------|--------------|------|----------|------|--------------|"
+    "| Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |\n"
+    "|------|-----------|--------------|--------|----------------|----------|--------------|"
 )
 
 FAMILY_HEADER = (
-    "| 名称 | Catalog id | 大小 / quant | 状态 | 最低内存 | 浏览 |\n"
-    "|------|------------|--------------|------|----------|------|"
+    "| Name | Catalog id | Size / quant | Status | Minimum memory | Browse |\n"
+    "|------|------------|--------------|--------|----------------|--------|"
 )
 
 
@@ -90,16 +90,16 @@ def search_stem(weight_id: str) -> str:
 
 
 def category_heading(category: str) -> str:
-    for key, zh, en in CATEGORY_ORDER:
+    for key, en in CATEGORY_ORDER:
         if key == category:
-            return f"{zh} / {en}"
+            return en
     return category
 
 
 def ordered_categories(entries: list[dict]) -> list[str]:
     present = {entry["category"] for entry in entries}
-    ordered = [key for key, _, _ in CATEGORY_ORDER if key in present]
-    extras = sorted(present - {key for key, _, _ in CATEGORY_ORDER})
+    ordered = [key for key, _ in CATEGORY_ORDER if key in present]
+    extras = sorted(present - {key for key, _ in CATEGORY_ORDER})
     return ordered + extras
 
 
@@ -143,7 +143,7 @@ def unsupported_table(entries: list[dict]) -> str:
     for entry in entries:
         weight_id = entry["id"]
         lines.append(
-            "| {name} | `{weight_id}` | {size} | {status} | {ram} | 不下载 | {link} |".format(
+            "| {name} | `{weight_id}` | {size} | {status} | {ram} | will not download | {link} |".format(
                 name=md(entry.get("name") or weight_id),
                 weight_id=md(weight_id),
                 size=md(size_quant(entry)),
@@ -169,24 +169,26 @@ def render(catalog: dict) -> str:
         "",
         "**Pitch:** Download an exact catalog weight id (`org/repo`), the same string as `nova download`.",
         "",
-        "「支持」指「精确权重」一节中的 id。该 id 与 `nova download <id>` 相同。名字相近而 id 不同的仓库可能无法加载。",
+        '"Supported" means an id in [Exact weights](#exact-weights). That id is the same string as `nova download <id>`. A repo with a similar name and a different id may fail to load.',
         "",
-        f"本页与应用内目录一致，数据日期 {updated}。`verified` 为已测条目；`preview` 在目录中，尚未标成 verified。`unsupported` 列在文末，NovaMLX 不会下载或加载。",
+        f"This page matches the in-app catalog. Data date {updated}. `verified` entries have been tested; `preview` is in the catalog and is not marked verified. `unsupported` is listed at the end, and NovaMLX will not download or load it.",
         "",
-        "## 下载 / Download",
+        "## Download",
         "",
         "```bash",
         "nova download <id>",
         "nova search \"qwen\"",
         "```",
         "",
-        "镜像在应用的下载页选择：Official（huggingface.co）、ModelScope，或自定义端点。ModelScope 与 Hugging Face 使用同一个 id。",
+        "Pick a mirror on the app's Downloads page: Official (huggingface.co), ModelScope, or a custom endpoint. ModelScope and Hugging Face use the same id.",
         "",
-        "Hugging Face 上的可选链接由 id 拼出：`https://huggingface.co/<id>`。下载、取消与续传见 [Hugging Face](huggingface.md)。文件落盘见 [模型管理](model-management.md)。",
+        "Optional Hugging Face links are built from the id: `https://huggingface.co/<id>`. Download, cancel, and resume are covered in [Hugging Face](huggingface.md). Where files land is covered in [Model management](model-management.md).",
         "",
-        "## 精确权重 / Exact weights",
+        '<a id="exact-weights"></a>',
         "",
-        "下列 id 各对应一个仓库。",
+        "## Exact weights",
+        "",
+        "Each id below is one repository.",
         "",
     ]
 
@@ -202,15 +204,15 @@ def render(catalog: dict) -> str:
 
     parts.extend(
         [
-            "## 家族浏览 / Family browse",
+            "## Family browse",
             "",
-            "这些条目的 id 以 `*` 结尾，或对应 Hugging Face 搜索页，表示一族权重。用 `nova search` 列出具体 `org/repo`，再 `nova download` 那个 id。「精确权重」一节只收录具体 id。",
+            "These ids end in `*`, or point at a Hugging Face search page, and stand for a family of weights. Use `nova search` to list a concrete `org/repo`, then `nova download` that id. [Exact weights](#exact-weights) lists only concrete ids.",
             "",
             family_table(families),
             "",
-            "## 不加载 / Not loaded",
+            "## Not loaded",
             "",
-            "状态为 `unsupported` 的 id 留在目录里，便于辨认。NovaMLX 不下载、不加载。",
+            "Ids with status `unsupported` stay in the catalog so they can be recognized. NovaMLX does not download or load them.",
             "",
         ]
     )
@@ -223,12 +225,12 @@ def render(catalog: dict) -> str:
                 parts.append(f"- `{entry['id']}` — {description}")
         parts.append("")
     else:
-        parts.append("当前目录没有 `unsupported` 条目。")
+        parts.append("The catalog currently has no `unsupported` entries.")
         parts.append("")
 
     parts.extend(
         [
-            f"表格由 [`catalog/models.json`](../../catalog/models.json) 生成（`updatedAt` {updated}）。重新生成：`python3 Scripts/generate-supported-models-doc.py`。",
+            f"Tables are generated from [`catalog/models.json`](../../catalog/models.json) (`updatedAt` {updated}). Regenerate with `python3 Scripts/generate-supported-models-doc.py`.",
             "",
         ]
     )
