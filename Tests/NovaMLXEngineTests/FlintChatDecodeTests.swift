@@ -366,11 +366,19 @@ struct FlintChatDecodeTests {
     func testGrammarMasksSecondThink() {
         var grammar = FlintStructuralGrammar(allowsTools: false)
         #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkOpenId))
+        // Observation is a post-tool stop in the start phase. The think body
+        // unmasks it, because a tool call cannot already have happened there.
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.observationId))
         let openedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>")
         #expect(openedThink)
         #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>"))
-        #expect(!grammar.isAllowed(tokenId: FlintStructuralGrammar.endOfTextId, text: "<|end_of_text|>"))
-        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.endOfTextId))
+        // Grammar stops stay sampleable inside the open think so the turn can finish.
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.endOfTextId, text: "<|end_of_text|>"))
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.endOfTextId))
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.userId))
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.observationId, text: "<|observation|>"))
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.observationId))
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.developerId, text: "<|developer|>"))
         #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkCloseId))
         let reasoned = grammar.consume(tokenId: 11, text: "reason")
         #expect(reasoned)
@@ -511,6 +519,19 @@ struct FlintChatDecodeTests {
         #expect(FlintChatDecode.residentRoute(policy(temperature: 1, wantsLogprobs: true)) == .singleStep)
         #expect(FlintChatDecode.residentRoute(policy(temperature: 1, batchWidth: 2)) == .singleStep)
         #expect(FlintChatDecode.residentRoute(policy(temperature: 0, usesGrammar: true)) == .singleStep)
+        // Default Flint chat: temperature 0, generation_config top-p/top-k, grammar on.
+        #expect(FlintChatDecode.residentRoute(policy(
+            temperature: 0, topP: 0.95, topK: 20, usesStructuralGrammar: true)) == .filtered)
+        #expect(FlintChatDecode.serialFillKind(
+            hasSampler: true, structuralGrammar: true, devicePacketAllowed: false, recReady: false)
+            == .filteredPacket)
+        // Grammar installed, device packet vetoed, no sampler stored: still the filtered packet.
+        #expect(FlintChatDecode.serialFillKind(
+            hasSampler: false, structuralGrammar: true, devicePacketAllowed: false, recReady: true)
+            == .filteredPacket)
+        #expect(FlintChatDecode.serialFillKind(
+            hasSampler: false, structuralGrammar: false, devicePacketAllowed: false, recReady: true)
+            == .singleStep)
         #expect(FlintChatDecode.residentRoute(policy(temperature: 1, topP: 1.1)) == .singleStep)
         #expect(FlintChatDecode.residentRoute(policy(presencePenalty: 3)) == .singleStep)
     }
@@ -549,9 +570,11 @@ struct FlintChatDecodeTests {
         let grammarOff = FlintChatDecode.generationFinishStopIds(
             grammarOn: false, checkpoint: [], tokenizerEOS: nil)
         #expect(grammarOff.contains(developer))
-        #expect(FlintChatDecode.generationFinishStopIds(
+        let grammarOnStops = FlintChatDecode.generationFinishStopIds(
             grammarOn: true, checkpoint: Set(FlintChatDecode.canonicalStopIds), tokenizerEOS: nil)
-            == stops)
+        #expect(grammarOnStops.isSuperset(of: stops))
+        #expect(grammarOnStops.contains(developer))
+        #expect(grammarOnStops == Set(FlintChatDecode.canonicalStopIds))
         #expect(FlintStructuralGrammar.thinkBodyExcludes.map(\.tokenId) == [
             FlintStructuralGrammar.thinkCloseId, end, user, observation,
         ])
@@ -572,6 +595,24 @@ struct FlintChatDecodeTests {
         #expect(endTurn.tokens == [12, end])
         #expect(endTurn.rejectedMaskedId == nil)
 
+        let insideThink = finish(on: end, tools: false, prelude: [
+            FlintStructuralGrammar.thinkOpenId, 11,
+        ])
+        #expect(insideThink.stoppedOnEOS)
+        #expect(insideThink.tokens == [
+            FlintStructuralGrammar.thinkOpenId, 11, end,
+        ])
+        #expect(insideThink.rejectedMaskedId == nil)
+
+        let observationInThink = finish(on: observation, tools: false, prelude: [
+            FlintStructuralGrammar.thinkOpenId, 11,
+        ])
+        #expect(observationInThink.stoppedOnEOS)
+        #expect(observationInThink.tokens == [
+            FlintStructuralGrammar.thinkOpenId, 11, observation,
+        ])
+        #expect(observationInThink.rejectedMaskedId == nil)
+
         let userTurn = finish(on: user, tools: false, prelude: [
             FlintStructuralGrammar.thinkOpenId, 11, FlintStructuralGrammar.thinkCloseId, 12,
         ])
@@ -590,6 +631,23 @@ struct FlintChatDecodeTests {
         #expect(maskedDeveloper.rejectedMaskedId == developer)
         #expect(maskedDeveloper.tokens == [12])
         #expect(!maskedDeveloper.stoppedOnEOS)
+
+        // During think, developer is sampleable and is a checkpoint EOS.
+        var thinkGrammar: FlintStructuralGrammar? = FlintStructuralGrammar(allowsTools: false)
+        let hostStops = FlintChatDecode.generationFinishStopIds(
+            grammarOn: true, checkpoint: Set(FlintChatDecode.canonicalStopIds), tokenizerEOS: nil)
+        let thinkScript = [FlintStructuralGrammar.thinkOpenId, developer, 99]
+        var thinkIndex = 0
+        let thinkDeveloper = FlintChatDecode.acceptFilteredPacket(
+            grammar: &thinkGrammar, stopIds: hostStops
+        ) { _ in
+            let next = thinkScript[thinkIndex]
+            thinkIndex += 1
+            return next
+        }
+        #expect(thinkDeveloper.stoppedOnEOS)
+        #expect(thinkDeveloper.tokens == [FlintStructuralGrammar.thinkOpenId, developer])
+        #expect(thinkDeveloper.rejectedMaskedId == nil)
     }
 
     @Test("grammar mask drops a second think below the argmax")

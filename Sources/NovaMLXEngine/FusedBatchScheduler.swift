@@ -376,6 +376,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     private var flintKVTokens: [String: [Int]] = [:]
     private var flintKV: [String: [KVCache]] = [:]
     private var flintMetrics: [UUID: (cached: Int, common: Int)] = [:]
+    /// One resident-route line per Flint sequence.
+    private var flintRouteLogged: Set<UUID> = []
 
     /// `prepare_prefix` after a finished Flint generation. Short outputs never
     /// schedule. A cancel inside a chunk leaves the last committed cache.
@@ -1832,6 +1834,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             usesGrammar: false,
                             usesStructuralGrammar: grammarOn))
                     : .singleStep
+                if isFlint, flintRouteLogged.insert(seq.id).inserted {
+                    NovaMLXLog.info(
+                        "[Flint] resident route \(flintRoute) grammar=\(grammarOn) temp=\(flintTemperature) topP=\(flintTopP) topK=\(flintTopK) minP=\(flintMinP) freq=\(freqPenForRoute) rep=\(flintRepetition) presence=\(flintPresence) logprobs=\(wantLogprobs) batch=\(active.count)")
+                }
                 // Greedy must stay step-by-step: batch verify KV vs stepwise can
                 // flip near-tie argmax (max |Δ|~0.5), breaking lossless compares.
                 let draftTokens = (
@@ -1977,7 +1983,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         }
                         specResults.append(SpecDecodeResult(
                             acceptedTokens: [tid], draftAccepted: 0, draftProposed: 0, sequenceId: seq.id,
-                            logprobs: decodedLogprobs
+                            logprobs: decodedLogprobs,
+                            // A filtered route that produced no packet id still
+                            // belongs to that path. singleTokens stays the
+                            // single-step route only.
+                            fromResidentPacket: flintRoute == .filtered
                         ))
                     }
                 } else {
@@ -2406,6 +2416,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // Only release budget if WE finished the sequence in this decode step.
                 // Preempt/abort paths release budget themselves; skip to avoid double-release.
                 guard seq._finishedByDecodeStep else { continue }
+                flintRouteLogged.remove(seq.id)
                 if container.identifier.family == .flint, let start = seq.decodeWindowStart {
                     let seconds = Date().timeIntervalSince(start)
                     if let line = FlintChatDecode.line(
