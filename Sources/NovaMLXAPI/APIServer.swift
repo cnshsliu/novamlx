@@ -964,7 +964,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         coordinator: coordinator,
                         responseModelOverride: modelfileName,
                         httpRequest: request,
-                        toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
+                        toolsJSON: FlintOrderedJSON.toolsJSON(in: Data(buffer: body))
                     )
                 } else {
                     response = try await Self.handleChat(
@@ -974,7 +974,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         cfg: cfg, clientType: clientType,
                         responseModelOverride: modelfileName,
                         httpRequest: request,
-                        toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
+                        toolsJSON: FlintOrderedJSON.toolsJSON(in: Data(buffer: body))
                     )
                     Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
                 }
@@ -1015,7 +1015,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         cfg: cfg, clientType: anthropicClientType,
                         coordinator: coordinator,
                         httpRequest: httpRequest,
-                        toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
+                        toolsJSON: FlintOrderedJSON.toolsJSON(in: Data(buffer: body))
                     )
                     if case .justLoaded(let ms) = anthropicLoadOutcome {
                         streamResp.headers[.init("X-Model-Cold-Load")!] = "true"
@@ -1058,7 +1058,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         serverConfig: cfg.enforceToolSchemas),
                     toolChoice: flintToolChoice(anthropicReq.toolChoice),
                     flintGrammar: nil,
-                    toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
+                    toolsJSON: FlintOrderedJSON.toolsJSON(in: Data(buffer: body))
                 )
 
                 CurrentInferenceModel.shared.modelID = request.model
