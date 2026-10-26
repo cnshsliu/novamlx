@@ -122,6 +122,12 @@ public final class ModelFamilyRegistry: @unchecked Sendable {
             recommendedContextLength: 16384,
             repeatLastN: 16
         ),
+        // Official Recursive `Sampling` / Flint card when generation_config.json
+        // does not set the field: temperature 1.0, top_p 0.95, top_k 20.
+        // A present generation_config value still wins (see MLXEngine load).
+        .flint: ModelFamilyOptimization(
+            samplingDefaults: FamilySamplingDefaults(temperature: 1.0, topP: 0.95, topK: 20)
+        ),
     ]
 
     private static let architectureMapping: [String: ModelFamily] = [

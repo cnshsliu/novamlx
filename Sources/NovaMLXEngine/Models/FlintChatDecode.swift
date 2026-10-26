@@ -563,17 +563,30 @@ enum FlintChatDecode {
 
     // MARK: - Structural grammar install
 
+    /// Official `rec` `validate_request`: with flint grammar on (the default),
+    /// a custom `stop` is a 400, not a silent switch to `ThinkReentryGuard`.
+    /// Another constraint (JSON schema, regex, GBNF, JSON mode) turns the
+    /// flint grammar off, so a custom stop stays allowed.
+    /// Empty lists are not a custom stop.
+    static func customStopConflict(stop: [String]?, hasRequestConstraint: Bool) -> String? {
+        guard !hasRequestConstraint else { return nil }
+        guard let stop, stop.contains(where: { !$0.isEmpty }) else { return nil }
+        return "Flint grammar cannot be combined with custom stop strings"
+    }
+
     /// Default Flint chat/agent grammar. Off when the request already has a
-    /// constraint (`json_schema`, regex, GBNF, JSON mode) or a custom `stop`
-    /// list — official rec refuses to combine flint grammar with custom stops.
-    /// The think-reentry guard covers those requests.
+    /// constraint (`json_schema`, regex, GBNF, JSON mode). A custom `stop`
+    /// also leaves grammar off: `FlintAlignment.prepareMessages` rejects that
+    /// request before generation (`customStopConflict`). This nil is the
+    /// backstop so a missed rejection cannot run grammar and a custom stop
+    /// together. The think-reentry guard covers constraint requests.
     static func structuralGrammar(
         tools: [[String: Any]]?,
         stop: [String]?,
         hasRequestConstraint: Bool
     ) -> FlintStructuralGrammar? {
         if hasRequestConstraint { return nil }
-        if let stop, stop.contains(where: { !$0.isEmpty }) { return nil }
+        if customStopConflict(stop: stop, hasRequestConstraint: false) != nil { return nil }
         return FlintStructuralGrammar(allowsTools: !(tools ?? []).isEmpty)
     }
 

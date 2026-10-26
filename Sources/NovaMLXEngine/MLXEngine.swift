@@ -1322,6 +1322,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     func buildUserInput(request: InferenceRequest, hasImages: Bool) async throws -> UserInput {
+        let promptMessages = try promptMessages(for: request)
         let toolSpecs: [[String: any Sendable]]? = request.tools?.map { tool in
             tool.mapValues { toSendable($0) }
         }
@@ -1344,7 +1345,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         if hasImages {
-            let chatMessages = request.messages.compactMap { msg -> Chat.Message? in
+            let chatMessages = promptMessages.compactMap { msg -> Chat.Message? in
                 let images: [UserInput.Image] = (msg.images ?? []).compactMap { urlString -> UserInput.Image? in
                     if urlString.hasPrefix("data:") {
                         let parts = urlString.split(separator: ",", maxSplits: 1)
@@ -1364,7 +1365,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
             return UserInput(prompt: .chat(chatMessages), tools: toolSpecs, additionalContext: additionalContext)
         } else {
-            let messages: [Message] = request.messages.map { msg in
+            let messages: [Message] = promptMessages.map { msg in
                 var m: Message = ["role": msg.role.rawValue, "content": msg.content ?? ""]
                 if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
                 if let name = msg.name { m["name"] = name }
@@ -1630,17 +1631,55 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
     /// Estimate total tokens for a request (prompt + max output).
     /// Prompt tokens are already in activeMemory, so we only budget for output tokens.
+    ///
+    /// Flint with an omitted `max_tokens` later fills the remaining context
+    /// (`outputTokenBudget`). This estimate stays on the ModelConfig default
+    /// so admission does not reserve a full window up front. `preflightCheck`
+    /// still sees the resolved budget and can refuse it.
     public func estimateRequestTokens(modelId: String, request: InferenceRequest) -> Int {
         let maxTokens = request.maxTokens ?? getContainer(for: modelId)?.config.maxTokens ?? 4096
         let promptGuess = request.messages.reduce(0) { $0 + ($1.content?.count ?? 0) } / 4
         return maxTokens + promptGuess
     }
 
+    /// Flint with an omitted `max_tokens` fills the remaining context window
+    /// (`rec` `server.py`). Other families keep ModelConfig (normally 2048).
+    func outputTokenBudget(
+        request: InferenceRequest,
+        config: ModelConfig,
+        promptTokens: Int
+    ) throws -> Int {
+        let contextLength = settingsProvider?(request.model)?.maxContextWindow ?? config.contextLength
+        let budget = try FlintAlignment.outputTokenBudget(
+            family: config.identifier.family,
+            requested: request.maxTokens,
+            promptTokens: promptTokens,
+            contextLength: contextLength,
+            fallback: config.maxTokens
+        )
+        if config.identifier.family == .flint, request.maxTokens == nil {
+            NovaMLXLog.info(
+                "[Flint] omitted max_tokens fills remaining context \(budget) (prompt \(promptTokens), window \(contextLength))"
+            )
+        }
+        return budget
+    }
+
+    /// Messages the chat template should see. Flint sanitizes role/think
+    /// injections and rejects a custom stop while structural grammar is on.
+    func promptMessages(for request: InferenceRequest) throws -> [ChatMessage] {
+        guard getContainer(for: request.model)?.identifier.family == .flint else {
+            return request.messages
+        }
+        return try FlintAlignment.prepareMessages(request: request)
+    }
+
     func buildGenerateParameters(
-        request: InferenceRequest, config: ModelConfig, settings: ModelSettings? = nil
+        request: InferenceRequest, config: ModelConfig, settings: ModelSettings? = nil,
+        outputBudget: Int? = nil
     ) -> GenerateParameters {
         let temperature = Float(request.temperature ?? config.temperature)
-        let maxTokens = request.maxTokens ?? config.maxTokens
+        let maxTokens = outputBudget ?? request.maxTokens ?? config.maxTokens
         let topP = Float(request.topP ?? config.topP)
         let topK = request.topK ?? config.topK
         let minP = request.minP ?? config.minP
@@ -2402,7 +2441,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         NovaMLXLog.info("[Engine] Encoded \(promptTokenCount) tokens via chat template")
         NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Starting generation for \(request.model)")
 
-        let maxTokens = request.maxTokens ?? container.config.maxTokens
+        let maxTokens = try outputTokenBudget(
+            request: request, config: container.config, promptTokens: Int(promptTokenCount))
 
         // Context window check with accurate token count (after chat template)
         let genSettings = settingsProvider?(request.model)
@@ -2415,7 +2455,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         try await preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
-        let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
+        let parameters = buildGenerateParameters(
+            request: request, config: container.config, settings: settingsProvider?(request.model),
+            outputBudget: maxTokens)
 
         // Fetch model early so we can probe cache type for RotatingKVCache.
         // Build processor (repetition penalty only)
@@ -3134,9 +3176,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let input = try await mlxContainer.prepare(input: userInput)
 
-                    let parameters = self.buildGenerateParameters(request: request, config: container.config, settings: self.settingsProvider?(request.model))
                     let promptTokenCount = input.text.tokens.size
-                    let maxTokens = request.maxTokens ?? container.config.maxTokens
+                    let maxTokens = try self.outputTokenBudget(
+                        request: request, config: container.config, promptTokens: Int(promptTokenCount))
+                    let parameters = self.buildGenerateParameters(
+                        request: request, config: container.config,
+                        settings: self.settingsProvider?(request.model),
+                        outputBudget: maxTokens)
 
                     // Context window check with accurate token count (after chat template)
                     let streamSettings = self.settingsProvider?(request.model)
@@ -3902,15 +3948,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             throw NovaMLXError.modelNotFound(request.model)
         }
 
-        let lastUserMessage = request.messages.last(where: { $0.role == .user })?.content ?? ""
-        let systemPrompt = request.messages.first(where: { $0.role == .system })?.content
+        let sessionMessages = try promptMessages(for: request)
+        let lastUserMessage = sessionMessages.last(where: { $0.role == .user })?.content ?? ""
+        let systemPrompt = sessionMessages.first(where: { $0.role == .system })?.content
 
-        let estimatedPromptTokens = tokenizeMessages(request.messages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
-        let maxTokens = request.maxTokens ?? container.config.maxTokens
+        let estimatedPromptTokens = tokenizeMessages(sessionMessages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
+        let maxTokens = try outputTokenBudget(
+            request: request, config: container.config, promptTokens: estimatedPromptTokens)
         try await preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
         let sessionParams = buildGenerateParameters(
-            request: request, config: container.config, settings: settingsProvider?(request.model))
+            request: request, config: container.config, settings: settingsProvider?(request.model),
+            outputBudget: maxTokens)
         var sessionContext: [String: any Sendable] = [:]
         sessionContext["enable_thinking"] = request.enableThinking ?? false
         sessionContext["preserve_thinking"] = request.preserveThinking ?? false
@@ -4006,16 +4055,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         throw NovaMLXError.modelNotFound(request.model)
                     }
 
-                    let lastUserMessage = request.messages.last(where: { $0.role == .user })?.content ?? ""
-                    let systemPrompt = request.messages.first(where: { $0.role == .system })?.content
+                    let sessionMessages = try engine.promptMessages(for: request)
+                    let lastUserMessage = sessionMessages.last(where: { $0.role == .user })?.content ?? ""
+                    let systemPrompt = sessionMessages.first(where: { $0.role == .system })?.content
 
-                    let estimatedPromptTokens = engine.tokenizeMessages(request.messages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
-                    let maxTokens = request.maxTokens ?? container.config.maxTokens
+                    let estimatedPromptTokens = engine.tokenizeMessages(sessionMessages, tokenizer: container.tokenizer ?? Tokenizer(encode: { _ in [] }, decode: { _ in "" }, eosToken: nil, eosTokenId: nil)).count
+                    let maxTokens = try engine.outputTokenBudget(
+                        request: request, config: container.config, promptTokens: estimatedPromptTokens)
                     try await engine.preflightCheck(modelId: request.model, promptTokens: estimatedPromptTokens, maxTokens: maxTokens)
 
                     let sessionParams = engine.buildGenerateParameters(
                         request: request, config: container.config,
-                        settings: engine.settingsProvider?(request.model))
+                        settings: engine.settingsProvider?(request.model),
+                        outputBudget: maxTokens)
                     var sessionContext: [String: any Sendable] = [:]
                     sessionContext["enable_thinking"] = request.enableThinking ?? false
                     sessionContext["preserve_thinking"] = request.preserveThinking ?? false
@@ -4217,7 +4269,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // as the Jinja.TemplateException crash on json_object / json_schema
         // requests that included their own system message.
         let jsonInstruction = "You must respond with valid JSON only. Do not include any text, explanation, or markdown outside the JSON object."
-        var systemMessages = request.messages.filter { $0.role == .system }
+        let sourceMessages = try promptMessages(for: request)
+        var systemMessages = sourceMessages.filter { $0.role == .system }
         if request.responseFormat == .jsonObject {
             if var first = systemMessages.first {
                 let existing = first.content ?? ""
@@ -4232,7 +4285,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 systemMessages.append(ChatMessage(role: .system, content: jsonInstruction))
             }
         }
-        let allMessages = systemMessages + request.messages.filter { $0.role != .system }
+        let allMessages = systemMessages + sourceMessages.filter { $0.role != .system }
         let mappedMessages: [Message] = allMessages.map { msg in
             // Mirror the rich mapping from `buildUserInput` so tool-call assistant
             // messages and tool-result messages preserve their `tool_calls` /
@@ -4272,7 +4325,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let input = try await mlxContainer.prepare(input: userInput)
 
         let promptTokenCount = input.text.tokens.size
-        let maxTokens = request.maxTokens ?? container.config.maxTokens
+        let maxTokens = try outputTokenBudget(
+            request: request, config: container.config, promptTokens: Int(promptTokenCount))
         try await preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
         // Use parameters.sampler() so temperature=0 returns ArgmaxSampler.
@@ -4284,7 +4338,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let iterator = try TokenIterator(
             input: input, model: model.value,
             processor: processor, sampler: sampler,
-            maxTokens: request.maxTokens ?? container.config.maxTokens
+            maxTokens: maxTokens
         )
 
         let ticketBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
@@ -4293,7 +4347,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             modelConfiguration: modelConfig,
             tokenizer: mlxTokenizer,
             iterator: iterator,
-            wiredMemoryTicket: createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: ticketBytesPerToken)
+            wiredMemoryTicket: createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: ticketBytesPerToken)
         )
 
         let startTime = Date()
@@ -4425,7 +4479,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     // 'System message must be at the beginning.' on requests
                     // that already carried their own system message.
                     let jsonInstruction = "You must respond with valid JSON only. Do not include any text, explanation, or markdown outside the JSON object."
-                    var systemMessages = request.messages.filter { $0.role == .system }
+                    let sourceMessages = try engine.promptMessages(for: request)
+                    var systemMessages = sourceMessages.filter { $0.role == .system }
                     if request.responseFormat == .jsonObject {
                         if var first = systemMessages.first {
                             let existing = first.content ?? ""
@@ -4440,7 +4495,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             systemMessages.append(ChatMessage(role: .system, content: jsonInstruction))
                         }
                     }
-                    let allMessages = systemMessages + request.messages.filter { $0.role != .system }
+                    let allMessages = systemMessages + sourceMessages.filter { $0.role != .system }
                     let mappedMessages: [Message] = allMessages.map { msg in
                         // See generateWithProcessor for rationale — preserve
                         // tool_calls / tool_call_id / name across the JSON-mode
@@ -4470,7 +4525,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let userInput = UserInput(prompt: .messages(mappedMessages), tools: toolSpecs, additionalContext: additionalContext)
                     let input = try await mlxContainer.prepare(input: userInput)
                     let promptTokenCount = input.text.tokens.size
-                    let maxTokens = request.maxTokens ?? container.config.maxTokens
+                    let maxTokens = try engine.outputTokenBudget(
+                        request: request, config: container.config, promptTokens: Int(promptTokenCount))
                     try await engine.preflightCheck(modelId: request.model, promptTokens: Int(promptTokenCount), maxTokens: maxTokens)
 
                     let sampler = parameters.sampler()
@@ -4481,7 +4537,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let iterator = try TokenIterator(
                         input: input, model: model.value,
                         processor: processor, sampler: sampler,
-                        maxTokens: request.maxTokens ?? container.config.maxTokens
+                        maxTokens: maxTokens
                     )
 
                     let sessionBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
@@ -4490,7 +4546,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         modelConfiguration: modelConfig,
                         tokenizer: mlxTokenizer,
                         iterator: iterator,
-                        wiredMemoryTicket: engine.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: request.maxTokens ?? container.config.maxTokens, bytesPerToken: sessionBytesPerToken)
+                        wiredMemoryTicket: engine.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: sessionBytesPerToken)
                     )
 
                     let startTime = Date()

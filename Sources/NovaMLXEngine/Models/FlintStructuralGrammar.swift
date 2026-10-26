@@ -10,9 +10,10 @@ import MLXLMCommon
 /// The turn still finishes on the checkpoint multi-EOS set.
 ///
 /// `FlintChatDecode.ThinkReentryGuard` is the fallback when this grammar is
-/// not installed (custom `stop` strings, or another request constraint such
-/// as JSON schema). It is not the control that blocks a second `<think>` on
-/// the default Flint chat path.
+/// not installed (another request constraint such as JSON schema). A custom
+/// `stop` does not select the guard: official `rec` rejects that request
+/// while flint grammar is on. The guard is not the control that blocks a
+/// second `<think>` on the default Flint chat path.
 public struct FlintStructuralGrammar: Equatable, Sendable {
     public enum Phase: Equatable, Sendable {
         case start
