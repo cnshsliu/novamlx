@@ -344,8 +344,13 @@ struct FlintChatDecodeTests {
                 == Set(FlintChatDecode.canonicalStopIds))
     }
 
-    @Test("custom stop or another constraint leaves the think guard in charge")
+    @Test("custom stop disables grammar as a backstop; the request itself is rejected")
     func testStructuralGrammarOptOut() {
+        #expect(
+            FlintChatDecode.customStopConflict(stop: ["END"], hasRequestConstraint: false)
+                == "Flint grammar cannot be combined with custom stop strings")
+        #expect(FlintChatDecode.customStopConflict(stop: [], hasRequestConstraint: false) == nil)
+        #expect(FlintChatDecode.customStopConflict(stop: ["END"], hasRequestConstraint: true) == nil)
         #expect(FlintChatDecode.structuralGrammar(
             tools: nil, stop: ["END"], hasRequestConstraint: false) == nil)
         #expect(FlintChatDecode.structuralGrammar(

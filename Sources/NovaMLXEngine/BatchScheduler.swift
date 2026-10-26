@@ -108,7 +108,8 @@ public final class BatchScheduler: @unchecked Sendable {
         let userInput = try await engine.buildUserInput(request: req.request, hasImages: hasImages)
         let input = try await mlxContainer.prepare(input: userInput)
         let promptTokenCount = input.text.tokens.size
-        let maxTokens = req.request.maxTokens ?? container.config.maxTokens
+        let maxTokens = try engine.outputTokenBudget(
+            request: req.request, config: container.config, promptTokens: Int(promptTokenCount))
 
         let cachesBox = MutableSendableBox<[KVCache]?>(nil)
         let prefillParams: GenerateParameters = {

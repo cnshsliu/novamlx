@@ -13,9 +13,9 @@ People who want a local agent/coding model with reasoning and tool calls, and st
 | Feature | Details |
 |---------|---------|
 | **Architecture** | 49 layers: GQA (32q/4kv, head 128) + per-head QK RMSNorm + learned attention sinks; 35 sliding-window (513) + RoPE layers / 14 full-attention NoPE layers; sigmoid-routed MoE (6/256 experts + an ungated shared expert); the first 2 layers are dense |
-| **Capabilities** | `<think>` reasoning (`reasoning_content` on its own channel), multi-turn tool calls (GLM4 dialect normalized to standard OpenAI tool_calls), 256K context (sliding-window KV) |
+| **Capabilities** | `<think>` reasoning (`reasoning_content` on its own channel), multi-turn tool calls (Flint `<tool_call>` / `<arg_key>` dialect, arguments typed from the tool schema, OpenAI `tool_calls` on the wire), 256K context (sliding-window KV) |
 | **API** | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`, streaming and non-streaming; eos = `<|end_of_text|>` and role-header tokens (automatic stop and scrub, no leak) |
-| **Decoding** | Flint chat uses the official rec flint structural grammar: one optional `<think>…</think>`, then answer or tool-call text whose logits mask forbids another think tag and the protocol markers, then stop on the checkpoint multi-EOS set. `max_tokens` is only a cap. The older think-reentry guard runs when that grammar is off |
+| **Decoding** | Flint chat uses the official rec flint structural grammar: one optional `<think>…</think>`, then answer or tool-call text whose logits mask forbids another think tag and the protocol markers, then stop on the checkpoint multi-EOS set. An omitted `max_tokens` fills the remaining context (`rec` `server.py`); an explicit value is only a cap. A custom `stop` while that grammar is on is HTTP 400. The older think-reentry guard runs when grammar is off (JSON schema, regex, GBNF, JSON mode) |
 | **Scheduling** | Default HTTP chat goes through FusedBatchScheduler (including tool parsing). Structural grammar stays on, and the resident packet stays on with it: grammar, presence, and temperature / top-p / top-k are applied before each acceptance (`filtered`, width 16). Temperature 0 with no grammar and no presence still uses the device argmax packet, also width 16. Frequency penalty, repetition penalty, min-p, logprobs, and a second sequence stay on the single-step path |
 | **Quantization** | Official `RecursiveSI/flint-int4` (~22.6 GB; the community OptiQ-4bit build was used for early verification and is no longer the default) |
 | **Performance** | Official INT4 runs on the rec megakernel. MacMaxPro M4 Max, `RecursiveSI/flint-int4`, packet width 16: LOOP-RESULT **226.8 tok/s**, SINGLE-RESULT **190.7 tok/s**, FLINT-CHAT **217.3 tok/s**. Window, comparisons, and the bar chart are in [Speed](#speed). |
@@ -33,7 +33,7 @@ curl -X POST localhost:6590/v1/chat/completions \
 # → reasoning_content (step-by-step reasoning) + content (the answer), two channels
 ```
 
-Recommended sampling: temperature 1.0, top-p 0.95, top-k 20 (the official recommendation). Use temperature 0 for an exact reproduction.
+Recommended sampling: temperature 1.0, top-p 0.95, top-k 20. Those are the official `rec` `Sampling` defaults, and Nova applies them for Flint when `generation_config.json` omits the field. A value in that file still wins. Use temperature 0 for an exact reproduction.
 
 ## Speed
 
@@ -120,8 +120,12 @@ curl -X POST localhost:6590/v1/chat/completions \
 ## Limits / notes
 
 - With `thinking_budget` omitted, Flint stops on `max_tokens` (and the usual eos / role-header stops). Pass `thinking_budget` to opt into a close-marker cap. Other thinking families still receive an automatic cap when the field is omitted.
-- Default Flint chat installs the structural grammar and the filtered resident packet (width 16). A second `<think>` is masked before that packet accepts a token. The think-reentry guard is the fallback when grammar is off. `max_tokens` (including the demo default) only caps length.
-- Tool calls are parsed on the fused path. Flint always has the GLM4 parser attached. A packet whose new text contains `<` (a tool marker, a think tag, or half a tag) is still decoded token by token. A greedy packet with no `<` is decoded once, then handed to the same parser.
+- An omitted `max_tokens` on Flint fills `context window − prompt`, matching `rec` `server.py` `handle_completion`. There is no second cap at 1024 or 2048. An explicit `max_tokens`, including one saved on the model and `/demo/chat`'s 2048, stays as sent. The memory preflight still applies to that budget and can refuse a full-window reservation. Other families keep the ModelConfig default (2048) when the field is omitted.
+- A custom `stop` while Flint structural grammar is on is rejected (`Flint grammar cannot be combined with custom stop strings`, HTTP 400), the same sentence as `rec`. Grammar stays off for JSON schema, regex, GBNF, and JSON mode, and a custom stop is allowed there; `ThinkReentryGuard` covers those requests. An empty stop list is not a custom stop.
+- Before the chat template, Flint user, system, and tool text drops NUL and `<think>` tags and escapes role markers (`<|user|>` and the other headers), matching `rec` `normalize_messages`. Assistant text is left alone. History tool-call arguments must be a JSON object; blank becomes `{}`.
+- Default Flint chat installs the structural grammar and the filtered resident packet (width 16). A second `<think>` is masked before that packet accepts a token.
+- Fused Flint tool calls follow `rec` `parse_tool_call`: string schema values stay raw, other values are JSON, and a seed (request or model config) produces the same call ids as `seeded_tool_parser`. No seed keeps random `call_` ids. Official `rec` always seeds (default 0); Nova does not invent seed 0. Session, JSON, regex, and GBNF turns still use the stock parser and random ids. `enforce_tool_schemas` (xgrammar on `strict: false` tools) is not implemented.
+- A packet whose new text contains `<` (a tool marker, a think tag, or half a tag) is still decoded token by token. A greedy packet with no `<` is decoded once, then handed to the parser.
 - Text-to-3D and similar paths are separate from Flint. Flint is a text agent model.
 - TurboQuant KV cache drops attention sinks (the same tradeoff as GPT-OSS) and is off by default.
 - 190.7 / 226.8 in [Speed](#speed) are `FlintSpeedTests` rec decode. FLINT-CHAT **217.3** is the chat decode window, below the same run's LOOP-RESULT **223.3**. The official 196.8 and llama.cpp ~89.7 are labeled-source comparisons, not a re-run this time. 1.8.0's 181.6 / 214.7 (packet=8) is the earlier record.

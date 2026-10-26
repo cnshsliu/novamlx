@@ -130,9 +130,63 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// pre-tool-parsing behavior.
     final class ToolStreamState: @unchecked Sendable {
         let processor: ToolCallProcessor
+        /// Flint fused path. Types arguments from the tool schema and
+        /// derives call ids from the seed (`rec` `chat.py`). Nil keeps the
+        /// stock processor for every other family.
+        var flintExtractor: FlintToolCallExtractor?
         var emittedToolCall = false
         init(processor: ToolCallProcessor) {
             self.processor = processor
+        }
+
+        enum Piece {
+            case text(String)
+            case call(ToolCallResult)
+        }
+
+        func feedPieces(_ text: String) -> [Piece] {
+            if let flintExtractor {
+                return flintExtractor.feed(text).map(Self.piece)
+            }
+            var pieces: [Piece] = []
+            for out in processor.processChunkOutputs(text) {
+                switch out {
+                case .response(let text):
+                    pieces.append(.text(text))
+                case .toolCall(let tc):
+                    pieces.append(.call(ActiveStreamSequence.toolCallResult(tc)))
+                case .rejectedToolCall:
+                    break
+                }
+            }
+            return pieces
+        }
+
+        func finishPieces() -> [Piece] {
+            if let flintExtractor {
+                return flintExtractor.finish().map(Self.piece)
+            }
+            var pieces: [Piece] = []
+            for out in processor.processEOSOutputs() {
+                switch out {
+                case .response(let text):
+                    pieces.append(.text(text))
+                case .toolCall(let tc):
+                    pieces.append(.call(ActiveStreamSequence.toolCallResult(tc)))
+                case .rejectedToolCall:
+                    break
+                }
+            }
+            return pieces
+        }
+
+        private static func piece(_ event: FlintToolCallExtractor.Event) -> Piece {
+            switch event {
+            case .response(let text):
+                return .text(text)
+            case .tool(let name, let arguments, let id):
+                return .call(ToolCallResult(id: id, functionName: name, arguments: arguments))
+            }
         }
     }
 
@@ -157,19 +211,17 @@ struct ActiveStreamSequence: @unchecked Sendable {
             return
         }
         var first = true
-        for out in state.processor.processChunkOutputs(decoded) {
-            switch out {
-            case .response(let text):
+        for piece in state.feedPieces(decoded) {
+            switch piece {
+            case .text(let text):
                 if !text.isEmpty {
                     safeYield(Token(id: 0, text: text,
                         logprob: first ? logprob?.0 : nil,
                         topLogprobs: first ? logprob?.1 : nil))
                 }
-            case .toolCall(let tc):
+            case .call(let call):
                 state.emittedToolCall = true
-                safeYield(Token(id: 0, text: "", toolCall: Self.toolCallResult(tc)))
-            case .rejectedToolCall:
-                break
+                safeYield(Token(id: 0, text: "", toolCall: call))
             }
             first = false
         }
@@ -178,15 +230,13 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// Flush buffered text / pending calls at end of stream.
     func drainToolProcessor() {
         guard let state = toolStream else { return }
-        for out in state.processor.processEOSOutputs() {
-            switch out {
-            case .response(let text):
+        for piece in state.finishPieces() {
+            switch piece {
+            case .text(let text):
                 if !text.isEmpty { safeYield(Token(id: 0, text: text)) }
-            case .toolCall(let tc):
+            case .call(let call):
                 state.emittedToolCall = true
-                safeYield(Token(id: 0, text: "", toolCall: Self.toolCallResult(tc)))
-            case .rejectedToolCall:
-                break
+                safeYield(Token(id: 0, text: "", toolCall: call))
             }
         }
     }
@@ -703,22 +753,62 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             return
         }
         var first = true
-        for out in state.processor.processChunkOutputs(text) {
-            switch out {
-            case .response(let t):
+        for piece in state.feedPieces(text) {
+            switch piece {
+            case .text(let t):
                 if !t.isEmpty {
                     continuation.yield(Token(id: 0, text: t,
                         logprob: first ? logprob?.0 : nil,
                         topLogprobs: first ? logprob?.1 : nil))
                 }
-            case .toolCall(let tc):
+            case .call(let call):
                 state.emittedToolCall = true
-                continuation.yield(Token(id: 0, text: "", toolCall: ActiveStreamSequence.toolCallResult(tc)))
-            case .rejectedToolCall:
-                break
+                continuation.yield(Token(id: 0, text: "", toolCall: call))
             }
             first = false
         }
+    }
+
+    /// Flush a prefill-finished stream. The sequence is not entered, so the
+    /// instance `drainToolProcessor` never runs.
+    nonisolated static func drainProcessed(
+        _ state: ActiveStreamSequence.ToolStreamState?,
+        continuation: AsyncThrowingStream<Token, Error>.Continuation
+    ) {
+        guard let state else { return }
+        for piece in state.finishPieces() {
+            switch piece {
+            case .text(let text):
+                if !text.isEmpty { continuation.yield(Token(id: 0, text: text)) }
+            case .call(let call):
+                state.emittedToolCall = true
+                continuation.yield(Token(id: 0, text: "", toolCall: call))
+            }
+        }
+    }
+
+    /// Install the `rec` tool parser on a Flint stream. Other families keep
+    /// the stock processor. A nil seed keeps random `call_` ids; a request
+    /// or model-config seed hashes the same inputs as `seeded_tool_parser`.
+    nonisolated static func armFlintExtractor(
+        _ state: ActiveStreamSequence.ToolStreamState?,
+        family: ModelFamily,
+        request: InferenceRequest,
+        config: ModelConfig,
+        promptTokens: [Int],
+        maxTokens: Int
+    ) {
+        guard family == .flint, let state else { return }
+        let identity = FlintAlignment.CallIdentity(
+            seed: request.seed ?? config.seed,
+            temperature: request.temperature ?? config.temperature,
+            topP: request.topP ?? config.topP,
+            topK: request.topK ?? config.topK,
+            presencePenalty: Double(request.presencePenalty ?? config.presencePenalty),
+            maxTokens: maxTokens,
+            promptTokens: promptTokens
+        )
+        state.flintExtractor = FlintToolCallExtractor(tools: request.tools, identity: identity)
     }
 
     private func prefillSequence(
@@ -735,7 +825,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let userInput = try await engine.buildUserInput(request: request, hasImages: hasImages)
         let input = try await mlxContainer.prepare(input: userInput)
         let promptTokenCount = input.text.tokens.size
-        let maxTokens = request.maxTokens ?? container.config.maxTokens
+        let maxTokens = try engine.outputTokenBudget(
+            request: request, config: container.config, promptTokens: Int(promptTokenCount))
 
         // Context window check with accurate token count (includes chat template)
         let settings = engine.settingsProvider?(request.model)
@@ -755,7 +846,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         let parameters = engine.buildGenerateParameters(
             request: request, config: container.config,
-            settings: engine.settingsProvider?(request.model)
+            settings: engine.settingsProvider?(request.model),
+            outputBudget: maxTokens
         )
 
         // --- Memory feedback: update budget with actual token count ---
@@ -963,6 +1055,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 yield: eos ? "" : scrubbedFirstToken, isEOS: eos, thinkReentry: false)
         }
         let finishFirst = firstDecision.isEOS || firstDecision.thinkReentry
+        Self.armFlintExtractor(
+            toolStream, family: container.identifier.family, request: request,
+            config: container.config, promptTokens: allTokens, maxTokens: maxTokens)
         if !firstDecision.yield.isEmpty {
             Self.emitProcessed(toolStream, firstDecision.yield,
                 continuation: continuation,
@@ -972,6 +1067,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let completionCount: Int
         let isFinished: Bool
         if finishFirst {
+            Self.drainProcessed(toolStream, continuation: continuation)
             continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount))
             continuation.finish()
             completionCount = firstDecision.yield.isEmpty ? 0 : 1
@@ -1121,12 +1217,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             emitText = decision.yield
             finishFirst = decision.isEOS || decision.thinkReentry
         }
+        Self.armFlintExtractor(
+            toolStream, family: container.identifier.family, request: request,
+            config: container.config, promptTokens: allTokens, maxTokens: maxTokens)
         if !emitText.isEmpty {
             Self.emitProcessed(toolStream, emitText,
                 continuation: continuation,
                 logprob: prefixLogprobs.map { ($0.logprob, $0.topLogprobs) })
         }
         if finishFirst {
+            Self.drainProcessed(toolStream, continuation: continuation)
             continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount))
             continuation.finish()
         }
