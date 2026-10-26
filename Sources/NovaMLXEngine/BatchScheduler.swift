@@ -255,14 +255,14 @@ public final class BatchScheduler: @unchecked Sendable {
 
             let eosId = container.tokenizer?.eosTokenId
             let isFlint = container.identifier.family == .flint
-            let flintStopIds: Set<Int> = isFlint
-                ? FlintChatDecode.generationFinishStopIds(
-                    grammarOn: seq.flintGrammar != nil,
-                    checkpoint: container.flintFinishStopIds,
-                    tokenizerEOS: eosId)
-                : []
 
             for (i, var seq) in active.enumerated() {
+                let flintStopIds: Set<Int> = isFlint
+                    ? FlintChatDecode.generationFinishStopIds(
+                        grammarOn: seq.flintGrammar != nil,
+                        checkpoint: container.flintFinishStopIds,
+                        tokenizerEOS: eosId)
+                    : []
                 var seqLogits = logits[i][0..., -1, 0...]
                 if let grammar = seq.flintGrammar {
                     seqLogits = FlintStructuralGrammar.suppress(

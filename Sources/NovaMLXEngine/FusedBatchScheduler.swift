@@ -2062,6 +2062,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             for (i, var seq) in updatedActive.enumerated() {
                 guard i < specResults.count else { break }
                 let result = specResults[i]
+                let isFlint = container.identifier.family == .flint
+                let flintStopIds: Set<Int> = isFlint
+                    ? FlintChatDecode.generationFinishStopIds(
+                        grammarOn: seq.flintGrammar != nil,
+                        checkpoint: container.flintFinishStopIds,
+                        tokenizerEOS: eosId)
+                    : []
 
                 // Record speculation stats and update N-gram cache.
                 if result.draftProposed > 0 {
