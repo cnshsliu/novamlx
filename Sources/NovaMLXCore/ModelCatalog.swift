@@ -90,6 +90,16 @@ public struct CatalogEntry: Codable, Sendable, Identifiable, Equatable {
         status = try c.decodeIfPresent(CatalogStatus.self, forKey: .status) ?? .verified
         addedAt = try c.decodeIfPresent(String.self, forKey: .addedAt)
     }
+
+    /// Family, quant, and the NovaMLX version that passed the manual test.
+    public var testedVersionLabel: String {
+        var parts = [family.rawValue]
+        if let quant, !quant.isEmpty { parts.append(quant) }
+        if let testedOn, !testedOn.isEmpty {
+            parts.append("NovaMLX \(testedOn)")
+        }
+        return parts.joined(separator: " · ")
+    }
 }
 
 public struct CatalogFile: Codable, Sendable, Equatable {

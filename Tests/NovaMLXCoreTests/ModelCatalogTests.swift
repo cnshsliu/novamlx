@@ -305,6 +305,33 @@ struct ModelCatalogTests {
         #expect(ModelCatalogPolicy.hubSearchQuery(forPattern: "mlx-community/Qwen3.8-*") == "Qwen3.8")
     }
 
+    @Test("Tested-weight version line names family, quant, and NovaMLX version")
+    func testedVersionLabel() {
+        let entry = CatalogEntry(
+            id: "mlx-community/Qwen3.8-27B-4bit",
+            url: "https://huggingface.co/mlx-community/Qwen3.8-27B-4bit",
+            name: "Qwen3.8-27B 4-bit",
+            category: .llm,
+            family: .qwen,
+            format: .mlx,
+            quant: "4bit",
+            testedOn: "1.2.0",
+            status: .verified
+        )
+        #expect(entry.testedVersionLabel == "qwen · 4bit · NovaMLX 1.2.0")
+
+        let untested = CatalogEntry(
+            id: "RecursiveSI/flint-int4",
+            url: "https://huggingface.co/RecursiveSI/flint-int4",
+            name: "Flint",
+            category: .llm,
+            family: .flint,
+            format: .mlx,
+            quant: "int4"
+        )
+        #expect(untested.testedVersionLabel == "flint · int4")
+    }
+
     @Test("Family glob allows every matching Hub id")
     func prefixAllowsFamily() {
         let family = CatalogEntry(

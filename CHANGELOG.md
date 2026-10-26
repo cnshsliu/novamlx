@@ -4,6 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Tested weights on Downloads** — the Downloads page lists every catalog entry with status `verified`: name, model version (family, quant, NovaMLX version that passed), and the exact weight id. One click downloads that weight.
+
 ## [1.8.1] - 2026-10-26
 
 **Headline: Flint packet width 16 — LOOP-RESULT 226.8 tok/s, FLINT-CHAT 217.3 tok/s.** MacMaxPro M4 Max, official `RecursiveSI/flint-int4`. #38 (`ef57be1`): greedy resident packet width **16**, PARITY match 16, LOOP-RESULT **226.8 tok/s** (kernel packet), SINGLE-RESULT **190.7 tok/s**. #39 (`313d92f`): FLINT-CHAT **217.3 tok/s** (`decodeTokens / wallDecodeSeconds`, prefill excluded; packetTokens=128, singleTokens=0). That same run's LOOP-RESULT was **223.3 tok/s** — 217.3 sits below the kernel line on that run; 226.8 vs 223.3 is run variance. Recursive's published Mac INT4 rec reference remains **196.8 tok/s** (1K context / 256 decoded tokens — a different window, not a re-run). llama.cpp on the same machine was ~89.7 tok/s in an earlier reference and was not re-run. The 1.8.0 packet=8 record (214.7) stays in the section below. Intro: [Flint](docs/features/flint.md).

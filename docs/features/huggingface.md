@@ -8,6 +8,7 @@
 
 | 功能 | 详情 |
 |------|------|
+| **已测试权重** | Downloads 页顶部列出目录里 `verified` 的条目：名称、模型版本（家族、量化、通过测试的 NovaMLX 版本）、测试用的权重 id。点一下下载这一份 |
 | **下载** | `POST /admin/api/hf/download`，`repo_id`，可选 `endpoint` |
 | **取消** | `POST /admin/api/hf/cancel`，按 task ID 取消飞行中的 `Task` |
 | **状态** | `GET /admin/api/hf/tasks`：分文件进度、速度、卡顿检测 |

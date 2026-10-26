@@ -94,14 +94,20 @@ struct DownloadsPageView: View {
                 VStack(spacing: 20) {
                     searchSection
 
+                    if !testedWeightModels.isEmpty {
+                        testedWeightsSection
+                    }
+
                     // Hub list after an Advanced / family-glob search. Empty Hub
                     // must not hide behind the verified catalog — that is what
                     // made "Allow unverified downloads" look like a no-op.
                     if hubSearchAttempted || !searchResults.isEmpty {
                         searchResultsSection
                     }
-                    if searchResults.isEmpty || !displayedCatalogModels.isEmpty {
-                        catalogModelsSection
+                    if !catalogCardModels.isEmpty || testedWeightModels.isEmpty {
+                        if searchResults.isEmpty || !displayedCatalogModels.isEmpty {
+                            catalogModelsSection
+                        }
                     }
 
                     if !activeOrFailed.isEmpty || isSearching {
@@ -324,6 +330,57 @@ struct DownloadsPageView: View {
         }
     }
 
+    // MARK: - Tested weights
+
+    private var testedWeightModels: [CatalogEntry] {
+        displayedCatalogModels.filter {
+            $0.status == .verified && !ModelCatalogPolicy.isIdPattern($0.id)
+        }
+    }
+
+    private var testedWeightsSection: some View {
+        let models = testedWeightModels
+        return VStack(alignment: .leading, spacing: 8) {
+            sectionHeader(l10n.tr("models.testedWeightsTitle"), icon: "checkmark.seal.fill", count: models.count)
+            Text(l10n.tr("models.testedWeightsHint"))
+                .font(.caption)
+                .foregroundColor(.secondary)
+            ForEach(models) { model in
+                testedWeightRow(model)
+            }
+        }
+        .sectionCard()
+    }
+
+    private func testedWeightRow(_ model: CatalogEntry) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(2)
+                testedField(l10n.tr("models.testedVersion"), model.testedVersionLabel)
+                testedField(l10n.tr("models.testedWeight"), model.id, mono: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            downloadActionButton(for: model.id)
+        }
+        .rowCard()
+    }
+
+    private func testedField(_ title: String, _ value: String, mono: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 88, alignment: .leading)
+            Text(value)
+                .font(mono ? .system(size: 11, design: .monospaced) : .system(size: 11))
+                .foregroundColor(mono ? NovaTheme.Colors.accent : NovaTheme.Colors.textPrimary)
+                .lineLimit(2)
+                .textSelection(.enabled)
+        }
+    }
+
     // MARK: - Verified Catalog
 
     private var catalogEmptyCopy: String {
@@ -338,6 +395,13 @@ struct DownloadsPageView: View {
 
     private var displayedCatalogModels: [CatalogEntry] { displayedCatalog }
 
+    /// Preview and family rows. Verified exact weights are the list above.
+    private var catalogCardModels: [CatalogEntry] {
+        displayedCatalogModels.filter {
+            $0.status != .verified || ModelCatalogPolicy.isIdPattern($0.id)
+        }
+    }
+
     private func reloadDisplayedCatalog() {
         if catalogSearchQuery.isEmpty {
             displayedCatalog = modelManager.catalogModels(forCategory: typeFilter.matchType)
@@ -351,7 +415,7 @@ struct DownloadsPageView: View {
     }
 
     private var catalogModelsSection: some View {
-        let models = displayedCatalogModels
+        let models = catalogCardModels
         let catalogTitle = (hubSearchAttempted && appState.allowUnlistedDownloads)
             ? "Also in catalog"
             : l10n.tr("models.verifiedTitle")
