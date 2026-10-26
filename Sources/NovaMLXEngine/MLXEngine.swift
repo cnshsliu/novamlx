@@ -585,6 +585,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     ///     format for an arbitrary model corrupts inference more often than not.
     private static func ensureChatTemplate(modelDir: URL, modelId: String, family: ModelFamily, architecture: String? = nil) {
         let fm = FileManager.default
+        if family == .flint {
+            _ = FlintRecChatTemplate.install(modelDir: modelDir, modelId: modelId)
+            return
+        }
+
         let tcPath = modelDir.appendingPathComponent("tokenizer_config.json")
         let jinjaPath = modelDir.appendingPathComponent("chat_template.jinja")
         let jsonPath = modelDir.appendingPathComponent("chat_template.json")
@@ -1323,7 +1328,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
     func buildUserInput(request: InferenceRequest, hasImages: Bool) async throws -> UserInput {
         let promptMessages = try promptMessages(for: request)
-        let toolSpecs: [[String: any Sendable]]? = request.tools?.map { tool in
+        let requestTools = getContainer(for: request.model)?.identifier.family == .flint
+            ? FlintAlignment.effectiveTools(request)
+            : request.tools
+        let toolSpecs: [[String: any Sendable]]? = requestTools?.map { tool in
             tool.mapValues { toSendable($0) }
         }
 
@@ -1366,9 +1374,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             return UserInput(prompt: .chat(chatMessages), tools: toolSpecs, additionalContext: additionalContext)
         } else {
             let messages: [Message] = promptMessages.map { msg in
-                var m: Message = ["role": msg.role.rawValue, "content": msg.content ?? ""]
+                var m: Message = ["role": msg.wireRole ?? msg.role.rawValue, "content": msg.content ?? ""]
                 if let tcId = msg.toolCallId { m["tool_call_id"] = tcId }
                 if let name = msg.name { m["name"] = name }
+                if let reasoning = msg.reasoningContent, !reasoning.isEmpty {
+                    m["reasoning_content"] = reasoning
+                }
                 if let tcs = msg.toolCalls {
                     m["tool_calls"] = tcs.map(Self.toolCallMessageDict)
                 }
@@ -1668,9 +1679,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// Messages the chat template should see. Flint sanitizes role/think
     /// injections and rejects a custom stop while structural grammar is on.
     func promptMessages(for request: InferenceRequest) throws -> [ChatMessage] {
-        guard getContainer(for: request.model)?.identifier.family == .flint else {
+        guard let container = getContainer(for: request.model),
+              container.identifier.family == .flint
+        else {
             return request.messages
         }
+        try FlintAlignment.validate(request: request, config: container.config)
         return try FlintAlignment.prepareMessages(request: request)
     }
 
@@ -1744,7 +1758,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             )
         }
 
-        if let seed = request.seed ?? config.seed {
+        if config.identifier.family == .flint {
+            MLXRandom.seed(FlintAlignment.resolvedSeed(
+                requestSeed: request.seed, modelSeed: config.seed))
+        } else if let seed = request.seed ?? config.seed {
             MLXRandom.seed(seed)
         }
 
@@ -1784,6 +1801,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             usesGrammar: grammar,
             usesStructuralGrammar: FlintChatDecode.processorUsesStructuralGrammar(processor))
         if let flint = model as? FlintModel {
+            let effectiveStops = policy.usesStructuralGrammar
+                ? FlintChatDecode.grammarStopIds
+                : stopIds
             switch FlintChatDecode.residentRoute(policy) {
             case .greedyDevice:
                 NovaMLXLog.info(
@@ -1795,7 +1815,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     processor: processor,
                     prefill: parameters.prefill,
                     maxTokens: maxTokens,
-                    eosTokenIds: stopIds)
+                    eosTokenIds: effectiveStops)
             case .filtered:
                 FlintChatDecode.noteFilteredPacket(
                     temperature: parameters.temperature,
@@ -1811,7 +1831,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     sampler: sampler,
                     prefill: parameters.prefill,
                     maxTokens: maxTokens,
-                    eosTokenIds: stopIds)
+                    eosTokenIds: effectiveStops)
             case .singleStep:
                 break
             }

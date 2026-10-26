@@ -17,7 +17,8 @@ extension NovaMLXAPIServer {
         regexPattern: String? = nil, gbnfGrammar: String? = nil,
         cfg: ServerConfig, clientType: ClientType,
         responseModelOverride: String? = nil,
-        httpRequest: Request? = nil
+        httpRequest: Request? = nil,
+        toolsJSON: String? = nil
     ) async throws -> Response {
         // Peer-relay fast-fail (X-No-Autoload): when the caller opted out of
         // queue-behind-load, a non-resident model must 503 BEFORE any SSE
@@ -66,7 +67,12 @@ extension NovaMLXAPIServer {
             adaptiveVerifyMax: openAIReq.adaptiveVerifyMax,
             enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
                 requestFlag: openAIReq.enforceToolSchemas,
-                serverConfig: cfg.enforceToolSchemas)
+                serverConfig: cfg.enforceToolSchemas),
+            toolChoice: flintToolChoice(openAIReq.toolChoice),
+            parallelToolCalls: openAIReq.parallelToolCalls,
+            storeCompletions: openAIReq.store,
+            flintGrammar: openAIReq.grammar,
+            toolsJSON: toolsJSON
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -197,7 +203,8 @@ extension NovaMLXAPIServer {
         cfg: ServerConfig, clientType: ClientType,
         coordinator: AutoLoadCoordinator,
         responseModelOverride: String? = nil,
-        httpRequest: Request? = nil
+        httpRequest: Request? = nil,
+        toolsJSON: String? = nil
     ) async throws -> Response {
         let responseModel = responseModelOverride ?? openAIReq.model
         // Peer-relay fast-fail (X-No-Autoload): when the caller opted out of
@@ -246,7 +253,12 @@ extension NovaMLXAPIServer {
             adaptiveVerifyMax: openAIReq.adaptiveVerifyMax,
             enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
                 requestFlag: openAIReq.enforceToolSchemas,
-                serverConfig: cfg.enforceToolSchemas)
+                serverConfig: cfg.enforceToolSchemas),
+            toolChoice: flintToolChoice(openAIReq.toolChoice),
+            parallelToolCalls: openAIReq.parallelToolCalls,
+            storeCompletions: openAIReq.store,
+            flintGrammar: openAIReq.grammar,
+            toolsJSON: toolsJSON
         )
 
         let modelId = openAIReq.model
@@ -285,6 +297,7 @@ extension NovaMLXAPIServer {
             var lastProgressCount = 0
             var completionTokenCount = 0
             var promptTokenCount: Int? = nil
+            var streamedCachedTokens: Int?
             var lastFinishReason: String? = nil
             do {
                 let roleChunk = OpenAIStreamChunk(
@@ -344,6 +357,7 @@ extension NovaMLXAPIServer {
                         } else if let finish = token.finishReason {
                             lastFinishReason = finish.rawValue
                             if let pt = token.promptTokens { promptTokenCount = pt }
+                            if let cached = token.cachedTokens { streamedCachedTokens = cached }
                             if let tp = thinkingParser {
                                 let finalParsed = tp.finalize()
                                 var cleanResp = finalParsed.response
@@ -452,7 +466,10 @@ extension NovaMLXAPIServer {
                         id: chunkId,
                         model: responseModel,
                         choices: [],
-                        usage: OpenAIUsage(promptTokens: scaledPrompt, completionTokens: scaledCompletion)
+                        usage: OpenAIUsage(
+                            promptTokens: scaledPrompt,
+                            completionTokens: scaledCompletion,
+                            cachedTokens: streamedCachedTokens)
                     )
                     let usageData = try JSONEncoder().encode(usageChunk)
                     try await writer.write(ByteBuffer(string: "data: \(String(data: usageData, encoding: .utf8) ?? "")\n\n"))
@@ -540,7 +557,8 @@ extension NovaMLXAPIServer {
         anthropicReq: AnthropicRequest, messages: [ChatMessage], inference: InferenceService,
         cfg: ServerConfig, clientType: ClientType,
         coordinator: AutoLoadCoordinator,
-        httpRequest: Request? = nil
+        httpRequest: Request? = nil,
+        toolsJSON: String? = nil
     ) async throws -> Response {
         let ocrSampling = OCROptimizer.samplingOverrides(
             modelName: anthropicReq.model,
@@ -552,6 +570,17 @@ extension NovaMLXAPIServer {
 
         let request = InferenceRequest(
             model: anthropicReq.model, messages: messages,
+            tools: anthropicReq.tools?.map { tool in
+                var dict: [String: Any] = ["name": tool.name]
+                if let desc = tool.description { dict["description"] = desc }
+                dict["type"] = "function"
+                dict["function"] = [
+                    "name": tool.name,
+                    "description": tool.description ?? "",
+                    "parameters": unwrapAnyCodable(tool.inputSchema),
+                ] as [String: Any]
+                return dict
+            },
             temperature: ocrSampling.temperature,
             maxTokens: ocrSampling.maxTokens,
             topP: anthropicReq.topP, topK: anthropicReq.topK,
@@ -562,7 +591,12 @@ extension NovaMLXAPIServer {
             httpRequestId: HTTPHelpers.requestID(from: httpRequest),
             enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
                 requestFlag: anthropicReq.enforceToolSchemas,
-                serverConfig: cfg.enforceToolSchemas)
+                serverConfig: cfg.enforceToolSchemas),
+            toolChoice: flintToolChoice(anthropicReq.toolChoice),
+            parallelToolCalls: nil,
+            storeCompletions: nil,
+            flintGrammar: nil,
+            toolsJSON: toolsJSON
         )
 
         let reqTag = request.id.uuidString.prefix(8)

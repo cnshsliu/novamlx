@@ -7,7 +7,10 @@ import MLXLMCommon
 /// an optional single `<think>…</think>` at the start, then answer text and,
 /// when tools were supplied, a GLM tool-call body. Think tags and the other
 /// protocol markers are excluded from the answer (their logits are masked).
-/// The turn still finishes on the checkpoint multi-EOS set.
+/// With structural grammar on, the turn finishes on `grammar.stops`
+/// (`<|end_of_text|>`, `<|user|>`, `<|observation|>`). `<|developer|>` is
+/// masked in the answer and is not one of those stops. Grammar off keeps the
+/// checkpoint multi-EOS set, including developer.
 ///
 /// `FlintChatDecode.ThinkReentryGuard` is the fallback when this grammar is
 /// not installed (another request constraint such as JSON schema). A custom
@@ -15,9 +18,11 @@ import MLXLMCommon
 /// while flint grammar is on. The guard is not the control that blocks a
 /// second `<think>` on the default Flint chat path.
 ///
-/// When `toolSchema` is set, the tool body is a host FSM (not xgrammar):
-/// names, keys, and value shapes are masked. `strict: false` is included
-/// only when `enforce_tool_schemas` compiled that session.
+/// When `toolSchema` is set, the tool body is a host FSM aligned with
+/// xgrammar `glm_4_7`: names, schema key order, patterns, formats, length,
+/// numeric bounds, and nested objects. Omitted `strict` enforces. `strict:
+/// false` enforces when `enforce_tool_schemas` is on and otherwise keeps a
+/// loose argument body after the name is accepted.
 public struct FlintStructuralGrammar: Equatable, Sendable {
     public enum Phase: Equatable, Sendable {
         case start
@@ -85,7 +90,8 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
     public private(set) var sawToolCall = false
     /// Proper prefix of a marker excluded in `phase`, withheld across tokens.
     public private(set) var held = ""
-    /// Set when at least one tool is schema-enforced. Nil keeps the loose body.
+    /// Set whenever tools exist. Names are constrained. A `strict: false` body
+    /// switches to loose after the name is accepted.
     var toolSchema: FlintToolSchemaSession?
     /// Shared by grammar copies. Nil until a schema session is installed.
     var vocabTexts: FlintVocabTextCache?

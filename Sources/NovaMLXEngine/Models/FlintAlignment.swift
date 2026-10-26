@@ -44,19 +44,102 @@ package enum FlintAlignment {
     /// Flint messages for the chat template. Rejects a custom `stop` while
     /// structural grammar would be on, then sanitizes like `normalize_messages`.
     static func prepareMessages(request: InferenceRequest) throws -> [ChatMessage] {
+        let grammarOn = flintGrammarEnabled(request)
         if let message = FlintChatDecode.customStopConflict(
             stop: request.stop,
-            hasRequestConstraint: FlintChatDecode.requestHasOtherConstraint(request))
+            hasRequestConstraint: !grammarOn)
         {
             throw NovaMLXError.apiError(message)
         }
-        if !FlintChatDecode.requestHasOtherConstraint(request),
+        if grammarOn,
            let message = FlintToolSchemaSession.rejection(
-            tools: request.tools, enforceToolSchemas: request.enforceToolSchemas)
+            tools: effectiveTools(request),
+            enforceToolSchemas: request.enforceToolSchemas,
+            toolsJSON: request.toolChoice == "none" ? nil : request.toolsJSON)
         {
             throw NovaMLXError.apiError(message)
         }
+        try validateRoles(request.messages)
         return try sanitizeMessages(request.messages)
+    }
+
+    /// Omitted Flint seed is 0, matching `Sampling.seed`. An explicit request
+    /// seed wins over the model config.
+    static func resolvedSeed(requestSeed: UInt64?, modelSeed: UInt64?) -> UInt64 {
+        requestSeed ?? modelSeed ?? 0
+    }
+
+    /// `validate_request` sampling and API constraints. Call only for `.flint`.
+    static func validate(request: InferenceRequest, config: ModelConfig) throws {
+        let frequency = request.frequencyPenalty ?? config.frequencyPenalty
+        if frequency != 0 {
+            throw NovaMLXError.apiError("Nonzero frequency_penalty is not supported by this decoder")
+        }
+        let minP = request.minP ?? config.minP
+        if minP != 0 {
+            throw NovaMLXError.apiError("Nonzero min_p is not supported by this decoder")
+        }
+        let repetition = request.repetitionPenalty ?? config.repeatPenalty
+        if repetition != 0 && repetition != 1 {
+            throw NovaMLXError.apiError("Only neutral repetition_penalty=1 is supported")
+        }
+        if request.stream && request.includeLogprobs {
+            throw NovaMLXError.apiError("Token logprobs require stream=false")
+        }
+        if let store = request.storeCompletions, store != false {
+            throw NovaMLXError.apiError("Stored-completion retrieval is not supported; use store=false")
+        }
+        let choice = request.toolChoice ?? "auto"
+        if choice != "auto" && choice != "none" {
+            throw NovaMLXError.apiError(
+                "tool_choice currently supports auto and none; forced calls are not implemented")
+        }
+        if request.parallelToolCalls == false {
+            throw NovaMLXError.apiError("parallel_tool_calls=false is not supported")
+        }
+        let grammar = request.flintGrammar ?? "flint"
+        if grammar != "none" && grammar != "flint" {
+            throw NovaMLXError.apiError("grammar must be none or flint")
+        }
+        try validateRoles(request.messages)
+    }
+
+    static func validateRoles(_ messages: [ChatMessage]) throws {
+        let allowed: Set<String> = ["system", "developer", "user", "assistant", "tool"]
+        for message in messages {
+            let role = message.wireRole ?? message.role.rawValue
+            if !allowed.contains(role) {
+                throw NovaMLXError.apiError("Unsupported message role")
+            }
+        }
+    }
+
+    /// `tool_choice=none` drops tools before the template and the grammar.
+    static func effectiveTools(_ request: InferenceRequest) -> [[String: Any]]? {
+        if request.toolChoice == "none" { return nil }
+        return request.tools
+    }
+
+    /// Structural grammar is on unless the client set `grammar` to `none`
+    /// or another constraint (JSON, regex, GBNF) already replaced it.
+    static func flintGrammarEnabled(_ request: InferenceRequest) -> Bool {
+        let mode = request.flintGrammar ?? "flint"
+        if mode != "flint" { return false }
+        return !FlintChatDecode.requestHasOtherConstraint(request)
+    }
+
+    static func anthropicToolChoice(_ value: Any?) -> String? {
+        if let text = value as? String { return text }
+        guard let object = value as? [String: Any] ?? (value as? NSDictionary).map({ dict in
+            var out: [String: Any] = [:]
+            for (key, item) in dict {
+                if let key = key as? String { out[key] = item }
+            }
+            return out
+        }) else { return nil }
+        guard let type = object["type"] as? String else { return "forced" }
+        if type == "auto" || type == "none" { return type }
+        return type
     }
 
     /// `rec` `normalize_messages`. Non-assistant string content drops NUL and
@@ -79,7 +162,9 @@ package enum FlintAlignment {
             images: message.images,
             name: message.name,
             toolCallId: message.toolCallId,
-            toolCalls: toolCalls
+            toolCalls: toolCalls,
+            reasoningContent: message.reasoningContent,
+            wireRole: message.wireRole
         )
     }
 

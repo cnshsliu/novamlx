@@ -371,6 +371,33 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     private var totalPreemptions: UInt64 = 0
     private var lastDecodeStepTime: Date = Date()
     private var lastDecodeStepTokens: UInt64 = 0
+    /// Token-level Flint prefix (`prefix.py`). Not the block-hash SSD cache.
+    private var flintPrefixes: [String: FlintPrefixSession] = [:]
+    private var flintKVTokens: [String: [Int]] = [:]
+    private var flintKV: [String: [KVCache]] = [:]
+    private var flintMetrics: [UUID: (cached: Int, common: Int)] = [:]
+
+    /// `prepare_prefix` after a finished Flint generation. Short outputs never
+    /// schedule. A cancel inside a chunk leaves the last committed cache.
+    /// Decode KV is not stored here; the next prefill reuses the prompt snapshot.
+    private func noteFlintPreparedPrefix(modelId: String, prompt: [Int], generated: [Int]) {
+        guard var session = flintPrefixes[modelId] else { return }
+        if generated.count >= session.chunkSize {
+            session.schedulePrefix(ids: prompt, generated: generated)
+        }
+        guard let pending = session.preparation else {
+            flintPrefixes[modelId] = session
+            return
+        }
+        let full = pending.tokens
+        // Chunk prep is bookkeeping. A throw leaves the last committed cache
+        // and must not fail the request that just finished.
+        _ = try? session.preparePrefix(shouldStop: { false }) { prefix, target in
+            try FlintPrefixSession.advanceChunk(
+                prefix: prefix, target: target, tokens: full, cancel: false)
+        }
+        flintPrefixes[modelId] = session
+    }
 
     // MARK: - Init
 
@@ -496,11 +523,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let elapsed = Date().timeIntervalSince(startTime)
         let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
 
+        let prefixMetrics = flintMetrics.removeValue(forKey: request.id)
         return InferenceResult(
             id: request.id, model: modelId, text: text,
             toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls,
             tokensPerSecond: tps, promptTokens: promptTokensBox.value,
-            completionTokens: completionTokens, finishReason: finishReason
+            completionTokens: completionTokens, finishReason: finishReason,
+            cachedTokens: prefixMetrics?.cached ?? 0,
+            commonPrefixTokens: prefixMetrics?.common ?? 0
         )
     }
 
@@ -788,8 +818,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     }
 
     /// Install the `rec` tool parser on a Flint stream. Other families keep
-    /// the stock processor. A nil seed keeps random `call_` ids; a request
-    /// or model-config seed hashes the same inputs as `seeded_tool_parser`.
+    /// the stock processor. An omitted Flint seed is 0, and that seed is the
+    /// one `seeded_tool_parser` hashes. A nil seed is only for non-Flint.
     nonisolated static func armFlintExtractor(
         _ state: ActiveStreamSequence.ToolStreamState?,
         family: ModelFamily,
@@ -800,7 +830,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     ) {
         guard family == .flint, let state else { return }
         let identity = FlintAlignment.CallIdentity(
-            seed: request.seed ?? config.seed,
+            seed: family == .flint
+                ? FlintAlignment.resolvedSeed(requestSeed: request.seed, modelSeed: config.seed)
+                : request.seed ?? config.seed,
             temperature: request.temperature ?? config.temperature,
             topP: request.topP ?? config.topP,
             topK: request.topK ?? config.topK,
@@ -860,8 +892,56 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
 
         // --- Prefix cache check ---
-        let prefixCacheManager = engine.getOrCreatePrefixCacheManager(modelId: request.model)
+        // Flint uses the session prefix below. The block-hash SSD cache is a
+        // different mechanism and must not stand in for `select_prefix`.
+        let flintFamily = container.identifier.family == .flint
+        let prefixCacheManager = flintFamily
+            ? nil
+            : engine.getOrCreatePrefixCacheManager(modelId: request.model)
         let prefixResult = prefixCacheManager?.fetchPrefix(tokenIds: allTokens)
+
+        var flintTrial = flintPrefixes[request.model] ?? FlintPrefixSession()
+        var flintSelection = FlintPrefixEngine.Selection(cache: nil, common: 0, cached: 0)
+        if flintFamily {
+            let taken = flintTrial.takePrefix(ids: allTokens, trimmable: true)
+            flintSelection = FlintPrefixEngine.select(prefix: taken, tokens: allTokens, trimmable: true)
+            flintTrial.noteSelection(flintSelection)
+            let line = FlintPrefixEngine.prefillLog(
+                prompt: allTokens.count,
+                common: flintSelection.common,
+                reused: flintSelection.cached)
+            NovaMLXLog.info("[Flint] " + line)
+            flintMetrics[request.id] = (flintSelection.cached, flintSelection.common)
+            if flintSelection.cached > 0,
+               let snapTokens = flintKVTokens[request.model],
+               snapTokens.count >= flintSelection.cached,
+               let stored = flintKV[request.model]
+            {
+                var copies = stored.map { $0.copy() }
+                let drop = snapTokens.count - flintSelection.cached
+                let trimmed = drop == 0 || copies.allSatisfy { $0.trim(drop) >= drop }
+                if trimmed && flintSelection.cached < allTokens.count {
+                    let remaining = Array(allTokens.dropFirst(flintSelection.cached))
+                    let seq = try await prefillRemaining(
+                        request: request,
+                        continuation: continuation,
+                        container: container,
+                        mlxContainer: mlxContainer,
+                        parameters: parameters,
+                        restoredCaches: copies,
+                        remainingTokenIds: remaining,
+                        cachedTokenCount: flintSelection.cached,
+                        allTokens: allTokens,
+                        promptTokenCount: Int(promptTokenCount),
+                        maxTokens: maxTokens)
+                    flintTrial.commit(tokens: allTokens)
+                    flintPrefixes[request.model] = flintTrial
+                    flintKVTokens[request.model] = allTokens
+                    flintKV[request.model] = seq.caches.map { $0.copy() }
+                    return seq
+                }
+            }
+        }
 
         if let prefixResult = prefixResult,
            let restoredCaches = prefixResult.cache,
@@ -1025,14 +1105,22 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         guard !caches.isEmpty else {
             throw NovaMLXError.inferenceFailed("Prefill produced no cache")
         }
+        if flintFamily {
+            flintTrial.commit(tokens: allTokens)
+            flintPrefixes[request.model] = flintTrial
+            flintKVTokens[request.model] = allTokens
+            flintKV[request.model] = caches.map { $0.copy() }
+        }
 
         // Check if first token is EOS. Flint role headers are stops even
         // when they are not the tokenizer's single eosTokenId.
         let eosId = container.tokenizer?.eosTokenId
         let isFlint = container.identifier.family == .flint
         let flintStopIds: Set<Int> = isFlint
-            ? FlintChatDecode.hostFinishStopIds(
-                checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
+            ? FlintChatDecode.generationFinishStopIds(
+                grammarOn: flintGrammarSeed != nil,
+                checkpoint: container.flintFinishStopIds,
+                tokenizerEOS: eosId)
             : []
 
         // Resolve logprob data (token IDs → text) outside perform
@@ -1070,7 +1158,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let isFinished: Bool
         if finishFirst {
             Self.drainProcessed(toolStream, continuation: continuation)
-            continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount))
+            continuation.yield(Token(
+                id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount,
+                cachedTokens: flintSelection.cached))
             continuation.finish()
             completionCount = firstDecision.yield.isEmpty ? 0 : 1
             isFinished = true
@@ -1212,8 +1302,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         var finishFirst = false
         if isFlint {
             let eosId = container.tokenizer?.eosTokenId
-            let stops = FlintChatDecode.hostFinishStopIds(
-                checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
+            let stops = FlintChatDecode.generationFinishStopIds(
+                grammarOn: flintGrammarSeed != nil,
+                checkpoint: container.flintFinishStopIds,
+                tokenizerEOS: eosId)
             let decision = FlintChatDecode.openingDecision(
                 tokenId: firstTokenId, yieldText: scrubbedPrefixToken,
                 grammarText: firstTokenText, primaryEOS: eosId, stopIds: stops,
@@ -1231,7 +1323,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
         if finishFirst {
             Self.drainProcessed(toolStream, continuation: continuation)
-            continuation.yield(Token(id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount))
+            continuation.yield(Token(
+                id: 0, text: "", finishReason: .stop, promptTokens: promptTokenCount,
+                cachedTokens: cachedTokenCount))
             continuation.finish()
         }
 
@@ -1476,8 +1570,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             seq.safeYield(Token(id: 0, text: "</think>"))
             seq.harmonyInThinking = false
         }
+        noteFlintPreparedPrefix(
+            modelId: seq.modelId, prompt: seq.promptTokenIds, generated: seq.accumulatedTokenIds)
         seq.safeYield(Token(
-            id: 0, text: "", finishReason: .length, promptTokens: seq.promptTokenCount))
+            id: 0, text: "", finishReason: .length, promptTokens: seq.promptTokenCount,
+            cachedTokens: flintMetrics[seq.request.id]?.cached))
         let finishedByUs = seq.safeFinish()
         seq.isFinished = true
         seq._finishedByDecodeStep = finishedByUs
@@ -1691,11 +1788,6 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             let specDecoder = engine.specDecoder
             var specResults: [SpecDecodeResult] = []
             var firstDecodeStart: [UUID: Date] = [:]
-            let flintStopIds: Set<Int> = container.identifier.family == .flint
-                ? FlintChatDecode.hostFinishStopIds(
-                    checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
-                : []
-
             for seq in active {
                 if seq.decodeWindowStart == nil {
                     firstDecodeStart[seq.id] = Date()
@@ -1709,6 +1801,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // is argmax, and it does not see the grammar or top-p mask.
                 let grammarOn = seq.flintGrammar != nil
                 let isFlint = container.identifier.family == .flint
+                let flintStopIds: Set<Int> = isFlint
+                    ? FlintChatDecode.generationFinishStopIds(
+                        grammarOn: grammarOn,
+                        checkpoint: container.flintFinishStopIds,
+                        tokenizerEOS: eosId)
+                    : []
                 let flintTemperature = Float(seq.request.temperature ?? container.config.temperature)
                 let flintTopP = Float(seq.request.topP ?? container.config.topP)
                 let flintTopK = seq.request.topK ?? container.config.topK
@@ -1749,8 +1847,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     // 16, and only when nothing rewrites logits. Grammar,
                     // presence, and temperature / top-p / top-k use the filtered
                     // packet: the same width, one resident forward per token,
-                    // mask before acceptance. Repetition is not applied on this
-                    // scheduler; a non-neutral repetition penalty stays single-step.
+                    // mask before acceptance. A non-neutral repetition penalty is
+                    // HTTP 400 before this loop; the route still returns single-step.
                     let token = MLXArray(Int32(seq.lastTokenId)).reshaped(1, 1)
                     let seqCaches = seq.caches
                     let seqSampler = seq.sampler
@@ -1966,6 +2064,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             for (i, var seq) in updatedActive.enumerated() {
                 guard i < specResults.count else { break }
                 let result = specResults[i]
+                let isFlint = container.identifier.family == .flint
+                let flintStopIds: Set<Int> = isFlint
+                    ? FlintChatDecode.generationFinishStopIds(
+                        grammarOn: seq.flintGrammar != nil,
+                        checkpoint: container.flintFinishStopIds,
+                        tokenizerEOS: eosId)
+                    : []
 
                 // Record speculation stats and update N-gram cache.
                 if result.draftProposed > 0 {
@@ -2243,7 +2348,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             seq.safeYield(Token(id: 0, text: "</think>"))
                             seq.harmonyInThinking = false
                         }
-                        seq.safeYield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: seq.promptTokenCount))
+                        noteFlintPreparedPrefix(
+                            modelId: seq.modelId, prompt: seq.promptTokenIds,
+                            generated: seq.accumulatedTokenIds)
+                        seq.safeYield(Token(
+                            id: 0, text: "", finishReason: finishReason,
+                            promptTokens: seq.promptTokenCount,
+                            cachedTokens: flintMetrics[seq.request.id]?.cached))
                         let finishedByUs = seq.safeFinish()
                         seq.isFinished = true
                         sequenceFinished = true

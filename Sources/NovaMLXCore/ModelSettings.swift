@@ -134,7 +134,12 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             adaptiveVerify: request.adaptiveVerify,
             adaptiveVerifyMin: request.adaptiveVerifyMin,
             adaptiveVerifyMax: request.adaptiveVerifyMax,
-            enforceToolSchemas: request.enforceToolSchemas
+            enforceToolSchemas: request.enforceToolSchemas,
+            toolChoice: request.toolChoice,
+            parallelToolCalls: request.parallelToolCalls,
+            storeCompletions: request.storeCompletions,
+            flintGrammar: request.flintGrammar,
+            toolsJSON: request.toolsJSON
         )
     }
 }

@@ -33,6 +33,15 @@ public struct CodableInferenceRequest: Codable, Sendable {
     public let adaptiveVerifyMin: Int?
     public let adaptiveVerifyMax: Int?
     public let enforceToolSchemas: Bool
+    public let toolChoice: String?
+    public let parallelToolCalls: Bool?
+    public let storeCompletions: Bool?
+    public let flintGrammar: String?
+    /// Raw tools JSON with property key order. Distinct from `toolsJSON`,
+    /// which is the dictionary encoding of `tools`.
+    public let orderedToolsJSON: String?
+    public let includeLogprobs: Bool?
+    public let topLogprobsCount: Int?
 
     public init(from request: InferenceRequest) {
         self.id = request.id.uuidString
@@ -77,6 +86,13 @@ public struct CodableInferenceRequest: Codable, Sendable {
         self.adaptiveVerifyMin = request.adaptiveVerifyMin
         self.adaptiveVerifyMax = request.adaptiveVerifyMax
         self.enforceToolSchemas = request.enforceToolSchemas
+        self.toolChoice = request.toolChoice
+        self.parallelToolCalls = request.parallelToolCalls
+        self.storeCompletions = request.storeCompletions
+        self.flintGrammar = request.flintGrammar
+        self.orderedToolsJSON = request.toolsJSON
+        self.includeLogprobs = request.includeLogprobs
+        self.topLogprobsCount = request.topLogprobsCount
     }
 
     public func toInferenceRequest() -> InferenceRequest {
@@ -119,11 +135,18 @@ public struct CodableInferenceRequest: Codable, Sendable {
             preserveThinking: preserveThinking,
             draftModel: draftModel,
             numDraftTokens: numDraftTokens,
+            includeLogprobs: includeLogprobs ?? false,
+            topLogprobsCount: topLogprobsCount,
             useNativeMtp: useNativeMtp,
             adaptiveVerify: adaptiveVerify,
             adaptiveVerifyMin: adaptiveVerifyMin,
             adaptiveVerifyMax: adaptiveVerifyMax,
-            enforceToolSchemas: enforceToolSchemas
+            enforceToolSchemas: enforceToolSchemas,
+            toolChoice: toolChoice,
+            parallelToolCalls: parallelToolCalls,
+            storeCompletions: storeCompletions,
+            flintGrammar: flintGrammar,
+            toolsJSON: orderedToolsJSON
         )
     }
 }

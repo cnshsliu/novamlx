@@ -313,6 +313,18 @@ public struct InferenceRequest: @unchecked Sendable {
     /// Flint structural grammar: also constrain tools whose `strict` is not
     /// `true`. Default false. Other families ignore it.
     public let enforceToolSchemas: Bool
+    /// Flint `tool_choice`. `nil` is `auto`. `none` drops tools. Any other
+    /// value is rejected for family `.flint`.
+    public let toolChoice: String?
+    /// Flint rejects `false`. `nil` leaves the field omitted.
+    public let parallelToolCalls: Bool?
+    /// Flint rejects any value other than `false`. `nil` means omitted (`false`).
+    public let storeCompletions: Bool?
+    /// Flint grammar mode. `nil` and `"flint"` install structural grammar.
+    /// `"none"` turns it off. Any other value is rejected.
+    public let flintGrammar: String?
+    /// Raw tools JSON so property key order survives `JSONSerialization`.
+    public let toolsJSON: String?
 
     public init(
         id: UUID = UUID(),
@@ -347,7 +359,12 @@ public struct InferenceRequest: @unchecked Sendable {
         adaptiveVerify: String? = nil,
         adaptiveVerifyMin: Int? = nil,
         adaptiveVerifyMax: Int? = nil,
-        enforceToolSchemas: Bool = false
+        enforceToolSchemas: Bool = false,
+        toolChoice: String? = nil,
+        parallelToolCalls: Bool? = nil,
+        storeCompletions: Bool? = nil,
+        flintGrammar: String? = nil,
+        toolsJSON: String? = nil
     ) {
         self.id = id
         self.model = model
@@ -382,6 +399,61 @@ public struct InferenceRequest: @unchecked Sendable {
         self.adaptiveVerifyMin = adaptiveVerifyMin
         self.adaptiveVerifyMax = adaptiveVerifyMax
         self.enforceToolSchemas = enforceToolSchemas
+        self.toolChoice = toolChoice
+        self.parallelToolCalls = parallelToolCalls
+        self.storeCompletions = storeCompletions
+        self.flintGrammar = flintGrammar
+        self.toolsJSON = toolsJSON
+    }
+
+    /// Copy that keeps Flint request fields through model resolution, streaming,
+    /// and draft-model injection.
+    public func replacing(
+        model: String? = nil,
+        stream: Bool? = nil,
+        draftModel: String? = nil,
+        numDraftTokens: Int? = nil
+    ) -> InferenceRequest {
+        InferenceRequest(
+            id: id,
+            model: model ?? self.model,
+            messages: messages,
+            tools: tools,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            topP: topP,
+            topK: topK,
+            minP: minP,
+            frequencyPenalty: frequencyPenalty,
+            presencePenalty: presencePenalty,
+            repetitionPenalty: repetitionPenalty,
+            seed: seed,
+            stream: stream ?? self.stream,
+            stop: stop,
+            sessionId: sessionId,
+            responseFormat: responseFormat,
+            jsonSchemaDef: jsonSchemaDef,
+            regexPattern: regexPattern,
+            gbnfGrammar: gbnfGrammar,
+            thinkingBudget: thinkingBudget,
+            enableThinking: enableThinking,
+            preserveThinking: preserveThinking,
+            draftModel: draftModel ?? self.draftModel,
+            numDraftTokens: numDraftTokens ?? self.numDraftTokens,
+            includeLogprobs: includeLogprobs,
+            topLogprobsCount: topLogprobsCount,
+            httpRequestId: httpRequestId,
+            useNativeMtp: useNativeMtp,
+            adaptiveVerify: adaptiveVerify,
+            adaptiveVerifyMin: adaptiveVerifyMin,
+            adaptiveVerifyMax: adaptiveVerifyMax,
+            enforceToolSchemas: enforceToolSchemas,
+            toolChoice: toolChoice,
+            parallelToolCalls: parallelToolCalls,
+            storeCompletions: storeCompletions,
+            flintGrammar: flintGrammar,
+            toolsJSON: toolsJSON
+        )
     }
 
     /// Native in-graph MTP and companion MTP auto-inject. `nil` means on.
@@ -417,6 +489,7 @@ public final class ImageRunControl: @unchecked Sendable {
 public struct ChatMessage: Codable, Sendable {
     public enum Role: String, Codable, Sendable {
         case system
+        case developer
         case user
         case assistant
         case tool
@@ -430,14 +503,29 @@ public struct ChatMessage: Codable, Sendable {
     // TODO(novamlx-tool-fidelity): No isError field — Anthropic tool_result.is_error is dropped.
     // See AnthropicTypes.swift AnthropicContentBlock.
     public let toolCalls: [ToolCallResult]?
+    /// Assistant `reasoning_content` kept for the Flint chat template.
+    public let reasoningContent: String?
+    /// Original HTTP role. Flint rejects values outside the rec set.
+    public let wireRole: String?
 
-    public init(role: Role, content: String? = nil, images: [String]? = nil, name: String? = nil, toolCallId: String? = nil, toolCalls: [ToolCallResult]? = nil) {
+    public init(
+        role: Role,
+        content: String? = nil,
+        images: [String]? = nil,
+        name: String? = nil,
+        toolCallId: String? = nil,
+        toolCalls: [ToolCallResult]? = nil,
+        reasoningContent: String? = nil,
+        wireRole: String? = nil
+    ) {
         self.role = role
         self.content = content
         self.images = images
         self.name = name
         self.toolCallId = toolCallId
         self.toolCalls = toolCalls
+        self.reasoningContent = reasoningContent
+        self.wireRole = wireRole
     }
 }
 
@@ -451,8 +539,10 @@ public struct InferenceResult: Codable, Sendable {
     public let completionTokens: Int
     /// Prefix-cache hit length for this generation (worker-measured — the
     /// ONLY trusted source for cached-token billing; never parsed from the
-    /// model body). 0 when no cache hit.
+    /// model body). 0 when no cache hit. For Flint this is `cached_prompt_tokens`.
     public let cachedTokens: Int
+    /// Flint `common_prefix_tokens` from `select_prefix`. 0 for other families.
+    public let commonPrefixTokens: Int
     public let finishReason: FinishReason
     public let tokenLogprobs: [Token]?
 
@@ -466,7 +556,8 @@ public struct InferenceResult: Codable, Sendable {
         completionTokens: Int,
         finishReason: FinishReason,
         tokenLogprobs: [Token]? = nil,
-        cachedTokens: Int = 0
+        cachedTokens: Int = 0,
+        commonPrefixTokens: Int = 0
     ) {
         self.id = id
         self.model = model
@@ -476,8 +567,44 @@ public struct InferenceResult: Codable, Sendable {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.cachedTokens = cachedTokens
+        self.commonPrefixTokens = commonPrefixTokens
         self.finishReason = finishReason
         self.tokenLogprobs = tokenLogprobs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, model, text, toolCalls, tokensPerSecond, promptTokens, completionTokens
+        case cachedTokens, commonPrefixTokens, finishReason, tokenLogprobs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        model = try container.decode(String.self, forKey: .model)
+        text = try container.decode(String.self, forKey: .text)
+        toolCalls = try container.decodeIfPresent([ToolCallResult].self, forKey: .toolCalls)
+        tokensPerSecond = try container.decode(Double.self, forKey: .tokensPerSecond)
+        promptTokens = try container.decode(Int.self, forKey: .promptTokens)
+        completionTokens = try container.decode(Int.self, forKey: .completionTokens)
+        cachedTokens = try container.decodeIfPresent(Int.self, forKey: .cachedTokens) ?? 0
+        commonPrefixTokens = try container.decodeIfPresent(Int.self, forKey: .commonPrefixTokens) ?? 0
+        finishReason = try container.decode(FinishReason.self, forKey: .finishReason)
+        tokenLogprobs = try container.decodeIfPresent([Token].self, forKey: .tokenLogprobs)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(model, forKey: .model)
+        try container.encode(text, forKey: .text)
+        try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+        try container.encode(tokensPerSecond, forKey: .tokensPerSecond)
+        try container.encode(promptTokens, forKey: .promptTokens)
+        try container.encode(completionTokens, forKey: .completionTokens)
+        try container.encode(cachedTokens, forKey: .cachedTokens)
+        try container.encode(commonPrefixTokens, forKey: .commonPrefixTokens)
+        try container.encode(finishReason, forKey: .finishReason)
+        try container.encodeIfPresent(tokenLogprobs, forKey: .tokenLogprobs)
     }
 }
 
@@ -519,12 +646,15 @@ public struct Token: Codable, Sendable {
     public let finishReason: FinishReason?
     public let toolCall: ToolCallResult?
     public let promptTokens: Int?
+    /// Flint `cached_prompt_tokens` for this request. Nil on other families.
+    public let cachedTokens: Int?
     /// Harmony channel metadata for GPT-OSS models. Nil for non-Harmony models.
     public let channels: [HarmonyChannel]?
 
     public init(
         id: Int, text: String, logprob: Float? = nil, topLogprobs: [TopLogprob]? = nil,
         finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil, promptTokens: Int? = nil,
+        cachedTokens: Int? = nil,
         channels: [HarmonyChannel]? = nil
     ) {
         self.id = id
@@ -534,6 +664,7 @@ public struct Token: Codable, Sendable {
         self.finishReason = finishReason
         self.toolCall = toolCall
         self.promptTokens = promptTokens
+        self.cachedTokens = cachedTokens
         self.channels = channels
     }
 }

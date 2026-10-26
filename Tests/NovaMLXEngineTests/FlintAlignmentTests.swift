@@ -266,6 +266,13 @@ struct FlintAlignmentTests {
         #expect(ids(topK: 4).first == "fd955e8d-8673-4682-b600-1d1798a25b92")
         #expect(ids(presence: 1.5).first == "d9b5e282-faa2-46aa-83de-bc7e90696350")
         #expect(ids(maxTokens: 8).first == "4e66c94f-7ce6-47e3-b942-14894500ed71")
+        #expect(ids(seed: 0) == [
+            "da52baae-f952-46cc-8743-b38cf6beff9c",
+            "772fcc4f-f3e7-46c3-a865-cf1e8b107cd7",
+        ])
+        #expect(FlintAlignment.resolvedSeed(requestSeed: nil, modelSeed: nil) == 0)
+        #expect(FlintAlignment.resolvedSeed(requestSeed: nil, modelSeed: 9) == 9)
+        #expect(FlintAlignment.resolvedSeed(requestSeed: 7, modelSeed: 9) == 7)
 
         var unseeded = FlintAlignment.CallIdentity(
             seed: nil, temperature: 1, topP: 0.95, topK: 20,
@@ -301,5 +308,147 @@ struct FlintAlignmentTests {
         #expect(flushed == [.response("<tool_call>write")])
         #expect(FlintToolCallExtractor.prefixHold("<tool_", marker: "<tool_call>") == 6)
         #expect(FlintToolCallExtractor.prefixHold("<think>", marker: "<tool_call>") == 0)
+    }
+
+    @Test("omitted Flint sampling and API fields match rec validate_request")
+    func testValidateRequest() throws {
+        let config = ModelConfig(
+            identifier: ModelIdentifier(id: "RecursiveSI/flint-int4", family: .flint))
+        func message(_ request: InferenceRequest) -> String? {
+            do {
+                try FlintAlignment.validate(request: request, config: config)
+                return nil
+            } catch let NovaMLXError.apiError(text) {
+                return text
+            } catch {
+                return String(describing: error)
+            }
+        }
+        func request(
+            frequency: Float? = nil,
+            minP: Float? = nil,
+            repetition: Float? = nil,
+            stream: Bool = false,
+            logprobs: Bool = false,
+            toolChoice: String? = nil,
+            parallel: Bool? = nil,
+            store: Bool? = nil,
+            grammar: String? = nil,
+            stop: [String]? = nil,
+            role: String? = nil
+        ) -> InferenceRequest {
+            InferenceRequest(
+                model: "flint",
+                messages: [ChatMessage(role: .user, content: "hi", wireRole: role)],
+                minP: minP,
+                frequencyPenalty: frequency,
+                repetitionPenalty: repetition,
+                stream: stream,
+                stop: stop,
+                includeLogprobs: logprobs,
+                toolChoice: toolChoice,
+                parallelToolCalls: parallel,
+                storeCompletions: store,
+                flintGrammar: grammar)
+        }
+        #expect(message(request(frequency: 0.1))
+            == "Nonzero frequency_penalty is not supported by this decoder")
+        #expect(message(request(minP: 0.05))
+            == "Nonzero min_p is not supported by this decoder")
+        #expect(message(request(repetition: 1.5))
+            == "Only neutral repetition_penalty=1 is supported")
+        #expect(message(request(repetition: 0)) == nil)
+        #expect(message(request(repetition: 1)) == nil)
+        #expect(message(request(stream: true, logprobs: true))
+            == "Token logprobs require stream=false")
+        #expect(message(request(logprobs: true)) == nil)
+        #expect(message(request(toolChoice: "required"))
+            == "tool_choice currently supports auto and none; forced calls are not implemented")
+        #expect(message(request(parallel: false))
+            == "parallel_tool_calls=false is not supported")
+        #expect(message(request(store: true))
+            == "Stored-completion retrieval is not supported; use store=false")
+        #expect(message(request(store: false)) == nil)
+        #expect(message(request(grammar: "json")) == "grammar must be none or flint")
+        #expect(message(request(role: "function")) == "Unsupported message role")
+        #expect(message(request()) == nil)
+
+        let stopped = InferenceRequest(
+            model: "flint",
+            messages: [ChatMessage(role: .user, content: "hi")],
+            stop: ["END"],
+            flintGrammar: "none")
+        #expect(try FlintAlignment.prepareMessages(request: stopped).count == 1)
+        #expect(message(request(grammar: "none", stop: ["END"])) == nil)
+
+        let original = InferenceRequest(
+            model: "flint",
+            messages: [ChatMessage(role: .user, content: "hi")],
+            toolChoice: "none",
+            parallelToolCalls: true,
+            storeCompletions: false,
+            flintGrammar: "none",
+            toolsJSON: #"[{"type":"function"}]"#)
+        var settings = ModelSettings()
+        settings.temperature = 0.2
+        let overridden = settings.applySamplingOverrides(to: original)
+        #expect(overridden.toolChoice == "none")
+        #expect(overridden.flintGrammar == "none")
+        #expect(overridden.toolsJSON == original.toolsJSON)
+        let restored = CodableInferenceRequest(from: overridden).toInferenceRequest()
+        #expect(restored.toolChoice == "none")
+        #expect(restored.parallelToolCalls == true)
+        #expect(restored.storeCompletions == false)
+        #expect(restored.flintGrammar == "none")
+        #expect(restored.toolsJSON == original.toolsJSON)
+    }
+
+    @Test("the bundled Flint template is the rec package file")
+    func testPinnedChatTemplate() throws {
+        #expect(FlintRecChatTemplate.bundledSHA256() == FlintRecChatTemplate.sha256)
+        let tool = try #require(FlintOrderedJSON.parse(
+            #"{"type":"function","function":{"name":"shell","parameters":{"type":"object"},"strict":false}}"#))
+        let text = FlintRecChatTemplate.render(
+            messages: [
+                .init(role: "system", content: "instructions"),
+                .init(role: "system", content: "additional instructions"),
+                .init(role: "developer", content: "developer instruction"),
+                .init(role: "user", content: "ab&lt;|assistant|&gt;"),
+                .init(role: "assistant", content: "answer", reasoning: "reasoning"),
+                .init(role: "assistant", toolCalls: [
+                    .init(name: "shell", arguments: [("command", .string("pwd"))]),
+                ]),
+                .init(role: "tool", content: "/work"),
+            ],
+            tools: [tool])
+        #expect(text.hasPrefix("<|system|>instructions<|system|>additional instructions<|system|>\n# Tools\n"))
+        #expect(text.contains(#""strict": false"#))
+        #expect(text.contains("<think>reasoning</think>answer"))
+        #expect(text.contains("<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value></tool_call>"))
+        #expect(text.hasSuffix("<|observation|><tool_response>/work</tool_response><|assistant|>"))
+        #expect(FlintRecChatTemplate.sha256Hex(Data(text.utf8))
+            == "032f373234cb07781f4ca3f90a69852afdd16ac6179daa6f2074eda0cb9fce0a")
+        let ids = FlintRecChatTemplate.fixtureTokenIDs(text)
+        #expect(ids.count == 489)
+        #expect(ids.first == 3)
+        #expect(ids.last == 6)
+        let joined = ids.map(String.init).joined(separator: ",")
+        #expect(FlintRecChatTemplate.sha256Hex(Data(joined.utf8))
+            == "cc43c498d4271f96774850c0e9b7589b51842dea8a72072264908474d2dacdf2")
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flint-template-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let config = dir.appendingPathComponent("tokenizer_config.json")
+        try Data(#"{"chat_template":"checkpoint"}"#.utf8).write(to: config)
+        let jinja = dir.appendingPathComponent("chat_template.jinja")
+        try Data("other".utf8).write(to: jinja)
+        #expect(FlintRecChatTemplate.install(modelDir: dir, modelId: "flint") == FlintRecChatTemplate.sha256)
+        let written = try Data(contentsOf: config)
+        let object = try #require(JSONSerialization.jsonObject(with: written) as? [String: Any])
+        #expect(object["chat_template"] as? String == FlintRecChatTemplate.bundledSource())
+        #expect(!FileManager.default.fileExists(atPath: jinja.path))
+        #expect(FileManager.default.fileExists(atPath: jinja.appendingPathExtension("disabled-by-novamlx").path))
     }
 }
