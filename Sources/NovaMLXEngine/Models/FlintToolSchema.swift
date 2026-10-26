@@ -85,11 +85,12 @@ struct FlintToolSchemaSession: Equatable, Sendable {
         var allowsAdditional: Bool
 
         static func == (lhs: ObjectShape, rhs: ObjectShape) -> Bool {
-            lhs.allowsAdditional == rhs.allowsAdditional
-                && lhs.fields.count == rhs.fields.count
-                && zip(lhs.fields, rhs.fields).allSatisfy {
-                    $0.0.name == $1.0.name && $0.0.kind == $1.0.kind && $0.0.required == $1.0.required
-                }
+            guard lhs.allowsAdditional == rhs.allowsAdditional,
+                  lhs.fields.count == rhs.fields.count
+            else { return false }
+            return zip(lhs.fields, rhs.fields).allSatisfy { a, b in
+                a.name == b.name && a.kind == b.kind && a.required == b.required
+            }
         }
     }
 
