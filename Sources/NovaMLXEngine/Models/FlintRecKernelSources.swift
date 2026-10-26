@@ -11,11 +11,11 @@
 // and the M4 Max measurements in recursive-oss/rec#17).
 //
 // Scratch aliases: workspace, partials, statistics, routing, and trace are
-// session inputs. The greedy packet also keeps logits and the control buffer
-// on the session. `release_control` zeros that buffer after the packet so
-// the next launch does not upload zeros. Single-token decode still uploads
-// a fresh control buffer and returns logits as an output. MLX marks inputs
-// const; the kernel const-casts them the same way as KV.
+// session inputs. `release_control` zeros the greedy control buffer after
+// the packet so the next launch does not upload zeros. Single-token decode
+// still uploads a fresh control buffer. Logits stay a kernel output on both
+// paths so the in-kernel argmax reads the vocabulary-head stores. MLX marks
+// inputs const; the kernel const-casts the scratch aliases the same way as KV.
 enum FlintRecKernelSources {
     static let headerPro: String = #"""
 

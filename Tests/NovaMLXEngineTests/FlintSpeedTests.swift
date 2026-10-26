@@ -30,15 +30,25 @@ struct FlintSpeedTests {
         var parity: Bool
     }
 
+    /// Official INT4 snapshot. Local disk first, then the removable volume
+    /// (same roots as `BiRefNetMattingTests`). Shards are `model-0000N`, so
+    /// the sentinel is `config.json`.
+    private static func officialInt4Directory() -> URL? {
+        for root in ["/Users/lucas/Models", "/Volumes/Samsung768/Models"] {
+            let url = URL(fileURLWithPath: root + "/RecursiveSI/flint-int4")
+            let config = url.appendingPathComponent("config.json")
+            if FileManager.default.fileExists(atPath: config.path) { return url }
+        }
+        return nil
+    }
+
     @Test("raw model decode ~128 tokens")
     func testRawDecodeSpeed() async throws {
-        let dir = URL(fileURLWithPath: "/Volumes/Samsung768/Models/RecursiveSI/flint-int4")
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue
-        else {
+        guard let dir = Self.officialInt4Directory() else {
             print("SPEED-SKIP: weights not present")
             return
         }
+        print("SPEED-WEIGHTS:", dir.path)
 
         await CustomModelRegistration.ensureRegistered()
         let container = try await LLMModelFactory.shared.loadContainer(

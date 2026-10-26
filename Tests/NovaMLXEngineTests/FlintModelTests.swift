@@ -249,8 +249,12 @@ struct FlintModelTests {
         #expect(maxBody.contains("profile[\(FlintRecResident.producedSlot)]=block_step+1u"))
         #expect(maxBody.contains("if(stop)break;"))
         #expect(maxBody.components(separatedBy: "diagnostic[group]=0;").count - 1 == 1)
-        #expect(maxBody.contains("logits_rw"))
-        #expect(maxBody.contains("#define logits logits_rw"))
+        // Logits stay the writable output parameter. A const-cast input made
+        // the resident argmax repeat one id.
+        #expect(!maxBody.contains("logits_rw"))
+        #expect(!maxBody.contains("#define logits"))
+        #expect(maxBody.contains("float(logits[word])"))
+        #expect(maxBody.contains("q4_local<2048>(weight_matrix(tail,final+30),n,logits,"))
         #expect(maxBody.components(separatedBy: "release_control(control,tid)").count - 1 == 1)
         let release = try #require(maxBody.range(of: "release_control(control,tid)"))
         let earlyStop = try #require(maxBody.range(of: "if(stop)break;"))

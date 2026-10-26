@@ -63,14 +63,15 @@ struct FlintRecLaunch: Equatable, Sendable {
 ///
 /// The shader is rendered for two resident pools (see `FlintRecKernelSources`).
 /// Large scratch (workspace, attention partials, statistics, routing, trace)
-/// lives on the session and is passed back in. Single-token logits stay a
-/// fresh output so the caller can sample them. Greedy logits stay on the
-/// session. The sync diagnostic stays an output so a
-/// failed resident spin is visible. Single-token `forward` uploads a fresh
-/// zero control buffer every launch — a dirty atomic counter deadlocks the
-/// device spin. The greedy packet instead reuses the session buffer and
-/// `release_control` zeros it on device after the launch. Set
-/// `NOVA_FLINT_REC_FRESH_CONTROL=1` to force the upload on that path too.
+/// lives on the session and is passed back in. Logits stay a kernel output
+/// on both paths. MLX marks inputs const, and a const-cast is not a reliable
+/// publish for the in-kernel argmax: the packet then repeats one token id.
+/// The sync diagnostic stays an output so a failed resident spin is visible.
+/// Single-token `forward` uploads a fresh zero control buffer every launch —
+/// a dirty atomic counter deadlocks the device spin. The greedy packet
+/// instead reuses the session buffer and `release_control` zeros it on
+/// device after the launch. Set `NOVA_FLINT_REC_FRESH_CONTROL=1` to force
+/// the upload on that path too.
 public final class FlintRecKernel: @unchecked Sendable {
     private static let decodeThreads = 256
     private static let kvBlocks = 4
@@ -111,22 +112,20 @@ public final class FlintRecKernel: @unchecked Sendable {
         /// Greedy-packet spin counters. `release_control` restores zeros.
         /// Replaced when a launch fails before that epilogue runs.
         var control: MLXArray
-        /// Greedy logits. The host never reads them; argmax stays on device.
-        let logits: MLXArray
 
         init() {
             // trace [50, 2048] bf16, workspace 78848 bf16,
             // partials 32 * 1024 * 128 / 2 f32, statistics 32 * 1024 * 2 f32,
             // routing 1280 u32. Same shapes as rec's `decode_scratch`.
-            // control is 1024 u32. logits is the full vocab, bf16.
+            // control is 1024 u32. Logits are a kernel output, not scratch:
+            // see `FlintRecKernel` (const inputs are not a safe argmax source).
             trace = MLXArray.zeros([50 * 2048], dtype: .bfloat16)
             workspace = MLXArray.zeros([78848], dtype: .bfloat16)
             partials = MLXArray.zeros([32 * 1024 * 128 / 2], dtype: .float32)
             statistics = MLXArray.zeros([32 * 1024 * 2], dtype: .float32)
             routing = MLXArray.zeros([1280], dtype: .uint32)
             control = MLXArray.zeros([1024], dtype: .uint32)
-            logits = MLXArray.zeros([FlintRecKernel.vocabulary], dtype: .bfloat16)
-            eval(trace, workspace, partials, statistics, routing, control, logits)
+            eval(trace, workspace, partials, statistics, routing, control)
         }
     }
 
@@ -186,9 +185,8 @@ public final class FlintRecKernel: @unchecked Sendable {
                     "metadata", "kv0", "kv1", "kv2", "kv3",
                     "parameters", "silu_table", "private_control", "sampling",
                     "trace", "workspace", "partials", "statistics", "routing",
-                    "logits",
                 ],
-                outputNames: ["diagnostic", "profile"],
+                outputNames: ["logits", "diagnostic", "profile"],
                 source: resident,
                 header: sources.0,
                 ensureRowContiguous: true
@@ -420,8 +418,9 @@ public final class FlintRecKernel: @unchecked Sendable {
     /// Greedy resident packet. One launch runs `count` tokens
     /// (1...`FlintRecResident.width`) and returns the sampled ids.
     /// `eosTokenIds` (at most 4) stops the packet early, matching rec's
-    /// sampler; an empty list runs the full count. Logits stay on the
-    /// session. The control buffer is reused unless
+    /// sampler; an empty list runs the full count. Logits are a writable
+    /// kernel output so the in-kernel argmax observes the vocabulary head.
+    /// The host does not read them. The control buffer is reused unless
     /// `NOVA_FLINT_REC_FRESH_CONTROL=1`.
     func forwardGreedy(
         state: KVState, token: Int, count: Int, eosTokenIds: [Int] = [], layerCount: Int = 49
@@ -466,15 +465,14 @@ public final class FlintRecKernel: @unchecked Sendable {
                 scratch.partials,
                 scratch.statistics,
                 scratch.routing,
-                scratch.logits,
             ],
             grid: (Self.decodeThreads * launch.workers, 1, 1),
             threadGroup: (Self.decodeThreads, 1, 1),
-            outputShapes: [[launch.workers], [FlintRecResident.profileWords]],
-            outputDTypes: [.uint32, .uint32]
+            outputShapes: [[Self.vocabulary], [launch.workers], [FlintRecResident.profileWords]],
+            outputDTypes: [.bfloat16, .uint32, .uint32]
         )
         eval(out)
-        let diagnostic = out[0].asArray(Int.self)
+        let diagnostic = out[1].asArray(Int.self)
         if diagnostic.contains(where: { $0 != 0 }) {
             // The epilogue did not run, so the reused counters are dirty.
             if !Self.uploadsFreshControl {
@@ -483,7 +481,7 @@ public final class FlintRecKernel: @unchecked Sendable {
             }
             throw NovaMLXError.inferenceFailed("rec greedy packet GPU sync failure: \(diagnostic)")
         }
-        let packet = out[1].asArray(Int.self)
+        let packet = out[2].asArray(Int.self)
         guard packet.count >= FlintRecResident.profileWords else {
             throw NovaMLXError.inferenceFailed(
                 "rec greedy packet profile \(packet.count) < \(FlintRecResident.profileWords)")
@@ -533,9 +531,15 @@ public final class FlintRecKernel: @unchecked Sendable {
 /// argmax inside the launch so the host does not read logits between tokens.
 ///
 /// Official names the per-step dumps `block_logits` and `block_trace`. This
-/// port keeps one logits buffer and the session trace: the argmax finishes
+/// port keeps one logits output and the session trace: the argmax finishes
 /// before the next step overwrites logits, and trace is write-only. That
 /// avoids the `#define trace trace_rw` alias colliding with a shadow pointer.
+///
+/// Logits are a kernel output, not a const input. Width 8 matched single-token
+/// argmax with that binding. Binding the same buffer as a const input made
+/// every step of the packet emit one id (the head stores never reached the
+/// argmax). The loop bound is a runtime load and the argmax stride is the
+/// worker grid, so width 8 and 16 compile the same body.
 enum FlintRecResident {
     /// Tokens per greedy launch. The loop is not unrolled, so this does not
     /// change the resident register footprint. 16 amortizes the host launch
@@ -630,8 +634,6 @@ enum FlintRecResident {
             .replacingOccurrences(of: "10240u", with: "\(stride)u")
             .replacingOccurrences(of: "peer<40", with: "peer<\(workers)")
         let header = """
-            device bfloat16_t* logits_rw=(device bfloat16_t*)logits;
-            #define logits logits_rw
             uint block_input_token=uint(token);
             #pragma clang loop unroll(disable)
             for(uint block_step=0;block_step<uint(sampling[0]);++block_step) {
