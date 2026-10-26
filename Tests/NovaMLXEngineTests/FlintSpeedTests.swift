@@ -7,17 +7,23 @@ import Testing
 
 @testable import NovaMLXEngine
 
-/// Manual speed probe. The primary measurement is the real model call:
-/// eager prefill, then `FlintRecKernel` decode for official INT4. Runs only
-/// when the weights are on disk (skips otherwise). Stops after `LOOP-RESULT`.
-/// `NOVA_FLINT_MEGA_DECODE=1` also runs the obsolete MegaDecode probe.
+/// Manual speed probe. Official INT4 decode is timed two ways. `SINGLE-RESULT`
+/// is one `model()` call plus a host argmax per token. `LOOP-RESULT` is rec's
+/// greedy resident packet (8 tokens per launch, argmax on device), which is
+/// the path behind the ~197 tok/s INT4 figure. Runs only when the weights are
+/// on disk. Stops after `LOOP-RESULT`. `NOVA_FLINT_MEGA_DECODE=1` also runs
+/// the obsolete MegaDecode probe.
 @Suite("Flint raw decode speed")
 struct FlintSpeedTests {
 
     private struct LoopStats: Sendable {
-        var seconds: Double
-        var steps: Int
+        var packetSeconds: Double
+        var packetSteps: Int
+        var singleSeconds: Double
+        var singleSteps: Int
         var official: Bool
+        var launch: String
+        var parity: Bool
     }
 
     @Test("raw model decode ~128 tokens")
@@ -47,51 +53,110 @@ struct FlintSpeedTests {
         }
         print("SPEED-DTYPE:", dtypeInfo)
 
-        // Closed loop: eager prefill, then single-token decode through the
-        // armed rec kernel (the same call the app's generate loop makes).
+        // Two closed loops. Both prefill the same prompt, take the eager
+        // one-token tail, then one rec step so the session is live.
+        // Parity compares the next 16 greedy tokens: host argmax versus the
+        // resident packet. Timing starts after that, so shader compile is
+        // outside the window.
         let n = 128
         let dtBox = try await container.perform { context in
-            let caches = try context.model.newCache(parameters: nil)
-            let full = MLXArray(promptIds.map { Int32($0) }).reshaped(1, -1)
-            var logits = context.model(full, cache: caches)
-            eval(logits)
-            var lastId = Int(argMax(logits[0..., -1, 0...]).item(Int.self))
-            logits = context.model(MLXArray(Int32(lastId)).reshaped(1, 1), cache: caches)
-            eval(logits)
-            lastId = Int(argMax(logits[0..., -1, 0...]).item(Int.self))
-            // Warmup extra: force all compile traces before timing.
-            for _ in 0 ..< 40 {
-                logits = context.model(MLXArray(Int32(lastId)).reshaped(1, 1), cache: caches)
+            let flint = context.model as! FlintModel
+            let prompt = MLXArray(promptIds.map { Int32($0) }).reshaped(1, -1)
+
+            func arm(_ caches: [KVCache]) -> Int {
+                var logits = context.model(prompt, cache: caches)
                 eval(logits)
-                lastId = Int(argMax(logits[0..., -1, 0...]).item(Int.self))
+                var last = Int(argMax(logits[0..., -1, 0...]).item(Int.self))
+                // Eager tail, then the first rec step.
+                for _ in 0 ..< 2 {
+                    logits = context.model(MLXArray(Int32(last)).reshaped(1, 1), cache: caches)
+                    eval(logits)
+                    last = Int(argMax(logits[0..., -1, 0...]).item(Int.self))
+                }
+                return last
             }
-            var segTimes: [Double] = []
+            func singleStep(_ caches: [KVCache], _ last: Int) -> Int {
+                let logits = context.model(MLXArray(Int32(last)).reshaped(1, 1), cache: caches)
+                eval(logits)
+                return Int(argMax(logits[0..., -1, 0...]).item(Int.self))
+            }
+
+            let singleCaches = try context.model.newCache(parameters: nil)
+            var singleLast = arm(singleCaches)
+            var reference: [Int] = []
+            reference.reserveCapacity(16)
+            for _ in 0 ..< 16 {
+                singleLast = singleStep(singleCaches, singleLast)
+                reference.append(singleLast)
+            }
+
+            // Time single-token while this cache still owns the rec session.
+            // Arming the packet cache replaces that session.
+            var singleSegs: [Double] = []
             let per = n / 4
-            for seg in 0 ..< 4 {
+            let singleBefore = flint.recDecodeSteps
+            for _ in 0 ..< 4 {
                 let t0 = Date()
                 for _ in 0 ..< per {
-                    logits = context.model(MLXArray(Int32(lastId)).reshaped(1, 1), cache: caches)
-                    eval(logits)
-                    lastId = Int(argMax(logits[0..., -1, 0...]).item(Int.self))
+                    singleLast = singleStep(singleCaches, singleLast)
                 }
-                segTimes.append(Date().timeIntervalSince(t0) / Double(per) * 1000)
+                singleSegs.append(Date().timeIntervalSince(t0) / Double(per) * 1000)
             }
-            print("SPEED-SEGS ms/token:", segTimes.map { String(format: "%.1f", $0) }.joined(separator: " "))
-            let flint = context.model as! FlintModel
-            let seconds = segTimes.reduce(0, +) / 4 / 1000 * Double(n)
+            let singleSteps = flint.recDecodeSteps - singleBefore
+            print("SINGLE-SEGS ms/token:", singleSegs.map { String(format: "%.1f", $0) }.joined(separator: " "))
+
+            let packetCaches = try context.model.newCache(parameters: nil)
+            var packetLast = arm(packetCaches)
+            var resident: [Int] = []
+            resident.reserveCapacity(16)
+            for _ in 0 ..< 2 {
+                let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: 8)
+                resident.append(contentsOf: ids)
+                packetLast = ids[ids.count - 1]
+            }
+            let parity = reference == resident
+            print("PARITY:", parity ? "match 16" : "MISMATCH single=\(reference) packet=\(resident)")
+
+            // Resident packets. The parity packets already compiled this shader.
+            var packetSegs: [Double] = []
+            let packetBefore = flint.recDecodeSteps
+            for _ in 0 ..< 4 {
+                let t0 = Date()
+                var left = per
+                while left > 0 {
+                    let take = min(8, left)
+                    let ids = try flint.recGreedyPacket(cache: packetCaches, token: packetLast, count: take)
+                    packetLast = ids[ids.count - 1]
+                    left -= ids.count
+                }
+                packetSegs.append(Date().timeIntervalSince(t0) / Double(per) * 1000)
+            }
+            let packetSteps = flint.recDecodeSteps - packetBefore
+            print("PACKET-SEGS ms/token:", packetSegs.map { String(format: "%.1f", $0) }.joined(separator: " "))
+
+            func seconds(_ segs: [Double]) -> Double {
+                segs.reduce(0, +) / 4 / 1000 * Double(n)
+            }
             return SendableBox(LoopStats(
-                seconds: seconds, steps: flint.recDecodeSteps, official: flint.isOfficialInt4))
+                packetSeconds: seconds(packetSegs), packetSteps: packetSteps,
+                singleSeconds: seconds(singleSegs), singleSteps: singleSteps,
+                official: flint.isOfficialInt4,
+                launch: flint.recKernel?.launch.label ?? "none",
+                parity: parity))
         }
         let stats = dtBox.value
-        let dt = stats.seconds
-        print(String(format: "SPEED-RESULT: raw model decode %.2f s for %d tokens = %.1f tok/s", dt, n, Double(n) / dt))
+        let singleRate = Double(n) / stats.singleSeconds
+        let packetRate = Double(n) / stats.packetSeconds
+        print(String(format: "SINGLE-RESULT: one launch + host argmax %.1f tok/s (%d rec steps)", singleRate, stats.singleSteps))
         print(String(
-            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@)",
-            Double(n) / dt, stats.steps, stats.official ? "yes" : "no"))
+            format: "LOOP-RESULT: load→pack→decode %.1f tok/s (%d rec steps, official=%@, launch=%@, packet=8)",
+            packetRate, stats.packetSteps, stats.official ? "yes" : "no", stats.launch))
         // The first single-token forward stays eager (it may be the prefill
-        // tail). Warmup plus the timed loop are the kernel steps.
+        // tail). Both timed windows are rec steps after that handoff.
         #expect(stats.official)
-        #expect(stats.steps >= n)
+        #expect(stats.parity)
+        #expect(stats.singleSteps == n)
+        #expect(stats.packetSteps == n)
 
         // MegaDecode is an obsolete compile experiment. After a successful rec
         // loop it still launches and GPU-timeouts, which fails this suite.

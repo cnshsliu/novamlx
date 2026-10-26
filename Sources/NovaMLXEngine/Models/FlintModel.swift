@@ -572,6 +572,7 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
     nonisolated(unsafe) private var recQuantFallbackLogged = false
     nonisolated(unsafe) private var recIngestFailedCache: ObjectIdentifier?
     nonisolated(unsafe) private var recActiveLogged = false
+    nonisolated(unsafe) private var recPacketLogged = false
     /// Non-proxy caches only. Proxies keep this on themselves so two live
     /// sequences do not steal each other's handoff.
     nonisolated(unsafe) private var recSawSingleToken: ObjectIdentifier?
@@ -600,7 +601,8 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             let packed = try FlintRecPacker.pack(self)
             let kernel = FlintRecKernel(packed: packed)
             recKernel = kernel
-            NovaMLXLog.info("[Flint] rec megakernel armed (official INT4)")
+            NovaMLXLog.info(
+                "[Flint] rec megakernel armed (official INT4, \(kernel.launch.label) workers)")
             return kernel
         } catch {
             NovaMLXLog.error("[Flint] rec pack failed, staying eager: \(error)")
@@ -674,17 +676,23 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             }
         }
 
-        let tokens = inputs.asType(.int32).asArray(Int32.self)
-        guard tokens.count == seq else {
-            NovaMLXLog.error("[Flint] rec decode off: token read \(tokens.count) != \(seq)")
-            return nil
+        let tokens: [Int]
+        if seq == 1 {
+            tokens = [Self.recScalarToken(inputs)]
+        } else {
+            let flat = inputs.asType(.int32).asArray(Int32.self)
+            guard flat.count == seq else {
+                NovaMLXLog.error("[Flint] rec decode off: token read \(flat.count) != \(seq)")
+                return nil
+            }
+            tokens = flat.map { Int($0) }
         }
         var rows: [MLXArray] = []
         rows.reserveCapacity(seq)
         var committed = 0
         do {
             for id in tokens {
-                let flat = try kernel.forward(state: session.state, token: Int(id))
+                let flat = try kernel.forward(state: session.state, token: id)
                 guard flat.dim(0) == vocabularySize else {
                     session.state.position = max(0, session.state.position - 1)
                     throw NovaMLXError.inferenceFailed(
@@ -710,6 +718,55 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             return rows[0].reshaped(1, 1, vocabularySize)
         }
         return stacked(rows, axis: 0).reshaped(1, rows.count, vocabularySize)
+    }
+
+    /// Continue an active rec session with one greedy resident packet
+    /// (1...8 tokens, argmax inside the kernel). The session must already
+    /// have been handed off by a single-token `callAsFunction`. Empty
+    /// `eosTokenIds` runs the full count. Sampled decode stays on `forward`.
+    func recGreedyPacket(
+        cache: [KVCache], token: Int, count: Int, eosTokenIds: [Int] = []
+    ) throws -> [Int] {
+        guard !recDecodeDisabled, let kernel = recKernel else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet: kernel is not armed")
+        }
+        guard recSessionMatches(cache), let session = recSession else {
+            throw NovaMLXError.inferenceFailed("rec greedy packet: no active session for this cache")
+        }
+        let ids: [Int]
+        do {
+            ids = try kernel.forwardGreedy(
+                state: session.state, token: token, count: count, eosTokenIds: eosTokenIds)
+        } catch {
+            invalidateRecSession()
+            recDecodeDisabled = true
+            NovaMLXLog.error("[Flint] rec greedy packet failed, falling back to eager: \(error)")
+            throw error
+        }
+        for _ in ids {
+            noteRecStep(cache, session: session)
+        }
+        recDecodeSteps += ids.count
+        if !recPacketLogged {
+            recPacketLogged = true
+            NovaMLXLog.info("[Flint] rec greedy resident packet active (width \(FlintRecResident.width))")
+        }
+        return ids
+    }
+
+    /// One decode token, without a dtype-cast kernel when the id is already
+    /// an integer array (the generate loop passes `Int32`).
+    private static func recScalarToken(_ inputs: MLXArray) -> Int {
+        switch inputs.dtype {
+        case .int32:
+            return Int(inputs.item(Int32.self))
+        case .uint32:
+            return Int(inputs.item(UInt32.self))
+        case .int64:
+            return Int(inputs.item(Int64.self))
+        default:
+            return Int(inputs.asType(.int32).item(Int32.self))
+        }
     }
 
     /// True when this forward should run on the megakernel.
