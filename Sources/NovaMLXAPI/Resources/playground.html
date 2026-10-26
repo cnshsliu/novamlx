@@ -132,8 +132,10 @@ async function send() {
   const content = attached
     ? [{ type: "text", text }, { type: "image_url", image_url: { url: attached } }]
     : text;
+  // 2048 is ModelConfig.maxTokens. Sent on every /demo/chat and /demo/vlm
+  // request so the ceiling is in the body, not only the server default.
   const body = {
-    model, stream: true,
+    model, stream: true, max_tokens: 2048,
     messages: [...history, { role: "user", content }],
   };
   history.push({ role: "user", content: text });   // history keeps text only
