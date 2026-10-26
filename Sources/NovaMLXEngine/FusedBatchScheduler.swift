@@ -233,6 +233,11 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// Flint chat/agent grammar. Nil when grammar is off; the think guard is
     /// the fallback in that case. The mask is applied before each sample.
     var flintGrammar: FlintStructuralGrammar? = nil
+    /// Generated token ids penalized on the Flint filtered packet.
+    /// Official presence is a 0/1 mask over sampled tokens, not the prompt.
+    /// Empty when `flintPresencePenalty` is 0.
+    var flintPresenceSeen: Set<Int> = []
+    var flintPresencePenalty: Float = 0
 
     /// Yield a token to the stream IFF the sequence has not been finished
     /// by any concurrent path. Silent no-op if already finished.
@@ -835,7 +840,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         // Frequency penalty — per-model default from generation_config.json + family defaults
         let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
         let flintGrammarSeed = FlintChatDecode.chatGrammar(for: request, family: container.identifier.family)
-        let flintPrefillMask = flintGrammarSeed?.maskedTokenIds() ?? []
+        let applyFlintSampleFilter = container.identifier.family == .flint
+        let flintPrefillTemperature = Float(request.temperature ?? container.config.temperature)
+        let flintPrefillTopK = request.topK ?? container.config.topK
 
         // Run entire prefill + first token sampling inside perform to ensure
         // correct MLX lazy evaluation context.
@@ -878,8 +885,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit)) — sequence too long or model unstable")
                 return SendableBox((-1, "NaN/Inf", nil as RawLogprobData?))
             }
-            if !flintPrefillMask.isEmpty {
-                logitsToSample = FlintStructuralGrammar.suppress(flintPrefillMask, in: logitsToSample)
+            if applyFlintSampleFilter {
+                // Same mask as the filtered packet: grammar, then top-k when
+                // temperature is not 0. Presence has no generated tokens yet.
+                logitsToSample = FlintChatDecode.filterLogits(
+                    logitsToSample,
+                    grammar: flintGrammarSeed,
+                    presenceSeen: [],
+                    presencePenalty: 0,
+                    temperature: flintPrefillTemperature,
+                    topK: flintPrefillTopK)
             }
             let stats = "max=\(String(format: "%.2f", maxLogit)), min=\(String(format: "%.2f", minLogit)), shape=\(logitsToSample.shape), dtype=\(logitsToSample.dtype)"
             let prefillSampled = sampler.sample(logits: logitsToSample)
@@ -992,6 +1007,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         seq.toolStream = toolStream
         seq.flintThink = flintThink
         seq.flintGrammar = flintGrammar
+        seq.flintPresencePenalty = request.presencePenalty ?? container.config.presencePenalty
+        if seq.flintPresencePenalty != 0, firstTokenId >= 0 {
+            seq.flintPresenceSeen.insert(firstTokenId)
+        }
         return seq
     }
 
@@ -1020,7 +1039,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
         let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
         let flintGrammarSeed = FlintChatDecode.chatGrammar(for: request, family: container.identifier.family)
-        let flintPrefillMask = flintGrammarSeed?.maskedTokenIds() ?? []
+        let applyFlintSampleFilter = container.identifier.family == .flint
+        let flintPrefillTemperature = Float(request.temperature ?? container.config.temperature)
+        let flintPrefillTopK = request.topK ?? container.config.topK
         let reqTag = request.id.uuidString.prefix(8)
         let remainingArray = MLXArray(remainingTokenIds.map { Int32($0) })
         let firstTokenIdBox = await mlxContainer.perform(nonSendable: (remainingArray, restoredCaches)) { context, values in
@@ -1037,8 +1058,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Remaining prefill logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit))")
                 return SendableBox((-1, nil as RawLogprobData?))
             }
-            if !flintPrefillMask.isEmpty {
-                logitsToSample = FlintStructuralGrammar.suppress(flintPrefillMask, in: logitsToSample)
+            if applyFlintSampleFilter {
+                logitsToSample = FlintChatDecode.filterLogits(
+                    logitsToSample,
+                    grammar: flintGrammarSeed,
+                    presenceSeen: [],
+                    presencePenalty: 0,
+                    temperature: flintPrefillTemperature,
+                    topK: flintPrefillTopK)
             }
             let sampled = sampler.sample(logits: logitsToSample)
             eval(sampled)
@@ -1129,6 +1156,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         seq.toolStream = toolStream
         seq.flintThink = flintThink
         seq.flintGrammar = flintGrammar
+        seq.flintPresencePenalty = request.presencePenalty ?? container.config.presencePenalty
+        if seq.flintPresencePenalty != 0, firstTokenId >= 0 {
+            seq.flintPresenceSeen.insert(firstTokenId)
+        }
         return seq
     }
 
@@ -1324,6 +1355,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
         lock.withLock { totalTokensViaFused += UInt64(tokens.count) }
         seq.previousTokenWasControl = false
+        if seq.flintPresencePenalty != 0 {
+            for id in tokens {
+                seq.flintPresenceSeen.insert(id)
+            }
+        }
         if !scrubbed.isEmpty {
             seq.yieldProcessed(scrubbed)
         }
@@ -1565,44 +1601,75 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 let wantLogprobs = seq.request.includeLogprobs
                 // Flint structural grammar rewrites logits every step. Drafts
                 // are unmasked, so they stay off while the grammar is installed.
+                // A filtered resident packet also replaces drafts: n-gram verify
+                // is argmax, and it does not see the grammar or top-p mask.
                 let grammarOn = seq.flintGrammar != nil
+                let isFlint = container.identifier.family == .flint
+                let flintTemperature = Float(seq.request.temperature ?? container.config.temperature)
+                let flintTopP = Float(seq.request.topP ?? container.config.topP)
+                let flintTopK = seq.request.topK ?? container.config.topK
+                let flintMinP = seq.request.minP ?? container.config.minP
+                let flintPresence = seq.flintPresencePenalty
+                let flintRepetition = seq.request.repetitionPenalty ?? container.config.repeatPenalty
+                let freqPenForRoute = seq.frequencyPenalty
+                let flintRoute: FlintChatDecode.ResidentRoute = isFlint
+                    ? FlintChatDecode.residentRoute(
+                        FlintChatDecode.Policy(
+                            temperature: flintTemperature,
+                            topP: flintTopP,
+                            topK: flintTopK,
+                            minP: flintMinP,
+                            frequencyPenalty: freqPenForRoute,
+                            repetitionPenalty: flintRepetition,
+                            presencePenalty: flintPresence,
+                            wantsLogprobs: wantLogprobs,
+                            batchWidth: active.count,
+                            // Fused decode does not apply JSON / regex / GBNF.
+                            // Greedy with that constraint keeps the device packet,
+                            // matching the path from before the filtered packet.
+                            usesGrammar: false,
+                            usesStructuralGrammar: grammarOn))
+                    : .singleStep
                 // Greedy must stay step-by-step: batch verify KV vs stepwise can
                 // flip near-tie argmax (max |Δ|~0.5), breaking lossless compares.
-                let draftTokens = (wantLogprobs || grammarOn || seq.sampler.isGreedy || !specDecoder.shouldSpeculate())
+                let draftTokens = (
+                    wantLogprobs || grammarOn || flintRoute != .singleStep
+                        || seq.sampler.isGreedy || !specDecoder.shouldSpeculate()
+                )
                     ? []
                     : specDecoder.speculate(context: seq.recentTokenIds)
 
                 if draftTokens.isEmpty {
-                    // No draft — standard single-token decode (zero overhead).
-                    // Official Flint INT4 greedy, one sequence, no logprobs:
-                    // one resident packet (up to FlintRecResident.width tokens, argmax on device)
-                    // instead of a host logit read per token. Fused sampling
-                    // does not apply repetition or presence penalties.
+                    // No draft. Flint either takes one resident packet or one
+                    // host sample. The device packet is greedy argmax, width
+                    // 16, and only when nothing rewrites logits. Grammar,
+                    // presence, and temperature / top-p / top-k use the filtered
+                    // packet: the same width, one resident forward per token,
+                    // mask before acceptance. Repetition is not applied on this
+                    // scheduler; a non-neutral repetition penalty stays single-step.
                     let token = MLXArray(Int32(seq.lastTokenId)).reshaped(1, 1)
                     let seqCaches = seq.caches
                     let seqSampler = seq.sampler
                     let recentIds = seq.recentTokenIds
-                    let freqPen = seq.frequencyPenalty
+                    let freqPen = freqPenForRoute
                     let logprobTopK = seq.request.topLogprobsCount ?? 0
-                    let allowPacket = container.identifier.family == .flint
-                        && !grammarOn
-                        && FlintChatDecode.allowsResidentPacket(
-                            FlintChatDecode.Policy(
-                                temperature: seq.sampler.isGreedy ? 0 : 1,
-                                frequencyPenalty: freqPen,
-                                repetitionPenalty: 0,
-                                presencePenalty: 0,
-                                wantsLogprobs: wantLogprobs,
-                                batchWidth: active.count,
-                                usesGrammar: false))
-                    let grammarMask = seq.flintGrammar?.maskedTokenIds() ?? []
+                    let grammarSeed = seq.flintGrammar
+                    let presenceSeed = seq.flintPresenceSeen
                     let packetCount = min(
                         FlintRecResident.width, max(1, seq.maxTokens - seq.completionTokens))
                     let packetStops = FlintChatDecode.packetStopIds(tokenizerEOS: eosId)
                     let inputToken = seq.lastTokenId
+                    if flintRoute == .filtered {
+                        FlintChatDecode.noteFilteredPacket(
+                            temperature: flintTemperature,
+                            topP: flintTopP,
+                            topK: flintTopK,
+                            grammar: grammarOn,
+                            presence: flintPresence)
+                    }
                     let tidBox = await mlxContainer.perform(nonSendable: (token, seqCaches)) { context, values in
                         let (tokenInput, caches) = values
-                        if allowPacket, let flint = context.model as? FlintModel,
+                        if flintRoute == .greedyDevice, let flint = context.model as? FlintModel,
                             flint.recGreedyPacketReady(cache: caches)
                         {
                             do {
@@ -1615,6 +1682,53 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             } catch {
                                 // recGreedyPacket disables rec after a kernel failure.
                                 // The single-token forward below is the eager fallback.
+                            }
+                        }
+                        if flintRoute == .filtered {
+                            var ids: [Int] = []
+                            ids.reserveCapacity(packetCount)
+                            var stepToken = inputToken
+                            var grammar = grammarSeed
+                            var seen = presenceSeed
+                            var stopPacket = false
+                            for _ in 0..<packetCount {
+                                let step = MLXArray(Int32(stepToken)).reshaped(1, 1)
+                                let stepLogits = context.model(step, cache: caches)
+                                eval(stepLogits)
+                                let filtered = FlintChatDecode.filterLogits(
+                                    stepLogits[0..., -1, 0...],
+                                    grammar: grammar,
+                                    presenceSeen: seen,
+                                    presencePenalty: flintPresence,
+                                    temperature: flintTemperature,
+                                    topK: flintTopK)
+                                let sampled = seqSampler.sample(logits: filtered)
+                                eval(sampled)
+                                let id = sampled.item(Int.self)
+                                let masked = grammar?.maskedTokenIds() ?? []
+                                switch FlintChatDecode.decideFiltered(
+                                    tokenId: id, masked: masked, stopIds: flintStopIds)
+                                {
+                                case .rejectMasked:
+                                    // Keep the id so the host can drop its text and
+                                    // finish. It is not in KV yet; dropping it here
+                                    // would forward `stepToken` again next step.
+                                    ids.append(id)
+                                    stopPacket = true
+                                case .keep(_, let stop):
+                                    ids.append(id)
+                                    if flintPresence != 0 { seen.insert(id) }
+                                    if var activeGrammar = grammar {
+                                        activeGrammar.advancePhase(tokenId: id)
+                                        grammar = activeGrammar
+                                    }
+                                    stepToken = id
+                                    if stop { stopPacket = true }
+                                }
+                                if stopPacket { break }
+                            }
+                            if !ids.isEmpty {
+                                return SendableBox(FusedDecodeHit.packet(ids))
                             }
                         }
                         let logits = context.model(tokenInput, cache: caches)
@@ -1630,8 +1744,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                                 .at[ids].add(ones)
                             lastLogits = lastLogits - (histogram * freqPen).reshaped(1, -1)
                         }
-                        if !grammarMask.isEmpty {
-                            lastLogits = FlintStructuralGrammar.suppress(grammarMask, in: lastLogits)
+                        if isFlint {
+                            lastLogits = FlintChatDecode.filterLogits(
+                                lastLogits,
+                                grammar: grammarSeed,
+                                presenceSeen: presenceSeed,
+                                presencePenalty: flintPresence,
+                                temperature: flintTemperature,
+                                topK: flintTopK)
                         }
 
                         let sampled = seqSampler.sample(logits: lastLogits)
@@ -1765,7 +1885,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 var sequenceFinished = false
                 var consumed = 0
                 var usedFast = false
-                if result.fromResidentPacket, container.identifier.family != .gptOss {
+                // Grammar has to see each token's text. A one-shot decode would
+                // skip that and leave the next packet's mask on the old phase.
+                if result.fromResidentPacket, seq.flintGrammar == nil,
+                    container.identifier.family != .gptOss {
                     switch fastFlintPacket(
                         seq: &seq, tokens: emitTokens, eosIds: flintStopIds,
                         tokenizer: container.tokenizer, controlPatterns: controlPatterns,
@@ -1791,6 +1914,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let isEOSNow = FlintChatDecode.isStopToken(
                         tokenId, primaryEOS: eosId, stopIds: flintStopIds)
                     seq.lastTokenId = tokenId
+                    if seq.flintPresencePenalty != 0 {
+                        seq.flintPresenceSeen.insert(tokenId)
+                    }
                     if !isEOSNow {
                         seq.completionTokens += 1
                         seq.decodeTokens += 1

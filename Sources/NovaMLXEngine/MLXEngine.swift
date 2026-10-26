@@ -1712,8 +1712,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return params
     }
 
-    /// Flint serial decode uses the resident packet when sampling is greedy
-    /// and nothing rewrites logits. Every other request keeps `TokenIterator`.
+    /// Flint serial decode uses a resident packet when the route allows it.
+    /// Greedy with no grammar stays on the device argmax packet. Grammar and
+    /// recommended sampling use the filtered packet (processor mask, then the
+    /// request sampler) at the same width. Every other request keeps
+    /// `TokenIterator`.
     static func openDecodeIterator(
         input: LMInput,
         model: any LanguageModel,
@@ -1731,23 +1734,48 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             || request.gbnfGrammar != nil
         let policy = FlintChatDecode.Policy(
             temperature: parameters.temperature,
+            topP: parameters.topP,
+            topK: parameters.topK,
+            minP: parameters.minP,
             frequencyPenalty: parameters.frequencyPenalty ?? 0,
             repetitionPenalty: parameters.repetitionPenalty ?? 0,
             presencePenalty: parameters.presencePenalty ?? 0,
             wantsLogprobs: request.includeLogprobs,
             batchWidth: 1,
-            usesGrammar: grammar)
-        if let flint = model as? FlintModel, FlintChatDecode.allowsResidentPacket(policy) {
-            NovaMLXLog.info(
-                "[Flint] serial decode will use the resident packet when the rec session is live")
-            return try FlintGreedyTokenIterator(
-                input: input,
-                model: flint,
-                cache: cache,
-                processor: processor,
-                prefill: parameters.prefill,
-                maxTokens: maxTokens,
-                eosTokenIds: stopIds)
+            usesGrammar: grammar,
+            usesStructuralGrammar: FlintChatDecode.processorUsesStructuralGrammar(processor))
+        if let flint = model as? FlintModel {
+            switch FlintChatDecode.residentRoute(policy) {
+            case .greedyDevice:
+                NovaMLXLog.info(
+                    "[Flint] serial decode will use the greedy resident packet when the rec session is live")
+                return try FlintGreedyTokenIterator(
+                    input: input,
+                    model: flint,
+                    cache: cache,
+                    processor: processor,
+                    prefill: parameters.prefill,
+                    maxTokens: maxTokens,
+                    eosTokenIds: stopIds)
+            case .filtered:
+                FlintChatDecode.noteFilteredPacket(
+                    temperature: parameters.temperature,
+                    topP: parameters.topP,
+                    topK: parameters.topK,
+                    grammar: policy.usesStructuralGrammar,
+                    presence: policy.presencePenalty)
+                return try FlintGreedyTokenIterator(
+                    input: input,
+                    model: flint,
+                    cache: cache,
+                    processor: processor,
+                    sampler: sampler,
+                    prefill: parameters.prefill,
+                    maxTokens: maxTokens,
+                    eosTokenIds: stopIds)
+            case .singleStep:
+                break
+            }
         }
         return try TokenIterator(
             input: input, model: model, cache: cache,

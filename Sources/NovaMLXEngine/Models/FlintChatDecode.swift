@@ -6,8 +6,9 @@ import NovaMLXUtils
 
 // MARK: - Policy and report
 
-/// Greedy Flint chat decode: when it may use the resident packet, how to
-/// stop a packet early, and the end-to-end rate line.
+/// Flint chat decode: when the resident packet may run, how grammar and
+/// sampling compose with it, how to stop a packet early, and the
+/// end-to-end rate line.
 ///
 /// `FLINT-CHAT` tok/s = `decodeTokens / wallDecodeSeconds`.
 /// `decodeTokens` counts tokens emitted after the prefill-sampled first token,
@@ -23,32 +24,224 @@ import NovaMLXUtils
 /// to the same run's `LOOP-RESULT`. It is lower by the host work the kernel
 /// loop does not do.
 enum FlintChatDecode {
+    /// Which resident launch a Flint sequence may use.
+    ///
+    /// Official `rec` (`ResidentSampler.block` / `FilteredResidentSampler`)
+    /// keeps a packet for grammar and for temperature / top-p / top-k.
+    /// Nova's device argmax packet stays width ``FlintRecResident/width``
+    /// (16). The filtered packet is that many resident steps with the mask
+    /// applied before each acceptance. It is not a shrink to rec's `WIDTH` 8.
+    ///
+    /// Allow / reject, matched to official where the paths differ:
+    ///
+    /// | Request | Official `rec` | Nova Flint packet |
+    /// |---|---|---|
+    /// | temp 0, no grammar, presence 0, freq 0, rep neutral, no logprobs, one sequence | fused greedy kernel, width 8 | ``greedyDevice``, width 16 |
+    /// | structural grammar, and/or presence, and/or temp / top-p / top-k | `FilteredResidentSampler`, width 8 | ``filtered``, width 16 |
+    /// | `(temp, top_p, top_k) == (1, 1, 0)` and no grammar / presence | fused gumbel kernel, width 8 | ``filtered`` (host sampler; no gumbel kernel) |
+    /// | `frequency_penalty != 0` | HTTP 400 | ``singleStep`` (fused still applies frequency) |
+    /// | `repetition_penalty` not 0 or 1 | HTTP 400 | ``singleStep`` (fused does not apply repetition) |
+    /// | `min_p != 0` | HTTP 400 | ``singleStep`` (fused sampler ignores min-p) |
+    /// | logprobs | filtered packet | ``singleStep`` (per-step logprobs) |
+    /// | batch width > 1 | single session only | ``singleStep`` |
+    /// | JSON / regex / GBNF (`usesGrammar`) | not the flint grammar | ``singleStep`` |
+    ///
+    /// Recommended sampling from `generation_config.json` is temperature 1.0,
+    /// top-p 0.95, top-k 20. That row is ``filtered``, including when the
+    /// structural grammar is on.
+    enum ResidentRoute: Equatable, Sendable {
+        /// One host sample. The fused scheduler reads logits between tokens.
+        case singleStep
+        /// Device argmax for up to ``FlintRecResident/width`` tokens.
+        case greedyDevice
+        /// Up to ``FlintRecResident/width`` resident forwards. Grammar,
+        /// presence, and top-k are applied before the host sampler accepts.
+        case filtered
+    }
+
     struct Policy: Equatable, Sendable {
         var temperature: Float
+        var topP: Float = 1
+        var topK: Int = 0
+        var minP: Float = 0
         var frequencyPenalty: Float
         var repetitionPenalty: Float
         var presencePenalty: Float
         var wantsLogprobs: Bool
         var batchWidth: Int
+        /// JSON schema, regex, GBNF, or JSON mode. That mask is not the flint
+        /// grammar, so every packet stays off and the serial iterator applies it.
         var usesGrammar: Bool
+        /// Official flint structural grammar (`FlintStructuralGrammar`).
+        var usesStructuralGrammar: Bool = false
     }
 
-    /// Device argmax matches the host sampler only for a single greedy
-    /// sequence with no logit rewrite. Sampled decode, logprobs, penalties,
-    /// grammar, and a second live sequence stay on the one-token forward.
+    /// ``greedyDevice`` only. Grammar and non-greedy sampling use ``filtered``
+    /// instead of this predicate.
     static func allowsResidentPacket(_ policy: Policy) -> Bool {
-        policy.temperature == 0
-            && policy.frequencyPenalty == 0
-            && !penaltyChangesLogits(policy.repetitionPenalty)
-            && policy.presencePenalty == 0
-            && !policy.wantsLogprobs
-            && policy.batchWidth == 1
-            && !policy.usesGrammar
+        residentRoute(policy) == .greedyDevice
+    }
+
+    static func residentRoute(_ policy: Policy) -> ResidentRoute {
+        guard policy.batchWidth == 1 else { return .singleStep }
+        guard !policy.wantsLogprobs else { return .singleStep }
+        guard policy.frequencyPenalty == 0 else { return .singleStep }
+        guard !penaltyChangesLogits(policy.repetitionPenalty) else { return .singleStep }
+        guard policy.minP == 0 else { return .singleStep }
+        guard !policy.usesGrammar else { return .singleStep }
+        guard policy.temperature >= 0 else { return .singleStep }
+        guard policy.topP >= 0, policy.topP <= 1 else { return .singleStep }
+        guard policy.topK >= 0 else { return .singleStep }
+        // Official rejects presence outside [-2, 2]. Stay on one token there.
+        guard policy.presencePenalty >= -2, policy.presencePenalty <= 2 else { return .singleStep }
+
+        let needsFilter = policy.usesStructuralGrammar
+            || policy.presencePenalty != 0
+            || policy.temperature != 0
+        if needsFilter { return .filtered }
+        return .greedyDevice
     }
 
     /// 1.0 is identity. 0 means the penalty is not installed.
     static func penaltyChangesLogits(_ value: Float) -> Bool {
         value != 0 && value != 1
+    }
+
+    /// One filtered step after the sampler has already seen the mask.
+    /// A masked id is not part of the kept packet. A stop id is kept and ends it.
+    enum FilteredDecision: Equatable, Sendable {
+        case rejectMasked(Int)
+        case keep(Int, stop: Bool)
+    }
+
+    static func decideFiltered(tokenId: Int, masked: Set<Int>, stopIds: Set<Int>) -> FilteredDecision {
+        if masked.contains(tokenId) { return .rejectMasked(tokenId) }
+        return .keep(tokenId, stop: stopIds.contains(tokenId))
+    }
+
+    struct FilteredPacketResult: Equatable, Sendable {
+        var tokens: [Int]
+        /// Sampler returned an id the grammar mask forbids. Not in `tokens`.
+        var rejectedMaskedId: Int?
+        var stoppedOnEOS: Bool
+    }
+
+    /// Walk up to `width` choices. `choose` is the sampler; it receives the
+    /// ids whose logits are `-inf` for this step. Official
+    /// `FilteredResidentSampler` applies that mask before `make_sampler`.
+    static func acceptFilteredPacket(
+        width: Int = FlintRecResident.width,
+        grammar: inout FlintStructuralGrammar?,
+        stopIds: Set<Int>,
+        choose: (Set<Int>) -> Int
+    ) -> FilteredPacketResult {
+        var tokens: [Int] = []
+        let steps = max(0, width)
+        for _ in 0..<steps {
+            let masked = grammar?.maskedTokenIds() ?? []
+            let id = choose(masked)
+            switch decideFiltered(tokenId: id, masked: masked, stopIds: stopIds) {
+            case .rejectMasked(let rejected):
+                return FilteredPacketResult(
+                    tokens: tokens, rejectedMaskedId: rejected, stoppedOnEOS: false)
+            case .keep(let kept, let stop):
+                tokens.append(kept)
+                if var active = grammar {
+                    active.advancePhase(tokenId: kept)
+                    grammar = active
+                }
+                if stop {
+                    return FilteredPacketResult(
+                        tokens: tokens, rejectedMaskedId: nil, stoppedOnEOS: true)
+                }
+            }
+        }
+        return FilteredPacketResult(tokens: tokens, rejectedMaskedId: nil, stoppedOnEOS: false)
+    }
+
+    /// Presence, then the grammar mask, then top-k when temperature is not 0.
+    /// Top-k runs before the fused sampler's top-p. Official `make_sampler`
+    /// applies top-p then top-k on log-probabilities; both filters are on for
+    /// the recommended `(1.0, 0.95, 20)` pair. Temperature 0 ignores top-k
+    /// and takes argmax after the grammar mask, matching `make_sampler`.
+    static func filterLogits(
+        _ logits: MLXArray,
+        grammar: FlintStructuralGrammar?,
+        presenceSeen: Set<Int>,
+        presencePenalty: Float,
+        temperature: Float,
+        topK: Int
+    ) -> MLXArray {
+        var row = logits
+        if presencePenalty != 0 {
+            row = applyPresence(row, seen: presenceSeen, penalty: presencePenalty)
+        }
+        if let grammar {
+            let masked = grammar.maskedTokenIds()
+            if !masked.isEmpty {
+                row = FlintStructuralGrammar.suppress(masked, in: row)
+            }
+        }
+        if temperature != 0, topK > 0 {
+            row = applyTopK(row, k: topK)
+        }
+        return row
+    }
+
+    /// `logit[id] -= penalty` for each id already sampled this turn.
+    /// Official `FilteredResidentSampler` subtracts `presence_penalty * mask`
+    /// with a 0/1 mask over generated tokens, not the prompt.
+    static func applyPresence(_ logits: MLXArray, seen: Set<Int>, penalty: Float) -> MLXArray {
+        guard penalty != 0, !seen.isEmpty else { return logits }
+        var row = logits
+        if row.dtype != .float32 { row = row.asType(.float32) }
+        let vocab = row.dim(-1)
+        let ids = seen.filter { $0 >= 0 && $0 < vocab }
+        guard !ids.isEmpty else { return row }
+        let index = MLXArray(ids.map { Int32($0) })
+        let ones = MLXArray.ones([ids.count], type: Float32.self)
+        let histogram = MLXArray.zeros([vocab], type: Float32.self).at[index].add(ones)
+        let flat = row.ndim == 1 ? row : row.reshaped(-1)
+        let adjusted = flat - histogram * penalty
+        if row.ndim == 1 { return adjusted }
+        return adjusted.reshaped(row.shape)
+    }
+
+    /// Mask every id outside the top `k` logits. `k <= 0` leaves `logits` alone.
+    static func applyTopK(_ logits: MLXArray, k: Int) -> MLXArray {
+        guard k > 0 else { return logits }
+        var row = logits
+        if row.dtype == .bfloat16 || row.dtype == .float16 {
+            row = row.asType(.float32)
+        }
+        let vocab = row.dim(-1)
+        guard k < vocab else { return row }
+        let maskIndices = argPartition(-row, kth: k - 1, axis: -1)[.ellipsis, k...]
+        return putAlong(
+            row, maskIndices, values: MLXArray(-Float.infinity, dtype: row.dtype), axis: -1)
+    }
+
+    private static let filteredLogLock = NSLock()
+    nonisolated(unsafe) private static var didLogFilteredPacket = false
+
+    /// Once per process, same style as the greedy packet line.
+    static func noteFilteredPacket(
+        temperature: Float, topP: Float, topK: Int, grammar: Bool, presence: Float
+    ) {
+        filteredLogLock.lock()
+        defer { filteredLogLock.unlock() }
+        guard !didLogFilteredPacket else { return }
+        didLogFilteredPacket = true
+        NovaMLXLog.info(
+            "[Flint] filtered resident packet active (width \(FlintRecResident.width), temp=\(temperature), topP=\(topP), topK=\(topK), grammar=\(grammar), presence=\(presence))")
+    }
+
+    static func processorUsesStructuralGrammar(_ processor: (any LogitProcessor)?) -> Bool {
+        if processor is FlintGrammarLogitProcessor { return true }
+        if let composed = processor as? ComposedLogitProcessor {
+            return composed.appliesFlintStructuralGrammar
+        }
+        return false
     }
 
     /// Role headers plus end-of-text. The resident kernel accepts at most four.
@@ -436,15 +629,17 @@ enum FlintChatDecode {
 // MARK: - Token iterator
 
 /// Plain Flint generation for the engine `TokenIterator` path (serial decode).
-/// Prefill matches `TokenIterator`. After the rec session is live and the
-/// processor is not masking, decode runs `recGreedyPacket` (up to
-/// `FlintRecResident.width` greedy tokens, argmax on device). The HTTP fused
-/// scheduler calls the kernel
-/// directly; this iterator covers the serial engine path.
+/// Prefill matches `TokenIterator`. With no sampler, and after the rec session
+/// is live and the processor is not masking, decode runs `recGreedyPacket`
+/// (up to `FlintRecResident.width` greedy tokens, argmax on device). With a
+/// sampler, each launch runs that many resident forwards and accepts through
+/// the processor mask (flint grammar) and the sampler. The HTTP fused
+/// scheduler calls the kernel directly; this iterator covers the serial path.
 struct FlintGreedyTokenIterator: TokenIteratorProtocol {
     private let model: FlintModel
     private var cache: [KVCache]
     private var processor: (any LogitProcessor)?
+    private let sampler: (any LogitSampler)?
     private let eosTokenIds: [Int]
     private let kernelStopIds: [Int]
 
@@ -466,6 +661,7 @@ struct FlintGreedyTokenIterator: TokenIteratorProtocol {
         model: FlintModel,
         cache: [KVCache]?,
         processor: (any LogitProcessor)?,
+        sampler: (any LogitSampler)? = nil,
         prefill: PrefillParameters,
         maxTokens: Int?,
         eosTokenIds: [Int]
@@ -473,6 +669,7 @@ struct FlintGreedyTokenIterator: TokenIteratorProtocol {
         self.model = model
         self.cache = try cache ?? model.newCache(parameters: nil)
         self.processor = processor
+        self.sampler = sampler
         self.maxTokens = maxTokens
         self.eosTokenIds = eosTokenIds
         self.kernelStopIds = FlintChatDecode.packetStopIds(tokenizerEOS: nil, extra: eosTokenIds)
@@ -529,6 +726,10 @@ struct FlintGreedyTokenIterator: TokenIteratorProtocol {
     private mutating func fill() {
         let room = maxTokens.map { $0 - tokenCount - pending.count } ?? FlintRecResident.width
         guard room > 0 else { return }
+        if sampler != nil {
+            filteredFill(room: room)
+            return
+        }
         if FlintChatDecode.processorAllowsPacket(processor),
             model.recGreedyPacketReady(cache: cache)
         {
@@ -563,6 +764,30 @@ struct FlintGreedyTokenIterator: TokenIteratorProtocol {
         if let last = kept.last { lastToken = last }
     }
 
+    /// One resident forward per token, up to the packet width. The processor
+    /// mask (structural grammar, and a penalty slot when one is installed)
+    /// runs before the sampler. `didSample` advances the grammar with the
+    /// decoded piece, which is the serial equivalent of
+    /// `FilteredResidentSampler`'s per-step grammar update.
+    private mutating func filteredFill(room: Int) {
+        let count = Swift.min(FlintRecResident.width, room)
+        guard count > 0 else { return }
+        var ids: [Int] = []
+        ids.reserveCapacity(count)
+        for _ in 0..<count {
+            let logits = model(MLXArray(Int32(lastToken)).reshaped(1, 1), cache: cache)
+            eval(logits)
+            let id = sample(logits)
+            ids.append(id)
+            lastToken = id
+            if eosTokenIds.contains(id) { break }
+        }
+        guard !ids.isEmpty else { return }
+        packetLaunches += 1
+        packetTokens += ids.count
+        pending.append(contentsOf: ids)
+    }
+
     private mutating func singleStep() {
         let logits = model(MLXArray(Int32(lastToken)).reshaped(1, 1), cache: cache)
         eval(logits)
@@ -575,7 +800,14 @@ struct FlintGreedyTokenIterator: TokenIteratorProtocol {
     private mutating func sample(_ logits: MLXArray) -> Int {
         var row = logits[0..., -1, 0...]
         row = processor?.process(logits: row) ?? row
-        let id = argMax(row, axis: -1).item(Int.self)
+        let id: Int
+        if let sampler {
+            let token = sampler.sample(logits: row)
+            eval(token)
+            id = token.item(Int.self)
+        } else {
+            id = argMax(row, axis: -1).item(Int.self)
+        }
         processor?.didSample(token: MLXArray([Int32(id)]))
         return id
     }
