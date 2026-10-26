@@ -124,6 +124,12 @@ public struct VerifiedModelGroup: Sendable, Equatable, Identifiable {
     public let family: ModelFamily
     public let weights: [CatalogEntry]
 
+    public init(name: String, family: ModelFamily, weights: [CatalogEntry]) {
+        self.name = name
+        self.family = family
+        self.weights = weights
+    }
+
     public var id: String { "\(family.rawValue)|\(name)" }
 
     /// NovaMLX version when every weight in the group was tested on the same release.
@@ -228,26 +234,24 @@ public enum ModelCatalogPolicy {
         "\(id) is not in the NovaMLX verified catalog. Turn on Download Models → Allow unverified downloads if you want to try it anyway."
     }
 
-    /// Groups verified exact weights under the model they belong to. Preview rows and family globs stay out.
+    /// Groups exact catalog weights under the model they belong to.
+    /// Unsupported rows and family globs stay out. Names sort A–Z.
     public static func verifiedModelGroups(from entries: [CatalogEntry]) -> [VerifiedModelGroup] {
-        let verified = entries.filter { $0.status == .verified && !isIdPattern($0.id) }
-        var order: [String] = []
+        let verified = entries.filter { $0.status != .unsupported && !isIdPattern($0.id) }
         var buckets: [String: [CatalogEntry]] = [:]
         for entry in verified {
             let key = "\(entry.family.rawValue)|\(entry.verifiedModelTitle)"
-            if buckets[key] == nil {
-                order.append(key)
-            }
             buckets[key, default: []].append(entry)
         }
-        return order.compactMap { key in
-            guard let weights = buckets[key], let first = weights.first else { return nil }
+        return buckets.keys.sorted().compactMap { key in
+            guard var weights = buckets[key], let first = weights.first else { return nil }
+            weights.sort { $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending }
             return VerifiedModelGroup(
                 name: first.verifiedModelTitle,
                 family: first.family,
                 weights: weights
             )
-        }
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     public static func search(

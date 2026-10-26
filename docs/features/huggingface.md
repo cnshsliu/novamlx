@@ -8,7 +8,7 @@
 
 | 功能 | 详情 |
 |------|------|
-| **已验证模型** | Downloads 页一节「Verified models」。每个模型下面是一到多份测过的权重 id。点一下下载这一份。预览条目在另一节 |
+| **已验证模型** | Downloads 页一节「Verified models」，按模型名 A–Z。标题下是和模型页相同的正则筛选框。每个模型下面是一到多份权重 id，点一下下载这一份。系列通配单独一节 |
 | **下载** | `POST /admin/api/hf/download`，`repo_id`，可选 `endpoint` |
 | **取消** | `POST /admin/api/hf/cancel`，按 task ID 取消飞行中的 `Task` |
 | **状态** | `GET /admin/api/hf/tasks`：分文件进度、速度、卡顿检测 |

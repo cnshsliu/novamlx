@@ -28,6 +28,52 @@ extension View {
 
 // MARK: - Section Header
 
+/// Regex-first model filter. A plain substring is a valid regex, so `^`, `.*`,
+/// `|`, and `[…]` match as patterns. An invalid pattern falls back to substring.
+enum ModelQueryMatch {
+    static func matches(_ query: String, in text: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        if let regex = try? NSRegularExpression(pattern: trimmed, options: [.caseInsensitive]) {
+            let range = NSRange(text.startIndex..., in: text)
+            return regex.firstMatch(in: text, range: range) != nil
+        }
+        return text.localizedCaseInsensitiveContains(trimmed)
+    }
+}
+
+/// The magnifying-glass filter used on the Models page. Regex is the query itself.
+struct ModelRegexFilterField: View {
+    @Binding var text: String
+    var placeholder: String
+    var accessibilityIdentifier: String = "models-filter"
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .accessibilityIdentifier(accessibilityIdentifier)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 /// Unified section header with themed icon, title, and optional count badge.
 func sectionHeader(_ title: String, icon: String, count: Int? = nil) -> some View {
     HStack(spacing: NovaTheme.Spacing.sm) {

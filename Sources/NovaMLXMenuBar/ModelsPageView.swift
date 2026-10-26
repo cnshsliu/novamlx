@@ -386,28 +386,10 @@ struct ModelsPageView: View {
 
     private var modelFilterField: some View {
         HStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                TextField(l10n.tr("models.filterPlaceholder"), text: $modelQuery)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .accessibilityIdentifier("models-filter")
-                if !modelQuery.isEmpty {
-                    Button {
-                        modelQuery = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            ModelRegexFilterField(
+                text: $modelQuery,
+                placeholder: l10n.tr("models.filterPlaceholder")
+            )
 
             if !unmountedSnapshot.isEmpty {
                 Button {
@@ -439,17 +421,7 @@ struct ModelsPageView: View {
     }
 
     private func matchesQuery(_ id: String) -> Bool {
-        let query = modelQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return true }
-        // Regex-first: any plain substring is itself a valid regex with
-        // identical semantics, so valid patterns (incl. ^, .*, |, […]) match
-        // as regexes; invalid patterns (e.g. a dangling "(" or "+") fall
-        // back to plain substring matching.
-        if let regex = try? NSRegularExpression(pattern: query, options: [.caseInsensitive]) {
-            let range = NSRange(id.startIndex..., in: id)
-            return regex.firstMatch(in: id, range: range) != nil
-        }
-        return id.localizedCaseInsensitiveContains(query)
+        ModelQueryMatch.matches(modelQuery, in: id)
     }
 
     private var loadedSection: some View {

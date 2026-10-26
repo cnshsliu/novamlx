@@ -30,6 +30,7 @@ struct DownloadsPageView: View {
     @State private var catalogSearchQuery = ""
     @State private var displayedCatalog: [CatalogEntry] = []
     @State private var catalogDidLoad = false
+    @State private var verifiedFilter = ""
     @State private var hubSearchAttempted = false
     @State private var hubSearchError: String?
 
@@ -94,7 +95,7 @@ struct DownloadsPageView: View {
                 VStack(spacing: 20) {
                     searchSection
 
-                    if !verifiedModelGroups.isEmpty {
+                    if !allVerifiedModelGroups.isEmpty || !verifiedFilter.isEmpty {
                         verifiedModelsSection
                     }
 
@@ -330,19 +331,45 @@ struct DownloadsPageView: View {
 
     // MARK: - Verified models and their tested weights
 
-    private var verifiedModelGroups: [VerifiedModelGroup] {
+    private var allVerifiedModelGroups: [VerifiedModelGroup] {
         ModelCatalogPolicy.verifiedModelGroups(from: displayedCatalogModels)
+    }
+
+    private var verifiedModelGroups: [VerifiedModelGroup] {
+        let query = verifiedFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return allVerifiedModelGroups }
+        return allVerifiedModelGroups.compactMap { group in
+            if ModelQueryMatch.matches(query, in: group.name) { return group }
+            let weights = group.weights.filter { weight in
+                ModelQueryMatch.matches(query, in: weight.id)
+                    || ModelQueryMatch.matches(query, in: weight.name)
+                    || ModelQueryMatch.matches(query, in: weight.quant ?? "")
+            }
+            guard !weights.isEmpty else { return nil }
+            return VerifiedModelGroup(name: group.name, family: group.family, weights: weights)
+        }
     }
 
     private var verifiedModelsSection: some View {
         let groups = verifiedModelGroups
         return VStack(alignment: .leading, spacing: 12) {
             sectionHeader(l10n.tr("models.verifiedTitle"), icon: "checkmark.seal.fill", count: groups.count)
+            ModelRegexFilterField(
+                text: $verifiedFilter,
+                placeholder: l10n.tr("models.filterPlaceholder"),
+                accessibilityIdentifier: "verified-models-filter"
+            )
             Text(l10n.tr("models.testedWeightsHint"))
                 .font(.caption)
                 .foregroundColor(.secondary)
-            ForEach(groups) { group in
-                verifiedModelBlock(group)
+            if groups.isEmpty {
+                Text(l10n.tr("models.noFilterMatch"))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(groups) { group in
+                    verifiedModelBlock(group)
+                }
             }
         }
         .sectionCard()
@@ -405,11 +432,9 @@ struct DownloadsPageView: View {
 
     private var displayedCatalogModels: [CatalogEntry] { displayedCatalog }
 
-    /// Preview and family rows. Verified exact weights are the list above.
+    /// Family globs only. Exact weights, verified or not, sit under Verified models.
     private var catalogCardModels: [CatalogEntry] {
-        displayedCatalogModels.filter {
-            $0.status != .verified || ModelCatalogPolicy.isIdPattern($0.id)
-        }
+        displayedCatalogModels.filter { ModelCatalogPolicy.isIdPattern($0.id) }
     }
 
     private func reloadDisplayedCatalog() {
@@ -431,7 +456,7 @@ struct DownloadsPageView: View {
             : l10n.tr("models.previewCatalog")
 
         return VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(catalogTitle, icon: "checkmark.seal.fill", count: models.count)
+            sectionHeader(catalogTitle, icon: "square.stack.3d.up", count: models.count)
 
             if models.isEmpty {
                 Text(catalogEmptyCopy)

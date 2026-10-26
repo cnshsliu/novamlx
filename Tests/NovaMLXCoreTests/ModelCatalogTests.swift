@@ -356,13 +356,19 @@ struct ModelCatalogTests {
             entry("mlx-community/Qwen3.8-*", "Qwen3.8 family", .verified),
         ]
         let groups = ModelCatalogPolicy.verifiedModelGroups(from: catalog)
-        #expect(groups.map(\.name) == ["Qwen3.8-27B", "Qwen3.8-27B Uncensored", "Flint 40B A2.5B"])
-        #expect(groups[0].weights.map(\.id) == [
-            "mlx-community/Qwen3.8-27B-8bit",
-            "mlx-community/Qwen3.8-27B-4bit",
+        #expect(groups.map(\.name) == [
+            "Flint 40B A2.5B",
+            "Qwen3.5 preview",
+            "Qwen3.8-27B",
+            "Qwen3.8-27B Uncensored",
         ])
-        #expect(groups[0].sharedTestedOn == "1.8.1")
-        #expect(groups[2].weights.map(\.id) == ["RecursiveSI/flint-int4"])
+        let qwen = groups.first { $0.name == "Qwen3.8-27B" }
+        #expect(qwen?.weights.map(\.id) == [
+            "mlx-community/Qwen3.8-27B-4bit",
+            "mlx-community/Qwen3.8-27B-8bit",
+        ])
+        #expect(qwen?.sharedTestedOn == "1.8.1")
+        #expect(groups.first { $0.name == "Flint 40B A2.5B" }?.weights.map(\.id) == ["RecursiveSI/flint-int4"])
     }
 
     @Test("Family glob allows every matching Hub id")
