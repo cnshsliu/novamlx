@@ -15,7 +15,8 @@ People who want a local agent/coding model with reasoning and tool calls, and st
 | **Architecture** | 49 layers: GQA (32q/4kv, head 128) + per-head QK RMSNorm + learned attention sinks; 35 sliding-window (513) + RoPE layers / 14 full-attention NoPE layers; sigmoid-routed MoE (6/256 experts + an ungated shared expert); the first 2 layers are dense |
 | **Capabilities** | `<think>` reasoning (`reasoning_content` on its own channel), multi-turn tool calls (GLM4 dialect normalized to standard OpenAI tool_calls), 256K context (sliding-window KV) |
 | **API** | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`, streaming and non-streaming; eos = `<|end_of_text|>` and role-header tokens (automatic stop and scrub, no leak) |
-| **Scheduling** | Default HTTP chat goes through FusedBatchScheduler (including tool parsing). Temperature 0, one sequence, no logprobs, no frequency penalty, and no grammar use the resident packet. Session, grammar, and sampling stay on the single-step path |
+| **Decoding** | Flint chat uses the official rec flint structural grammar: one optional `<think>…</think>`, then answer or tool-call text whose logits mask forbids another think tag and the protocol markers, then stop on the checkpoint multi-EOS set. `max_tokens` is only a cap. The older think-reentry guard runs when that grammar is off |
+| **Scheduling** | Default HTTP chat goes through FusedBatchScheduler (including tool parsing). The structural grammar is on for that path, so chat samples one token at a time under the mask. Temperature 0, one sequence, no logprobs, no frequency penalty, and no grammar use the resident packet. Session, request grammar, and sampling stay on the single-step path |
 | **Quantization** | Official `RecursiveSI/flint-int4` (~22.6 GB; the community OptiQ-4bit build was used for early verification and is no longer the default) |
 | **Performance** | Official INT4 runs on the rec megakernel. MacMaxPro M4 Max, `RecursiveSI/flint-int4`, packet width 16: LOOP-RESULT **226.8 tok/s**, SINGLE-RESULT **190.7 tok/s**, FLINT-CHAT **217.3 tok/s**. Window, comparisons, and the bar chart are in [Speed](#speed). |
 
@@ -87,7 +88,7 @@ On a Mac, start with the speed suite. The `LOOP-RESULT` timing window is unchang
 ./build.sh test --filter FlintSpeedTests
 ```
 
-HTTP chat (official INT4, temperature 0, one sequence, no logprobs, `frequency_penalty` 0) writes the same line to `~/.nova/novamlx.log` when the sequence finishes. `packetTokens` should be most of the decode tokens; the 1–2 tokens before the rec session is established are counted in `singleTokens`. Temperature > 0, logprobs, frequency penalty, grammar, session, and a second concurrent sequence stay on the single-step path.
+HTTP chat (official INT4) writes the same line to `~/.nova/novamlx.log` when the sequence finishes. Flint structural grammar is on by default, so that line's `packetTokens` is 0 and the tokens are `singleTokens`: each one is sampled under the logits mask. Temperature 0, one sequence, no logprobs, and `frequency_penalty` 0 still use the resident packet when grammar is off (a non-empty `stop` list, or a request constraint such as JSON schema). Temperature > 0, logprobs, frequency penalty, session, and a second concurrent sequence stay on the single-step path.
 
 ```bash
 curl -X POST localhost:6590/v1/chat/completions \
@@ -101,6 +102,7 @@ curl -X POST localhost:6590/v1/chat/completions \
 ## Limits / notes
 
 - With `thinking_budget` omitted, Flint stops on `max_tokens` (and the usual eos / role-header stops). Pass `thinking_budget` to opt into a close-marker cap. Other thinking families still receive an automatic cap when the field is omitted.
+- Default Flint chat installs the structural grammar, so a second `<think>` is masked before sampling. The think-reentry guard is the fallback when grammar is off. `max_tokens` (including the demo default) only caps length.
 - Tool calls are parsed on the fused path. Flint always has the GLM4 parser attached. A packet whose new text contains `<` (a tool marker, a think tag, or half a tag) is still decoded token by token. A greedy packet with no `<` is decoded once, then handed to the same parser.
 - Text-to-3D and similar paths are separate from Flint. Flint is a text agent model.
 - TurboQuant KV cache drops attention sinks (the same tradeoff as GPT-OSS) and is off by default.

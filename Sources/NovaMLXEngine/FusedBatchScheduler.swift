@@ -227,8 +227,12 @@ struct ActiveStreamSequence: @unchecked Sendable {
     var harmonyInThinking: Bool = false
 
     /// Flint only. Stops a turn that already showed an answer and then opens
-    /// another `<think>`. Other families leave this at the default.
+    /// another `<think>` when structural grammar is off. Other families leave
+    /// this at the default.
     var flintThink = FlintChatDecode.ThinkReentryGuard()
+    /// Flint chat/agent grammar. Nil when grammar is off; the think guard is
+    /// the fallback in that case. The mask is applied before each sample.
+    var flintGrammar: FlintStructuralGrammar? = nil
 
     /// Yield a token to the stream IFF the sequence has not been finished
     /// by any concurrent path. Silent no-op if already finished.
@@ -830,6 +834,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         // Frequency penalty — per-model default from generation_config.json + family defaults
         let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
+        let flintGrammarSeed = FlintChatDecode.chatGrammar(for: request, family: container.identifier.family)
+        let flintPrefillMask = flintGrammarSeed?.maskedTokenIds() ?? []
 
         // Run entire prefill + first token sampling inside perform to ensure
         // correct MLX lazy evaluation context.
@@ -864,13 +870,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             // have a max value of ~65504, and summing 32K+ vocab logits trivially
             // overflows to inf even with perfectly valid values. Using max/min in
             // float32 avoids false positives.
-            let logitsToSample = lastLogits[0..., -1, 0...]
+            var logitsToSample = lastLogits[0..., -1, 0...]
             let logitsF32 = logitsToSample.asType(.float32)
             let maxLogit = logitsF32.max().item(Float.self)
             let minLogit = logitsF32.min().item(Float.self)
             if maxLogit.isNaN || maxLogit.isInfinite || minLogit.isNaN || minLogit.isInfinite {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit)) — sequence too long or model unstable")
                 return SendableBox((-1, "NaN/Inf", nil as RawLogprobData?))
+            }
+            if !flintPrefillMask.isEmpty {
+                logitsToSample = FlintStructuralGrammar.suppress(flintPrefillMask, in: logitsToSample)
             }
             let stats = "max=\(String(format: "%.2f", maxLogit)), min=\(String(format: "%.2f", minLogit)), shape=\(logitsToSample.shape), dtype=\(logitsToSample.dtype)"
             let prefillSampled = sampler.sample(logits: logitsToSample)
@@ -913,7 +922,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let eosId = container.tokenizer?.eosTokenId
         let isFlint = container.identifier.family == .flint
         let flintStopIds: Set<Int> = isFlint
-            ? Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+            ? FlintChatDecode.hostFinishStopIds(
+                checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
             : []
 
         // Resolve logprob data (token IDs → text) outside perform
@@ -925,11 +935,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         // SAFE: pre-shared-state yields — seq hasn't entered activeByModel yet
         let scrubbedFirstToken = MLXEngine.scrubControlTokens(firstTokenText)
         var flintThink = FlintChatDecode.ThinkReentryGuard()
+        var flintGrammar = flintGrammarSeed
         let firstDecision: FlintChatDecode.TokenDecision
         if isFlint {
-            firstDecision = FlintChatDecode.tokenDecision(
-                tokenId: firstTokenId, decoded: scrubbedFirstToken,
-                primaryEOS: eosId, stopIds: flintStopIds, state: &flintThink)
+            firstDecision = FlintChatDecode.openingDecision(
+                tokenId: firstTokenId, yieldText: scrubbedFirstToken,
+                grammarText: firstTokenText, primaryEOS: eosId, stopIds: flintStopIds,
+                grammar: &flintGrammar, guardState: &flintThink)
         } else {
             let eos = FlintChatDecode.isStopToken(firstTokenId, primaryEOS: eosId, stopIds: flintStopIds)
             firstDecision = FlintChatDecode.TokenDecision(
@@ -979,6 +991,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
         seq.toolStream = toolStream
         seq.flintThink = flintThink
+        seq.flintGrammar = flintGrammar
         return seq
     }
 
@@ -1006,13 +1019,15 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             minP: request.minP ?? container.config.minP
         )
         let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
+        let flintGrammarSeed = FlintChatDecode.chatGrammar(for: request, family: container.identifier.family)
+        let flintPrefillMask = flintGrammarSeed?.maskedTokenIds() ?? []
         let reqTag = request.id.uuidString.prefix(8)
         let remainingArray = MLXArray(remainingTokenIds.map { Int32($0) })
         let firstTokenIdBox = await mlxContainer.perform(nonSendable: (remainingArray, restoredCaches)) { context, values in
             let (remaining, caches) = values
             let logits = context.model(remaining.reshaped(1, remainingTokenIds.count), cache: caches)
             eval(logits)
-            let logitsToSample = logits[0..., -1, 0...]
+            var logitsToSample = logits[0..., -1, 0...]
             // NaN/inf check — cast to float32 to avoid false positives from
             // float16 sum overflow (32K+ vocab logits easily exceed float16 max).
             let logitsF32 = logitsToSample.asType(.float32)
@@ -1021,6 +1036,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             if maxLogit.isNaN || maxLogit.isInfinite || minLogit.isNaN || minLogit.isInfinite {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Remaining prefill logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit))")
                 return SendableBox((-1, nil as RawLogprobData?))
+            }
+            if !flintPrefillMask.isEmpty {
+                logitsToSample = FlintStructuralGrammar.suppress(flintPrefillMask, in: logitsToSample)
             }
             let sampled = sampler.sample(logits: logitsToSample)
             eval(sampled)
@@ -1062,14 +1080,17 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let scrubbedPrefixToken = MLXEngine.scrubControlTokens(firstTokenText)
         let isFlint = container.identifier.family == .flint
         var flintThink = FlintChatDecode.ThinkReentryGuard()
+        var flintGrammar = flintGrammarSeed
         var emitText = scrubbedPrefixToken
         var finishFirst = false
         if isFlint {
             let eosId = container.tokenizer?.eosTokenId
-            let stops = Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
-            let decision = FlintChatDecode.tokenDecision(
-                tokenId: firstTokenId, decoded: scrubbedPrefixToken,
-                primaryEOS: eosId, stopIds: stops, state: &flintThink)
+            let stops = FlintChatDecode.hostFinishStopIds(
+                checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
+            let decision = FlintChatDecode.openingDecision(
+                tokenId: firstTokenId, yieldText: scrubbedPrefixToken,
+                grammarText: firstTokenText, primaryEOS: eosId, stopIds: stops,
+                grammar: &flintGrammar, guardState: &flintThink)
             emitText = decision.yield
             finishFirst = decision.isEOS || decision.thinkReentry
         }
@@ -1107,6 +1128,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
         seq.toolStream = toolStream
         seq.flintThink = flintThink
+        seq.flintGrammar = flintGrammar
         return seq
     }
 
@@ -1530,7 +1552,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             var specResults: [SpecDecodeResult] = []
             var firstDecodeStart: [UUID: Date] = [:]
             let flintStopIds: Set<Int> = container.identifier.family == .flint
-                ? Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+                ? FlintChatDecode.hostFinishStopIds(
+                    checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
                 : []
 
             for seq in active {
@@ -1540,9 +1563,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 // Logprobs require per-step logits — bypass spec decoding when requested
                 // so every accepted token has logprob data (avoids silent gaps in the API).
                 let wantLogprobs = seq.request.includeLogprobs
+                // Flint structural grammar rewrites logits every step. Drafts
+                // are unmasked, so they stay off while the grammar is installed.
+                let grammarOn = seq.flintGrammar != nil
                 // Greedy must stay step-by-step: batch verify KV vs stepwise can
                 // flip near-tie argmax (max |Δ|~0.5), breaking lossless compares.
-                let draftTokens = (wantLogprobs || seq.sampler.isGreedy || !specDecoder.shouldSpeculate())
+                let draftTokens = (wantLogprobs || grammarOn || seq.sampler.isGreedy || !specDecoder.shouldSpeculate())
                     ? []
                     : specDecoder.speculate(context: seq.recentTokenIds)
 
@@ -1559,6 +1585,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let freqPen = seq.frequencyPenalty
                     let logprobTopK = seq.request.topLogprobsCount ?? 0
                     let allowPacket = container.identifier.family == .flint
+                        && !grammarOn
                         && FlintChatDecode.allowsResidentPacket(
                             FlintChatDecode.Policy(
                                 temperature: seq.sampler.isGreedy ? 0 : 1,
@@ -1568,6 +1595,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                                 wantsLogprobs: wantLogprobs,
                                 batchWidth: active.count,
                                 usesGrammar: false))
+                    let grammarMask = seq.flintGrammar?.maskedTokenIds() ?? []
                     let packetCount = min(
                         FlintRecResident.width, max(1, seq.maxTokens - seq.completionTokens))
                     let packetStops = FlintChatDecode.packetStopIds(tokenizerEOS: eosId)
@@ -1601,6 +1629,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
                                 .at[ids].add(ones)
                             lastLogits = lastLogits - (histogram * freqPen).reshaped(1, -1)
+                        }
+                        if !grammarMask.isEmpty {
+                            lastLogits = FlintStructuralGrammar.suppress(grammarMask, in: lastLogits)
                         }
 
                         let sampled = seqSampler.sample(logits: lastLogits)
@@ -1781,6 +1812,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
                     var decoded: String
                     var hitThinkReentry = false
+                    var hitGrammarReject = false
                     if isEOSNow {
                         // EOS decodes to nothing (some tokenizers would emit its
                         // literal text) — handled entirely by the stop path below.
@@ -1882,11 +1914,25 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         seq.previousTokenWasControl = false
                     }
                     if container.identifier.family == .flint {
-                        let step = FlintChatDecode.tokenDecision(
-                            tokenId: tokenId, decoded: decoded,
-                            primaryEOS: eosId, stopIds: flintStopIds, state: &seq.flintThink)
-                        decoded = step.yield
-                        hitThinkReentry = step.thinkReentry
+                        if var grammar = seq.flintGrammar {
+                            if !isEOSNow {
+                                let grammarText = container.tokenizer?.decode([tokenId]) ?? decoded
+                                if grammar.consume(tokenId: tokenId, text: grammarText) {
+                                    seq.flintGrammar = grammar
+                                } else {
+                                    // Mask bypass: the piece spells a marker the
+                                    // grammar excludes. Drop it and end the turn.
+                                    decoded = ""
+                                    hitGrammarReject = true
+                                }
+                            }
+                        } else {
+                            let step = FlintChatDecode.tokenDecision(
+                                tokenId: tokenId, decoded: decoded,
+                                primaryEOS: eosId, stopIds: flintStopIds, state: &seq.flintThink)
+                            decoded = step.yield
+                            hitThinkReentry = step.thinkReentry
+                        }
                     }
                     seq.generatedText = seq.lastDecodedText
                     if !decoded.isEmpty || seq.toolStream != nil {
@@ -1936,7 +1982,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         }
                     }
 
-                    if isEOS || atMax || hitStop || hitControlToken || hitThinkReentry {
+                    if isEOS || atMax || hitStop || hitControlToken || hitThinkReentry || hitGrammarReject {
                         // Flush any tool-call buffer the parser still holds, then
                         // mirror the ContinuousBatcher finish semantics: a stop
                         // that produced tool calls reports finish_reason=tool_calls.
@@ -1950,7 +1996,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         var finishReason: FinishReason = atMax ? .length : .stop
                         // A new `<think>` after visible text is a turn stop, including
                         // when that token is also the one that reaches maxTokens.
-                        if hitThinkReentry {
+                        if hitThinkReentry || hitGrammarReject {
                             finishReason = .stop
                         }
                         if seq.toolStream?.emittedToolCall == true && finishReason == .stop {
