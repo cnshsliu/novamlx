@@ -11,11 +11,10 @@
 // and the M4 Max measurements in recursive-oss/rec#17).
 //
 // Scratch aliases: workspace, partials, statistics, routing, and trace are
-// session inputs. `release_control` zeros the greedy control buffer after
-// the packet so the next launch does not upload zeros. Single-token decode
-// still uploads a fresh control buffer. Logits stay a kernel output on both
-// paths so the in-kernel argmax reads the vocabulary-head stores. MLX marks
-// inputs const; the kernel const-casts the scratch aliases the same way as KV.
+// session inputs. MLX marks inputs const; the kernel const-casts them the
+// same way as KV. Logits stay a kernel output. The INT4 inner loop is the
+// ushort form from the parity-clean packet: the always_inline uint2 dequant
+// compiled inside the resident loop and disagreed with single-token decode.
 enum FlintRecKernelSources {
     static let headerPro: String = #"""
 
@@ -73,49 +72,30 @@ inline Matrix weight_matrix(const device uchar* bank, const device uint* d) {
     return {bank+d[0], (const device bfloat16_t*)(bank+d[1]),
             (const device bfloat16_t*)(bank+d[2]),d[3],d[4]};
 }
-inline __attribute__((always_inline)) float load16(const device bfloat16_t* x, thread float* v) {
+inline float load16(const device bfloat16_t* x, thread float* v) {
     float sum=0.0f;
-    // 8-byte tiles. Callers pass a 16-element cursor, so each tile is aligned.
-    // One bf16->f32 conversion feeds both the sum and the shifted lane.
     for(uint i=0;i<16;i+=4) {
-        vec<bfloat16_t,4> packed=*((const device vec<bfloat16_t,4>*)(x+i));
-        float4 f=float4(float(packed[0]),float(packed[1]),float(packed[2]),float(packed[3]));
-        sum+=f[0]+f[1]+f[2]+f[3];
-        v[i]=f[0];v[i+1]=f[1]/16.0f;
-        v[i+2]=f[2]/256.0f;v[i+3]=f[3]/4096.0f;
+        sum+=x[i]+x[i+1]+x[i+2]+x[i+3];
+        v[i]=x[i];v[i+1]=x[i+1]/16.0f;
+        v[i+2]=x[i+2]/256.0f;v[i+3]=x[i+3]/4096.0f;
     }
     return sum;
 }
-inline __attribute__((always_inline)) float load16_local(const threadgroup bfloat16_t* x, thread float* v) {
+inline float load16_local(const threadgroup bfloat16_t* x, thread float* v) {
     float sum=0.0f;
     for(uint i=0;i<16;i+=4) {
-        vec<bfloat16_t,4> packed=*((const threadgroup vec<bfloat16_t,4>*)(x+i));
-        float4 f=float4(float(packed[0]),float(packed[1]),float(packed[2]),float(packed[3]));
-        sum+=f[0]+f[1]+f[2]+f[3];
-        v[i]=f[0];v[i+1]=f[1]/16.0f;
-        v[i+2]=f[2]/256.0f;v[i+3]=f[3]/4096.0f;
+        sum+=x[i]+x[i+1]+x[i+2]+x[i+3];
+        v[i]=x[i];v[i+1]=x[i+1]/16.0f;
+        v[i+2]=x[i+2]/256.0f;v[i+3]=x[i+3]/4096.0f;
     }
     return sum;
 }
-// Unshifted nibble masks, same left-associative sum as the ushort loop.
-// `nibble_as_float` is exact for these masks (0..61440), so the dot matches
-// `float(mask)` bit for bit. Banks are 256-byte aligned and row strides are
-// multiples of 32 bytes, so the uint2 load is 8-byte aligned.
-inline __attribute__((always_inline)) float nibble_as_float(uint bits) {
-    return as_type<float>(0x4b000000u|bits)-8388608.0f;
-}
-inline __attribute__((always_inline)) float dot16(const device uchar* w,thread float* x,float s,float b,float sum) {
-    uint2 packed=*((const device uint2*)w);
+inline float dot16(const device uchar* w,thread float* x,float s,float b,float sum) {
+    const device ushort* p=(const device ushort*)w;
     float a=0.0f;
-    uint word0=packed.x, word1=packed.y;
-    a+=x[0]*nibble_as_float(word0&15u)+x[1]*nibble_as_float(word0&240u)
-       +x[2]*nibble_as_float(word0&3840u)+x[3]*nibble_as_float(word0&61440u);
-    a+=x[4]*nibble_as_float((word0>>16)&15u)+x[5]*nibble_as_float((word0>>16)&240u)
-       +x[6]*nibble_as_float((word0>>16)&3840u)+x[7]*nibble_as_float((word0>>16)&61440u);
-    a+=x[8]*nibble_as_float(word1&15u)+x[9]*nibble_as_float(word1&240u)
-       +x[10]*nibble_as_float(word1&3840u)+x[11]*nibble_as_float(word1&61440u);
-    a+=x[12]*nibble_as_float((word1>>16)&15u)+x[13]*nibble_as_float((word1>>16)&240u)
-       +x[14]*nibble_as_float((word1>>16)&3840u)+x[15]*nibble_as_float((word1>>16)&61440u);
+    for(uint j=0;j<4;++j)
+        a+=x[4*j]*(p[j]&15u)+x[4*j+1]*(p[j]&240u)
+           +x[4*j+2]*(p[j]&3840u)+x[4*j+3]*(p[j]&61440u);
     return s*a+sum*b;
 }
 template<uint K>
@@ -482,8 +462,13 @@ inline void attention_partial_w204(const device bfloat16_t* q,const device bfloa
     }
 }
 
-inline __attribute__((always_inline)) float dot16_w197_bias23(const device uchar* w,thread float* x,float s,float b,float sum) {
-    return dot16(w,x,s,b,sum);
+inline float dot16_w197_bias23(const device uchar* w,thread float* x,float s,float b,float sum) {
+    const device ushort* p=(const device ushort*)w;
+    float a=0.0f;
+    for(uint j=0;j<4;++j)
+        a+=x[4*j]*(as_type<float>(0x4b000000u|(uint(p[j])&15u))-8388608.0f)+x[4*j+1]*(as_type<float>(0x4b000000u|(uint(p[j])&240u))-8388608.0f)
+           +x[4*j+2]*(as_type<float>(0x4b000000u|(uint(p[j])&3840u))-8388608.0f)+x[4*j+3]*(as_type<float>(0x4b000000u|(uint(p[j])&61440u))-8388608.0f);
+    return s*a+sum*b;
 }
 
 inline void down_all_w197_bias23(const device uchar* bank,const threadgroup uint* d,
@@ -802,21 +787,6 @@ inline void q4_local_block(Matrix m,const threadgroup bfloat16_t* x,device bfloa
     }
 }
 
-// Last threadgroup to leave the launch zeros the spin counters in place.
-// Greedy packets reuse this buffer. The next launch must observe zeros or
-// sync_all waits forever. Words 0..63 cover the grid counter, the failure
-// flag, KV team counters, and the pro ticket counters. Word 1022 is the
-// arrival count. Single-token decode does not call this.
-inline void release_control(device atomic_uint* control, uint tid) {
-    if(tid==0) {
-        uint n=atomic_fetch_add_explicit(control+1022,1u,memory_order_relaxed);
-        if(n+1u==36u) {
-            for(uint i=0;i<64u;++i) atomic_store_explicit(control+i,0u,memory_order_relaxed);
-            atomic_store_explicit(control+1022,0u,memory_order_relaxed);
-        }
-    }
-}
-
 
 """#
     static let bodyPro: String = #"""
@@ -1056,49 +1026,30 @@ inline Matrix weight_matrix(const device uchar* bank, const device uint* d) {
     return {bank+d[0], (const device bfloat16_t*)(bank+d[1]),
             (const device bfloat16_t*)(bank+d[2]),d[3],d[4]};
 }
-inline __attribute__((always_inline)) float load16(const device bfloat16_t* x, thread float* v) {
+inline float load16(const device bfloat16_t* x, thread float* v) {
     float sum=0.0f;
-    // 8-byte tiles. Callers pass a 16-element cursor, so each tile is aligned.
-    // One bf16->f32 conversion feeds both the sum and the shifted lane.
     for(uint i=0;i<16;i+=4) {
-        vec<bfloat16_t,4> packed=*((const device vec<bfloat16_t,4>*)(x+i));
-        float4 f=float4(float(packed[0]),float(packed[1]),float(packed[2]),float(packed[3]));
-        sum+=f[0]+f[1]+f[2]+f[3];
-        v[i]=f[0];v[i+1]=f[1]/16.0f;
-        v[i+2]=f[2]/256.0f;v[i+3]=f[3]/4096.0f;
+        sum+=x[i]+x[i+1]+x[i+2]+x[i+3];
+        v[i]=x[i];v[i+1]=x[i+1]/16.0f;
+        v[i+2]=x[i+2]/256.0f;v[i+3]=x[i+3]/4096.0f;
     }
     return sum;
 }
-inline __attribute__((always_inline)) float load16_local(const threadgroup bfloat16_t* x, thread float* v) {
+inline float load16_local(const threadgroup bfloat16_t* x, thread float* v) {
     float sum=0.0f;
     for(uint i=0;i<16;i+=4) {
-        vec<bfloat16_t,4> packed=*((const threadgroup vec<bfloat16_t,4>*)(x+i));
-        float4 f=float4(float(packed[0]),float(packed[1]),float(packed[2]),float(packed[3]));
-        sum+=f[0]+f[1]+f[2]+f[3];
-        v[i]=f[0];v[i+1]=f[1]/16.0f;
-        v[i+2]=f[2]/256.0f;v[i+3]=f[3]/4096.0f;
+        sum+=x[i]+x[i+1]+x[i+2]+x[i+3];
+        v[i]=x[i];v[i+1]=x[i+1]/16.0f;
+        v[i+2]=x[i+2]/256.0f;v[i+3]=x[i+3]/4096.0f;
     }
     return sum;
 }
-// Unshifted nibble masks, same left-associative sum as the ushort loop.
-// `nibble_as_float` is exact for these masks (0..61440), so the dot matches
-// `float(mask)` bit for bit. Banks are 256-byte aligned and row strides are
-// multiples of 32 bytes, so the uint2 load is 8-byte aligned.
-inline __attribute__((always_inline)) float nibble_as_float(uint bits) {
-    return as_type<float>(0x4b000000u|bits)-8388608.0f;
-}
-inline __attribute__((always_inline)) float dot16(const device uchar* w,thread float* x,float s,float b,float sum) {
-    uint2 packed=*((const device uint2*)w);
+inline float dot16(const device uchar* w,thread float* x,float s,float b,float sum) {
+    const device ushort* p=(const device ushort*)w;
     float a=0.0f;
-    uint word0=packed.x, word1=packed.y;
-    a+=x[0]*nibble_as_float(word0&15u)+x[1]*nibble_as_float(word0&240u)
-       +x[2]*nibble_as_float(word0&3840u)+x[3]*nibble_as_float(word0&61440u);
-    a+=x[4]*nibble_as_float((word0>>16)&15u)+x[5]*nibble_as_float((word0>>16)&240u)
-       +x[6]*nibble_as_float((word0>>16)&3840u)+x[7]*nibble_as_float((word0>>16)&61440u);
-    a+=x[8]*nibble_as_float(word1&15u)+x[9]*nibble_as_float(word1&240u)
-       +x[10]*nibble_as_float(word1&3840u)+x[11]*nibble_as_float(word1&61440u);
-    a+=x[12]*nibble_as_float((word1>>16)&15u)+x[13]*nibble_as_float((word1>>16)&240u)
-       +x[14]*nibble_as_float((word1>>16)&3840u)+x[15]*nibble_as_float((word1>>16)&61440u);
+    for(uint j=0;j<4;++j)
+        a+=x[4*j]*(p[j]&15u)+x[4*j+1]*(p[j]&240u)
+           +x[4*j+2]*(p[j]&3840u)+x[4*j+3]*(p[j]&61440u);
     return s*a+sum*b;
 }
 template<uint K>
@@ -1465,8 +1416,13 @@ inline void attention_partial_w204(const device bfloat16_t* q,const device bfloa
     }
 }
 
-inline __attribute__((always_inline)) float dot16_w197_bias23(const device uchar* w,thread float* x,float s,float b,float sum) {
-    return dot16(w,x,s,b,sum);
+inline float dot16_w197_bias23(const device uchar* w,thread float* x,float s,float b,float sum) {
+    const device ushort* p=(const device ushort*)w;
+    float a=0.0f;
+    for(uint j=0;j<4;++j)
+        a+=x[4*j]*(as_type<float>(0x4b000000u|(uint(p[j])&15u))-8388608.0f)+x[4*j+1]*(as_type<float>(0x4b000000u|(uint(p[j])&240u))-8388608.0f)
+           +x[4*j+2]*(as_type<float>(0x4b000000u|(uint(p[j])&3840u))-8388608.0f)+x[4*j+3]*(as_type<float>(0x4b000000u|(uint(p[j])&61440u))-8388608.0f);
+    return s*a+sum*b;
 }
 
 inline void down_all_w197_bias23(const device uchar* bank,const threadgroup uint* d,
@@ -1765,21 +1721,6 @@ inline bool kv_team_sync(device atomic_uint* control,uint tid,thread uint& phase
     ++phase;
     return ready[0]!=0;
 
-}
-
-// Last threadgroup to leave the launch zeros the spin counters in place.
-// Greedy packets reuse this buffer. The next launch must observe zeros or
-// sync_all waits forever. Words 0..63 cover the grid counter, the failure
-// flag, and the four KV team counters. Word 1022 is the arrival count.
-// Single-token decode does not call this.
-inline void release_control(device atomic_uint* control, uint tid) {
-    if(tid==0) {
-        uint n=atomic_fetch_add_explicit(control+1022,1u,memory_order_relaxed);
-        if(n+1u==76u) {
-            for(uint i=0;i<64u;++i) atomic_store_explicit(control+i,0u,memory_order_relaxed);
-            atomic_store_explicit(control+1022,0u,memory_order_relaxed);
-        }
-    }
 }
 
 """#

@@ -13,8 +13,9 @@ import Testing
 /// on device). The published baseline on MacMaxPro M4 Max at packet 8 is
 /// 214.7 tok/s (`e8e7b27`). Re-run on that machine with
 /// `./build.sh test --filter FlintSpeedTests` and read `PARITY`,
-/// `SINGLE-RESULT`, `LOOP-RESULT`. `NOVA_FLINT_REC_FRESH_CONTROL=1` restores
-/// the per-launch zero upload. Runs only when the weights are on disk.
+/// `SINGLE-RESULT`, `LOOP-RESULT`, and `PARITY-STEP0` (host argmax of the
+/// greedy logits output versus the device profile and the single-token id).
+/// Runs only when the weights are on disk.
 /// Stops after `LOOP-RESULT`. `NOVA_FLINT_MEGA_DECODE=1` also runs the
 /// obsolete MegaDecode probe.
 @Suite("Flint raw decode speed")
@@ -28,6 +29,9 @@ struct FlintSpeedTests {
         var official: Bool
         var launch: String
         var parity: Bool
+        var step0Single: Int
+        var step0Device: Int
+        var step0Host: Int
     }
 
     /// Official INT4 snapshot. Local disk first, then the removable volume
@@ -119,6 +123,15 @@ struct FlintSpeedTests {
             let singleSteps = flint.recDecodeSteps - singleBefore
             print("SINGLE-SEGS ms/token:", singleSegs.map { String(format: "%.1f", $0) }.joined(separator: " "))
 
+            // Separate armed session. count=1 so the logits output is step 0,
+            // not the last token of a wider packet.
+            let probeCaches = try context.model.newCache(parameters: nil)
+            let probeToken = arm(probeCaches)
+            let probe = try flint.recGreedyProbe(cache: probeCaches, token: probeToken, count: 1)
+            let step0Device = probe.ids.first ?? -1
+            let step0Host = probe.logitsArgmax
+            print("PARITY-STEP0: single=\(reference[0]) device=\(step0Device) host=\(step0Host)")
+
             let packetCaches = try context.model.newCache(parameters: nil)
             var packetLast = arm(packetCaches)
             var resident: [Int] = []
@@ -158,7 +171,10 @@ struct FlintSpeedTests {
                 singleSeconds: seconds(singleSegs), singleSteps: singleSteps,
                 official: flint.isOfficialInt4,
                 launch: flint.recKernel?.launch.label ?? "none",
-                parity: parity))
+                parity: parity,
+                step0Single: reference[0],
+                step0Device: step0Device,
+                step0Host: step0Host))
         }
         let stats = dtBox.value
         let singleRate = Double(n) / stats.singleSeconds
@@ -171,6 +187,8 @@ struct FlintSpeedTests {
         // tail). Both timed windows are rec steps after that handoff.
         #expect(stats.official)
         #expect(stats.parity)
+        #expect(stats.step0Single == stats.step0Device)
+        #expect(stats.step0Device == stats.step0Host)
         #expect(stats.singleSteps == n)
         #expect(stats.packetSteps == n)
 

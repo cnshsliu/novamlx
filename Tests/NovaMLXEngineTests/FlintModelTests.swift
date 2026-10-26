@@ -249,23 +249,23 @@ struct FlintModelTests {
         #expect(maxBody.contains("profile[\(FlintRecResident.producedSlot)]=block_step+1u"))
         #expect(maxBody.contains("if(stop)break;"))
         #expect(maxBody.components(separatedBy: "diagnostic[group]=0;").count - 1 == 1)
-        // Logits stay the writable output parameter. A const-cast input made
-        // the resident argmax repeat one id.
+        // Writable logits output. No const-cast, no control epilogue.
         #expect(!maxBody.contains("logits_rw"))
         #expect(!maxBody.contains("#define logits"))
+        #expect(!maxBody.contains("release_control"))
         #expect(maxBody.contains("float(logits[word])"))
         #expect(maxBody.contains("q4_local<2048>(weight_matrix(tail,final+30),n,logits,"))
-        #expect(maxBody.components(separatedBy: "release_control(control,tid)").count - 1 == 1)
-        let release = try #require(maxBody.range(of: "release_control(control,tid)"))
+        let diagnosticWrite = try #require(maxBody.range(of: "if(tid==0)diagnostic[group]=0;"))
         let earlyStop = try #require(maxBody.range(of: "if(stop)break;"))
-        #expect(release.lowerBound > earlyStop.upperBound)
+        #expect(diagnosticWrite.lowerBound > earlyStop.upperBound)
         #expect(!FlintRecKernelSources.bodyMax.contains("release_control("))
         #expect(!FlintRecKernelSources.bodyPro.contains("release_control("))
-        #expect(FlintRecKernelSources.headerMax.contains("n+1u==76u"))
-        #expect(FlintRecKernelSources.headerPro.contains("n+1u==36u"))
-        #expect(FlintRecKernelSources.headerMax.contains("uint2 packed"))
-        #expect(FlintRecKernelSources.headerPro.contains("uint2 packed"))
-        #expect(FlintRecKernelSources.headerMax.contains("return dot16(w,x,s,b,sum);"))
+        #expect(!FlintRecKernelSources.headerMax.contains("release_control("))
+        #expect(!FlintRecKernelSources.headerPro.contains("release_control("))
+        #expect(FlintRecKernelSources.headerMax.contains("const device ushort* p"))
+        #expect(FlintRecKernelSources.headerPro.contains("const device ushort* p"))
+        #expect(!FlintRecKernelSources.headerMax.contains("uint2 packed"))
+        #expect(!FlintRecKernelSources.headerPro.contains("uint2 packed"))
         #expect(FlintRecResident.width == 16)
         #expect(FlintRecResident.producedSlot == 32)
         #expect(FlintRecResident.profileWords == 33)
@@ -273,6 +273,8 @@ struct FlintModelTests {
         #expect(FlintRecResident.body(from: FlintRecKernelSources.bodyMax, workers: 40) == nil)
     }
 
+    /// The shader is back on the ushort loop. This checks the 2^23 form
+    /// against that loop for the masks the vector dot used.
     @Test("int4 nibble conversion matches the unshifted ushort dot")
     func testInt4NibbleDotMatchesUshortLoop() {
         func nibble(_ bits: UInt32) -> Float {
