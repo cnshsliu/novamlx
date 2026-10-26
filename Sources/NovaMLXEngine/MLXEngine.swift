@@ -29,6 +29,10 @@ public final class ModelContainer: @unchecked Sendable {
     /// Per-model-family chat template processor for control token handling
     public private(set) var chatTemplateProcessor: ChatTemplateProcessor?
 
+    /// Flint finish stops loaded from `config.json` and `generation_config.json`
+    /// `eos_token_id`, union the canonical four ids. Empty for other families.
+    public private(set) var flintFinishStopIds: Set<Int> = []
+
     /// NovaMLX-TIE: tier-inference policy. Non-nil if model was loaded from a
     /// directory containing tier-manifest.json (produced by ExpertShardLayout).
     /// Phase 1: detected + logged but no runtime behavior change.
@@ -38,6 +42,10 @@ public final class ModelContainer: @unchecked Sendable {
         self.identifier = identifier
         self.config = config
         self.isLoaded = false
+    }
+
+    public func setFlintFinishStopIds(_ ids: Set<Int>) {
+        flintFinishStopIds = ids
     }
 
     public func setLoaded(mlxContainer: MLXLMCommon.ModelContainer, tokenizer: Tokenizer) {
@@ -953,6 +961,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             NovaMLXLog.info("[Engine] generation_config.json: temp=\(gen.temperature?.description ?? "-"), topP=\(gen.topP?.description ?? "-"), topK=\(gen.topK?.description ?? "-")")
         }
 
+        if config.identifier.family == .flint {
+            let stops = FlintChatDecode.loadFinishStopIds(modelDirectory: url)
+            container.setFlintFinishStopIds(stops)
+            NovaMLXLog.info("[Flint] finish stops \(stops.sorted()) from checkpoint eos_token_id ∪ canonical role headers")
+        }
+
         // Apply per-family sampling defaults for fields NOT set by generation_config.
         // frequencyPenalty/repetitionPenalty always come from family defaults since
         // generation_config.json rarely includes them.
@@ -1745,6 +1759,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         if let eos = container.tokenizer?.eosTokenId {
             ids.insert(eos)
         }
+        if container.identifier.family == .flint {
+            ids.formUnion(FlintChatDecode.hostFinishStopIds(
+                checkpoint: container.flintFinishStopIds,
+                tokenizerEOS: container.tokenizer?.eosTokenId))
+        }
         return Array(ids)
     }
 
@@ -1929,11 +1948,49 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             budget = nil
         }
 
+        let flintGrammar = flintStructuralProcessor(
+            container: container, tokenizer: tokenizer, request: request)
+        if flintGrammar != nil {
+            // Penalty stays in the penalty slot. Flint grammar owns the mask.
+            return ComposedLogitProcessor.compose(
+                grammar: flintGrammar,
+                penalty: baseProcessor,
+                turnStop: tsp,
+                thinkingBudget: budget
+            )
+        }
         return ComposedLogitProcessor.compose(
             grammar: baseProcessor,
             turnStop: tsp,
             thinkingBudget: budget
         )
+    }
+
+    /// Serial-path mask for Flint chat. Nil for every other family, and for
+    /// Flint requests that opt out (custom stop, JSON/regex/GBNF).
+    private func flintStructuralProcessor(
+        container: ModelContainer?,
+        tokenizer: Tokenizer,
+        request: InferenceRequest?
+    ) -> FlintGrammarLogitProcessor? {
+        guard container?.identifier.family == .flint else { return nil }
+        let grammar: FlintStructuralGrammar?
+        if let request {
+            grammar = FlintChatDecode.structuralGrammar(
+                tools: request.tools,
+                stop: request.stop,
+                hasRequestConstraint: FlintChatDecode.requestHasOtherConstraint(request))
+        } else {
+            grammar = FlintStructuralGrammar(allowsTools: false)
+        }
+        guard let grammar else { return nil }
+        if request != nil {
+            NovaMLXLog.info(
+                "[Flint] structural grammar on (official rec flint shape). A second <think> is masked. ThinkReentryGuard is idle for this request.")
+        }
+        return FlintGrammarLogitProcessor(grammar: grammar) { id in
+            tokenizer.decode([id])
+        }
     }
 
     /// Build a `ThinkingBudgetProcessor` if the request + model state warrant it.

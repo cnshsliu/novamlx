@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import Testing
 import NovaMLXCore
 
@@ -306,5 +307,163 @@ struct FlintChatDecodeTests {
         let heldPrefix = untouched.observeFastPacket("Hello<")
         #expect(!heldPrefix)
         #expect(!untouched.hasVisibleContent)
+    }
+
+    @Test("stop ids are the checkpoint eos set union the canonical four")
+    func testFinishStopIdsFromCheckpoint() throws {
+        #expect(FlintChatDecode.parseEosTokenIds(150001) == [150001])
+        #expect(FlintChatDecode.finishStopIds(configEOS: [150001]) == Set(FlintChatDecode.canonicalStopIds))
+        let both = FlintChatDecode.finishStopIds(
+            configJSON: ["eos_token_id": [150001, 150003, 150005, 150018] as [Any]],
+            generationJSON: ["eos_token_id": 150001])
+        #expect(both == Set([150001, 150003, 150005, 150018]))
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flint-eos-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("{\"eos_token_id\":[150001,150003]}".utf8).write(
+            to: dir.appendingPathComponent("config.json"))
+        try Data("{\"eos_token_id\":[42]}".utf8).write(
+            to: dir.appendingPathComponent("generation_config.json"))
+        let loaded = FlintChatDecode.loadFinishStopIds(modelDirectory: dir)
+        #expect(loaded == Set([42, 150001, 150003, 150005, 150018]))
+        #expect(loaded.contains(150018))
+        #expect(!loaded.contains(FlintChatDecode.thinkOpenTokenId))
+        #expect(FlintChatDecode.hostFinishStopIds(checkpoint: loaded, tokenizerEOS: 7) == loaded.union([7]))
+        #expect(
+            FlintChatDecode.hostFinishStopIds(checkpoint: [], tokenizerEOS: nil)
+                == Set(FlintChatDecode.canonicalStopIds))
+    }
+
+    @Test("custom stop or another constraint leaves the think guard in charge")
+    func testStructuralGrammarOptOut() {
+        #expect(FlintChatDecode.structuralGrammar(
+            tools: nil, stop: ["END"], hasRequestConstraint: false) == nil)
+        #expect(FlintChatDecode.structuralGrammar(
+            tools: nil, stop: [], hasRequestConstraint: false) != nil)
+        #expect(FlintChatDecode.structuralGrammar(
+            tools: nil, stop: nil, hasRequestConstraint: true) == nil)
+        let withTools = FlintChatDecode.structuralGrammar(
+            tools: [["type": "function"] as [String: Any]], stop: nil, hasRequestConstraint: false)
+        #expect(withTools?.allowsTools == true)
+    }
+
+    @Test("after a closed think and a visible answer a second think is masked")
+    func testGrammarMasksSecondThink() {
+        var grammar = FlintStructuralGrammar(allowsTools: false)
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkOpenId))
+        let openedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>")
+        #expect(openedThink)
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>"))
+        #expect(!grammar.isAllowed(tokenId: FlintStructuralGrammar.endOfTextId, text: "<|end_of_text|>"))
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.endOfTextId))
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkCloseId))
+        let reasoned = grammar.consume(tokenId: 11, text: "reason")
+        #expect(reasoned)
+        let closedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkCloseId, text: "</think>")
+        #expect(closedThink)
+        // Official AnyText excludes `<think>` as soon as the block closes,
+        // including when the only text so far is whitespace.
+        #expect(grammar.phase == .answer)
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkOpenId))
+        let whitespace = grammar.consume(tokenId: 2, text: "\n\n")
+        #expect(whitespace)
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkOpenId))
+        let hello = grammar.consume(tokenId: 12, text: "Hello")
+        #expect(hello)
+
+        #expect(!grammar.isAllowed(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>"))
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkOpenId))
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkCloseId))
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.developerId))
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.endOfTextId))
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.userId))
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.endOfTextId, text: "<|end_of_text|>"))
+        #expect(grammar.isAllowed(tokenId: 12, text: "Hello"))
+        #expect(!grammar.isAllowed(tokenId: FlintStructuralGrammar.toolOpenId, text: "<tool_call>"))
+
+        #expect(grammar.isAllowed(tokenId: 3, text: "<"))
+        let heldOpen = grammar.consume(tokenId: 3, text: "<")
+        #expect(heldOpen)
+        #expect(!grammar.isAllowed(tokenId: 4, text: "think>"))
+        let spelledThink = grammar.consume(tokenId: 4, text: "think>")
+        #expect(!spelledThink)
+        #expect(grammar.phase == .answer)
+    }
+
+    @Test("tool calls stay available and still exclude think tags")
+    func testGrammarAllowsOneToolRegion() {
+        var grammar = FlintStructuralGrammar(allowsTools: true)
+        let hello = grammar.consume(tokenId: 12, text: "Hello")
+        #expect(hello)
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.toolOpenId, text: "<tool_call>"))
+        #expect(!grammar.isAllowed(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>"))
+        let openedTool = grammar.consume(tokenId: FlintStructuralGrammar.toolOpenId, text: "<tool_call>")
+        #expect(openedTool)
+        #expect(grammar.phase == .inTool)
+        #expect(!grammar.isAllowed(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>"))
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.argKeyOpenId, text: "<arg_key>"))
+        let argument = grammar.consume(tokenId: 21, text: "search")
+        #expect(argument)
+        let closedTool = grammar.consume(tokenId: FlintStructuralGrammar.toolCloseId, text: "</tool_call>")
+        #expect(closedTool)
+        #expect(grammar.phase == .answer)
+        #expect(grammar.isAllowed(tokenId: FlintStructuralGrammar.observationId, text: "<|observation|>"))
+        #expect(!grammar.maskedTokenIds().contains(FlintStructuralGrammar.observationId))
+        #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.thinkOpenId))
+    }
+
+    @Test("the logits mask drops a second think-open below every answer token")
+    func testSuppressThinkOpenLogit() {
+        var grammar = FlintStructuralGrammar(allowsTools: false)
+        let openedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>")
+        #expect(openedThink)
+        let closedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkCloseId, text: "</think>")
+        #expect(closedThink)
+        let hello = grammar.consume(tokenId: 12, text: "Hello")
+        #expect(hello)
+
+        let vocab = FlintStructuralGrammar.developerId + 1
+        var values = [Float](repeating: 0, count: vocab)
+        values[FlintStructuralGrammar.thinkOpenId] = 50
+        values[12] = 1
+        let logits = MLXArray(values, [1, vocab])
+        let masked = FlintStructuralGrammar.suppress(grammar.maskedTokenIds(), in: logits)
+        let flat = masked.asArray(Float.self)
+        #expect(flat[FlintStructuralGrammar.thinkOpenId].isInfinite)
+        #expect(flat[FlintStructuralGrammar.thinkOpenId] < 0)
+        #expect(flat[12] == 1)
+        #expect(flat[FlintStructuralGrammar.endOfTextId] == 0)
+        #expect(flat[FlintStructuralGrammar.userId] == 0)
+    }
+
+    @Test("grammar rejects a second think; the guard still does when grammar is off")
+    func testOpeningDecisionGrammarAndGuard() {
+        var grammar: FlintStructuralGrammar? = FlintStructuralGrammar(allowsTools: false)
+        var guardState = FlintChatDecode.ThinkReentryGuard()
+        let stops = Set(FlintChatDecode.canonicalStopIds)
+        let open = FlintChatDecode.thinkOpenTokenId
+        let close = FlintChatDecode.thinkCloseTokenId
+        func step(_ id: Int, _ text: String) -> FlintChatDecode.TokenDecision {
+            FlintChatDecode.openingDecision(
+                tokenId: id, yieldText: text, grammarText: text,
+                primaryEOS: 150001, stopIds: stops,
+                grammar: &grammar, guardState: &guardState)
+        }
+        #expect(!step(open, "<think>").thinkReentry)
+        #expect(!step(11, "reason").thinkReentry)
+        #expect(!step(close, "</think>").thinkReentry)
+        #expect(step(12, "Hello").yield == "Hello")
+        let again = step(open, "<think>")
+        #expect(again.thinkReentry)
+        #expect(again.yield.isEmpty)
+
+        grammar = nil
+        guardState = FlintChatDecode.ThinkReentryGuard()
+        #expect(!step(12, "Hello").thinkReentry)
+        let guarded = step(open, "<think>")
+        #expect(guarded.thinkReentry)
+        #expect(guarded.yield.isEmpty)
     }
 }

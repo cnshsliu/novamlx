@@ -136,12 +136,17 @@ enum FlintChatDecode {
         var thinkReentry: Bool
     }
 
-    /// One decoded token on the Flint fused (and batch) path.
+    /// One decoded token on the Flint fused (and batch) path when structural
+    /// grammar is off.
     ///
     /// Stop ids finish even when their text was scrubbed to empty. After the
     /// assistant has produced visible text — following `</think>`, or with no
     /// think block — a new `<think>` (id 150006 or the decoded tag) ends the
     /// turn. Text inside an open GLM4 `<tool_call>` is left alone.
+    ///
+    /// Default Flint chat does not use this guard. `FlintStructuralGrammar`
+    /// masks the second `<think>` (and the other protocol markers) before
+    /// sampling. This guard runs only when that grammar is unavailable.
     static func tokenDecision(
         tokenId: Int,
         decoded: String,
@@ -157,6 +162,10 @@ enum FlintChatDecode {
     }
 
     /// Visible-answer tracker for one Flint assistant turn.
+    ///
+    /// Fallback for when `FlintStructuralGrammar` is off (a custom `stop`
+    /// list, or another request constraint). The grammar's logits mask is
+    /// the primary control on the default chat and agent paths.
     struct ThinkReentryGuard: Equatable, Sendable {
         private(set) var insideThink = false
         private(set) var insideToolCall = false
@@ -290,6 +299,137 @@ enum FlintChatDecode {
             }
             return Outcome(yield: yield, stop: false)
         }
+    }
+
+    // MARK: - Checkpoint stop set
+
+    /// `eos_token_id` from a config object. Accepts a single id or an array.
+    /// JSON numbers arrive as `Int` or `NSNumber`.
+    static func parseEosTokenIds(_ value: Any?) -> [Int] {
+        guard let value else { return [] }
+        if let id = value as? Int { return [id] }
+        if let list = value as? [Int] { return list }
+        if let list = value as? [Any] {
+            return list.flatMap { parseEosTokenIds($0) }
+        }
+        // JSONSerialization stores numbers as NSNumber. Whole numbers usually
+        // bridge to Int above; this catches the ones that do not.
+        if let number = value as? NSNumber {
+            return [number.intValue]
+        }
+        return []
+    }
+
+    static func eosTokenIds(in json: [String: Any]) -> [Int] {
+        let direct = parseEosTokenIds(json["eos_token_id"])
+        if !direct.isEmpty { return direct }
+        if let nested = json["text_config"] as? [String: Any] {
+            return parseEosTokenIds(nested["eos_token_id"])
+        }
+        return []
+    }
+
+    /// Checkpoint ids union the canonical four. Empty inputs still yield
+    /// `<|end_of_text|>`, `<|user|>`, `<|observation|>`, `<|developer|>`.
+    static func finishStopIds(configEOS: [Int], generationEOS: [Int] = []) -> Set<Int> {
+        var ids = Set(configEOS.filter { $0 >= 0 })
+        ids.formUnion(generationEOS.filter { $0 >= 0 })
+        ids.formUnion(canonicalStopIds)
+        return ids
+    }
+
+    static func finishStopIds(configJSON: [String: Any], generationJSON: [String: Any]?) -> Set<Int> {
+        finishStopIds(
+            configEOS: eosTokenIds(in: configJSON),
+            generationEOS: generationJSON.map { eosTokenIds(in: $0) } ?? [])
+    }
+
+    /// Read `config.json` and `generation_config.json` next to the weights.
+    static func loadFinishStopIds(modelDirectory: URL) -> Set<Int> {
+        let config = readJSONObject(modelDirectory.appendingPathComponent("config.json"))
+        let generation = readJSONObject(modelDirectory.appendingPathComponent("generation_config.json"))
+        return finishStopIds(configJSON: config ?? [:], generationJSON: generation)
+    }
+
+    /// Host finish set for a loaded Flint checkpoint. An empty checkpoint
+    /// set (load did not run) still includes the canonical four, plus the
+    /// tokenizer EOS when that id is outside the four.
+    static func hostFinishStopIds(checkpoint: Set<Int>, tokenizerEOS: Int?) -> Set<Int> {
+        var ids = checkpoint
+        if ids.isEmpty { ids = Set(canonicalStopIds) }
+        if let tokenizerEOS, tokenizerEOS >= 0 { ids.insert(tokenizerEOS) }
+        return ids
+    }
+
+    private static func readJSONObject(_ url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object
+    }
+
+    // MARK: - Structural grammar install
+
+    /// Default Flint chat/agent grammar. Off when the request already has a
+    /// constraint (`json_schema`, regex, GBNF, JSON mode) or a custom `stop`
+    /// list — official rec refuses to combine flint grammar with custom stops.
+    /// The think-reentry guard covers those requests.
+    static func structuralGrammar(
+        tools: [[String: Any]]?,
+        stop: [String]?,
+        hasRequestConstraint: Bool
+    ) -> FlintStructuralGrammar? {
+        if hasRequestConstraint { return nil }
+        if let stop, stop.contains(where: { !$0.isEmpty }) { return nil }
+        return FlintStructuralGrammar(allowsTools: !(tools ?? []).isEmpty)
+    }
+
+    /// Installed grammar for one request, or nil when this family or this
+    /// request should keep the think-reentry guard instead.
+    static func chatGrammar(for request: InferenceRequest, family: ModelFamily) -> FlintStructuralGrammar? {
+        guard family == .flint else { return nil }
+        let grammar = structuralGrammar(
+            tools: request.tools,
+            stop: request.stop,
+            hasRequestConstraint: requestHasOtherConstraint(request))
+        if grammar != nil {
+            NovaMLXLog.info(
+                "[Flint] structural grammar on (official rec flint shape). A second <think> is masked. ThinkReentryGuard is idle for this request.")
+        }
+        return grammar
+    }
+
+    static func requestHasOtherConstraint(_ request: InferenceRequest) -> Bool {
+        request.jsonSchemaDef != nil
+            || request.regexPattern != nil
+            || request.gbnfGrammar != nil
+            || request.responseFormat == .jsonObject
+    }
+
+    /// First generated token. Grammar, when present, is the think control.
+    /// The guard runs only when `grammar` is nil.
+    static func openingDecision(
+        tokenId: Int,
+        yieldText: String,
+        grammarText: String,
+        primaryEOS: Int?,
+        stopIds: Set<Int>,
+        grammar: inout FlintStructuralGrammar?,
+        guardState: inout ThinkReentryGuard
+    ) -> TokenDecision {
+        if grammar != nil {
+            if isStopToken(tokenId, primaryEOS: primaryEOS, stopIds: stopIds) {
+                return TokenDecision(yield: "", isEOS: true, thinkReentry: false)
+            }
+            if var active = grammar, active.consume(tokenId: tokenId, text: grammarText) {
+                grammar = active
+                return TokenDecision(yield: yieldText, isEOS: false, thinkReentry: false)
+            }
+            return TokenDecision(yield: "", isEOS: false, thinkReentry: true)
+        }
+        return tokenDecision(
+            tokenId: tokenId, decoded: yieldText,
+            primaryEOS: primaryEOS, stopIds: stopIds, state: &guardState)
     }
 }
 

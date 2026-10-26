@@ -21,7 +21,10 @@ struct ActiveBatchSequence: @unchecked Sendable {
     let sampler: any LogitSampler
     let continuation: CheckedContinuation<InferenceResult, Error>
     /// Flint only. Other families leave this at the default.
+    /// Used when structural grammar is off.
     var flintThink = FlintChatDecode.ThinkReentryGuard()
+    /// Flint chat grammar. Nil when grammar is off.
+    var flintGrammar: FlintStructuralGrammar? = nil
 }
 
 public final class BatchScheduler: @unchecked Sendable {
@@ -143,12 +146,15 @@ public final class BatchScheduler: @unchecked Sendable {
         let firstTokenId = container.tokenizer?.encode(firstTokenText).first ?? 0
 
         var flintThink = FlintChatDecode.ThinkReentryGuard()
+        var flintGrammar = FlintChatDecode.chatGrammar(for: req.request, family: container.identifier.family)
         if container.identifier.family == .flint, !firstTokenText.isEmpty {
             let eosId = container.tokenizer?.eosTokenId
-            let stops = Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
-            let decision = FlintChatDecode.tokenDecision(
-                tokenId: firstTokenId, decoded: firstTokenText,
-                primaryEOS: eosId, stopIds: stops, state: &flintThink)
+            let stops = FlintChatDecode.hostFinishStopIds(
+                checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
+            let decision = FlintChatDecode.openingDecision(
+                tokenId: firstTokenId, yieldText: firstTokenText,
+                grammarText: firstTokenText, primaryEOS: eosId, stopIds: stops,
+                grammar: &flintGrammar, guardState: &flintThink)
             if decision.isEOS || decision.thinkReentry {
                 req.continuation.resume(returning: InferenceResult(
                     id: req.id,
@@ -163,7 +169,7 @@ public final class BatchScheduler: @unchecked Sendable {
             }
         }
 
-        let seq = ActiveBatchSequence(
+        var seq = ActiveBatchSequence(
             id: req.id,
             request: req.request,
             caches: caches,
@@ -175,6 +181,7 @@ public final class BatchScheduler: @unchecked Sendable {
             continuation: req.continuation,
             flintThink: flintThink
         )
+        seq.flintGrammar = flintGrammar
 
         lock.withLock {
             if activeByModel[req.request.model] == nil {
@@ -244,11 +251,15 @@ public final class BatchScheduler: @unchecked Sendable {
             let eosId = container.tokenizer?.eosTokenId
             let isFlint = container.identifier.family == .flint
             let flintStopIds: Set<Int> = isFlint
-                ? Set(FlintChatDecode.packetStopIds(tokenizerEOS: eosId))
+                ? FlintChatDecode.hostFinishStopIds(
+                    checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
                 : []
 
             for (i, var seq) in active.enumerated() {
-                let seqLogits = logits[i][0..., -1, 0...]
+                var seqLogits = logits[i][0..., -1, 0...]
+                if let grammar = seq.flintGrammar {
+                    seqLogits = FlintStructuralGrammar.suppress(grammar.maskedTokenIds(), in: seqLogits)
+                }
                 let sampledToken = seq.sampler.sample(logits: seqLogits)
                 let tokenId = sampledToken.item(Int.self)
 
@@ -256,9 +267,16 @@ public final class BatchScheduler: @unchecked Sendable {
                 let rawPiece = container.tokenizer.map { $0.decode([tokenId]) } ?? ""
                 let decision: FlintChatDecode.TokenDecision
                 if isFlint {
-                    decision = FlintChatDecode.tokenDecision(
-                        tokenId: tokenId, decoded: rawPiece,
-                        primaryEOS: eosId, stopIds: flintStopIds, state: &seq.flintThink)
+                    if seq.flintGrammar != nil {
+                        decision = FlintChatDecode.openingDecision(
+                            tokenId: tokenId, yieldText: rawPiece, grammarText: rawPiece,
+                            primaryEOS: eosId, stopIds: flintStopIds,
+                            grammar: &seq.flintGrammar, guardState: &seq.flintThink)
+                    } else {
+                        decision = FlintChatDecode.tokenDecision(
+                            tokenId: tokenId, decoded: rawPiece,
+                            primaryEOS: eosId, stopIds: flintStopIds, state: &seq.flintThink)
+                    }
                     if !decision.isEOS {
                         seq.generatedText += decision.yield
                     }
