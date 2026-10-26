@@ -595,7 +595,7 @@ struct FlintToolSchemaSession: Equatable, Sendable {
 /// JSON object/array prefix check. Inner properties are not constrained.
 private enum JSONPrefix {
     static func root(_ text: String, object: Bool) -> (prefix: Bool, complete: Bool) {
-        var parser = Parser(Array(text))
+        var parser = Parser(chars: Array(text))
         return parser.root(object: object)
     }
 
