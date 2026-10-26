@@ -931,7 +931,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         // Frequency penalty — per-model default from generation_config.json + family defaults
         let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
-        let flintGrammarSeed = FlintChatDecode.chatGrammar(for: request, family: container.identifier.family)
+        let flintGrammarSeed = FlintChatDecode.withVocabTexts(
+            FlintChatDecode.chatGrammar(for: request, family: container.identifier.family),
+            decodeTokens: container.tokenizer?.decode)
         let applyFlintSampleFilter = container.identifier.family == .flint
         let flintPrefillTemperature = Float(request.temperature ?? container.config.temperature)
         let flintPrefillTopK = request.topK ?? container.config.topK
@@ -1134,7 +1136,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             minP: request.minP ?? container.config.minP
         )
         let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
-        let flintGrammarSeed = FlintChatDecode.chatGrammar(for: request, family: container.identifier.family)
+        let flintGrammarSeed = FlintChatDecode.withVocabTexts(
+            FlintChatDecode.chatGrammar(for: request, family: container.identifier.family),
+            decodeTokens: container.tokenizer?.decode)
         let applyFlintSampleFilter = container.identifier.family == .flint
         let flintPrefillTemperature = Float(request.temperature ?? container.config.temperature)
         let flintPrefillTopK = request.topK ?? container.config.topK
@@ -1805,7 +1809,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                                 let sampled = seqSampler.sample(logits: filtered)
                                 eval(sampled)
                                 let id = sampled.item(Int.self)
-                                let masked = grammar?.maskedTokenIds() ?? []
+                                let masked = grammar?.maskedTokenIds(vocabSize: filtered.dim(-1)) ?? []
                                 switch FlintChatDecode.decideFiltered(
                                     tokenId: id, masked: masked, stopIds: flintStopIds)
                                 {

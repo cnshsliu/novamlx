@@ -133,7 +133,8 @@ public struct ModelSettings: Codable, Sendable, Equatable {
             useNativeMtp: request.useNativeMtp ?? nativeMtpEnabled,
             adaptiveVerify: request.adaptiveVerify,
             adaptiveVerifyMin: request.adaptiveVerifyMin,
-            adaptiveVerifyMax: request.adaptiveVerifyMax
+            adaptiveVerifyMax: request.adaptiveVerifyMax,
+            enforceToolSchemas: request.enforceToolSchemas
         )
     }
 }

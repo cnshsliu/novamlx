@@ -32,6 +32,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
     public var prefixCacheEnabled: Bool = true
     public var allowUnlistedDownloads: Bool = false
     public var exclusiveAutoUnload: Bool = true
+    public var enforceToolSchemas: Bool = false
     public var performanceMode: String = "balanced"
 
     /// Explicit public memberwise initializer so cross-module callers
@@ -62,6 +63,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         prefixCacheEnabled: Bool = true,
         allowUnlistedDownloads: Bool = false,
         exclusiveAutoUnload: Bool = true,
+        enforceToolSchemas: Bool = false,
         performanceMode: String = "balanced"
     ) {
         self.id = id
@@ -88,6 +90,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         self.prefixCacheEnabled = prefixCacheEnabled
         self.allowUnlistedDownloads = allowUnlistedDownloads
         self.exclusiveAutoUnload = exclusiveAutoUnload
+        self.enforceToolSchemas = enforceToolSchemas
         self.performanceMode = performanceMode
     }
 
@@ -114,6 +117,7 @@ public struct ConfigRecord: Codable, Sendable, PersistableRecord {
         case prefixCacheEnabled = "prefix_cache_enabled"
         case allowUnlistedDownloads = "allow_unlisted_downloads"
         case exclusiveAutoUnload = "exclusive_auto_unload"
+        case enforceToolSchemas = "enforce_tool_schemas"
         case performanceMode = "performance_mode"
     }
 }

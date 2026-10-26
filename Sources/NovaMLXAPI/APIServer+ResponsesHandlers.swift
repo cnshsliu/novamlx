@@ -11,6 +11,29 @@ import NovaMLXUtils
 
 extension NovaMLXAPIServer {
 
+    /// Responses function tools in the OpenAI chat shape, including `strict`.
+    static func responsesFunctionTools(_ tools: [ResponsesFunctionTool]?) -> [[String: Any]]? {
+        guard let tools else { return nil }
+        let mapped: [[String: Any]] = tools.compactMap { tool in
+            guard tool.type == "function" else { return nil }
+            var function: [String: Any] = [
+                "name": tool.name,
+                "description": tool.description ?? "",
+            ]
+            if let params = tool.parameters {
+                function["parameters"] = unwrapAnyCodable(params)
+            }
+            if let strict = tool.strict {
+                function["strict"] = strict
+            }
+            return [
+                "type": "function",
+                "function": function,
+            ]
+        }
+        return mapped
+    }
+
     // MARK: - Local Responses API Handlers
 
     static func handleResponsesRequest(
@@ -44,23 +67,7 @@ extension NovaMLXAPIServer {
             }
         }
 
-        // Convert tools to internal format
-        let tools: [[String: Any]]? = req.tools?.compactMap { tool in
-            guard tool.type == "function" else { return nil }
-            var dict: [String: Any] = [
-                "type": "function",
-                "function": [
-                    "name": tool.name,
-                    "description": tool.description ?? ""
-                ] as [String: Any]
-            ]
-            if let params = tool.parameters {
-                var fnDict = dict["function"] as! [String: Any]
-                fnDict["parameters"] = unwrapAnyCodable(params)
-                dict["function"] = fnDict
-            }
-            return dict
-        }
+        let tools = Self.responsesFunctionTools(req.tools)
 
         let request = InferenceRequest(
             model: req.model, messages: messages,
@@ -70,7 +77,10 @@ extension NovaMLXAPIServer {
             responseFormat: responseFormat,
             jsonSchemaDef: jsonSchemaDef,
             enableThinking: req.reasoning != nil,
-            httpRequestId: HTTPHelpers.requestID(from: nil)
+            httpRequestId: HTTPHelpers.requestID(from: nil),
+            enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
+                requestFlag: req.enforceToolSchemas,
+                serverConfig: cfg.enforceToolSchemas)
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -165,10 +175,14 @@ extension NovaMLXAPIServer {
         let capturedMessages = messages
         let request = InferenceRequest(
             model: req.model, messages: messages,
+            tools: Self.responsesFunctionTools(req.tools),
             temperature: req.temperature, maxTokens: req.maxOutputTokens,
             topP: req.topP, stream: true,
             enableThinking: req.reasoning != nil,
-            httpRequestId: HTTPHelpers.requestID(from: nil)
+            httpRequestId: HTTPHelpers.requestID(from: nil),
+            enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
+                requestFlag: req.enforceToolSchemas,
+                serverConfig: cfg.enforceToolSchemas)
         )
 
         let reqTag = request.id.uuidString.prefix(8)

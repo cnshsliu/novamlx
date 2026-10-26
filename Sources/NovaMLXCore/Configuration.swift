@@ -127,7 +127,8 @@ public actor NovaMLXConfiguration {
             maxGpuMemory: server.maxGpuMemory,
             prefixCacheEnabled: server.prefixCacheEnabled,
             allowUnlistedDownloads: server.allowUnlistedDownloads,
-            exclusiveAutoUnload: server.exclusiveAutoUnload
+            exclusiveAutoUnload: server.exclusiveAutoUnload,
+            enforceToolSchemas: server.enforceToolSchemas
         )
         do {
             try NovaDB.shared.configStore.update { existing in
@@ -162,6 +163,7 @@ public actor NovaMLXConfiguration {
             prefixCacheEnabled: record.prefixCacheEnabled,
             allowUnlistedDownloads: record.allowUnlistedDownloads,
             exclusiveAutoUnload: record.exclusiveAutoUnload,
+            enforceToolSchemas: record.enforceToolSchemas,
             autoLoad: autoLoad,
             cluster: cluster
         )

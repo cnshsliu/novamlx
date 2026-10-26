@@ -208,6 +208,13 @@ enum ConfigDBSchema {
         }
     }
 
+    /// Flint `enforce_tool_schemas`. Off by default so existing tool calls stay loose.
+    static func v11EnforceToolSchemas(in db: Database) throws {
+        try db.alter(table: "config") { t in
+            t.add(column: "enforce_tool_schemas", .boolean).notNull().defaults(to: false)
+        }
+    }
+
     /// Model root lives in `~/.config/novamlx/models-path`, not SQLite.
     static func v9DropModelsDir(in db: Database) throws {
         let columns = try db.columns(in: "config").map(\.name)

@@ -9,7 +9,7 @@ import NovaMLXCore
 /// `chat.py` `normalize_messages` strips injected role and think markers
 /// before the template. `parse_tool_call` types arguments from the tool
 /// schema, and `seeded_tool_parser` derives call ids from the seed.
-enum FlintAlignment {
+package enum FlintAlignment {
 
     // MARK: - Omitted max_tokens
 
@@ -47,6 +47,12 @@ enum FlintAlignment {
         if let message = FlintChatDecode.customStopConflict(
             stop: request.stop,
             hasRequestConstraint: FlintChatDecode.requestHasOtherConstraint(request))
+        {
+            throw NovaMLXError.apiError(message)
+        }
+        if !FlintChatDecode.requestHasOtherConstraint(request),
+           let message = FlintToolSchemaSession.rejection(
+            tools: request.tools, enforceToolSchemas: request.enforceToolSchemas)
         {
             throw NovaMLXError.apiError(message)
         }
@@ -190,6 +196,28 @@ enum FlintAlignment {
             pattern: #"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>"#,
             options: [.dotMatchesLineSeparators])
     }()
+
+    /// Request flag wins. An omitted flag uses `NOVA_ENFORCE_TOOL_SCHEMAS`
+    /// (`1` / `true` / `yes`) and otherwise the server config, which defaults off.
+    package static func resolvedEnforceToolSchemas(requestFlag: Bool?, serverConfig: Bool) -> Bool {
+        resolvedEnforceToolSchemas(
+            requestFlag: requestFlag,
+            serverConfig: serverConfig,
+            environment: ProcessInfo.processInfo.environment["NOVA_ENFORCE_TOOL_SCHEMAS"])
+    }
+
+    package static func resolvedEnforceToolSchemas(
+        requestFlag: Bool?,
+        serverConfig: Bool,
+        environment: String?
+    ) -> Bool {
+        if let requestFlag { return requestFlag }
+        let raw = environment?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        if raw == "1" || raw == "true" || raw == "yes" { return true }
+        return serverConfig
+    }
 
     /// `rec` `_accepts`: type, type list, string enums, and anyOf/oneOf.
     static func schemaAccepts(_ schema: [String: Any], kind: String) -> Bool {

@@ -310,6 +310,9 @@ public struct InferenceRequest: @unchecked Sendable {
     /// finalize the matching `RequestLogEntry` on completion. Nil for requests
     /// that didn't come through the HTTP API (e.g. internal/playground calls).
     public let httpRequestId: String?
+    /// Flint structural grammar: also constrain tools whose `strict` is not
+    /// `true`. Default false. Other families ignore it.
+    public let enforceToolSchemas: Bool
 
     public init(
         id: UUID = UUID(),
@@ -343,7 +346,8 @@ public struct InferenceRequest: @unchecked Sendable {
         useNativeMtp: Bool? = nil,
         adaptiveVerify: String? = nil,
         adaptiveVerifyMin: Int? = nil,
-        adaptiveVerifyMax: Int? = nil
+        adaptiveVerifyMax: Int? = nil,
+        enforceToolSchemas: Bool = false
     ) {
         self.id = id
         self.model = model
@@ -377,6 +381,7 @@ public struct InferenceRequest: @unchecked Sendable {
         self.adaptiveVerify = adaptiveVerify
         self.adaptiveVerifyMin = adaptiveVerifyMin
         self.adaptiveVerifyMax = adaptiveVerifyMax
+        self.enforceToolSchemas = enforceToolSchemas
     }
 
     /// Native in-graph MTP and companion MTP auto-inject. `nil` means on.
@@ -1088,6 +1093,9 @@ public struct ServerConfig: Codable, Sendable {
     public let allowUnlistedDownloads: Bool
     /// When true, loading a chat LLM/VLM unloads other chat models (TTS/ASR/image stay).
     public let exclusiveAutoUnload: Bool
+    /// Flint only. When true, structural grammar constrains tool arguments
+    /// even for tools sent with `strict: false`. Default false.
+    public let enforceToolSchemas: Bool
     public let autoLoad: AutoLoadConfig
     public let cluster: ClusterSettings?
 
@@ -1124,6 +1132,7 @@ public struct ServerConfig: Codable, Sendable {
         case prefixCacheEnabled
         case allowUnlistedDownloads
         case exclusiveAutoUnload
+        case enforceToolSchemas = "enforce_tool_schemas"
         case autoLoad
         case cluster
     }
@@ -1144,6 +1153,7 @@ public struct ServerConfig: Codable, Sendable {
         prefixCacheEnabled: Bool = true,
         allowUnlistedDownloads: Bool = false,
         exclusiveAutoUnload: Bool = true,
+        enforceToolSchemas: Bool = false,
         autoLoad: AutoLoadConfig = .init(),
         cluster: ClusterSettings? = nil
     ) {
@@ -1162,6 +1172,7 @@ public struct ServerConfig: Codable, Sendable {
         self.prefixCacheEnabled = prefixCacheEnabled
         self.allowUnlistedDownloads = allowUnlistedDownloads
         self.exclusiveAutoUnload = exclusiveAutoUnload
+        self.enforceToolSchemas = enforceToolSchemas
         self.autoLoad = autoLoad
         self.cluster = cluster
     }
@@ -1185,6 +1196,7 @@ public struct ServerConfig: Codable, Sendable {
         prefixCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .prefixCacheEnabled) ?? true
         allowUnlistedDownloads = try container.decodeIfPresent(Bool.self, forKey: .allowUnlistedDownloads) ?? false
         exclusiveAutoUnload = try container.decodeIfPresent(Bool.self, forKey: .exclusiveAutoUnload) ?? true
+        enforceToolSchemas = try container.decodeIfPresent(Bool.self, forKey: .enforceToolSchemas) ?? false
         autoLoad = try container.decodeIfPresent(AutoLoadConfig.self, forKey: .autoLoad) ?? .init()
         cluster = try container.decodeIfPresent(ClusterSettings.self, forKey: .cluster)
     }

@@ -37,6 +37,9 @@ public struct AnthropicRequest: Codable, Sendable {
     public let chatTemplateKwargs: [String: AnyCodable]?
     public let reasoningEffort: String?
     public let keepAlive: KeepAliveValue?
+    /// Flint only. When true, structural grammar constrains tool arguments
+    /// even for tools that omit `strict`. Omitted uses the server / env default.
+    public let enforceToolSchemas: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, maxTokens = "max_tokens", system, temperature
@@ -48,6 +51,7 @@ public struct AnthropicRequest: Codable, Sendable {
         case chatTemplateKwargs = "chat_template_kwargs"
         case reasoningEffort = "reasoning_effort"
         case keepAlive = "keep_alive"
+        case enforceToolSchemas = "enforce_tool_schemas"
     }
 
     public init(
@@ -67,7 +71,8 @@ public struct AnthropicRequest: Codable, Sendable {
         preserveThinking: Bool? = nil,
         chatTemplateKwargs: [String: AnyCodable]? = nil,
         reasoningEffort: String? = nil,
-        keepAlive: KeepAliveValue? = nil
+        keepAlive: KeepAliveValue? = nil,
+        enforceToolSchemas: Bool? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -86,6 +91,7 @@ public struct AnthropicRequest: Codable, Sendable {
         self.chatTemplateKwargs = chatTemplateKwargs
         self.reasoningEffort = reasoningEffort
         self.keepAlive = keepAlive
+        self.enforceToolSchemas = enforceToolSchemas
     }
 
     /// Resolve thinking toggle from multiple client formats, mirrors OpenAI pattern

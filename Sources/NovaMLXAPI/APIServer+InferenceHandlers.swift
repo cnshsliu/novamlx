@@ -63,7 +63,10 @@ extension NovaMLXAPIServer {
             useNativeMtp: openAIReq.useMtp,
             adaptiveVerify: openAIReq.adaptiveVerify,
             adaptiveVerifyMin: openAIReq.adaptiveVerifyMin,
-            adaptiveVerifyMax: openAIReq.adaptiveVerifyMax
+            adaptiveVerifyMax: openAIReq.adaptiveVerifyMax,
+            enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
+                requestFlag: openAIReq.enforceToolSchemas,
+                serverConfig: cfg.enforceToolSchemas)
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -240,7 +243,10 @@ extension NovaMLXAPIServer {
             useNativeMtp: openAIReq.useMtp,
             adaptiveVerify: openAIReq.adaptiveVerify,
             adaptiveVerifyMin: openAIReq.adaptiveVerifyMin,
-            adaptiveVerifyMax: openAIReq.adaptiveVerifyMax
+            adaptiveVerifyMax: openAIReq.adaptiveVerifyMax,
+            enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
+                requestFlag: openAIReq.enforceToolSchemas,
+                serverConfig: cfg.enforceToolSchemas)
         )
 
         let modelId = openAIReq.model
@@ -553,7 +559,10 @@ extension NovaMLXAPIServer {
             thinkingBudget: anthropicReq.thinkingBudget,
             enableThinking: anthropicReq.resolvedEnableThinking,
             preserveThinking: anthropicReq.resolvedPreserveThinking,
-            httpRequestId: HTTPHelpers.requestID(from: httpRequest)
+            httpRequestId: HTTPHelpers.requestID(from: httpRequest),
+            enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
+                requestFlag: anthropicReq.enforceToolSchemas,
+                serverConfig: cfg.enforceToolSchemas)
         )
 
         let reqTag = request.id.uuidString.prefix(8)

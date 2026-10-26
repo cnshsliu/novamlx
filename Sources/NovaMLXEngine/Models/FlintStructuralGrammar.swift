@@ -14,6 +14,10 @@ import MLXLMCommon
 /// `stop` does not select the guard: official `rec` rejects that request
 /// while flint grammar is on. The guard is not the control that blocks a
 /// second `<think>` on the default Flint chat path.
+///
+/// When `toolSchema` is set, the tool body is a host FSM (not xgrammar):
+/// names, keys, and value shapes are masked. `strict: false` is included
+/// only when `enforce_tool_schemas` compiled that session.
 public struct FlintStructuralGrammar: Equatable, Sendable {
     public enum Phase: Equatable, Sendable {
         case start
@@ -81,15 +85,55 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
     public private(set) var sawToolCall = false
     /// Proper prefix of a marker excluded in `phase`, withheld across tokens.
     public private(set) var held = ""
+    /// Set when at least one tool is schema-enforced. Nil keeps the loose body.
+    var toolSchema: FlintToolSchemaSession?
+    /// Shared by grammar copies. Nil until a schema session is installed.
+    var vocabTexts: FlintVocabTextCache?
+
+    public static func == (lhs: FlintStructuralGrammar, rhs: FlintStructuralGrammar) -> Bool {
+        lhs.allowsTools == rhs.allowsTools
+            && lhs.phase == rhs.phase
+            && lhs.sawToolCall == rhs.sawToolCall
+            && lhs.held == rhs.held
+            && lhs.toolSchema == rhs.toolSchema
+    }
 
     public init(allowsTools: Bool) {
         self.allowsTools = allowsTools
     }
 
+    init(allowsTools: Bool, toolSchema: FlintToolSchemaSession?) {
+        self.allowsTools = allowsTools
+        self.toolSchema = toolSchema
+    }
+
+    /// Decode hook for schema fields that mask ordinary vocab ids. No-op when
+    /// this request has no tool-schema session.
+    mutating func attachVocabTexts(_ decode: @escaping @Sendable (Int) -> String) {
+        guard toolSchema != nil else { return }
+        vocabTexts = FlintVocabTextCache(decode: decode)
+    }
+
     /// Ids whose logits must be `-inf` in the current phase.
-    /// Dedicated marker tokens only; spelled-out pieces are rejected by
-    /// `isAllowed(tokenId:text:)` / `consume`.
-    public func maskedTokenIds() -> Set<Int> {
+    /// Dedicated marker tokens only, unless a schema field is active and
+    /// `vocabSize` is the row width: those steps also mask vocab ids whose
+    /// text cannot continue the name, key, or value.
+    public func maskedTokenIds(vocabSize: Int = 0) -> Set<Int> {
+        if phase == .inTool, let schema = toolSchema, schema.constrainsThisCall {
+            var masked = Set<Int>()
+            for marker in Self.protocolMarkers where !schema.allows(tokenId: marker.tokenId, text: marker.text) {
+                masked.insert(marker.tokenId)
+            }
+            if vocabSize > 0, schema.constrainsFreeText, let cache = vocabTexts {
+                let markerIds = Set(Self.protocolMarkers.map(\.tokenId))
+                for id in 0..<vocabSize where !markerIds.contains(id) {
+                    if !schema.allows(tokenId: id, text: cache.text(id)) {
+                        masked.insert(id)
+                    }
+                }
+            }
+            return masked
+        }
         var masked = Set<Int>()
         for marker in excludedMarkers() where !allowsTokenId(marker.tokenId) {
             masked.insert(marker.tokenId)
@@ -101,6 +145,9 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
     /// masked special id. Legal stops and the single structural transitions
     /// (open think, close think, open/close tool) return `true`.
     public func isAllowed(tokenId: Int, text: String) -> Bool {
+        if phase == .inTool, let schema = toolSchema, schema.constrainsThisCall {
+            return schema.allows(tokenId: tokenId, text: text)
+        }
         if allowsTokenId(tokenId) { return true }
         if maskedTokenIds().contains(tokenId) { return false }
         let combined = held + text
@@ -113,8 +160,19 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
     /// Phase update from a sampled id. Packet decode calls this so the next
     /// step's `maskedTokenIds()` matches `consume` for dedicated marker
     /// tokens. Spelled-out pieces still need `consume` with the decoded text.
-    public mutating func advancePhase(tokenId: Int) {
-        _ = consume(tokenId: tokenId, text: "")
+    /// A schema field that masks free text reads that text from `vocabTexts`
+    /// when the caller has not decoded it yet.
+    public mutating func advancePhase(tokenId: Int, text: String = "") {
+        var piece = text
+        if piece.isEmpty,
+           phase == .inTool,
+           let schema = toolSchema,
+           schema.constrainsFreeText,
+           let cache = vocabTexts
+        {
+            piece = cache.text(tokenId)
+        }
+        _ = consume(tokenId: tokenId, text: piece)
     }
 
     /// Advance on an allowed token. Returns `false` without changing state
@@ -160,6 +218,18 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
             held = Self.retainedPrefix(held + text, markers: excludedMarkerTexts())
             return true
         case .inTool:
+            if var session = toolSchema, session.constrainsThisCall {
+                guard session.take(tokenId: tokenId, text: text) else { return false }
+                let closed = tokenId == Self.toolCloseId || text == "</tool_call>"
+                toolSchema = session
+                if closed {
+                    phase = .answer
+                    held = ""
+                } else {
+                    held = session.held
+                }
+                return true
+            }
             if tokenId == Self.toolCloseId {
                 phase = .answer
                 held = ""
@@ -236,6 +306,10 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
         phase = .inTool
         sawToolCall = true
         held = ""
+        if var session = toolSchema {
+            session.begin()
+            toolSchema = session
+        }
     }
 
     static func retainedPrefix(_ buffer: String, markers: [String]) -> String {
@@ -268,7 +342,11 @@ public final class FlintGrammarLogitProcessor: LogitProcessor, @unchecked Sendab
     public func prompt(_ prompt: MLXArray) {}
 
     public func process(logits: MLXArray) -> MLXArray {
-        FlintStructuralGrammar.suppress(grammar.maskedTokenIds(), in: logits)
+        if grammar.vocabTexts == nil, grammar.toolSchema != nil {
+            grammar.attachVocabTexts(decodeToken)
+        }
+        let vocab = logits.dim(-1)
+        return FlintStructuralGrammar.suppress(grammar.maskedTokenIds(vocabSize: vocab), in: logits)
     }
 
     public func didSample(token: MLXArray) {

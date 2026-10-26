@@ -760,6 +760,7 @@ struct SettingsPageView: View {
                     prefixCacheEnabled: current.prefixCacheEnabled,
                     allowUnlistedDownloads: appState.allowUnlistedDownloads,
                     exclusiveAutoUnload: appState.exclusiveAutoUnload,
+                    enforceToolSchemas: current.enforceToolSchemas,
                     autoLoad: current.autoLoad,
                     cluster: clusterSettings
                 )
@@ -949,6 +950,7 @@ struct SettingsPageView: View {
                 prefixCacheEnabled: currentServer.prefixCacheEnabled,
                 allowUnlistedDownloads: appState.allowUnlistedDownloads,
                 exclusiveAutoUnload: appState.exclusiveAutoUnload,
+                enforceToolSchemas: currentServer.enforceToolSchemas,
                 autoLoad: currentServer.autoLoad,
                 cluster: clusterSettings
             )

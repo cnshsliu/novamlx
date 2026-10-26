@@ -192,7 +192,8 @@ public final class InferenceService: @unchecked Sendable {
             useNativeMtp: finalRequest.useNativeMtp,
             adaptiveVerify: finalRequest.adaptiveVerify,
             adaptiveVerifyMin: finalRequest.adaptiveVerifyMin,
-            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax
+            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax,
+            enforceToolSchemas: finalRequest.enforceToolSchemas
         )
         finalRequest = autoInjectDraftModel(finalRequest)
         track(finalRequest)
@@ -309,7 +310,8 @@ public final class InferenceService: @unchecked Sendable {
             useNativeMtp: finalRequest.useNativeMtp,
             adaptiveVerify: finalRequest.adaptiveVerify,
             adaptiveVerifyMin: finalRequest.adaptiveVerifyMin,
-            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax
+            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax,
+            enforceToolSchemas: finalRequest.enforceToolSchemas
         )
         finalRequest = autoInjectDraftModel(finalRequest)
         track(finalRequest)
@@ -575,7 +577,8 @@ public final class InferenceService: @unchecked Sendable {
             useNativeMtp: request.useNativeMtp,
             adaptiveVerify: request.adaptiveVerify,
             adaptiveVerifyMin: request.adaptiveVerifyMin,
-            adaptiveVerifyMax: request.adaptiveVerifyMax
+            adaptiveVerifyMax: request.adaptiveVerifyMax,
+            enforceToolSchemas: request.enforceToolSchemas
         )
     }
 

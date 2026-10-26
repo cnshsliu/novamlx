@@ -306,6 +306,7 @@ public final class MenuBarAppState: ObservableObject {
             prefixCacheEnabled: current.prefixCacheEnabled,
             allowUnlistedDownloads: enabled,
             exclusiveAutoUnload: current.exclusiveAutoUnload,
+            enforceToolSchemas: current.enforceToolSchemas,
             autoLoad: current.autoLoad,
             cluster: current.cluster
         )
@@ -332,6 +333,7 @@ public final class MenuBarAppState: ObservableObject {
             prefixCacheEnabled: current.prefixCacheEnabled,
             allowUnlistedDownloads: current.allowUnlistedDownloads,
             exclusiveAutoUnload: enabled,
+            enforceToolSchemas: current.enforceToolSchemas,
             autoLoad: current.autoLoad,
             cluster: current.cluster
         )
@@ -376,6 +378,7 @@ public final class MenuBarAppState: ObservableObject {
             prefixCacheEnabled: current.prefixCacheEnabled,
             allowUnlistedDownloads: current.allowUnlistedDownloads,
             exclusiveAutoUnload: current.exclusiveAutoUnload,
+            enforceToolSchemas: current.enforceToolSchemas,
             autoLoad: current.autoLoad,
             cluster: current.cluster
         )
