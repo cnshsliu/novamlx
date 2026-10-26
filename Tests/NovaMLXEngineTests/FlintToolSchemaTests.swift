@@ -31,7 +31,7 @@ struct FlintToolSchemaTests {
         return ["type": "function", "function": function]
     }
 
-    private func grammar(strict: Bool?, flag: Bool, tools: [[String: Any]]? = nil) throws -> FlintStructuralGrammar {
+    private func makeGrammar(strict: Bool?, flag: Bool, tools: [[String: Any]]? = nil) throws -> FlintStructuralGrammar {
         let list = tools ?? [shellTool(strict: strict)]
         return try #require(FlintChatDecode.structuralGrammar(
             tools: list, stop: nil, hasRequestConstraint: false, enforceToolSchemas: flag))
@@ -79,19 +79,19 @@ struct FlintToolSchemaTests {
 
     @Test("flag off leaves omitted and strict:false tools loose")
     func testFlagOffStaysLoose() throws {
-        let omitted = try grammar(strict: nil, flag: false)
+        let omitted = try makeGrammar(strict: nil, flag: false)
         #expect(omitted.toolSchema == nil)
-        let loose = try grammar(strict: false, flag: false)
+        let loose = try makeGrammar(strict: false, flag: false)
         #expect(loose.toolSchema == nil)
         var grammar = loose
         let unknown = play(&grammar, "<tool_call>nope</tool_call>")
         #expect(unknown)
         #expect(grammar.phase == .answer)
 
-        var violation = try grammar(strict: false, flag: false)
+        var violation = try makeGrammar(strict: false, flag: false)
         let missing = play(&violation, "<tool_call>shell</tool_call>")
         #expect(missing)
-        var typed = try grammar(strict: false, flag: false)
+        var typed = try makeGrammar(strict: false, flag: false)
         let soon = play(
             &typed,
             "<tool_call>shell<arg_key>timeout</arg_key><arg_value>soon</arg_value></tool_call>")
@@ -100,91 +100,91 @@ struct FlintToolSchemaTests {
 
     @Test("strict:true is enforced without the flag, and the flag forces strict:false")
     func testEnforcementGate() throws {
-        #expect(try grammar(strict: true, flag: false).toolSchema != nil)
-        #expect(try grammar(strict: false, flag: true).toolSchema != nil)
-        #expect(try grammar(strict: nil, flag: true).toolSchema != nil)
+        #expect(try makeGrammar(strict: true, flag: false).toolSchema != nil)
+        #expect(try makeGrammar(strict: false, flag: true).toolSchema != nil)
+        #expect(try makeGrammar(strict: nil, flag: true).toolSchema != nil)
 
         let valid = "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value></tool_call>"
         let cases: [(Bool?, Bool)] = [(true, false), (false, true), (nil, true)]
         for (strict, flag) in cases {
-            var grammar = try grammar(strict: strict, flag: flag)
+            var grammar = try makeGrammar(strict: strict, flag: flag)
             let accepted = play(&grammar, valid)
             #expect(accepted)
             #expect(grammar.phase == .answer)
         }
 
-        var enforced = try grammar(strict: false, flag: true)
+        var enforced = try makeGrammar(strict: false, flag: true)
         let missing = play(&enforced, "<tool_call>shell</tool_call>")
         #expect(!missing)
         #expect(enforced.phase == .inTool)
         #expect(enforced.maskedTokenIds().contains(FlintStructuralGrammar.toolCloseId))
 
-        var unknown = try grammar(strict: true, flag: false)
+        var unknown = try makeGrammar(strict: true, flag: false)
         let rejectedName = play(&unknown, "<tool_call>nope")
         #expect(!rejectedName)
     }
 
     @Test("schema violations match the shell fixture, including any-order keys")
     func testSchemaShapes() throws {
-        var soon = try grammar(strict: false, flag: true)
+        var soon = try makeGrammar(strict: false, flag: true)
         let badTimeout = play(
             &soon,
             "<tool_call>shell<arg_key>timeout</arg_key><arg_value>soon</arg_value>")
         #expect(!badTimeout)
 
-        var extra = try grammar(strict: false, flag: true)
+        var extra = try makeGrammar(strict: false, flag: true)
         let unexpected = play(&extra, "<tool_call>shell<arg_key>extra</arg_key>")
         #expect(!unexpected)
 
-        var ordered = try grammar(strict: false, flag: true)
+        var ordered = try makeGrammar(strict: false, flag: true)
         let swapped = play(
             &ordered,
             "<tool_call>shell<arg_key>timeout</arg_key><arg_value>12</arg_value><arg_key>command</arg_key><arg_value>pwd</arg_value></tool_call>")
         #expect(swapped)
         #expect(ordered.phase == .answer)
 
-        var leadZero = try grammar(strict: false, flag: true)
+        var leadZero = try makeGrammar(strict: false, flag: true)
         let zero = play(
             &leadZero,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>timeout</arg_key><arg_value>01</arg_value>")
         #expect(!zero)
 
-        var flagOn = try grammar(strict: false, flag: true)
+        var flagOn = try makeGrammar(strict: false, flag: true)
         let boolOk = play(
             &flagOn,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>123</arg_value><arg_key>verbose</arg_key><arg_value>true</arg_value></tool_call>")
         #expect(boolOk)
 
-        var badBool = try grammar(strict: false, flag: true)
+        var badBool = try makeGrammar(strict: false, flag: true)
         let yes = play(
             &badBool,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>verbose</arg_key><arg_value>yes</arg_value>")
         #expect(!yes)
 
-        var object = try grammar(strict: false, flag: true)
+        var object = try makeGrammar(strict: false, flag: true)
         let meta = play(
             &object,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>meta</arg_key><arg_value>{\"a\":1}</arg_value></tool_call>")
         #expect(meta)
 
-        var badObject = try grammar(strict: false, flag: true)
+        var badObject = try makeGrammar(strict: false, flag: true)
         let metaText = play(
             &badObject,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>meta</arg_key><arg_value>soon</arg_value>")
         #expect(!metaText)
 
-        var enumerated = try grammar(strict: false, flag: true)
+        var enumerated = try makeGrammar(strict: false, flag: true)
         let mode = play(
             &enumerated,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>mode</arg_key><arg_value>ls</arg_value></tool_call>")
         #expect(mode)
-        var badMode = try grammar(strict: false, flag: true)
+        var badMode = try makeGrammar(strict: false, flag: true)
         let rm = play(
             &badMode,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>mode</arg_key><arg_value>rm</arg_value>")
         #expect(!rm)
 
-        var union = try grammar(strict: false, flag: true)
+        var union = try makeGrammar(strict: false, flag: true)
         let label = play(
             &union,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>label</arg_key><arg_value>soon</arg_value></tool_call>")
@@ -193,7 +193,7 @@ struct FlintToolSchemaTests {
 
     @Test("tool close stays masked until required arguments are present")
     func testRequiredMasksClose() throws {
-        var grammar = try grammar(strict: true, flag: false)
+        var grammar = try makeGrammar(strict: true, flag: false)
         let opened = play(&grammar, "<tool_call>shell<arg_key>timeout</arg_key><arg_value>12</arg_value>")
         #expect(opened)
         #expect(grammar.maskedTokenIds().contains(FlintStructuralGrammar.toolCloseId))
@@ -207,7 +207,7 @@ struct FlintToolSchemaTests {
 
     @Test("integer values are vocabulary-masked; raw strings are not")
     func testVocabMask() throws {
-        var integer = try grammar(strict: false, flag: true)
+        var integer = try makeGrammar(strict: false, flag: true)
         let entered = play(&integer, "<tool_call>shell<arg_key>timeout</arg_key><arg_value>")
         #expect(entered)
         integer.vocabTexts = FlintVocabTextCache(preset: [21: "soon", 22: "12"])
@@ -220,7 +220,7 @@ struct FlintToolSchemaTests {
         integer.advancePhase(tokenId: 22)
         #expect(!integer.maskedTokenIds().contains(FlintStructuralGrammar.argValueCloseId))
 
-        var raw = try grammar(strict: false, flag: true)
+        var raw = try makeGrammar(strict: false, flag: true)
         let command = play(&raw, "<tool_call>shell<arg_key>command</arg_key><arg_value>")
         #expect(command)
         raw.vocabTexts = FlintVocabTextCache(preset: [21: "soon", 22: "12"])
@@ -245,12 +245,12 @@ struct FlintToolSchemaTests {
                 ] as [String: Any],
             ] as [String: Any],
         ]
-        var looseBody = try grammar(strict: false, flag: false, tools: [shellTool(strict: false), echo])
+        var looseBody = try makeGrammar(strict: false, flag: false, tools: [shellTool(strict: false), echo])
         let soon = play(
             &looseBody,
             "<tool_call>shell<arg_key>timeout</arg_key><arg_value>soon</arg_value><arg_key>command</arg_key><arg_value>pwd</arg_value></tool_call>")
         #expect(soon)
-        var unknown = try grammar(strict: false, flag: false, tools: [shellTool(strict: false), echo])
+        var unknown = try makeGrammar(strict: false, flag: false, tools: [shellTool(strict: false), echo])
         let nope = play(&unknown, "<tool_call>nope")
         #expect(!nope)
     }
@@ -304,7 +304,7 @@ struct FlintToolSchemaTests {
             enforceToolSchemas: true)
         #expect(try FlintAlignment.prepareMessages(request: constrained).count == 1)
 
-        let refused = try grammar(strict: nil, flag: true, tools: notObject)
+        let refused = try makeGrammar(strict: nil, flag: true, tools: notObject)
         var failing = refused
         let opened = failing.consume(tokenId: FlintStructuralGrammar.toolOpenId, text: "<tool_call>")
         #expect(opened)
