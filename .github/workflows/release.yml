@@ -519,22 +519,32 @@ jobs:
               "    ) {\n",
               1,
           )
-          linear = "vendors/mlx-swift/Source/MLXNN/Linear.swift"
-          replace_count(
-              linear,
+          # Older mlx-swift stores these as `let`. Current main uses
+          # `@ParameterInfo public var`, which TIE can already assign.
+          # QuantizedLinear scales/biases are `public private(set)`, so TIE
+          # in another module cannot write them until the setter is public.
+          linear = Path("vendors/mlx-swift/Source/MLXNN/Linear.swift")
+          linear_text = linear.read_text()
+          linear_let = (
               "open class Linear: Module, UnaryLayer, Quantizable {\n"
               "\n"
               "    public let weight: MLXArray\n"
-              "    public let bias: MLXArray?\n",
+              "    public let bias: MLXArray?\n"
+          )
+          linear_var = (
               "open class Linear: Module, UnaryLayer, Quantizable {\n"
               "\n"
               "    public var weight: MLXArray\n"
-              "    public var bias: MLXArray?\n",
-              1,
+              "    public var bias: MLXArray?\n"
           )
-          quantized = "vendors/mlx-swift/Source/MLXNN/Quantized.swift"
-          replace_count(
-              quantized,
+          if linear_let in linear_text:
+              linear.write_text(linear_text.replace(linear_let, linear_var, 1))
+          elif "@ParameterInfo public var weight: MLXArray" not in linear_text:
+              raise SystemExit("error: Linear.weight declaration changed")
+
+          quantized = Path("vendors/mlx-swift/Source/MLXNN/Quantized.swift")
+          q_text = quantized.read_text()
+          q_let = (
               "open class QuantizedLinear: Linear, Quantized {\n"
               "\n"
               "    public let groupSize: Int\n"
@@ -542,7 +552,9 @@ jobs:
               "\n"
               "    public let mode: QuantizationMode\n"
               "    public let scales: MLXArray\n"
-              "    public let biases: MLXArray?\n",
+              "    public let biases: MLXArray?\n"
+          )
+          q_let_var = (
               "open class QuantizedLinear: Linear, Quantized {\n"
               "\n"
               "    public let groupSize: Int\n"
@@ -550,9 +562,34 @@ jobs:
               "\n"
               "    public let mode: QuantizationMode\n"
               "    public var scales: MLXArray\n"
-              "    public var biases: MLXArray?\n",
-              1,
+              "    public var biases: MLXArray?\n"
           )
+          q_private = (
+              "open class QuantizedLinear: Linear, Quantized {\n"
+              "\n"
+              "    public let groupSize: Int\n"
+              "    public let bits: Int\n"
+              "\n"
+              "    public let mode: QuantizationMode\n"
+              "    @ParameterInfo public private(set) var scales: MLXArray\n"
+              "    @ParameterInfo public private(set) var biases: MLXArray?\n"
+          )
+          q_public = (
+              "open class QuantizedLinear: Linear, Quantized {\n"
+              "\n"
+              "    public let groupSize: Int\n"
+              "    public let bits: Int\n"
+              "\n"
+              "    public let mode: QuantizationMode\n"
+              "    @ParameterInfo public var scales: MLXArray\n"
+              "    @ParameterInfo public var biases: MLXArray?\n"
+          )
+          if q_let in q_text:
+              quantized.write_text(q_text.replace(q_let, q_let_var, 1))
+          elif q_private in q_text:
+              quantized.write_text(q_text.replace(q_private, q_public, 1))
+          elif "@ParameterInfo public var scales: MLXArray" not in q_text:
+              raise SystemExit("error: QuantizedLinear.scales declaration changed")
           print("patched switch linear visibility and linear weight assignment")
           PY
 

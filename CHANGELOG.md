@@ -4,6 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Model row actions** — On Local Inference, each “Downloaded, not loaded” row keeps **Load** where it is. **More**, immediately to the right, holds **Convert to TIE**, **Move to another disk**, and **Delete**. Convert to TIE is available for the same layouts as before. Move asks which other configured disk to use, then relocates the files (same vault move as Settings). Delete still asks for confirmation and stays destructive. Intro: [feature brief](docs/feature-briefs/2026-10-21-model-row-more-menu.md).
+
 ### Added
 - **Tested weights on Downloads** — the Downloads page lists every catalog entry with status `verified`: name, model version (family, quant, NovaMLX version that passed), and the exact weight id. One click downloads that weight.
 
