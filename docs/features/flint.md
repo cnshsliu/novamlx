@@ -16,7 +16,7 @@ People who want a local agent/coding model with reasoning and tool calls, and st
 | **Capabilities** | `<think>` reasoning (`reasoning_content` on its own channel), multi-turn tool calls (GLM4 dialect normalized to standard OpenAI tool_calls), 256K context (sliding-window KV) |
 | **API** | OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`, streaming and non-streaming; eos = `<|end_of_text|>` and role-header tokens (automatic stop and scrub, no leak) |
 | **Decoding** | Flint chat uses the official rec flint structural grammar: one optional `<think>…</think>`, then answer or tool-call text whose logits mask forbids another think tag and the protocol markers, then stop on the checkpoint multi-EOS set. `max_tokens` is only a cap. The older think-reentry guard runs when that grammar is off |
-| **Scheduling** | Default HTTP chat goes through FusedBatchScheduler (including tool parsing). The structural grammar is on for that path, so chat samples one token at a time under the mask. Temperature 0, one sequence, no logprobs, no frequency penalty, and no grammar use the resident packet. Session, request grammar, and sampling stay on the single-step path |
+| **Scheduling** | Default HTTP chat goes through FusedBatchScheduler (including tool parsing). Structural grammar stays on, and the resident packet stays on with it: grammar, presence, and temperature / top-p / top-k are applied before each acceptance (`filtered`, width 16). Temperature 0 with no grammar and no presence still uses the device argmax packet, also width 16. Frequency penalty, repetition penalty, min-p, logprobs, and a second sequence stay on the single-step path |
 | **Quantization** | Official `RecursiveSI/flint-int4` (~22.6 GB; the community OptiQ-4bit build was used for early verification and is no longer the default) |
 | **Performance** | Official INT4 runs on the rec megakernel. MacMaxPro M4 Max, `RecursiveSI/flint-int4`, packet width 16: LOOP-RESULT **226.8 tok/s**, SINGLE-RESULT **190.7 tok/s**, FLINT-CHAT **217.3 tok/s**. Window, comparisons, and the bar chart are in [Speed](#speed). |
 
@@ -72,7 +72,7 @@ Same machine, earlier commits (not the row in the table above):
 - In #35, after host/scratch and the 76 pool landed and before the packet was in: 185.2 tok/s
 - 1.8.0 / `e8e7b27`: packet=8, LOOP-RESULT **214.7 tok/s** (128 rec steps, official=yes, launch=76/64/64), SINGLE-RESULT **181.6 tok/s**. MegaDecode was MEGA-SKIP, with no mega tok/s
 
-190.7 and 226.8 are both the rec decode timing window inside `FlintSpeedTests` after shader compile, not HTTP end-to-end. 226.8 is the greedy resident packet (argmax on device, width 16). The same run's single-step path is one launch and host argmax (190.7). Sampling decode does not use the packet.
+190.7 and 226.8 are both the rec decode timing window inside `FlintSpeedTests` after shader compile, not HTTP end-to-end. 226.8 is the greedy resident packet (argmax on device, width 16). The same run's single-step path is one launch and host argmax (190.7). Grammar and recommended sampling (temperature 1.0, top-p 0.95, top-k 20) use the filtered packet at the same width 16. That path is not a new tok/s measurement; the 226.8 figure stays the greedy device packet.
 
 ### Chat tok/s (`FLINT-CHAT`)
 
@@ -88,7 +88,25 @@ On a Mac, start with the speed suite. The `LOOP-RESULT` timing window is unchang
 ./build.sh test --filter FlintSpeedTests
 ```
 
-HTTP chat (official INT4) writes the same line to `~/.nova/novamlx.log` when the sequence finishes. Flint structural grammar is on by default, so that line's `packetTokens` is 0 and the tokens are `singleTokens`: each one is sampled under the logits mask. Temperature 0, one sequence, no logprobs, and `frequency_penalty` 0 still use the resident packet when grammar is off (a non-empty `stop` list, or a request constraint such as JSON schema). Temperature > 0, logprobs, frequency penalty, session, and a second concurrent sequence stay on the single-step path.
+HTTP chat (official INT4) writes the same line to `~/.nova/novamlx.log` when the sequence finishes. Default Flint chat has the structural grammar on and samples with `generation_config.json` (temperature 1.0, top-p 0.95, top-k 20) unless the request overrides them. That combination uses the filtered resident packet, so `packetTokens` counts those steps. `singleTokens` is the handoff before the rec session is live, plus any request the packet refuses.
+
+### Packet allow / reject
+
+Official `rec` keeps resident decode under grammar and under recommended sampling via `FilteredResidentSampler` (width 8). Nova keeps width **16**.
+
+| Request | Official `rec` | Nova Flint |
+|---|---|---|
+| Temperature 0, no structural grammar, presence 0, frequency 0, repetition neutral, no logprobs, one sequence | Fused greedy kernel, width 8 | Device argmax packet, width 16 |
+| Structural grammar, and/or presence penalty, and/or temperature / top-p / top-k | `FilteredResidentSampler`, width 8 | Filtered packet, width 16. Grammar mask and presence run before the sampler. Top-k masks logits, then the fused sampler applies temperature and top-p |
+| Temperature 1, top-p 1, top-k 0, no grammar or presence | Fused gumbel kernel, width 8 | Filtered packet (host sampler, no gumbel kernel) |
+| `frequency_penalty != 0` | HTTP 400 | Single-step. The fused sampler still applies frequency |
+| Repetition penalty other than 0 or 1 | HTTP 400 | Single-step. This scheduler does not apply repetition |
+| `min_p != 0` | HTTP 400 | Single-step. The fused sampler does not apply min-p |
+| Logprobs | Filtered packet | Single-step, so each token keeps its logprobs |
+| Two sequences at once | Single session only | Single-step |
+| JSON schema, regex, or GBNF | Not the flint grammar | Single-step on the serial iterator, which applies that mask. Fused decode does not apply those masks; a greedy request there still uses the device packet |
+
+A filtered step refuses a token the grammar mask forbids (a second `<think>`, token 150006, after the answer has started). Checkpoint eos ids still end the packet: `<|end_of_text|>`, `<|user|>`, and `<|observation|>` after a tool call. `<|developer|>` stays in the host stop set and is masked during the answer, so the packet does not accept it.
 
 ```bash
 curl -X POST localhost:6590/v1/chat/completions \
@@ -102,7 +120,7 @@ curl -X POST localhost:6590/v1/chat/completions \
 ## Limits / notes
 
 - With `thinking_budget` omitted, Flint stops on `max_tokens` (and the usual eos / role-header stops). Pass `thinking_budget` to opt into a close-marker cap. Other thinking families still receive an automatic cap when the field is omitted.
-- Default Flint chat installs the structural grammar, so a second `<think>` is masked before sampling. The think-reentry guard is the fallback when grammar is off. `max_tokens` (including the demo default) only caps length.
+- Default Flint chat installs the structural grammar and the filtered resident packet (width 16). A second `<think>` is masked before that packet accepts a token. The think-reentry guard is the fallback when grammar is off. `max_tokens` (including the demo default) only caps length.
 - Tool calls are parsed on the fused path. Flint always has the GLM4 parser attached. A packet whose new text contains `<` (a tool marker, a think tag, or half a tag) is still decoded token by token. A greedy packet with no `<` is decoded once, then handed to the same parser.
 - Text-to-3D and similar paths are separate from Flint. Flint is a text agent model.
 - TurboQuant KV cache drops attention sinks (the same tradeoff as GPT-OSS) and is off by default.

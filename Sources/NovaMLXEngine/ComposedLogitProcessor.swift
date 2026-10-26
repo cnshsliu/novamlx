@@ -88,6 +88,11 @@ public final class ComposedLogitProcessor: LogitProcessor, @unchecked Sendable {
         )
     }
 
+    /// The grammar slot is the flint structural mask, not JSON / regex / GBNF.
+    var appliesFlintStructuralGrammar: Bool {
+        grammarProcessor is FlintGrammarLogitProcessor
+    }
+
     /// Resident greedy packets are safe only while every slot is a no-op on
     /// the next sample. A penalty or grammar slot rewrites logits on every
     /// step. Turn-stop and thinking-budget masks turn on only after a trigger.

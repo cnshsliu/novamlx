@@ -109,6 +109,13 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
         return true
     }
 
+    /// Phase update from a sampled id. Packet decode calls this so the next
+    /// step's `maskedTokenIds()` matches `consume` for dedicated marker
+    /// tokens. Spelled-out pieces still need `consume` with the decoded text.
+    public mutating func advancePhase(tokenId: Int) {
+        _ = consume(tokenId: tokenId, text: "")
+    }
+
     /// Advance on an allowed token. Returns `false` without changing state
     /// when the token is illegal — the caller stops the turn.
     @discardableResult

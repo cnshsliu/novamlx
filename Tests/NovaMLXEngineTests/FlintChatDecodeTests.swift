@@ -10,21 +10,29 @@ struct FlintChatDecodeTests {
 
     private func policy(
         temperature: Float = 0,
+        topP: Float = 1,
+        topK: Int = 0,
+        minP: Float = 0,
         frequencyPenalty: Float = 0,
         repetitionPenalty: Float = 0,
         presencePenalty: Float = 0,
         wantsLogprobs: Bool = false,
         batchWidth: Int = 1,
-        usesGrammar: Bool = false
+        usesGrammar: Bool = false,
+        usesStructuralGrammar: Bool = false
     ) -> FlintChatDecode.Policy {
         FlintChatDecode.Policy(
             temperature: temperature,
+            topP: topP,
+            topK: topK,
+            minP: minP,
             frequencyPenalty: frequencyPenalty,
             repetitionPenalty: repetitionPenalty,
             presencePenalty: presencePenalty,
             wantsLogprobs: wantsLogprobs,
             batchWidth: batchWidth,
-            usesGrammar: usesGrammar)
+            usesGrammar: usesGrammar,
+            usesStructuralGrammar: usesStructuralGrammar)
     }
 
     @Test("resident packet is greedy, single-sequence, and logit-neutral")
@@ -465,5 +473,159 @@ struct FlintChatDecodeTests {
         let guarded = step(open, "<think>")
         #expect(guarded.thinkReentry)
         #expect(guarded.yield.isEmpty)
+    }
+
+    @Test("greedy with no grammar stays on the device packet at width 16")
+    func testGreedyDevicePacketUnchanged() {
+        let greedy = policy()
+        #expect(FlintChatDecode.residentRoute(greedy) == .greedyDevice)
+        #expect(FlintChatDecode.allowsResidentPacket(greedy))
+        #expect(FlintChatDecode.allowsResidentPacket(policy(repetitionPenalty: 1)))
+        #expect(FlintRecResident.width == 16)
+        #expect(FlintChatDecode.packetStopIds(tokenizerEOS: nil) == FlintChatDecode.canonicalStopIds)
+        #expect(!FlintChatDecode.allowsResidentPacket(policy(temperature: 1)))
+        #expect(!FlintChatDecode.allowsResidentPacket(policy(usesGrammar: true)))
+        #expect(!FlintChatDecode.allowsResidentPacket(policy(usesStructuralGrammar: true)))
+    }
+
+    @Test("grammar and recommended sampling use the filtered packet")
+    func testFilteredPacketRoute() {
+        let recommended = policy(
+            temperature: 1, topP: 0.95, topK: 20, usesStructuralGrammar: true)
+        #expect(FlintChatDecode.residentRoute(recommended) == .filtered)
+        #expect(FlintChatDecode.residentRoute(policy(usesStructuralGrammar: true)) == .filtered)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, topP: 0.95, topK: 20)) == .filtered)
+        #expect(FlintChatDecode.residentRoute(policy(presencePenalty: 0.2)) == .filtered)
+        // Official rejects these. The packet stays off; frequency still runs
+        // on the single-step fused sampler.
+        #expect(FlintChatDecode.residentRoute(
+            policy(temperature: 1, topP: 0.95, topK: 20, frequencyPenalty: 0.1, usesStructuralGrammar: true)
+        ) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(repetitionPenalty: 1.1)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, minP: 0.05)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, wantsLogprobs: true)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, batchWidth: 2)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 0, usesGrammar: true)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(temperature: 1, topP: 1.1)) == .singleStep)
+        #expect(FlintChatDecode.residentRoute(policy(presencePenalty: 3)) == .singleStep)
+    }
+
+    @Test("filtered packet rejects a second think before acceptance")
+    func testFilteredPacketRejectsSecondThink() {
+        var grammar: FlintStructuralGrammar? = FlintStructuralGrammar(allowsTools: false)
+        let open = FlintStructuralGrammar.thinkOpenId
+        let close = FlintStructuralGrammar.thinkCloseId
+        let script = [open, 11, close, 12, open, 99]
+        var index = 0
+        let walked = FlintChatDecode.acceptFilteredPacket(
+            grammar: &grammar, stopIds: Set(FlintChatDecode.canonicalStopIds)
+        ) { _ in
+            let id = script[index]
+            index += 1
+            return id
+        }
+        #expect(walked.tokens == [open, 11, close, 12])
+        #expect(walked.rejectedMaskedId == open)
+        #expect(!walked.tokens.contains(99))
+        #expect(walked.tokens.filter { $0 == open }.count == 1)
+        #expect(grammar?.phase == .answer)
+        #expect(grammar?.maskedTokenIds().contains(open) == true)
+    }
+
+    @Test("filtered packet still finishes on each grammar-legal eos")
+    func testFilteredPacketMultiEOS() {
+        let end = FlintStructuralGrammar.endOfTextId
+        let user = FlintStructuralGrammar.userId
+        let observation = FlintStructuralGrammar.observationId
+        let developer = FlintStructuralGrammar.developerId
+        let stops = Set(FlintChatDecode.canonicalStopIds)
+        #expect(stops.contains(end))
+        #expect(stops.contains(user))
+        #expect(stops.contains(observation))
+        #expect(stops.contains(developer))
+
+        func finish(on id: Int, tools: Bool, prelude: [Int]) -> FlintChatDecode.FilteredPacketResult {
+            var grammar: FlintStructuralGrammar? = FlintStructuralGrammar(allowsTools: tools)
+            let script = prelude + [id, 99]
+            var index = 0
+            return FlintChatDecode.acceptFilteredPacket(grammar: &grammar, stopIds: stops) { _ in
+                let next = script[index]
+                index += 1
+                return next
+            }
+        }
+
+        let endTurn = finish(on: end, tools: false, prelude: [12])
+        #expect(endTurn.stoppedOnEOS)
+        #expect(endTurn.tokens == [12, end])
+        #expect(endTurn.rejectedMaskedId == nil)
+
+        let userTurn = finish(on: user, tools: false, prelude: [
+            FlintStructuralGrammar.thinkOpenId, 11, FlintStructuralGrammar.thinkCloseId, 12,
+        ])
+        #expect(userTurn.stoppedOnEOS)
+        #expect(userTurn.tokens.last == user)
+        #expect(!userTurn.tokens.contains(99))
+
+        let afterTool = finish(on: observation, tools: true, prelude: [
+            12, FlintStructuralGrammar.toolOpenId, 21, FlintStructuralGrammar.toolCloseId,
+        ])
+        #expect(afterTool.stoppedOnEOS)
+        #expect(afterTool.tokens.last == observation)
+
+        // Developer stays in the host stop set, and the answer-phase grammar
+        // masks it, so the packet does not accept it as a sampled token.
+        let maskedDeveloper = finish(on: developer, tools: false, prelude: [12])
+        #expect(maskedDeveloper.rejectedMaskedId == developer)
+        #expect(maskedDeveloper.tokens == [12])
+        #expect(!maskedDeveloper.stoppedOnEOS)
+    }
+
+    @Test("grammar mask drops a second think below the argmax")
+    func testFilteredArgmaxSkipsSecondThink() {
+        var grammar = FlintStructuralGrammar(allowsTools: false)
+        let openedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkOpenId, text: "<think>")
+        #expect(openedThink)
+        let closedThink = grammar.consume(tokenId: FlintStructuralGrammar.thinkCloseId, text: "</think>")
+        #expect(closedThink)
+        let hello = grammar.consume(tokenId: 12, text: "Hello")
+        #expect(hello)
+
+        let vocab = FlintStructuralGrammar.developerId + 1
+        var values = [Float](repeating: 0, count: vocab)
+        values[FlintStructuralGrammar.thinkOpenId] = 50
+        values[12] = 1
+        let logits = MLXArray(values, [1, vocab])
+        let filtered = FlintChatDecode.filterLogits(
+            logits,
+            grammar: grammar,
+            presenceSeen: [],
+            presencePenalty: 0,
+            temperature: 0,
+            topK: 20)
+        let flat = filtered.asArray(Float.self)
+        // Temperature 0 takes argmax after this mask. The think-open logit
+        // is no longer the maximum, so the packet cannot accept a second `<think>`.
+        #expect(flat[FlintStructuralGrammar.thinkOpenId].isInfinite)
+        #expect(flat[FlintStructuralGrammar.thinkOpenId] < 0)
+        #expect(flat[12] == 1)
+        #expect(flat[12] > flat[FlintStructuralGrammar.thinkOpenId])
+    }
+
+    @Test("top-k keeps the largest logit and presence subtracts once")
+    func testTopKAndPresenceMasks() {
+        let row = MLXArray([Float(1), 3, 2], [1, 3])
+        let top = FlintChatDecode.applyTopK(row, k: 1).asArray(Float.self)
+        #expect(top[1] == 3)
+        #expect(top[0].isInfinite && top[0] < 0)
+        #expect(top[2].isInfinite && top[2] < 0)
+
+        let present = FlintChatDecode.applyPresence(
+            MLXArray([Float(1), 1, 1], [3]), seen: [1], penalty: 0.5
+        ).asArray(Float.self)
+        #expect(present[0] == 1)
+        #expect(present[1] == 0.5)
+        #expect(present[2] == 1)
+        #expect(FlintChatDecode.applyTopK(row, k: 0).shape == row.shape)
     }
 }
