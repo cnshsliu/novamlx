@@ -2,11 +2,11 @@
 
 **Pitch:** Submit an image-to-3D job to the local Hunyuan3D-2.1 pipeline, then poll and download a GLB mesh (optionally textured).
 
-本地 Hunyuan3D-2.1（Swift + MLX，纯本机无 Python）通过 `Hy3DService` 跑异步任务：一张图 → mesh（可选 PBR 纹理）→ GLB。
+Local Hunyuan3D-2.1 (Swift + MLX, on this machine, no Python) runs async jobs through `Hy3DService`: one image → a mesh (optional PBR texture) → a GLB.
 
 ## Who it is for
 
-要在本机把一张图片变成 3D 模型（GLB）的人；或想用任务式 API（与 image / video 同一套）做 3D 生成接入的人。
+People who want to turn one image into a 3D model (GLB) on this machine, or who want to call 3D generation through the same task-style API as image and video.
 
 ## What it does
 
@@ -24,14 +24,14 @@
 
 ## How to try
 
-1. 下载并加载模型（catalog 搜 `hunyuan3d`，或在 Downloads 页）：
+1. Download and load a model (search the catalog for `hunyuan3d`, or use the Downloads page):
 
 ```bash
 nova download zimengxiong/hunyuan3d-mlx-shape-small
-# 然后在 Local Inference 页加载 zimengxiong/hunyuan3d-mlx-shape-small
+# Then load zimengxiong/hunyuan3d-mlx-shape-small on the Local Inference page
 ```
 
-2. 提交任务（`image` 接受 data URI、裸 base64、http(s) URL 或本地路径）：
+2. Submit a job (`image` accepts a data URI, raw base64, an http(s) URL, or a local path):
 
 ```bash
 curl -X POST http://localhost:6590/v1/3d/generations \
@@ -48,7 +48,7 @@ curl -X POST http://localhost:6590/v1/3d/generations \
 # → 202 {"id": "h3d-...", "status": "pending", "polling_url": "/v1/3d/generations/h3d-..."}
 ```
 
-3. 轮询并下载：
+3. Poll and download:
 
 ```bash
 curl -H "Authorization: Bearer $NOVA_API_KEY" http://localhost:6590/v1/tasks/h3d-...
@@ -59,21 +59,21 @@ curl -H "Authorization: Bearer $NOVA_API_KEY" \
 
 ## Texture (paint)
 
-- `texture: true` 需要同时加载一个 paint 模型（如 `zimengxiong/hunyuan3d-mlx-paint-large`），或请求里显式传 `paint_model`。
-- paint-large 走 PBR 路径（albedo + metallic-roughness 贴图）；paint-small 走 RGB 路径。
-- 峰值内存 ~25–39 GB：建议 64 GB 以上机型，内存不足会干净地失败。
-- shape 模型常驻（直到 unload）；paint 权重每个任务现加载、跑完即释放。
+- `texture: true` needs a paint model loaded as well (for example `zimengxiong/hunyuan3d-mlx-paint-large`), or an explicit `paint_model` on the request.
+- paint-large takes the PBR path (albedo + metallic-roughness maps). paint-small takes the RGB path.
+- Peak memory is ~25–39 GB. 64 GB and above is the suggested machine size. If memory is short, the job fails cleanly.
+- The shape model stays resident until unload. Paint weights load for each job and are released when it finishes.
 
 ## Limits / notes
 
-- 本轮只做 image-to-3D；`prompt` 字段接受但忽略；`output_format` 只支持 `glb`。
-- shape-small 实测参考（上游 README，M 系列芯片）：30 步 + octree 256 约 21 s、峰值 ~5.6 GB。
-- `usage.cost` 恒为 0（本机生成）；`meshes` / `size_tier` 为上游计量预留。
-- 权重遵循 Tencent Hunyuan3D Community License（由官方 tencent/Hunyuan3D-2.1 转换而来），不入 git。
+- This round is image-to-3D only. The `prompt` field is accepted and ignored. `output_format` supports `glb` only.
+- shape-small measured reference (upstream README, M-series chips): 30 steps + octree 256 is about 21 s, peak ~5.6 GB.
+- `usage.cost` is always 0 (generated on this machine). `meshes` / `size_tier` are reserved for upstream metering.
+- Weights follow the Tencent Hunyuan3D Community License (converted from official tencent/Hunyuan3D-2.1) and are not in git.
 
 ## Related
 
-- [图像生成 / Image generation](image-generation.md)
-- [视频生成 / Video generation](video-generation.md)
-- [API 兼容性 / API compatibility](api-compatibility.md)
-- `Hy3DService`（`NovaMLXEngine`）、`APIServer+3D.swift`（`NovaMLXAPI`）
+- [Image generation](image-generation.md)
+- [Video generation](video-generation.md)
+- [API compatibility](api-compatibility.md)
+- `Hy3DService` (`NovaMLXEngine`), `APIServer+3D.swift` (`NovaMLXAPI`)

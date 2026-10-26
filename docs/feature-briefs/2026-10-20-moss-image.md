@@ -1,52 +1,48 @@
-# MOSS-Image 文生图
+# MOSS-Image text-to-image
 
 ## Title
 
-OpenMOSS MOSS-Image — Apple Silicon 上的本地文生图（SFT）
+OpenMOSS MOSS-Image — local text-to-image on Apple Silicon (SFT)
 
 ## One-line pitch
 
 Generate images from a sentence on this Mac with MOSS-Image-SFT, through the same local image API as FLUX.
 
-在 Mac 上用 MOSS-Image-SFT 把一句话画成图，走和 FLUX 同一套本地图像接口。
-
 ## Who it is for / when to care
 
-已经在 NovaMLX 里跑本地模型，并希望用 OpenMOSS MOSS-Image 做文生图的人。中英文文字上屏、或把一段 JSON 版式当作提示词，是它相对现有 FLUX / Qwen-Image 路径的差别。统一内存大约 64 GB 时走 bf16；大约 32 GB 时 Nova 会在加载时把 DiT 和文本编码器量化成 int8。
-
-For people running NovaMLX on a Mac who want OpenMOSS MOSS-Image as a local text-to-image model. Use bf16 around 64 GB of unified memory. Around 32 GB, Nova quantizes the DiT and the text encoder to int8 on load.
+People already running local models in NovaMLX who want OpenMOSS MOSS-Image for text-to-image. Chinese and English text rendered in the image, or a JSON layout used as the prompt, is how it differs from the existing FLUX / Qwen-Image path. Around 64 GB of unified memory it stays bf16. Around 32 GB, Nova quantizes the DiT and the text encoder to int8 on load.
 
 ## What shipped (user-visible behavior)
 
-目录新增两条 preview，id 与 `nova download` 相同：
+Two preview rows were added to the catalog. The ids match `nova download`:
 
-| 仓库 | 用途 | 磁盘 | 目录建议统一内存 |
+| Repo | Role | Disk | Catalog suggested unified memory |
 | --- | --- | --- | --- |
-| `OpenMOSS-Team/MOSS-Image-SFT` | 生成用这一条 | ~27 GB（safetensors 27,199,664,580 字节） | 32 GB |
-| `OpenMOSS-Team/MOSS-Image-Base` | 同一加载路径上的预训练权重 | ~27 GB | 32 GB |
+| `OpenMOSS-Team/MOSS-Image-SFT` | Use this one for generation | ~27 GB (safetensors 27,199,664,580 bytes) | 32 GB |
+| `OpenMOSS-Team/MOSS-Image-Base` | Pretrain weights on the same load path | ~27 GB | 32 GB |
 
-下载的是 bf16 diffusers 快照（`transformer/`、`text_encoder/`、`tokenizer/`、`vae/`）。加载规则：
+The download is a bf16 diffusers snapshot (`transformer/`, `text_encoder/`, `tokenizer/`, `vae/`). Load rules:
 
-- 统一内存 ≥ 48 GiB：DiT 与 Qwen3.5-9B 文本编码器保持 bf16。接入的 Swift 端口公布的峰值大约 27 GB（编码阶段）。
-- 统一内存低于 48 GiB：加载时把 DiT 和文本编码器量化为 int8。同一端口公布的峰值大约 16 GB。
-- `NOVA_MOSS_IMAGE_QUANT=bf16` 或 `int8` 覆盖上面的自动选择。名字里带 `int8` / `8bit` 的 id 默认 int8。
+- Unified memory ≥ 48 GiB: the DiT and the Qwen3.5-9B text encoder stay bf16. The wired Swift port's published peak is about 27 GB (during encode).
+- Unified memory below 48 GiB: the DiT and the text encoder are quantized to int8 on load. The same port's published peak is about 16 GB.
+- `NOVA_MOSS_IMAGE_QUANT=bf16` or `int8` overrides that automatic choice. An id whose name contains `int8` / `8bit` defaults to int8.
 
-这些峰值是 moss-image-swift 0.3.0 公布的测量，不是这次在 NovaMLX 里重新采样的数字。
+Those peaks are measurements published by moss-image-swift 0.3.0. They were not resampled inside NovaMLX for this ship.
 
-生成走已有的 `POST /v1/images/generations`。未传 `steps` 时：Euler、50 步、CFG 3、shift 5、空负面提示、负面分支跳过第 22 层。宽和高落到 16 的倍数，每边至少 256，面积不超过 1456×1456。提示词可以是自然语言，也可以是 JSON 版式字符串。Playground 图像页（`/demo/image`）会把 MOSS-Image 的步数预填成 50。
+Generation uses the existing `POST /v1/images/generations`. When `steps` is omitted: Euler, 50 steps, CFG 3, shift 5, an empty negative prompt, and the negative branch skips layer 22. Width and height snap to multiples of 16, at least 256 on each side, with area at most 1456×1456. The prompt can be natural language or a JSON layout string. The Playground image page (`/demo/image`) prefills MOSS-Image steps at 50.
 
-编辑和变体接口会拒绝 MOSS-Image，并说明改用 generations。
+The edit and variation endpoints reject MOSS-Image and say to use generations instead.
 
 ## How to try it
 
-需要已运行的 NovaMLX（Apple Silicon）。推理 API 默认端口 6590。
+NovaMLX must already be running (Apple Silicon). The inference API's default port is 6590.
 
 ```bash
 nova download OpenMOSS-Team/MOSS-Image-SFT
 nova load OpenMOSS-Team/MOSS-Image-SFT
 ```
 
-菜单栏 Downloads 的目录里也能看到 `MOSS-Image-SFT`，带 preview 标记。
+`MOSS-Image-SFT` is also in the menu-bar Downloads catalog, marked preview.
 
 ```bash
 curl http://127.0.0.1:6590/v1/images/generations \
@@ -55,37 +51,35 @@ curl http://127.0.0.1:6590/v1/images/generations \
   -d '{"model":"OpenMOSS-Team/MOSS-Image-SFT","prompt":"a red paper lantern on a wooden table, with the Chinese character 春 on the lantern","size":"1024x1024"}'
 ```
 
-响应 `data[0].b64_json` 是 PNG。想少等可以在 JSON 里加 `"steps": 20`。32 GB 机器应自动走 int8；64 GB 机器应走 bf16。强制指定：启动前设置 `NOVA_MOSS_IMAGE_QUANT=int8` 或 `bf16`。
+The response `data[0].b64_json` is a PNG. To wait less, add `"steps": 20` to the JSON. A 32 GB machine should take int8 automatically. A 64 GB machine should take bf16. To force it, set `NOVA_MOSS_IMAGE_QUANT=int8` or `bf16` before launch.
 
-不要对这个模型调用 `/v1/images/edits` 或 `/v1/images/variations`。
+Do not call `/v1/images/edits` or `/v1/images/variations` on this model.
 
 ## Limits / out of scope
 
-- 不做图生图、遮罩编辑、变体。
-- 没有提示词增强，也没有云端 API。
-- 没有训练或 LoRA 界面。Base 权重只是可以加载，视频里不要把它讲成另一套产品。
-- 不做视频生成。
-- 请求里不能改 CFG。固定为 3。
-- 目录状态是 preview。这次没有在 Nova 里重跑出图计时或内存曲线。
-
-No image edits, no prompt enhancer, no training UI, no video.
+- No image-to-image, mask edits, or variations.
+- No prompt enhancer, and no cloud API.
+- No training or LoRA UI. The Base weights can be loaded. Do not describe them in a video as a second product.
+- No video generation.
+- CFG cannot be changed on the request. It is fixed at 3.
+- Catalog status is preview. Image timing and memory curves were not re-run inside Nova for this ship. No image edits, no prompt enhancer, no training UI, and no video.
 
 ## Suggested video beats
 
-- 开场一句：MOSS-Image on this Mac, same image API as FLUX。本地、文生图、Apple Silicon。
-- 在 Downloads 目录里指出 `OpenMOSS-Team/MOSS-Image-SFT`，大约 27 GB，preview。
-- 下载并加载 SFT。一句带中文的提示词，1024 方图，步数 50。
-- 点出结果是 PNG，文字在画面里。
-- 收在内存上：48 GB 及以上 bf16，更小的机器 int8；编辑和视频不在这次。
+- Opening line: MOSS-Image on this Mac, same image API as FLUX. Local, text-to-image, Apple Silicon.
+- In the Downloads catalog, point at `OpenMOSS-Team/MOSS-Image-SFT`, about 27 GB, preview.
+- Download and load the SFT. One prompt that includes Chinese text, a 1024 square, 50 steps.
+- Point out that the result is a PNG and the text is in the picture.
+- Close on memory: bf16 at 48 GB and above, int8 on smaller machines. Edits and video are not in this ship.
 
 ## Links
 
 - PR: https://github.com/cnshsliu/novamlx/pull/28
-- 用户文档：[docs/features/image-generation.md](../features/image-generation.md)
-- 目录：[docs/features/supported-models.md](../features/supported-models.md)
+- User docs: [docs/features/image-generation.md](../features/image-generation.md)
+- Catalog: [docs/features/supported-models.md](../features/supported-models.md)
 - SFT: https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT
 - Base: https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base
-- 上游: https://github.com/OpenMOSS/MOSS-Image
-- Swift 端口: https://github.com/xocialize/moss-image-swift （MossImage core，不是 MLXEngine 包装）
-- 目录数据：`catalog/models.json`
-- 产品日志：根目录 `CHANGELOG.md` 的 `[Unreleased]`
+- Upstream: https://github.com/OpenMOSS/MOSS-Image
+- Swift port: https://github.com/xocialize/moss-image-swift (MossImage core, not an MLXEngine wrapper)
+- Catalog data: `catalog/models.json`
+- Product log: the `[Unreleased]` section of the root `CHANGELOG.md`

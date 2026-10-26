@@ -2,85 +2,83 @@
 
 **Pitch:** Draft several tokens ahead — with an n-gram window or a small draft model — and let the target model accept or reject them.
 
-用 n-gram 窗口或小草稿模型先提出若干 token，再由目标模型接受或拒绝。
+An n-gram window or a small draft model proposes several tokens first. The target model then accepts or rejects them.
 
 ## Who it is for
 
-已经在本地跑目标模型，并希望一次验证多个 token 的人。n-gram 路径不需要另下一个草稿模型。
+People who already run a target model locally and want to verify more than one token at a time. The n-gram path does not need a separate draft model download.
 
 ## What it does
 
 ### N-gram
 
-无需草稿模型。通过 n-gram token 预测，配合 lookahead 窗口与接受采样。
+No draft model. N-gram token prediction, with a lookahead window and acceptance sampling.
 
-### 草稿模型
+### Draft models
 
-| 功能 | 详情 |
-|------|------|
-| **DraftModelRegistry** | 按目标模型家族自动注入推荐草稿模型 |
-| **内置草稿** | Qwen3-0.6B-4bit、Llama-3.2-1B-4bit、Gemma-2-2B-4bit |
-| **API** | 请求字段 `draft_model` 与 `num_draft_tokens` |
-| **EOS 抑制** | 仅草稿侧的 EOS token 被过滤，防止提前停止 |
-| **限制** | 不支持 hybrid-attention（Mamba）目标；不支持跨词表草稿 |
-| **状态** | `SpecBoostStatus`：`.eligible` / `.active` / `.ineligible`，按模型 |
+| Feature | Details |
+|---------|---------|
+| **DraftModelRegistry** | Injects the recommended draft model for the target model family |
+| **Built-in drafts** | Qwen3-0.6B-4bit, Llama-3.2-1B-4bit, Gemma-2-2B-4bit |
+| **API** | Request fields `draft_model` and `num_draft_tokens` |
+| **EOS suppression** | Only draft-side EOS tokens are filtered, so generation does not stop early |
+| **Limits** | Hybrid-attention (Mamba) targets are not supported. Cross-vocabulary drafts are not supported |
+| **Status** | `SpecBoostStatus`: `.eligible` / `.active` / `.ineligible`, per model |
 
-家族默认里的草稿推荐写在 `ModelFamilyRegistry`。见 [模型架构](model-architectures.md)。
+Draft recommendations in the family defaults live in `ModelFamilyRegistry`. See [Model architectures](model-architectures.md).
 
 ## How to try
 
-n-gram 路径不需要草稿模型。目录没有单独的 n-gram 请求字段，只说明 lookahead 窗口与接受采样。
+The n-gram path does not need a draft model. The catalog has no separate n-gram request field. It only describes the lookahead window and acceptance sampling.
 
-草稿路径使用请求字段 `draft_model` 与 `num_draft_tokens`。内置草稿为 Qwen3-0.6B-4bit、Llama-3.2-1B-4bit、Gemma-2-2B-4bit。`DraftModelRegistry` 会按目标家族自动注入推荐草稿。按模型的 `SpecBoostStatus` 为 `.eligible`、`.active` 或 `.ineligible`。目录没有给出 `num_draft_tokens` 的默认值。
+The draft path uses the request fields `draft_model` and `num_draft_tokens`. Built-in drafts are Qwen3-0.6B-4bit, Llama-3.2-1B-4bit, and Gemma-2-2B-4bit. `DraftModelRegistry` injects the recommended draft for the target family. Per-model `SpecBoostStatus` is `.eligible`, `.active`, or `.ineligible`. The catalog does not give a default for `num_draft_tokens`.
 
-### DFlash2 与 DSpark：按置信度决定验证长度
+### DFlash2 and DSpark: verification length from confidence
 
-DFlash2 与 DSpark 默认不再每次都把整块草稿交给目标模型。草稿模型仍一次提出预算内的 token。调度器只把预期吞吐最高的前缀送去验证。
+By default, DFlash2 and DSpark no longer hand the whole draft block to the target model on every round. The draft model still proposes up to the budget in one shot. The scheduler sends only the prefix with the highest expected throughput for verification.
 
-每个位置有一个条件置信度：在前面的草稿都被接受的前提下，这一位也被接受的概率。DSpark 用检查点里的 confidence head。DFlash2 没有这个头，用草稿分数里第一名与第二名的差距，经 sigmoid 映到 0–1。前缀的期望接受长度是这些概率的连乘再求和。验证代价是一次目标前向的固定成本，加上每个草稿 token 的边际成本；超过快速 SDPA 窗口（默认 4 个草稿，对应 query 长度不超过 5）之后边际成本更高。高置信度可以把前缀拉长到草稿预算。低置信度会在尾巴之前停下来。
+Each position has a conditional confidence: the probability that this position is also accepted, given that every draft before it was accepted. DSpark uses the confidence head in the checkpoint. DFlash2 has no such head. It uses the gap between the first- and second-place draft scores, mapped through a sigmoid onto 0–1. The prefix's expected accepted length is the sum of the cumulative products of those probabilities. Verification cost is a fixed cost for one target forward, plus a marginal cost per draft token. Past the fast SDPA window (default 4 drafts, which keeps query length at most 5) the marginal cost is higher. High confidence can stretch the prefix out to the draft budget. Low confidence stops before the tail.
 
-接受规则不变：目标模型对这个前缀做 argmax，最长匹配的草稿留下，再跟上第一个不一致位置的目标 token。同一组采样参数下，这条规则与固定块长相同。温度必须为 0。DFlash2 / DSpark 在温度大于 0 时仍走普通单 token 解码。
+The accept rule is unchanged: the target model takes argmax over this prefix, the longest matching draft is kept, and the target token at the first mismatch is appended. Under the same sampling parameters, this rule matches a fixed block on that prefix. Temperature must be 0. Above temperature 0, DFlash2 / DSpark still use ordinary single-token decode.
 
-关掉自适应、回到固定块长：请求字段 `"adaptive_verify": "fixed"`，或进程环境变量 `NOVAMLX_ADAPTIVE_VERIFY=fixed`（也接受 `off` / `0`）。`"adaptive"`、`on`、`1` 显式打开。未设置时为 adaptive。
+Turn adaptive off and return to a fixed block with the request field `"adaptive_verify": "fixed"`, or the process environment variable `NOVAMLX_ADAPTIVE_VERIFY=fixed` (`off` / `0` are also accepted). `"adaptive"`, `on`, and `1` turn it on explicitly. When unset, the mode is adaptive.
 
-| 旋钮 | 请求字段 | 环境变量 | 默认 |
-|------|----------|----------|------|
-| 模式 | `adaptive_verify` | `NOVAMLX_ADAPTIVE_VERIFY` | adaptive |
-| 最短前缀 | `adaptive_verify_min` | `NOVAMLX_ADAPTIVE_VERIFY_MIN` | 1 |
-| 最长前缀 | `adaptive_verify_max` | `NOVAMLX_ADAPTIVE_VERIFY_MAX` | 草稿预算（DSpark 固定模式仍是向量 SDPA 上限 4） |
-| 固定成本 | — | `NOVAMLX_ADAPTIVE_VERIFY_FIXED_COST` | 2 |
-| 窗口内边际成本 | — | `NOVAMLX_ADAPTIVE_VERIFY_MARGINAL_COST` | 0.40 |
-| 窗口外边际成本 | — | `NOVAMLX_ADAPTIVE_VERIFY_SLOW_MARGINAL_COST` | 0.55 |
-| 快速窗口（草稿数） | — | `NOVAMLX_ADAPTIVE_VERIFY_FAST_DRAFTS` | 4 |
-| DFlash2 分数间隔尺度 | — | `NOVAMLX_ADAPTIVE_VERIFY_MARGIN_SCALE` | 2 |
-| confidence head 温度 | — | `NOVAMLX_ADAPTIVE_VERIFY_TEMPERATURE` | 1 |
+| Knob | Request field | Environment variable | Default |
+|------|---------------|----------------------|---------|
+| Mode | `adaptive_verify` | `NOVAMLX_ADAPTIVE_VERIFY` | adaptive |
+| Minimum prefix | `adaptive_verify_min` | `NOVAMLX_ADAPTIVE_VERIFY_MIN` | 1 |
+| Maximum prefix | `adaptive_verify_max` | `NOVAMLX_ADAPTIVE_VERIFY_MAX` | draft budget (DSpark fixed mode is still the vector SDPA cap of 4) |
+| Fixed cost | — | `NOVAMLX_ADAPTIVE_VERIFY_FIXED_COST` | 2 |
+| Marginal cost inside the window | — | `NOVAMLX_ADAPTIVE_VERIFY_MARGINAL_COST` | 0.40 |
+| Marginal cost outside the window | — | `NOVAMLX_ADAPTIVE_VERIFY_SLOW_MARGINAL_COST` | 0.55 |
+| Fast window (draft count) | — | `NOVAMLX_ADAPTIVE_VERIFY_FAST_DRAFTS` | 4 |
+| DFlash2 score-gap scale | — | `NOVAMLX_ADAPTIVE_VERIFY_MARGIN_SCALE` | 2 |
+| confidence head temperature | — | `NOVAMLX_ADAPTIVE_VERIFY_TEMPERATURE` | 1 |
 
-固定成本偏大时前缀更长，适合单条生成；调小它会更早截断，适合验证宽度本身很贵的时候。这不改变加速器挂载：已知更快仍自动挂上，已知更慢仍不加载，不确定仍在加载时问一次并记住。
+A larger fixed cost makes the prefix longer, which suits a single generation. Lowering it truncates earlier, which suits the case where verify width itself is expensive. This does not change companion attach: a known-faster companion still attaches automatically, a known-slower one still stays unloaded, and an uncertain one is still asked once at load and remembered.
 
-不加载模型也能看调度结果：
+The scheduled length can be printed without loading a model:
 
 ```bash
 nova adaptive-verify --confidence 0.92,0.88,0.84,0.70,0.25,0.15,0.10
 nova adaptive-verify --mode fixed --confidence 0.92,0.88,0.84,0.70,0.25
 ```
 
-在 Mac 上对同一条 greedy 请求做 A/B：两次都设 `"temperature": 0`，一次 `"adaptive_verify": "adaptive"`，一次 `"fixed"`。日志里的 `draft` 是草稿长度，`verified` 是送进目标模型的前缀，`accepted` 是匹配上的草稿数。`nova chat <model> --adaptive-verify adaptive` 会带上 temperature 0 和对应字段；`--adaptive-verify fixed` 走固定块。
+On a Mac, A/B the same greedy request: set `"temperature": 0` both times, once with `"adaptive_verify": "adaptive"` and once with `"fixed"`. In the log, `draft` is the draft length, `verified` is the prefix sent to the target model, and `accepted` is the number of matching draft tokens. `nova chat <model> --adaptive-verify adaptive` sends temperature 0 and the matching field. `--adaptive-verify fixed` uses the fixed block.
 
 DFlash2 and DSpark schedule how many drafted tokens the target model scores. The default is adaptive. `"adaptive_verify": "fixed"` or `NOVAMLX_ADAPTIVE_VERIFY=fixed` restores the previous block. Acceptance stays the greedy prefix plus the target bonus token, and it still requires temperature 0. Companion attach policy is unchanged.
 
 ## Limits / notes
 
-- hybrid-attention（Mamba）目标不支持。
-- 跨词表的草稿模型不支持。
-- 草稿侧 EOS 会被滤掉，避免目标模型被提前截断。
-- 自适应验证只作用在 DFlash2 与 DSpark。n-gram 与普通小草稿模型仍用 `num_draft_tokens`。
-- 验证宽度超过快速 SDPA 窗口时，接近并列的 argmax 可能与逐 token 解码不同。这是既有的多 token 验证限制。固定模式把 DSpark 留在该窗口内（最多 4 个草稿）。自适应模式只在置信度足够高时越过它。
-- 低并发时更短的验证不一定更快。用 `adaptive_verify: fixed` 或加大 `NOVAMLX_ADAPTIVE_VERIFY_FIXED_COST` 即可回到更长的块。加速器不会因此被强制常开。
+- Hybrid-attention (Mamba) targets are not supported.
+- Cross-vocabulary draft models are not supported.
+- Draft-side EOS is filtered so the target model is not cut off early.
+- Adaptive verification applies only to DFlash2 and DSpark. N-gram and ordinary small draft models still use `num_draft_tokens`.
+- When the verify width passes the fast SDPA window, a near-tie argmax can differ from token-by-token decode. That is the existing multi-token verification limit. Fixed mode keeps DSpark inside that window (at most 4 drafts). Adaptive mode crosses it only when confidence is high enough.
+- At low concurrency a shorter verify is not necessarily faster. Use `adaptive_verify: fixed` or raise `NOVAMLX_ADAPTIVE_VERIFY_FIXED_COST` to get a longer block again. The companion is not forced on because of that.
 
 ## Related
 
-- [推理引擎](inference-engine.md)
-- [模型架构](model-architectures.md)
-- [配置](configuration.md)（引擎按家族默认含草稿推荐）
-
-正文来自 `features.zh-CN.md`「推测解码」（n-gram 与草稿模型两节）；标题与 pitch 为英文。
+- [Inference engine](inference-engine.md)
+- [Model architectures](model-architectures.md)
+- [Configuration](configuration.md) (engine family defaults include draft recommendations)
