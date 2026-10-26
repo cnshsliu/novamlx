@@ -340,8 +340,8 @@ struct FlintAlignmentTests {
             InferenceRequest(
                 model: "flint",
                 messages: [ChatMessage(role: .user, content: "hi", wireRole: role)],
-                frequencyPenalty: frequency,
                 minP: minP,
+                frequencyPenalty: frequency,
                 repetitionPenalty: repetition,
                 stream: stream,
                 stop: stop,
@@ -379,7 +379,7 @@ struct FlintAlignmentTests {
             stop: ["END"],
             flintGrammar: "none")
         #expect(try FlintAlignment.prepareMessages(request: stopped).count == 1)
-        #expect(message(request(stop: ["END"], grammar: "none")) == nil)
+        #expect(message(request(grammar: "none", stop: ["END"])) == nil)
 
         let original = InferenceRequest(
             model: "flint",
