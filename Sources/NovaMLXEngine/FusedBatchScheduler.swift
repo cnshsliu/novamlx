@@ -390,7 +390,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             return
         }
         let full = pending.tokens
-        _ = session.preparePrefix(shouldStop: { false }) { prefix, target in
+        // Chunk prep is bookkeeping. A throw leaves the last committed cache
+        // and must not fail the request that just finished.
+        _ = try? session.preparePrefix(shouldStop: { false }) { prefix, target in
             try FlintPrefixSession.advanceChunk(
                 prefix: prefix, target: target, tokens: full, cancel: false)
         }

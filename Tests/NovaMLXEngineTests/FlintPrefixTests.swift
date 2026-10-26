@@ -80,7 +80,7 @@ struct FlintPrefixTests {
         session.promptCache = FlintPrefixEngine.Cache(tokens: origin)
         session.schedulePrefix(ids: origin, generated: generated)
         var calls: [[Int]] = []
-        let metrics = session.preparePrefix(shouldStop: { false }) { prefix, target in
+        let metrics = try session.preparePrefix(shouldStop: { false }) { prefix, target in
             let start = prefix.tokens.count
             let next = try FlintPrefixSession.advanceChunk(
                 prefix: prefix, target: target, tokens: origin + generated, cancel: false)
@@ -100,7 +100,7 @@ struct FlintPrefixTests {
         var stopped = FlintPrefixSession(chunkSize: 4)
         stopped.promptCache = FlintPrefixEngine.Cache(tokens: origin)
         stopped.schedulePrefix(ids: origin, generated: Array(0..<10))
-        let none = stopped.preparePrefix(shouldStop: { true }) { prefix, target in
+        let none = try stopped.preparePrefix(shouldStop: { true }) { prefix, target in
             try FlintPrefixSession.advanceChunk(
                 prefix: prefix, target: target, tokens: origin + Array(0..<10), cancel: false)
         }
@@ -109,13 +109,13 @@ struct FlintPrefixTests {
         #expect(stopped.promptCache?.tokens == origin)
 
         var checks = [false, true].makeIterator()
-        let partial = stopped.preparePrefix(shouldStop: { checks.next() ?? true }) { prefix, target in
+        let partial = try stopped.preparePrefix(shouldStop: { checks.next() ?? true }) { prefix, target in
             try FlintPrefixSession.advanceChunk(
                 prefix: prefix, target: target, tokens: origin + Array(0..<10), cancel: false)
         }
         #expect(partial?.preparedTokens == 4)
         #expect(stopped.preparation?.cache?.tokens == origin + Array(0..<4))
-        let resumed = stopped.preparePrefix(shouldStop: { false }) { prefix, target in
+        let resumed = try stopped.preparePrefix(shouldStop: { false }) { prefix, target in
             try FlintPrefixSession.advanceChunk(
                 prefix: prefix, target: target, tokens: origin + Array(0..<10), cancel: false)
         }
@@ -126,7 +126,7 @@ struct FlintPrefixTests {
         cancelled.promptCache = FlintPrefixEngine.Cache(tokens: origin)
         cancelled.schedulePrefix(ids: origin, generated: Array(0..<10))
         var steps = 0
-        _ = cancelled.preparePrefix(shouldStop: { false }) { prefix, target in
+        _ = try cancelled.preparePrefix(shouldStop: { false }) { prefix, target in
             steps += 1
             if steps == 2 { throw FlintPrefixCancellation() }
             return try FlintPrefixSession.advanceChunk(
@@ -144,7 +144,7 @@ struct FlintPrefixTests {
             var session = FlintPrefixSession(chunkSize: 4)
             session.promptCache = FlintPrefixEngine.Cache(tokens: origin)
             session.schedulePrefix(ids: origin, generated: generated)
-            _ = session.preparePrefix(shouldStop: { false }) { prefix, target in
+            _ = try session.preparePrefix(shouldStop: { false }) { prefix, target in
                 try FlintPrefixSession.advanceChunk(
                     prefix: prefix, target: target, tokens: origin + generated, cancel: false)
             }
@@ -160,7 +160,7 @@ struct FlintPrefixTests {
         let generated = Array(0..<14)
         edited.promptCache = FlintPrefixEngine.Cache(tokens: origin)
         edited.schedulePrefix(ids: origin, generated: generated)
-        _ = edited.preparePrefix(shouldStop: { false }) { prefix, target in
+        _ = try edited.preparePrefix(shouldStop: { false }) { prefix, target in
             try FlintPrefixSession.advanceChunk(
                 prefix: prefix, target: target, tokens: origin + generated, cancel: false)
         }
@@ -178,7 +178,7 @@ struct FlintPrefixTests {
         let generated = Array(0..<14)
         session.promptCache = FlintPrefixEngine.Cache(tokens: originTokens)
         session.schedulePrefix(ids: originTokens, generated: generated)
-        _ = session.preparePrefix(shouldStop: { false }) { prefix, target in
+        _ = try session.preparePrefix(shouldStop: { false }) { prefix, target in
             try FlintPrefixSession.advanceChunk(
                 prefix: prefix, target: target, tokens: originTokens + generated, cancel: false)
         }
