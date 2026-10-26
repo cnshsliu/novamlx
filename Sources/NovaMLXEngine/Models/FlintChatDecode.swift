@@ -39,10 +39,11 @@ enum FlintChatDecode {
     /// | temp 0, no grammar, presence 0, freq 0, rep neutral, no logprobs, one sequence | fused greedy kernel, width 8 | ``greedyDevice``, width 16 |
     /// | structural grammar, and/or presence, and/or temp / top-p / top-k | `FilteredResidentSampler`, width 8 | ``filtered``, width 16 |
     /// | `(temp, top_p, top_k) == (1, 1, 0)` and no grammar / presence | fused gumbel kernel, width 8 | ``filtered`` (host sampler; no gumbel kernel) |
-    /// | `frequency_penalty != 0` | HTTP 400 | ``singleStep`` (fused still applies frequency) |
-    /// | `repetition_penalty` not 0 or 1 | HTTP 400 | ``singleStep`` (fused does not apply repetition) |
-    /// | `min_p != 0` | HTTP 400 | ``singleStep`` (fused sampler ignores min-p) |
-    /// | logprobs | filtered packet | ``singleStep`` (per-step logprobs) |
+    /// | `frequency_penalty != 0` | HTTP 400 | HTTP 400, then ``singleStep`` if a request skips validation |
+    /// | `repetition_penalty` not 0 or 1 | HTTP 400 | HTTP 400, then ``singleStep`` if a request skips validation |
+    /// | `min_p != 0` | HTTP 400 | HTTP 400, then ``singleStep`` if a request skips validation |
+    /// | `stream` and logprobs | HTTP 400 | HTTP 400 (`Token logprobs require stream=false`) |
+    /// | non-stream logprobs | filtered packet | ``singleStep`` (per-step logprobs) |
     /// | batch width > 1 | single session only | ``singleStep`` |
     /// | JSON / regex / GBNF (`usesGrammar`) | not the flint grammar | ``singleStep`` |
     ///
@@ -246,6 +247,25 @@ enum FlintChatDecode {
 
     /// Role headers plus end-of-text. The resident kernel accepts at most four.
     static let canonicalStopIds = [150001, 150003, 150005, 150018]
+
+    /// `grammar_builder._STOP_MARKERS`: end of text, user, observation.
+    /// `<|developer|>` is masked in the answer and is not a grammar stop.
+    static let grammarStopIds = [
+        FlintStructuralGrammar.endOfTextId,
+        FlintStructuralGrammar.userId,
+        FlintStructuralGrammar.observationId,
+    ]
+
+    /// Grammar on: the three grammar stops. Grammar off: the checkpoint
+    /// multi-EOS set, including `<|developer|>`.
+    static func generationFinishStopIds(
+        grammarOn: Bool,
+        checkpoint: Set<Int>,
+        tokenizerEOS: Int?
+    ) -> Set<Int> {
+        if grammarOn { return Set(grammarStopIds) }
+        return hostFinishStopIds(checkpoint: checkpoint, tokenizerEOS: tokenizerEOS)
+    }
 
     /// At most four stop ids, tokenizer EOS first, then the Flint canonical set.
     static func packetStopIds(tokenizerEOS: Int?, extra: [Int] = []) -> [Int] {
@@ -584,11 +604,14 @@ enum FlintChatDecode {
         tools: [[String: Any]]?,
         stop: [String]?,
         hasRequestConstraint: Bool,
-        enforceToolSchemas: Bool = false
+        enforceToolSchemas: Bool = false,
+        toolsJSON: String? = nil
     ) -> FlintStructuralGrammar? {
         if hasRequestConstraint { return nil }
         if customStopConflict(stop: stop, hasRequestConstraint: false) != nil { return nil }
-        switch FlintToolSchemaSession.compile(tools: tools, enforceToolSchemas: enforceToolSchemas) {
+        switch FlintToolSchemaSession.compile(
+            tools: tools, enforceToolSchemas: enforceToolSchemas, toolsJSON: toolsJSON)
+        {
         case .inactive:
             return FlintStructuralGrammar(allowsTools: !(tools ?? []).isEmpty)
         case .ready(let session):
@@ -604,18 +627,20 @@ enum FlintChatDecode {
     /// request should keep the think-reentry guard instead.
     static func chatGrammar(for request: InferenceRequest, family: ModelFamily) -> FlintStructuralGrammar? {
         guard family == .flint else { return nil }
+        guard FlintAlignment.flintGrammarEnabled(request) else { return nil }
         let grammar = structuralGrammar(
-            tools: request.tools,
+            tools: FlintAlignment.effectiveTools(request),
             stop: request.stop,
-            hasRequestConstraint: requestHasOtherConstraint(request),
-            enforceToolSchemas: request.enforceToolSchemas)
+            hasRequestConstraint: false,
+            enforceToolSchemas: request.enforceToolSchemas,
+            toolsJSON: request.toolChoice == "none" ? nil : request.toolsJSON)
         if grammar != nil {
             NovaMLXLog.info(
                 "[Flint] structural grammar on (official rec flint shape). A second <think> is masked. ThinkReentryGuard is idle for this request.")
         }
         if grammar?.toolSchema != nil {
             NovaMLXLog.info(
-                "[Flint] tool schema grammar on (host FSM, not xgrammar). Argument shapes are masked, including strict:false tools when enforce_tool_schemas is set.")
+                "[Flint] tool schema grammar on (host FSM, xgrammar key order). Omitted strict enforces. strict:false enforces when enforce_tool_schemas is set.")
         }
         return grammar
     }

@@ -80,7 +80,10 @@ extension NovaMLXAPIServer {
             httpRequestId: HTTPHelpers.requestID(from: nil),
             enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
                 requestFlag: req.enforceToolSchemas,
-                serverConfig: cfg.enforceToolSchemas)
+                serverConfig: cfg.enforceToolSchemas),
+            toolChoice: flintToolChoice(req.toolChoice),
+            parallelToolCalls: req.parallelToolCalls,
+            flintGrammar: nil
         )
 
         CurrentInferenceModel.shared.modelID = request.model
@@ -182,7 +185,10 @@ extension NovaMLXAPIServer {
             httpRequestId: HTTPHelpers.requestID(from: nil),
             enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
                 requestFlag: req.enforceToolSchemas,
-                serverConfig: cfg.enforceToolSchemas)
+                serverConfig: cfg.enforceToolSchemas),
+            toolChoice: flintToolChoice(req.toolChoice),
+            parallelToolCalls: req.parallelToolCalls,
+            flintGrammar: nil
         )
 
         let reqTag = request.id.uuidString.prefix(8)

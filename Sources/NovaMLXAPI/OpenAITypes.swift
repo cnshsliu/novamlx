@@ -194,6 +194,12 @@ public struct OpenAIRequest: Codable, Sendable {
     /// Flint only. When true, structural grammar constrains tool arguments
     /// even for `strict: false`. Omitted uses the server / env default.
     public let enforceToolSchemas: Bool?
+    /// Flint rejects `false`.
+    public let parallelToolCalls: Bool?
+    /// Flint rejects any value other than `false`.
+    public let store: Bool?
+    /// Flint grammar mode: `none` or `flint`. Omitted means `flint`.
+    public let grammar: String?
 
     private enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream, stop, n, seed, tools, logprobs, tag
@@ -222,6 +228,9 @@ public struct OpenAIRequest: Codable, Sendable {
         case adaptiveVerifyMin = "adaptive_verify_min"
         case adaptiveVerifyMax = "adaptive_verify_max"
         case enforceToolSchemas = "enforce_tool_schemas"
+        case parallelToolCalls = "parallel_tool_calls"
+        case store
+        case grammar
     }
 
     public init(
@@ -259,7 +268,10 @@ public struct OpenAIRequest: Codable, Sendable {
         adaptiveVerify: String? = nil,
         adaptiveVerifyMin: Int? = nil,
         adaptiveVerifyMax: Int? = nil,
-        enforceToolSchemas: Bool? = nil
+        enforceToolSchemas: Bool? = nil,
+        parallelToolCalls: Bool? = nil,
+        store: Bool? = nil,
+        grammar: String? = nil
     ) {
         self.model = model
         self.messages = messages
@@ -296,6 +308,9 @@ public struct OpenAIRequest: Codable, Sendable {
         self.adaptiveVerifyMin = adaptiveVerifyMin
         self.adaptiveVerifyMax = adaptiveVerifyMax
         self.enforceToolSchemas = enforceToolSchemas
+        self.parallelToolCalls = parallelToolCalls
+        self.store = store
+        self.grammar = grammar
     }
 
     /// Resolve thinking toggle from multiple client formats:

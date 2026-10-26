@@ -501,8 +501,8 @@ struct FlintChatDecodeTests {
         #expect(FlintChatDecode.residentRoute(policy(usesStructuralGrammar: true)) == .filtered)
         #expect(FlintChatDecode.residentRoute(policy(temperature: 1, topP: 0.95, topK: 20)) == .filtered)
         #expect(FlintChatDecode.residentRoute(policy(presencePenalty: 0.2)) == .filtered)
-        // Official rejects these. The packet stays off; frequency still runs
-        // on the single-step fused sampler.
+        // Product behavior is HTTP 400. This route is the backstop when
+        // validation did not run.
         #expect(FlintChatDecode.residentRoute(
             policy(temperature: 1, topP: 0.95, topK: 20, frequencyPenalty: 0.1, usesStructuralGrammar: true)
         ) == .singleStep)
@@ -537,17 +537,24 @@ struct FlintChatDecodeTests {
         #expect(grammar?.maskedTokenIds().contains(open) == true)
     }
 
-    @Test("filtered packet still finishes on each grammar-legal eos")
+    @Test("grammar-on finish stops are the three grammar markers")
     func testFilteredPacketMultiEOS() {
         let end = FlintStructuralGrammar.endOfTextId
         let user = FlintStructuralGrammar.userId
         let observation = FlintStructuralGrammar.observationId
         let developer = FlintStructuralGrammar.developerId
-        let stops = Set(FlintChatDecode.canonicalStopIds)
-        #expect(stops.contains(end))
-        #expect(stops.contains(user))
-        #expect(stops.contains(observation))
-        #expect(stops.contains(developer))
+        let stops = Set(FlintChatDecode.grammarStopIds)
+        #expect(stops == Set([end, user, observation]))
+        #expect(!stops.contains(developer))
+        let grammarOff = FlintChatDecode.generationFinishStopIds(
+            grammarOn: false, checkpoint: [], tokenizerEOS: nil)
+        #expect(grammarOff.contains(developer))
+        #expect(FlintChatDecode.generationFinishStopIds(
+            grammarOn: true, checkpoint: Set(FlintChatDecode.canonicalStopIds), tokenizerEOS: nil)
+            == stops)
+        #expect(FlintStructuralGrammar.thinkBodyExcludes.map(\.tokenId) == [
+            FlintStructuralGrammar.thinkCloseId, end, user, observation,
+        ])
 
         func finish(on id: Int, tools: Bool, prelude: [Int]) -> FlintChatDecode.FilteredPacketResult {
             var grammar: FlintStructuralGrammar? = FlintStructuralGrammar(allowsTools: tools)
@@ -578,8 +585,7 @@ struct FlintChatDecodeTests {
         #expect(afterTool.stoppedOnEOS)
         #expect(afterTool.tokens.last == observation)
 
-        // Developer stays in the host stop set, and the answer-phase grammar
-        // masks it, so the packet does not accept it as a sampled token.
+        // Developer is masked in the answer and is not a grammar stop.
         let maskedDeveloper = finish(on: developer, tools: false, prelude: [12])
         #expect(maskedDeveloper.rejectedMaskedId == developer)
         #expect(maskedDeveloper.tokens == [12])

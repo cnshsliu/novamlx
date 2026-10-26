@@ -40,15 +40,14 @@ public final class FlintVocabTextCache: @unchecked Sendable {
     }
 }
 
-/// Host stand-in for `rec` `build_flint_glm_grammar(..., enforce_tool_schemas=)`.
+/// Host stand-in for `rec` `build_flint_glm_grammar` / xgrammar `glm_4_7`
+/// (`any_order=False`).
 ///
-/// xgrammar is not linked here. This session is the constraint that runs
-/// inside `FlintStructuralGrammar` once a tool call has started. It forces
-/// tool names, argument keys, and value shapes. It does not compile regex
-/// `pattern` / `format`, string length, numeric bounds, or nested object
-/// properties. Property order is not fixed: the JSON bridge does not keep it.
-/// Raw string values are not vocabulary-scanned; only the dedicated marker
-/// ids are masked, matching the loose tool body.
+/// Tool names are always constrained when tools are present. Argument schemas
+/// are enforced when `enforce_tool_schemas` is on or `strict` is not `false`
+/// (omitted `strict` enforces). `strict: false` stays on the client tool and
+/// is still enforced when the flag is on. Patterns, formats, string length,
+/// numeric bounds, nested objects, and schema key order are masked here.
 struct FlintToolSchemaSession: Equatable, Sendable {
     static let objectSchemaMessage = "Flint grammar requires object parameter schemas"
     static let functionNameMessage = "Flint grammar requires a function name"
@@ -59,15 +58,54 @@ struct FlintToolSchemaSession: Equatable, Sendable {
         case rejected(String)
     }
 
+    struct TextRule: Equatable, Sendable {
+        var pattern: String?
+        var format: String?
+        var minLength: Int?
+        var maxLength: Int?
+    }
+
+    struct NumberRule: Equatable, Sendable {
+        var minimum: Double?
+        var maximum: Double?
+        var exclusiveMinimum: Double?
+        var exclusiveMaximum: Double?
+
+        func contains(_ value: Double) -> Bool {
+            if let minimum, value < minimum { return false }
+            if let maximum, value > maximum { return false }
+            if let exclusiveMinimum, value <= exclusiveMinimum { return false }
+            if let exclusiveMaximum, value >= exclusiveMaximum { return false }
+            return true
+        }
+    }
+
+    struct ObjectShape: Equatable, Sendable {
+        var fields: [(name: String, kind: ValueKind, required: Bool)]
+        var allowsAdditional: Bool
+
+        static func == (lhs: ObjectShape, rhs: ObjectShape) -> Bool {
+            lhs.allowsAdditional == rhs.allowsAdditional
+                && lhs.fields.count == rhs.fields.count
+                && zip(lhs.fields, rhs.fields).allSatisfy {
+                    $0.0.name == $1.0.name && $0.0.kind == $1.0.kind && $0.0.required == $1.0.required
+                }
+        }
+    }
+
     enum ValueKind: Equatable, Sendable {
         case rawString
+        case text(TextRule)
         case enumeration([String])
         case integer
         case number
+        case boundedInt(NumberRule)
+        case boundedNumber(NumberRule)
         case boolean
         case null
         case jsonObject
         case jsonArray
+        indirect case objectValue(ObjectShape)
         indirect case union([ValueKind])
 
         var constrainsFreeText: Bool {
@@ -83,6 +121,8 @@ struct FlintToolSchemaSession: Equatable, Sendable {
         var name: String
         var enforced: Bool
         var properties: [String: ValueKind]
+        /// Schema order. xgrammar `glm_xml` emits keys in this order.
+        var fieldOrder: [String]
         var required: Set<String>
         var allowsAdditional: Bool
     }
@@ -104,56 +144,137 @@ struct FlintToolSchemaSession: Equatable, Sendable {
         FlintToolSchemaSession(tools: [], step: .refused)
     }
 
-    /// `nil` when every tool that would be enforced has an object schema and
-    /// a function name. Loose tools are not checked.
-    static func rejection(tools: [[String: Any]]?, enforceToolSchemas: Bool) -> String? {
-        if case .rejected(let message) = compile(tools: tools, enforceToolSchemas: enforceToolSchemas) {
+    /// `nil` when every tool has a function name and an object parameter schema.
+    static func rejection(
+        tools: [[String: Any]]?,
+        enforceToolSchemas: Bool,
+        toolsJSON: String? = nil
+    ) -> String? {
+        if case .rejected(let message) = compile(
+            tools: tools, enforceToolSchemas: enforceToolSchemas, toolsJSON: toolsJSON)
+        {
             return message
         }
         return nil
     }
 
-    /// `.inactive` keeps today's loose tool body, including unknown names.
-    /// A tool is enforced when `enforceToolSchemas` is on or `strict` is
-    /// `true`. Omitted `strict` stays loose unless the flag is on.
-    static func compile(tools: [[String: Any]]?, enforceToolSchemas: Bool) -> Compile {
+    /// Names are constrained whenever tools exist. A tool is schema-enforced
+    /// when `enforceToolSchemas` is on or `strict` is not `false`. Omitted
+    /// `strict` enforces. `toolsJSON` preserves property key order; without it,
+    /// object keys are sorted so the order is deterministic.
+    static func compile(
+        tools: [[String: Any]]?,
+        enforceToolSchemas: Bool,
+        toolsJSON: String? = nil
+    ) -> Compile {
+        if let toolsJSON,
+           let parsed = FlintOrderedJSON.parse(toolsJSON),
+           case .array(let items) = parsed,
+           !items.isEmpty
+        {
+            return compile(orderedTools: items, enforceToolSchemas: enforceToolSchemas)
+        }
         guard let tools, !tools.isEmpty else { return .inactive }
         var specs: [ToolSpec] = []
-        var anyEnforced = false
         for tool in tools {
             let function = dictionary(tool["function"]) ?? tool
             let name = (function["name"] as? String) ?? (tool["name"] as? String) ?? ""
             let strict = boolValue(function["strict"]) ?? boolValue(tool["strict"])
-            let enforced = enforceToolSchemas || strict == true
+            let enforced = enforceToolSchemas || strict != false
+            if let rejected = validateToolShape(name: name, parameters: dictionary(function["parameters"]) ?? dictionary(tool["parameters"])) {
+                return .rejected(rejected)
+            }
             if !enforced {
-                if !name.isEmpty {
-                    specs.append(ToolSpec(
-                        name: name, enforced: false, properties: [:], required: [], allowsAdditional: true))
-                }
+                specs.append(ToolSpec(
+                    name: name, enforced: false, properties: [:], fieldOrder: [],
+                    required: [], allowsAdditional: true))
                 continue
             }
-            anyEnforced = true
-            if name.isEmpty || name.contains(where: { $0.isWhitespace || $0 == "<" }) {
-                return .rejected(functionNameMessage)
-            }
-            guard let parameters = dictionary(function["parameters"]) ?? dictionary(tool["parameters"]),
-                  (parameters["type"] as? String) == "object"
-            else { return .rejected(objectSchemaMessage) }
+            let parameters = dictionary(function["parameters"]) ?? dictionary(tool["parameters"]) ?? [:]
             let properties = dictionary(parameters["properties"]) ?? [:]
+            let order = properties.keys.sorted()
             var kinds: [String: ValueKind] = [:]
-            for (key, schema) in properties {
-                kinds[key] = valueKind(dictionary(schema) ?? [:])
+            for key in order {
+                kinds[key] = valueKind(dictionary(properties[key]) ?? [:])
             }
-            let required = Set(stringList(parameters["required"]) ?? [])
-            let allowsAdditional = additionalAllowed(parameters["additionalProperties"])
-            specs.append(ToolSpec(
-                name: name,
-                enforced: true,
-                properties: kinds,
-                required: required,
-                allowsAdditional: allowsAdditional))
+            specs.append(spec(
+                name: name, enforced: true, order: order, kinds: kinds,
+                required: stringList(parameters["required"]) ?? [],
+                allowsAdditional: additionalAllowed(parameters["additionalProperties"])))
         }
-        guard anyEnforced else { return .inactive }
+        return ready(specs)
+    }
+
+    private static func compile(orderedTools: [FlintOrderedJSON], enforceToolSchemas: Bool) -> Compile {
+        var specs: [ToolSpec] = []
+        for tool in orderedTools {
+            let function = tool.field("function") ?? tool
+            let name = function.field("name")?.stringValue ?? tool.field("name")?.stringValue ?? ""
+            let strict = function.field("strict")?.boolValue ?? tool.field("strict")?.boolValue
+            let enforced = enforceToolSchemas || strict != false
+            let parameters = function.field("parameters") ?? tool.field("parameters")
+            if let rejected = validateToolShape(name: name, ordered: parameters) {
+                return .rejected(rejected)
+            }
+            if !enforced {
+                specs.append(ToolSpec(
+                    name: name, enforced: false, properties: [:], fieldOrder: [],
+                    required: [], allowsAdditional: true))
+                continue
+            }
+            let properties = parameters?.field("properties")
+            let order = properties?.objectFields.map(\.0) ?? []
+            var kinds: [String: ValueKind] = [:]
+            for (key, schema) in properties?.objectFields ?? [] {
+                kinds[key] = valueKind(ordered: schema)
+            }
+            let required = parameters?.field("required")?.arrayItems.compactMap(\.stringValue) ?? []
+            specs.append(spec(
+                name: name, enforced: true, order: order, kinds: kinds,
+                required: required,
+                allowsAdditional: additionalAllowed(parameters?.field("additionalProperties")?.asAny())))
+        }
+        return ready(specs)
+    }
+
+    private static func validateToolShape(name: String, parameters: [String: Any]?) -> String? {
+        if name.isEmpty || name.contains(where: { $0.isWhitespace || $0 == "<" }) {
+            return functionNameMessage
+        }
+        guard let parameters, (parameters["type"] as? String) == "object" else {
+            return objectSchemaMessage
+        }
+        return nil
+    }
+
+    private static func validateToolShape(name: String, ordered: FlintOrderedJSON?) -> String? {
+        if name.isEmpty || name.contains(where: { $0.isWhitespace || $0 == "<" }) {
+            return functionNameMessage
+        }
+        guard let ordered, ordered.field("type")?.stringValue == "object" else {
+            return objectSchemaMessage
+        }
+        return nil
+    }
+
+    private static func spec(
+        name: String,
+        enforced: Bool,
+        order: [String],
+        kinds: [String: ValueKind],
+        required: [String],
+        allowsAdditional: Bool
+    ) -> ToolSpec {
+        ToolSpec(
+            name: name,
+            enforced: enforced,
+            properties: kinds,
+            fieldOrder: order,
+            required: Set(required),
+            allowsAdditional: allowsAdditional)
+    }
+
+    private static func ready(_ specs: [ToolSpec]) -> Compile {
         let names = specs.map(\.name)
         if Set(names).count != names.count {
             return .rejected("Flint grammar requires unique function names")
@@ -331,16 +452,58 @@ struct FlintToolSchemaSession: Equatable, Sendable {
 
     private func kindForKey(_ key: String, spec: ToolSpec, seen: Set<String>) -> ValueKind? {
         if key.isEmpty || seen.contains(key) { return nil }
-        if let kind = spec.properties[key] { return kind }
-        if spec.allowsAdditional { return .rawString }
+        let cursor = Self.cursor(seen: seen, spec: spec)
+        if let index = spec.fieldOrder.firstIndex(of: key) {
+            guard Self.keyIsLegal(index: index, cursor: cursor, spec: spec, seen: seen) else { return nil }
+            return spec.properties[key]
+        }
+        if spec.allowsAdditional, !Self.hasUnmetRequired(cursor: cursor, spec: spec, seen: seen) {
+            return .rawString
+        }
         return nil
     }
 
     private static func isKeyPrefix(_ buffer: String, spec: ToolSpec, seen: Set<String>) -> Bool {
         if buffer.isEmpty { return true }
-        return spec.properties.keys.contains { key in
-            !seen.contains(key) && key.hasPrefix(buffer)
+        if buffer.contains("<") || buffer.contains(where: isSpace) { return false }
+        let cursor = cursor(seen: seen, spec: spec)
+        let matchesSchema = spec.fieldOrder.enumerated().contains { index, name in
+            keyIsLegal(index: index, cursor: cursor, spec: spec, seen: seen) && name.hasPrefix(buffer)
         }
+        if matchesSchema { return true }
+        if spec.allowsAdditional, !hasUnmetRequired(cursor: cursor, spec: spec, seen: seen) {
+            if spec.fieldOrder.contains(where: { $0.hasPrefix(buffer) }) { return false }
+            return true
+        }
+        return false
+    }
+
+    private static func cursor(seen: Set<String>, spec: ToolSpec) -> Int {
+        var cursor = -1
+        for (index, name) in spec.fieldOrder.enumerated() where seen.contains(name) {
+            cursor = index
+        }
+        return cursor
+    }
+
+    private static func keyIsLegal(index: Int, cursor: Int, spec: ToolSpec, seen: Set<String>) -> Bool {
+        guard index > cursor, spec.fieldOrder.indices.contains(index) else { return false }
+        let name = spec.fieldOrder[index]
+        if seen.contains(name) { return false }
+        if cursor + 1 < index {
+            for earlier in (cursor + 1)..<index {
+                let field = spec.fieldOrder[earlier]
+                if spec.required.contains(field), !seen.contains(field) { return false }
+            }
+        }
+        return true
+    }
+
+    private static func hasUnmetRequired(cursor: Int, spec: ToolSpec, seen: Set<String>) -> Bool {
+        for (index, name) in spec.fieldOrder.enumerated() where index > cursor {
+            if spec.required.contains(name), !seen.contains(name) { return true }
+        }
+        return false
     }
 
     private static func markerText(_ tokenId: Int) -> String? {
@@ -376,10 +539,18 @@ struct FlintToolSchemaSession: Equatable, Sendable {
             return literalStatus(text, words: ["true", "false"]).prefix
         case .null:
             return literalStatus(text, words: ["null"]).prefix
+        case .text(let rule):
+            return textStatus(text, rule: rule).prefix
+        case .boundedInt(let rule):
+            return boundedStatus(text, rule: rule, integer: true).prefix
+        case .boundedNumber(let rule):
+            return boundedStatus(text, rule: rule, integer: false).prefix
         case .jsonObject:
             return JSONPrefix.root(text, object: true).prefix
         case .jsonArray:
             return JSONPrefix.root(text, object: false).prefix
+        case .objectValue(let shape):
+            return objectStatus(text, shape: shape).prefix
         case .union(let kinds):
             return kinds.contains { valuePrefix(text, kind: $0) }
         }
@@ -399,10 +570,18 @@ struct FlintToolSchemaSession: Equatable, Sendable {
             return literalStatus(text, words: ["true", "false"]).complete
         case .null:
             return literalStatus(text, words: ["null"]).complete
+        case .text(let rule):
+            return textStatus(text, rule: rule).complete
+        case .boundedInt(let rule):
+            return boundedStatus(text, rule: rule, integer: true).complete
+        case .boundedNumber(let rule):
+            return boundedStatus(text, rule: rule, integer: false).complete
         case .jsonObject:
             return JSONPrefix.root(text, object: true).complete
         case .jsonArray:
             return JSONPrefix.root(text, object: false).complete
+        case .objectValue(let shape):
+            return objectStatus(text, shape: shape).complete
         case .union(let kinds):
             return kinds.contains { valueComplete(text, kind: $0) }
         }
@@ -517,17 +696,25 @@ struct FlintToolSchemaSession: Equatable, Sendable {
             }
             return .union(branches.map(valueKind))
         }
+        if FlintAlignment.schemaAccepts(schema, kind: "object"),
+           dictionary(schema["properties"]) != nil
+        {
+            return .objectValue(objectShape(schema))
+        }
         if FlintAlignment.schemaAccepts(schema, kind: "string") {
             if let values = stringList(schema["enum"]), !values.isEmpty {
                 return .enumeration(values)
             }
+            if let rule = textRule(schema) { return .text(rule) }
             return .rawString
         }
         var kinds: [ValueKind] = []
         if FlintAlignment.schemaAccepts(schema, kind: "number") {
-            kinds.append(.number)
+            if let rule = numberRule(schema) { kinds.append(.boundedNumber(rule)) }
+            else { kinds.append(.number) }
         } else if FlintAlignment.schemaAccepts(schema, kind: "integer") {
-            kinds.append(.integer)
+            if let rule = numberRule(schema) { kinds.append(.boundedInt(rule)) }
+            else { kinds.append(.integer) }
         }
         if FlintAlignment.schemaAccepts(schema, kind: "boolean") { kinds.append(.boolean) }
         if FlintAlignment.schemaAccepts(schema, kind: "null") { kinds.append(.null) }
@@ -536,6 +723,172 @@ struct FlintToolSchemaSession: Equatable, Sendable {
         if kinds.count == 1, let only = kinds.first { return only }
         if kinds.count > 1 { return .union(kinds) }
         return .rawString
+    }
+
+    private static func valueKind(ordered schema: FlintOrderedJSON) -> ValueKind {
+        let object = schema.asAny()
+        let dict = dictionary(object) ?? [:]
+        if let properties = schema.field("properties") {
+            let required = Set(schema.field("required")?.arrayItems.compactMap(\.stringValue) ?? [])
+            let fields = properties.objectFields.map { key, child in
+                (name: key, kind: valueKind(ordered: child), required: required.contains(key))
+            }
+            let allows = additionalAllowed(schema.field("additionalProperties")?.asAny())
+            if schema.field("type")?.stringValue == "object" || !fields.isEmpty {
+                return .objectValue(ObjectShape(fields: fields, allowsAdditional: allows))
+            }
+        }
+        return valueKind(dict)
+    }
+
+    private static func objectShape(_ schema: [String: Any]) -> ObjectShape {
+        let properties = dictionary(schema["properties"]) ?? [:]
+        let required = Set(stringList(schema["required"]) ?? [])
+        let fields = properties.keys.sorted().map { key in
+            (name: key, kind: valueKind(dictionary(properties[key]) ?? [:]), required: required.contains(key))
+        }
+        return ObjectShape(
+            fields: fields,
+            allowsAdditional: additionalAllowed(schema["additionalProperties"]))
+    }
+
+    private static func textRule(_ schema: [String: Any]) -> TextRule? {
+        let pattern = schema["pattern"] as? String
+        let format = schema["format"] as? String
+        let minLength = intValue(schema["minLength"])
+        let maxLength = intValue(schema["maxLength"])
+        if pattern == nil && format == nil && minLength == nil && maxLength == nil { return nil }
+        return TextRule(pattern: pattern, format: format, minLength: minLength, maxLength: maxLength)
+    }
+
+    private static func numberRule(_ schema: [String: Any]) -> NumberRule? {
+        let minimum = doubleValue(schema["minimum"])
+        let maximum = doubleValue(schema["maximum"])
+        var exclusiveMinimum = doubleValue(schema["exclusiveMinimum"])
+        var exclusiveMaximum = doubleValue(schema["exclusiveMaximum"])
+        if exclusiveMinimum == nil, boolValue(schema["exclusiveMinimum"]) == true {
+            exclusiveMinimum = minimum
+        }
+        if exclusiveMaximum == nil, boolValue(schema["exclusiveMaximum"]) == true {
+            exclusiveMaximum = maximum
+        }
+        if minimum == nil && maximum == nil && exclusiveMinimum == nil && exclusiveMaximum == nil {
+            return nil
+        }
+        return NumberRule(
+            minimum: minimum, maximum: maximum,
+            exclusiveMinimum: exclusiveMinimum, exclusiveMaximum: exclusiveMaximum)
+    }
+
+    private static func textStatus(_ text: String, rule: TextRule) -> (prefix: Bool, complete: Bool) {
+        let count = text.unicodeScalars.count
+        if let maxLength = rule.maxLength, count > maxLength { return (false, false) }
+        let pattern = rule.pattern ?? formatPattern(rule.format)
+        var patternPrefix = true
+        var patternComplete = true
+        if let pattern {
+            guard let compiled = FlintPattern(pattern) else { return (false, false) }
+            patternPrefix = compiled.isPrefix(text)
+            patternComplete = compiled.matches(text)
+        }
+        if !patternPrefix { return (false, false) }
+        let minLength = rule.minLength ?? 0
+        let complete = patternComplete && count >= minLength && (rule.maxLength.map { count <= $0 } ?? true)
+        if count < minLength {
+            let room = rule.maxLength.map { count < $0 } ?? true
+            return (room, false)
+        }
+        return (true, complete)
+    }
+
+    private static func formatPattern(_ format: String?) -> String? {
+        switch format {
+        case "date":
+            return #"^\d{4}-\d{2}-\d{2}$"#
+        case "time":
+            return #"^\d{2}:\d{2}:\d{2}$"#
+        case "date-time":
+            return #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})?$"#
+        case "uuid":
+            return #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#
+        case "email":
+            return #"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"#
+        case "uri":
+            return #"^[A-Za-z][A-Za-z0-9+.\-]*:.+$"#
+        default:
+            return nil
+        }
+    }
+
+    private static func boundedStatus(
+        _ text: String, rule: NumberRule, integer: Bool
+    ) -> (prefix: Bool, complete: Bool) {
+        let base = integer ? integerStatus(text) : numberStatus(text)
+        if !base.prefix { return (false, false) }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "-" { return (true, false) }
+        if !base.complete {
+            return (numberCanExtend(trimmed, rule: rule, integer: integer), false)
+        }
+        guard let value = Double(trimmed), value.isFinite else { return (false, false) }
+        if rule.contains(value) { return (true, true) }
+        if numberCanExtend(trimmed, rule: rule, integer: integer) { return (true, false) }
+        return (false, false)
+    }
+
+    /// Digit and fraction extensions only. An exponent is not introduced to
+    /// pull an out-of-range prefix such as `11` with maximum 10 back into range.
+    private static func numberCanExtend(_ text: String, rule: NumberRule, integer: Bool) -> Bool {
+        if text.hasSuffix(".") || text.hasSuffix("e") || text.hasSuffix("E")
+            || text.hasSuffix("e+") || text.hasSuffix("e-")
+            || text.hasSuffix("E+") || text.hasSuffix("E-")
+        {
+            return true
+        }
+        guard let value = Double(text), value.isFinite else { return false }
+        if rule.contains(value) { return true }
+        if text.contains("e") || text.contains("E") || text.contains(".") { return false }
+        let digits = text.hasPrefix("-") ? String(text.dropFirst()) : text
+        if digits.isEmpty { return true }
+        if digits.first == "0" {
+            if integer { return false }
+            let sign = text.hasPrefix("-") ? -1.0 : 1.0
+            return rule.contains(sign * 0.5) || rule.contains(sign * 0.1)
+        }
+        guard let base = Int(digits) else { return false }
+        let signed = text.hasPrefix("-") ? -base : base
+        var current = signed
+        for _ in 0..<6 {
+            let start = current * 10
+            for digit in 0...9 {
+                let next = start + (current < 0 ? -digit : digit)
+                if rule.contains(Double(next)) { return true }
+            }
+            current = start
+        }
+        return false
+    }
+
+    private static func objectStatus(_ text: String, shape: ObjectShape) -> (prefix: Bool, complete: Bool) {
+        var parser = ObjectParser(chars: Array(text), shape: shape)
+        return parser.parse()
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let int = value as? Int { return int }
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            return number.intValue
+        }
+        return nil
+    }
+
+    private static func doubleValue(_ value: Any?) -> Double? {
+        if let double = value as? Double { return double }
+        if let int = value as? Int { return Double(int) }
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            return number.doubleValue
+        }
+        return nil
     }
 
     private static func unionBranches(_ schema: [String: Any]) -> [[String: Any]]? {
@@ -760,5 +1113,250 @@ private enum JSONPrefix {
         }
 
         func isDigit(_ char: Character) -> Bool { char >= "0" && char <= "9" }
+    }
+}
+
+/// Schema-ordered JSON object inside one Flint `<arg_value>`.
+private struct ObjectParser {
+    var chars: [Character]
+    var index = 0
+    var shape: FlintToolSchemaSession.ObjectShape
+
+    mutating func parse() -> (prefix: Bool, complete: Bool) {
+        skip()
+        if index >= chars.count { return (true, false) }
+        guard chars[index] == "{" else { return (false, false) }
+        index += 1
+        return parseBody(shape)
+    }
+
+    mutating func parseBody(_ shape: FlintToolSchemaSession.ObjectShape) -> (prefix: Bool, complete: Bool) {
+        skip()
+        if index >= chars.count { return (true, false) }
+        if chars[index] == "}" {
+            index += 1
+            let missing = shape.fields.contains { $0.required }
+            return missing ? (false, false) : (true, true)
+        }
+        var cursor = -1
+        var seen = Set<String>()
+        while index < chars.count {
+            let keyStart = index
+            guard chars[index] == "\"" else { return (false, false) }
+            guard let key = readString() else {
+                return index >= chars.count ? (true, false) : (false, false)
+            }
+            _ = keyStart
+            skip()
+            if index >= chars.count { return (true, false) }
+            guard chars[index] == ":" else { return (false, false) }
+            index += 1
+            skip()
+            if index >= chars.count { return (true, false) }
+            guard let kind = kind(for: key, shape: shape, cursor: cursor, seen: seen) else {
+                return (false, false)
+            }
+            let valueStart = index
+            guard consumeValue() else {
+                let partial = String(chars[valueStart..<min(index, chars.count)])
+                if index >= chars.count {
+                    return (FlintToolSchemaSession.valueAllowsPrefix(partial, kind: kind), false)
+                }
+                return (false, false)
+            }
+            let raw = String(chars[valueStart..<index])
+            let probed = FlintToolSchemaSession.schemaProbe(raw, kind: kind)
+            if !FlintToolSchemaSession.valueIsComplete(probed, kind: kind) {
+                return (false, false)
+            }
+            if let fieldIndex = shape.fields.firstIndex(where: { $0.name == key }) {
+                cursor = fieldIndex
+            }
+            seen.insert(key)
+            skip()
+            if index >= chars.count { return (true, false) }
+            if chars[index] == "}" {
+                index += 1
+                let missing = shape.fields.contains { $0.required && !seen.contains($0.name) }
+                skip()
+                if index < chars.count { return (false, false) }
+                return missing ? (false, false) : (true, true)
+            }
+            guard chars[index] == "," else { return (false, false) }
+            index += 1
+            skip()
+            if index >= chars.count { return (true, false) }
+        }
+        return (true, false)
+    }
+
+    func kind(
+        for key: String,
+        shape: FlintToolSchemaSession.ObjectShape,
+        cursor: Int,
+        seen: Set<String>
+    ) -> FlintToolSchemaSession.ValueKind? {
+        if seen.contains(key) { return nil }
+        if let index = shape.fields.firstIndex(where: { $0.name == key }) {
+            if index <= cursor { return nil }
+            for earlier in shape.fields[(cursor + 1)..<index] where earlier.required {
+                return nil
+            }
+            return shape.fields[index].kind
+        }
+        let unmet = shape.fields.enumerated().contains { offset, field in
+            offset > cursor && field.required && !seen.contains(field.name)
+        }
+        if shape.allowsAdditional && !unmet { return .rawString }
+        return nil
+    }
+
+    mutating func consumeValue() -> Bool {
+        skip()
+        guard index < chars.count else { return false }
+        switch chars[index] {
+        case "{":
+            return consumeObject()
+        case "[":
+            return consumeArray()
+        case "\"":
+            return readString() != nil
+        case "t":
+            return consumeWord("true")
+        case "f":
+            return consumeWord("false")
+        case "n":
+            return consumeWord("null")
+        default:
+            return consumeNumber()
+        }
+    }
+
+    mutating func consumeObject() -> Bool {
+        guard index < chars.count, chars[index] == "{" else { return false }
+        index += 1
+        skip()
+        if index < chars.count, chars[index] == "}" {
+            index += 1
+            return true
+        }
+        while index < chars.count {
+            guard readString() != nil else { return false }
+            skip()
+            guard index < chars.count, chars[index] == ":" else { return false }
+            index += 1
+            guard consumeValue() else { return false }
+            skip()
+            guard index < chars.count else { return false }
+            if chars[index] == "}" {
+                index += 1
+                return true
+            }
+            guard chars[index] == "," else { return false }
+            index += 1
+            skip()
+        }
+        return false
+    }
+
+    mutating func consumeArray() -> Bool {
+        guard index < chars.count, chars[index] == "[" else { return false }
+        index += 1
+        skip()
+        if index < chars.count, chars[index] == "]" {
+            index += 1
+            return true
+        }
+        while index < chars.count {
+            guard consumeValue() else { return false }
+            skip()
+            guard index < chars.count else { return false }
+            if chars[index] == "]" {
+                index += 1
+                return true
+            }
+            guard chars[index] == "," else { return false }
+            index += 1
+            skip()
+        }
+        return false
+    }
+
+    mutating func readString() -> String? {
+        guard index < chars.count, chars[index] == "\"" else { return nil }
+        index += 1
+        var out = ""
+        while index < chars.count {
+            let char = chars[index]
+            index += 1
+            if char == "\"" { return out }
+            if char == "\\" {
+                guard index < chars.count else { return nil }
+                out.append(chars[index])
+                index += 1
+                continue
+            }
+            out.append(char)
+        }
+        return nil
+    }
+
+    mutating func consumeWord(_ word: String) -> Bool {
+        for char in word {
+            guard index < chars.count, chars[index] == char else { return false }
+            index += 1
+        }
+        return true
+    }
+
+    mutating func consumeNumber() -> Bool {
+        let start = index
+        if index < chars.count, chars[index] == "-" { index += 1 }
+        guard index < chars.count, chars[index] >= "0" && chars[index] <= "9" else { return false }
+        while index < chars.count, chars[index] >= "0" && chars[index] <= "9" { index += 1 }
+        if index < chars.count, chars[index] == "." {
+            index += 1
+            guard index < chars.count, chars[index] >= "0" && chars[index] <= "9" else { return false }
+            while index < chars.count, chars[index] >= "0" && chars[index] <= "9" { index += 1 }
+        }
+        if index < chars.count, chars[index] == "e" || chars[index] == "E" {
+            index += 1
+            if index < chars.count, chars[index] == "+" || chars[index] == "-" { index += 1 }
+            guard index < chars.count, chars[index] >= "0" && chars[index] <= "9" else { return false }
+            while index < chars.count, chars[index] >= "0" && chars[index] <= "9" { index += 1 }
+        }
+        return index > start
+    }
+
+    mutating func skip() {
+        while index < chars.count {
+            let char = chars[index]
+            if char == " " || char == "\n" || char == "\t" || char == "\r" {
+                index += 1
+            } else {
+                break
+            }
+        }
+    }
+}
+
+extension FlintToolSchemaSession {
+    fileprivate static func valueAllowsPrefix(_ text: String, kind: ValueKind) -> Bool {
+        valuePrefix(schemaProbe(text, kind: kind), kind: kind)
+    }
+
+    fileprivate static func valueIsComplete(_ text: String, kind: ValueKind) -> Bool {
+        valueComplete(text, kind: kind)
+    }
+
+    fileprivate static func schemaProbe(_ raw: String, kind: ValueKind) -> String {
+        switch kind {
+        case .text, .rawString, .enumeration:
+            guard raw.count >= 2, raw.first == "\"", raw.last == "\"" else { return raw }
+            let body = raw.dropFirst().dropLast()
+            return body.replacingOccurrences(of: "\\\"", with: "\"").replacingOccurrences(of: "\\\\", with: "\\")
+        default:
+            return raw
+        }
     }
 }

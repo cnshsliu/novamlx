@@ -168,33 +168,7 @@ public final class InferenceService: @unchecked Sendable {
         try Self.rejectMtpAsChat(resolvedId)
         let settings = settingsManager.getSettings(resolvedId)
         var finalRequest = settings.applySamplingOverrides(to: request)
-        finalRequest = InferenceRequest(
-            id: finalRequest.id, model: resolvedId, messages: finalRequest.messages,
-            tools: finalRequest.tools,
-            temperature: finalRequest.temperature, maxTokens: finalRequest.maxTokens,
-            topP: finalRequest.topP, topK: finalRequest.topK, minP: finalRequest.minP,
-            frequencyPenalty: finalRequest.frequencyPenalty, presencePenalty: finalRequest.presencePenalty,
-            repetitionPenalty: finalRequest.repetitionPenalty, seed: finalRequest.seed,
-            stream: finalRequest.stream, stop: finalRequest.stop,
-            sessionId: finalRequest.sessionId,
-            responseFormat: finalRequest.responseFormat,
-            jsonSchemaDef: finalRequest.jsonSchemaDef,
-            regexPattern: finalRequest.regexPattern,
-            gbnfGrammar: finalRequest.gbnfGrammar,
-            thinkingBudget: finalRequest.thinkingBudget,
-            enableThinking: finalRequest.enableThinking,
-            preserveThinking: finalRequest.preserveThinking,
-            draftModel: finalRequest.draftModel,
-            numDraftTokens: finalRequest.numDraftTokens,
-            includeLogprobs: finalRequest.includeLogprobs,
-            topLogprobsCount: finalRequest.topLogprobsCount,
-            httpRequestId: finalRequest.httpRequestId,
-            useNativeMtp: finalRequest.useNativeMtp,
-            adaptiveVerify: finalRequest.adaptiveVerify,
-            adaptiveVerifyMin: finalRequest.adaptiveVerifyMin,
-            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax,
-            enforceToolSchemas: finalRequest.enforceToolSchemas
-        )
+        finalRequest = finalRequest.replacing(model: resolvedId)
         finalRequest = autoInjectDraftModel(finalRequest)
         track(finalRequest)
         defer { untrack(finalRequest) }
@@ -286,33 +260,7 @@ public final class InferenceService: @unchecked Sendable {
         }
         let settings = settingsManager.getSettings(resolvedId)
         var finalRequest = settings.applySamplingOverrides(to: request)
-        finalRequest = InferenceRequest(
-            id: finalRequest.id, model: resolvedId, messages: finalRequest.messages,
-            tools: finalRequest.tools,
-            temperature: finalRequest.temperature, maxTokens: finalRequest.maxTokens,
-            topP: finalRequest.topP, topK: finalRequest.topK, minP: finalRequest.minP,
-            frequencyPenalty: finalRequest.frequencyPenalty, presencePenalty: finalRequest.presencePenalty,
-            repetitionPenalty: finalRequest.repetitionPenalty, seed: finalRequest.seed,
-            stream: true, stop: finalRequest.stop,
-            sessionId: finalRequest.sessionId,
-            responseFormat: finalRequest.responseFormat,
-            jsonSchemaDef: finalRequest.jsonSchemaDef,
-            regexPattern: finalRequest.regexPattern,
-            gbnfGrammar: finalRequest.gbnfGrammar,
-            thinkingBudget: finalRequest.thinkingBudget,
-            enableThinking: finalRequest.enableThinking,
-            preserveThinking: finalRequest.preserveThinking,
-            draftModel: finalRequest.draftModel,
-            numDraftTokens: finalRequest.numDraftTokens,
-            includeLogprobs: finalRequest.includeLogprobs,
-            topLogprobsCount: finalRequest.topLogprobsCount,
-            httpRequestId: finalRequest.httpRequestId,
-            useNativeMtp: finalRequest.useNativeMtp,
-            adaptiveVerify: finalRequest.adaptiveVerify,
-            adaptiveVerifyMin: finalRequest.adaptiveVerifyMin,
-            adaptiveVerifyMax: finalRequest.adaptiveVerifyMax,
-            enforceToolSchemas: finalRequest.enforceToolSchemas
-        )
+        finalRequest = finalRequest.replacing(model: resolvedId, stream: true)
         finalRequest = autoInjectDraftModel(finalRequest)
         track(finalRequest)
 
@@ -553,33 +501,7 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     private func withDraft(_ request: InferenceRequest, draftId: String) -> InferenceRequest {
-        InferenceRequest(
-            id: request.id, model: request.model, messages: request.messages,
-            tools: request.tools,
-            temperature: request.temperature, maxTokens: request.maxTokens,
-            topP: request.topP, topK: request.topK, minP: request.minP,
-            frequencyPenalty: request.frequencyPenalty, presencePenalty: request.presencePenalty,
-            repetitionPenalty: request.repetitionPenalty, seed: request.seed,
-            stream: request.stream, stop: request.stop,
-            sessionId: request.sessionId,
-            responseFormat: request.responseFormat,
-            jsonSchemaDef: request.jsonSchemaDef,
-            regexPattern: request.regexPattern,
-            gbnfGrammar: request.gbnfGrammar,
-            thinkingBudget: request.thinkingBudget,
-            enableThinking: request.enableThinking,
-            preserveThinking: request.preserveThinking,
-            draftModel: draftId,
-            numDraftTokens: request.numDraftTokens ?? 4,
-            includeLogprobs: request.includeLogprobs,
-            topLogprobsCount: request.topLogprobsCount,
-            httpRequestId: request.httpRequestId,
-            useNativeMtp: request.useNativeMtp,
-            adaptiveVerify: request.adaptiveVerify,
-            adaptiveVerifyMin: request.adaptiveVerifyMin,
-            adaptiveVerifyMax: request.adaptiveVerifyMax,
-            enforceToolSchemas: request.enforceToolSchemas
-        )
+        request.replacing(draftModel: draftId, numDraftTokens: request.numDraftTokens ?? 4)
     }
 
     public func loadModel(

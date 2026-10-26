@@ -11,6 +11,7 @@ public func mapOpenAIMessages(_ messages: [OpenAIChatMessage]) -> [ChatMessage] 
     messages.map { msg in
         let role: ChatMessage.Role = switch msg.role {
         case "system": .system
+        case "developer": .developer
         case "assistant": .assistant
         case "tool": .tool
         default: .user
@@ -36,7 +37,9 @@ public func mapOpenAIMessages(_ messages: [OpenAIChatMessage]) -> [ChatMessage] 
             images: (imageURLs?.isEmpty ?? true) ? nil : imageURLs,
             name: msg.name,
             toolCallId: msg.toolCallId,
-            toolCalls: toolCalls
+            toolCalls: toolCalls,
+            reasoningContent: msg.reasoningContent,
+            wireRole: msg.role
         )
     }
 }

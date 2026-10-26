@@ -40,6 +40,21 @@ final class LockedCounter: @unchecked Sendable {
     }
 }
 
+func flintToolChoice(_ choice: AnyCodable?) -> String? {
+    guard let choice else { return nil }
+    switch choice {
+    case .string(let text):
+        return text
+    case .dictionary(let dict):
+        if case .string(let type) = dict["type"] {
+            return type
+        }
+        return "forced"
+    default:
+        return "forced"
+    }
+}
+
 func unwrapAnyCodable(_ ac: AnyCodable) -> Any {
     switch ac {
     case .string(let s): return s
@@ -874,7 +889,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         useMtp: openAIReq.useMtp,
                         adaptiveVerify: openAIReq.adaptiveVerify,
                         adaptiveVerifyMin: openAIReq.adaptiveVerifyMin,
-                        adaptiveVerifyMax: openAIReq.adaptiveVerifyMax
+                        adaptiveVerifyMax: openAIReq.adaptiveVerifyMax,
+                        enforceToolSchemas: openAIReq.enforceToolSchemas,
+                        parallelToolCalls: openAIReq.parallelToolCalls,
+                        store: openAIReq.store,
+                        grammar: openAIReq.grammar
                     )
                     NovaMLXLog.info("[API] Modelfile resolved: \(resolved.modelfileName) -> base=\(resolved.baseModel)")
                 }
@@ -944,7 +963,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         cfg: cfg, clientType: clientType,
                         coordinator: coordinator,
                         responseModelOverride: modelfileName,
-                        httpRequest: request
+                        httpRequest: request,
+                        toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
                     )
                 } else {
                     response = try await Self.handleChat(
@@ -953,7 +973,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         regexPattern: regexPattern, gbnfGrammar: gbnfGrammar,
                         cfg: cfg, clientType: clientType,
                         responseModelOverride: modelfileName,
-                        httpRequest: request
+                        httpRequest: request,
+                        toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
                     )
                     Self.applyKeepAlive(openAIReq.keepAlive, modelId: openAIReq.model, pool: inference.engine.pool)
                 }
@@ -993,7 +1014,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         anthropicReq: anthropicReq, messages: messages, inference: inference,
                         cfg: cfg, clientType: anthropicClientType,
                         coordinator: coordinator,
-                        httpRequest: httpRequest
+                        httpRequest: httpRequest,
+                        toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
                     )
                     if case .justLoaded(let ms) = anthropicLoadOutcome {
                         streamResp.headers[.init("X-Model-Cold-Load")!] = "true"
@@ -1033,7 +1055,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     httpRequestId: HTTPHelpers.requestID(from: request),
                     enforceToolSchemas: FlintAlignment.resolvedEnforceToolSchemas(
                         requestFlag: anthropicReq.enforceToolSchemas,
-                        serverConfig: cfg.enforceToolSchemas)
+                        serverConfig: cfg.enforceToolSchemas),
+                    toolChoice: flintToolChoice(anthropicReq.toolChoice),
+                    flintGrammar: nil,
+                    toolsJSON: FlintOrderedJSON.toolsJSON(in: body)
                 )
 
                 CurrentInferenceModel.shared.modelID = request.model

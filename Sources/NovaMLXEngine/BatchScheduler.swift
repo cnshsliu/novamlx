@@ -152,8 +152,10 @@ public final class BatchScheduler: @unchecked Sendable {
             decodeTokens: container.tokenizer?.decode)
         if container.identifier.family == .flint, !firstTokenText.isEmpty {
             let eosId = container.tokenizer?.eosTokenId
-            let stops = FlintChatDecode.hostFinishStopIds(
-                checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
+            let stops = FlintChatDecode.generationFinishStopIds(
+                grammarOn: flintGrammar != nil,
+                checkpoint: container.flintFinishStopIds,
+                tokenizerEOS: eosId)
             let decision = FlintChatDecode.openingDecision(
                 tokenId: firstTokenId, yieldText: firstTokenText,
                 grammarText: firstTokenText, primaryEOS: eosId, stopIds: stops,
@@ -254,8 +256,10 @@ public final class BatchScheduler: @unchecked Sendable {
             let eosId = container.tokenizer?.eosTokenId
             let isFlint = container.identifier.family == .flint
             let flintStopIds: Set<Int> = isFlint
-                ? FlintChatDecode.hostFinishStopIds(
-                    checkpoint: container.flintFinishStopIds, tokenizerEOS: eosId)
+                ? FlintChatDecode.generationFinishStopIds(
+                    grammarOn: seq.flintGrammar != nil,
+                    checkpoint: container.flintFinishStopIds,
+                    tokenizerEOS: eosId)
                 : []
 
             for (i, var seq) in active.enumerated() {
