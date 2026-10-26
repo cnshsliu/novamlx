@@ -343,7 +343,7 @@ struct ModelCatalogTests {
                 family: family,
                 format: .mlx,
                 quant: quant,
-                testedOn: "1.8.1",
+                testedOn: "1.8.2",
                 status: status
             )
         }
@@ -367,7 +367,7 @@ struct ModelCatalogTests {
             "mlx-community/Qwen3.8-27B-4bit",
             "mlx-community/Qwen3.8-27B-8bit",
         ])
-        #expect(qwen?.sharedTestedOn == "1.8.1")
+        #expect(qwen?.sharedTestedOn == "1.8.2")
         #expect(groups.first { $0.name == "Flint 40B A2.5B" }?.weights.map(\.id) == ["RecursiveSI/flint-int4"])
     }
 

@@ -1141,7 +1141,7 @@
         "tools"
       ],
       "quant": "int4",
-      "testedOn": "1.8.1",
+      "testedOn": "1.8.2",
       "status": "verified"
     }
   ]
