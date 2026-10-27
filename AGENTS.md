@@ -82,7 +82,7 @@ Runtime config lives at `~/.nova/config.json` and logs at `~/.nova/novamlx.log`.
 - **Test naming**: `test<description>`, e.g. `testLoadsModelFromHub`, `testPrefillTokenBatch`.
 - **E2E tests** (`NovaMLXE2ETests`) load real MLX models and exercise the HTTP API. Run with `Scripts/test-all-models.sh`.
 - **Benchmarks** live in `NovaMLXBenchTests`.
-- Metal shader support is hooked up automatically when running via `./build.sh test` (the script copies `mlx.metallib` into the test bundle).
+- Metal shader support is hooked up automatically when running via `./build.sh test` (the script copies `mlx.metallib` into every `.xctest` under `.build/out/Products/Debug/` and the legacy triple debug dir).
 
 ```bash
 swift test                          # full suite

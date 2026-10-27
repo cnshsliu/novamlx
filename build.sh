@@ -5,21 +5,87 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 
 # ─────────────────────────────────────────────────────────────────────────
 # ./build.sh test — run tests with metallib fix
-# SwiftPM's test runner puts the binary inside a .xctest bundle, but MLX
-# expects mlx.metallib colocated with the binary. This copies it in.
+# Each SwiftPM test target is its own .xctest. MLX loads mlx.metallib from
+# the directory that contains that bundle's Mach-O. SwiftPM 6.2 (Swift
+# Build) writes those bundles to .build/out/Products/Debug/; older SwiftPM
+# used .build/<triple>/debug/ and a single NovaMLXPackageTests.xctest.
+# Copy the library into every bundle after the test build, then run with
+# --skip-build so a later relink cannot drop it.
 # ─────────────────────────────────────────────────────────────────────────
 if [ "${1:-}" = "test" ]; then
 	shift
-	BUILD_DIR=".build/$(uname -m)-apple-macosx/debug"
-	TEST_BUNDLE="${BUILD_DIR}/NovaMLXPackageTests.xctest"
+	ARCH="$(uname -m)"
+	BUILD_DIR=".build/${ARCH}-apple-macosx/debug"
 	METALLIB="${BUILD_DIR}/mlx.metallib"
 
-	if [ ! -d "$TEST_BUNDLE" ] || [ ! -f "$METALLIB" ]; then
-		echo "→ Building test target and metallib..."
-		swift build --build-tests 2>&1
+	# Product dirs that can hold *.xctest bundles. One path per line.
+	xctest_product_dirs() {
+		printf '%s\n' \
+			".build/out/Products/Debug" \
+			"$BUILD_DIR" \
+			".build/debug"
+	}
+
+	# Prefer a top-level mlx.metallib. Fall back to a copy already sitting
+	# beside any test binary (EngineTests often has one when PrefixCacheTests
+	# does not) and park it outside the bundle before swift build refreshes
+	# .xctest contents.
+	resolve_metallib() {
+		local c dir bundle installed
+		for c in \
+			"$METALLIB" \
+			".build/arm64-apple-macosx/debug/mlx.metallib" \
+			".build/out/Products/Debug/mlx.metallib" \
+			".build/debug/mlx.metallib"
+		do
+			if [ -f "$c" ]; then
+				printf '%s\n' "$c"
+				return 0
+			fi
+		done
+		while IFS= read -r dir; do
+			[ -d "$dir" ] || continue
+			for bundle in "$dir"/*.xctest; do
+				installed="$bundle/Contents/MacOS/mlx.metallib"
+				if [ -f "$installed" ]; then
+					printf '%s\n' "$installed"
+					return 0
+				fi
+			done
+		done < <(xctest_product_dirs)
+		return 1
+	}
+
+	copy_metallib_into_xctests() {
+		local src="$1"
+		local dir bundle dest copied=0
+		while IFS= read -r dir; do
+			[ -d "$dir" ] || continue
+			for bundle in "$dir"/*.xctest; do
+				dest="$bundle/Contents/MacOS"
+				[ -d "$dest" ] || continue
+				if [ -f "$dest/mlx.metallib" ] && [ "$dest/mlx.metallib" -ef "$src" ]; then
+					continue
+				fi
+				cp "$src" "$dest/mlx.metallib"
+				copied=$((copied + 1))
+				echo "→ Copied mlx.metallib into $(basename "$bundle")"
+			done
+		done < <(xctest_product_dirs)
+		if [ "$copied" -eq 0 ]; then
+			echo "→ warning: no .xctest bundles found for mlx.metallib" >&2
+		fi
+	}
+
+	METALLIB_SRC="$(resolve_metallib || true)"
+	if [ -n "$METALLIB_SRC" ] && [ -f "$METALLIB_SRC" ] && [ ! "$METALLIB_SRC" -ef "$METALLIB" ]; then
+		mkdir -p "$(dirname "$METALLIB")"
+		cp "$METALLIB_SRC" "$METALLIB"
+		METALLIB_SRC="$METALLIB"
 	fi
 
-	# Compile metallib if missing
+	# Generated kernels only. A normal ./build.sh writes the full library
+	# to $METALLIB; this runs when that file is not already on disk.
 	if [ ! -f "$METALLIB" ] && [ -d "vendors/mlx-swift/Source/Cmlx/mlx-generated/metal" ]; then
 		echo "→ Compiling MLX Metal shaders for tests..."
 		TMPDIR_BUILD=$(mktemp -d)
@@ -33,13 +99,20 @@ if [ "${1:-}" = "test" ]; then
 		mkdir -p "$(dirname "$METALLIB")"
 		xcrun -sdk macosx metallib "$TMPDIR_BUILD"/*.air -o "$METALLIB" 2>/dev/null
 	fi
-
-	if [ -f "$METALLIB" ] && [ -d "$TEST_BUNDLE/Contents/MacOS" ]; then
-		cp "$METALLIB" "$TEST_BUNDLE/Contents/MacOS/mlx.metallib"
-		echo "→ Copied mlx.metallib into test bundle"
+	if [ -f "$METALLIB" ]; then
+		METALLIB_SRC="$METALLIB"
 	fi
 
-	exec swift test "$@"
+	echo "→ Building test targets..."
+	swift build --build-tests 2>&1
+
+	if [ -n "${METALLIB_SRC:-}" ] && [ -f "$METALLIB_SRC" ]; then
+		copy_metallib_into_xctests "$METALLIB_SRC"
+	else
+		echo "→ warning: mlx.metallib not found; MLX tests may abort" >&2
+	fi
+
+	exec swift test --skip-build "$@"
 fi
 
 # Strip --restart so it is not forwarded to `swift build`.
