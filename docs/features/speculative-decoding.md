@@ -53,9 +53,21 @@ Turn adaptive off and return to a fixed block with the request field `"adaptive_
 | Marginal cost outside the window | — | `NOVAMLX_ADAPTIVE_VERIFY_SLOW_MARGINAL_COST` | 0.55 |
 | Fast window (draft count) | — | `NOVAMLX_ADAPTIVE_VERIFY_FAST_DRAFTS` | 4 |
 | DFlash2 score-gap scale | — | `NOVAMLX_ADAPTIVE_VERIFY_MARGIN_SCALE` | 2 |
-| confidence head temperature | — | `NOVAMLX_ADAPTIVE_VERIFY_TEMPERATURE` | 1 |
+| confidence head temperature (cold-start prior) | — | `NOVAMLX_ADAPTIVE_VERIFY_TEMPERATURE` | 1 |
+| online calibration | — | `NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION` | on |
+| calibration file | — | `NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION_PATH` | `~/.nova/adaptive_verify_calibration.json` |
+| rounds before a position may leave the prior | — | `NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION_MIN_ROUNDS` | 8 |
+| label decay per new round | — | `NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION_DECAY` | 0.97 |
 
 A larger fixed cost makes the prefix longer, which suits a single generation. Lowering it truncates earlier, which suits the case where verify width itself is expensive. This does not change companion attach: a known-faster companion still attaches automatically, a known-slower one still stays unloaded, and an uncertain one is still asked once at load and remembered.
+
+### Online calibration
+
+The length scheduler needs the magnitude of each prefix survival probability, not only the order of the confidences. DSpark's head and DFlash2's score-gap sigmoid are often overconfident. Nova keeps a sequential temperature per draft position for each target+draft pair. Each verified round records an accept/reject label. When the request finishes, sequential temperature scaling refits those temperatures so the cumulative product matches the stored labels (the same post-hoc step DSpark uses). The fit stays outside the timed decode loop. A temperature above 1 softens the confidence and the prefix gets shorter. A temperature below 1 sharpens it and the prefix gets longer. The fit is written to the calibration file and the next request for that pair loads it before it schedules a prefix.
+
+Fixed mode does not read the temperatures. It still records labels for the positions it scored, which is why the A/B script warms up with a fixed block before measuring adaptive mode. `NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION=off` (`0` / `false` / `no`) restores the uncalibrated scheduler. The cold-start temperature, before a position has enough labels, stays `NOVAMLX_ADAPTIVE_VERIFY_TEMPERATURE`.
+
+Non-streaming `POST /v1/chat/completions` adds `usage.nova_speculation` when DFlash2 or DSpark verified at least one draft token: `proposed` (drafts scored), `accepted`, `accept_rate`, `decode_tokens_per_second`, and `temperatures`.
 
 The scheduled length can be printed without loading a model:
 
@@ -64,7 +76,20 @@ nova adaptive-verify --confidence 0.92,0.88,0.84,0.70,0.25,0.15,0.10
 nova adaptive-verify --mode fixed --confidence 0.92,0.88,0.84,0.70,0.25
 ```
 
-On a Mac, A/B the same greedy request: set `"temperature": 0` both times, once with `"adaptive_verify": "adaptive"` and once with `"fixed"`. In the log, `draft` is the draft length, `verified` is the prefix sent to the target model, and `accepted` is the number of matching draft tokens. `nova chat <model> --adaptive-verify adaptive` sends temperature 0 and the matching field. `--adaptive-verify fixed` uses the fixed block.
+On a Mac, with the target and the DFlash2 or DSpark companion already on disk, restart NovaMLX so the worker reads a fresh calibration file, then run the same prompts both ways:
+
+```bash
+export NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION_PATH="$HOME/.nova/adaptive-verify-ab.json"
+rm -f "$NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION_PATH"
+# Launch the host from this environment (a Finder launch does not see the variable).
+# Load the target. The companion stays on disk; pass it as --draft.
+
+python3 Scripts/adaptive-verify-ab.py \
+  --model <target-id> \
+  --draft <dflash2-or-dspark-id>
+```
+
+The script sends greedy chat completions (`temperature` 0, `stream` false). It warms up with fixed verify, measures adaptive, then measures fixed, and writes `~/.nova/adaptive-verify-ab.json` with decode tok/s, wall-clock tok/s, and accept rate for each arm. `usage.nova_speculation` is the source of the accept rate and the engine decode tok/s. The figure to compare against is about +4% to +7% decode tok/s for adaptive versus fixed. That band is the DeepInfer high-concurrency estimate. A single-sequence Mac run can land outside it; the script is what makes the comparison reproducible. `nova chat <model> --adaptive-verify adaptive` and `--adaptive-verify fixed` still send one greedy request each. In the log, `draft` is the draft length, `verified` is the prefix sent to the target, and `accepted` is the number of matching draft tokens.
 
 DFlash2 and DSpark schedule how many drafted tokens the target model scores. The default is adaptive. `"adaptive_verify": "fixed"` or `NOVAMLX_ADAPTIVE_VERIFY=fixed` restores the previous block. Acceptance stays the greedy prefix plus the target bonus token, and it still requires temperature 0. Companion attach policy is unchanged.
 
@@ -83,6 +108,7 @@ The older Engine `MtpTokenIterator` (`MtpTarget` / `MtpDrafter`) did not verify 
 - Qwen MTP requires temperature 0. The Nova `MtpTarget` / `MtpDrafter` iterator is disabled and does not report a speedup.
 - When the verify width passes the fast SDPA window, a near-tie argmax can differ from token-by-token decode. That is the existing multi-token verification limit. Fixed mode keeps DSpark inside that window (at most 4 drafts). Adaptive mode crosses it only when confidence is high enough.
 - At low concurrency a shorter verify is not necessarily faster. Use `adaptive_verify: fixed` or raise `NOVAMLX_ADAPTIVE_VERIFY_FIXED_COST` to get a longer block again. The companion is not forced on because of that.
+- Online calibration applies only while DFlash2 or DSpark is the drafter. Qwen MTP keeps its own verify width. Deleting the calibration file takes effect after the worker process starts again.
 
 ## Related
 

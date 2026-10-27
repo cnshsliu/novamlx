@@ -138,6 +138,35 @@ struct UsageReportingTests {
         #expect(decoded.usage?.totalTokens == 50)
     }
 
+    @Test("Chat usage omits nova_speculation until a draft was verified")
+    func speculationUsageJSON() throws {
+        let plain = OpenAIUsage(promptTokens: 1, completionTokens: 2)
+        let plainObject = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(plain)) as! [String: Any]
+        #expect(plainObject["nova_speculation"] == nil)
+        #expect(plainObject.keys.contains("prompt_tokens_details"))
+
+        let spec = OpenAIUsage(
+            promptTokens: 1,
+            completionTokens: 2,
+            speculation: NovaSpeculationUsage(
+                proposed: 10,
+                accepted: 4,
+                decodeTokensPerSecond: 32.5,
+                temperatures: [1, 2.5]
+            )
+        )
+        let specObject = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(spec)) as! [String: Any]
+        let nova = specObject["nova_speculation"] as? [String: Any]
+        #expect(nova?["proposed"] as? Int == 10)
+        #expect(nova?["accepted"] as? Int == 4)
+        #expect(nova?["accept_rate"] as? Double == 0.4)
+        #expect(nova?["decode_tokens_per_second"] as? Double == 32.5)
+        let temperatures = (nova?["temperatures"] as? [NSNumber])?.map(\.doubleValue)
+        #expect(temperatures == [1, 2.5])
+    }
+
     @Test("Streaming: final token without promptTokens falls back to 0 gracefully")
     func streamingFallbackWhenNoPromptTokens() async throws {
         // When engine doesn't set promptTokens (shouldn't happen after fix, but defensive)

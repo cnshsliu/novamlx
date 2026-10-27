@@ -110,6 +110,26 @@ struct AdaptiveVerifyTests {
         #expect(capped.verifyLength(confidences: high, draftCount: 7, fixedLength: 7) == 3)
     }
 
+    @Test("A higher temperature shortens a confident block and fixed mode ignores it")
+    func temperatureChangesLength() {
+        let confident = [Float](repeating: 0.97, count: 7)
+        let baseline = defaults.verifyLength(
+            confidences: confident, draftCount: 7, fixedLength: 4)
+        let softened = defaults.verifyLength(
+            confidences: confident, draftCount: 7, fixedLength: 4,
+            positionTemperatures: [Float](repeating: 3, count: 7))
+        #expect(baseline == 7)
+        #expect(softened < baseline)
+
+        let aggressive = [Float](repeating: 0.5, count: 7)
+        let fixed = AdaptiveVerifyConfig.fixed.verifyLength(
+            confidences: [0.1, 0.1, 0.1, 0.1],
+            draftCount: 7,
+            fixedLength: 4,
+            positionTemperatures: aggressive)
+        #expect(fixed == 4)
+    }
+
     @Test("Fixed mode and a missing head both keep the historical block length")
     func fixedAndMissingSignal() {
         let low: [Float] = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]

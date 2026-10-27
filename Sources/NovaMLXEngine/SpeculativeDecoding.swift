@@ -234,6 +234,67 @@ func adaptiveVerifyConfig(for request: InferenceRequest) -> AdaptiveVerifyConfig
     )
 }
 
+/// Running accept/reject totals for one generation. The HTTP response reads
+/// these after the iterator finishes.
+final class SpeculationMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var proposed = 0
+    private var accepted = 0
+
+    func record(proposed: Int, accepted: Int) {
+        lock.lock()
+        self.proposed += max(proposed, 0)
+        self.accepted += max(accepted, 0)
+        lock.unlock()
+    }
+
+    var totals: (proposed: Int, accepted: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (proposed, accepted)
+    }
+}
+
+func adaptivePositionTemperatures(
+    config: AdaptiveVerifyConfig,
+    calibrator: AdaptiveVerifyCalibrator?,
+    key: String?
+) -> [Float]? {
+    guard config.mode == .adaptive, let calibrator, let key else { return nil }
+    let temperatures = calibrator.temperatures(for: key)
+    return temperatures.isEmpty ? nil : temperatures
+}
+
+func recordAdaptiveVerifyOutcome(
+    calibrator: AdaptiveVerifyCalibrator?,
+    key: String?,
+    rawConfidences: [Float],
+    verified: Int,
+    accepted: Int,
+    prior: Float
+) {
+    guard let calibrator, let key, verified > 0 else { return }
+    let slice = Array(rawConfidences.prefix(verified))
+    guard !slice.isEmpty else { return }
+    calibrator.observe(
+        confidences: slice,
+        accepted: min(max(accepted, 0), slice.count),
+        key: key,
+        prior: prior
+    )
+}
+
+/// Fit rounds a previous request left in memory, before this request reads temperatures.
+func beginAdaptiveVerifyRequest(key: String) {
+    AdaptiveVerifyCalibrator.shared.flush(pairKey: key)
+}
+
+/// Fit this request's rounds after decode timing has already been captured.
+func finishAdaptiveVerifyRequest(key: String?) {
+    guard let key else { return }
+    AdaptiveVerifyCalibrator.shared.flush(pairKey: key)
+}
+
 /// Start a DFlash2 iterator when the checkpoint is a real drafter and the
 /// request is greedy. Temperature above 0 stays on the ordinary sampler:
 /// block accept is argmax. Returns nil when this request should not speculate.
@@ -246,7 +307,9 @@ func openDFlashIterator(
     processor: LogitProcessor?,
     promptTokenCount: Int,
     logTag: String,
-    verifyConfig: AdaptiveVerifyConfig = .resolved()
+    verifyConfig: AdaptiveVerifyConfig = .resolved(),
+    calibrationKey: String? = nil,
+    calibrator: AdaptiveVerifyCalibrator? = nil
 ) throws -> DFlashTokenIterator? {
     let drafter = dflashDrafterReady(model, draftModelId: draftModelId)
     let canTap = model is any DFlashTarget || DFlashHooks.make(model: model) != nil
@@ -279,11 +342,15 @@ func openDFlashIterator(
         mainCache: cache,
         parameters: parameters,
         processor: processor,
-        verifyConfig: verifyConfig
+        verifyConfig: verifyConfig,
+        calibrationKey: calibrationKey,
+        calibrator: calibrator
     )
     let kind = drafter.hasBlockWeights ? "block" : "selector"
+    let activeCalibrator = calibrationKey == nil ? nil : (calibrator ?? .shared)
+    let calibrationNote = activeCalibrator.map { " " + $0.summary(for: calibrationKey ?? "") } ?? ""
     NovaMLXLog.info(
-        "[\(logTag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) weights=\(kind) verify=\(verifyConfig.summary)"
+        "[\(logTag)] DFlash2 draft=\(draftModelId) block=\(drafter.config.blockSize) weights=\(kind) verify=\(verifyConfig.summary)\(calibrationNote)"
     )
     return iterator
 }
@@ -311,6 +378,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
     private var lastHidden: MLXArray
     private var capPolicy: DFlashCapPolicy
     private let verifyConfig: AdaptiveVerifyConfig
+    private let calibrationKey: String?
+    private let calibrator: AdaptiveVerifyCalibrator?
     private var draftCache: [DFlashCtxCache]
     private var cacheBackup: [KVCache]
     private let tap: [Int]
@@ -322,7 +391,9 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         mainCache: [KVCache]? = nil,
         parameters: GenerateParameters,
         processor: LogitProcessor? = nil,
-        verifyConfig: AdaptiveVerifyConfig = .resolved()
+        verifyConfig: AdaptiveVerifyConfig = .resolved(),
+        calibrationKey: String? = nil,
+        calibrator: AdaptiveVerifyCalibrator? = nil
     ) throws {
         try self.init(
             input: input,
@@ -333,7 +404,9 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
             parameters: parameters,
             processor: processor,
             cacheModel: target,
-            verifyConfig: verifyConfig
+            verifyConfig: verifyConfig,
+            calibrationKey: calibrationKey,
+            calibrator: calibrator
         )
     }
 
@@ -346,12 +419,15 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         mainCache: [KVCache]? = nil,
         parameters: GenerateParameters,
         processor: LogitProcessor? = nil,
-        verifyConfig: AdaptiveVerifyConfig = .resolved()
+        verifyConfig: AdaptiveVerifyConfig = .resolved(),
+        calibrationKey: String? = nil,
+        calibrator: AdaptiveVerifyCalibrator? = nil
     ) throws {
         if let target = model as? any DFlashTarget {
             try self.init(
                 input: input, target: target, drafter: drafter, mainCache: mainCache,
-                parameters: parameters, processor: processor, verifyConfig: verifyConfig)
+                parameters: parameters, processor: processor, verifyConfig: verifyConfig,
+                calibrationKey: calibrationKey, calibrator: calibrator)
             return
         }
         guard let hooks = DFlashHooks.make(model: model) else {
@@ -366,7 +442,9 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
             parameters: parameters,
             processor: processor,
             cacheModel: model,
-            verifyConfig: verifyConfig
+            verifyConfig: verifyConfig,
+            calibrationKey: calibrationKey,
+            calibrator: calibrator
         )
     }
 
@@ -381,7 +459,9 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         parameters: GenerateParameters,
         processor: LogitProcessor?,
         cacheModel: any LanguageModel,
-        verifyConfig: AdaptiveVerifyConfig
+        verifyConfig: AdaptiveVerifyConfig,
+        calibrationKey: String?,
+        calibrator: AdaptiveVerifyCalibrator?
     ) throws {
         guard drafter.hasSpeculativeWeights else {
             throw DFlashError.invalidConfig(
@@ -408,6 +488,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         let maxCap = Swift.max(1, drafter.config.blockSize - 1)
         self.capPolicy = DFlashCapPolicy(maxCap: maxCap)
         self.verifyConfig = verifyConfig
+        self.calibrationKey = calibrationKey
+        self.calibrator = calibrationKey == nil ? nil : (calibrator ?? .shared)
         self.draftCache = []
         self.cacheBackup = []
         self.lastLogits = MLXArray.zeros([1, 1])
@@ -495,7 +577,9 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
             return
         }
         let verifyLen = verifyConfig.verifyLength(
-            confidences: confidences, draftCount: fullIDs.count, fixedLength: policyCap)
+            confidences: confidences, draftCount: fullIDs.count, fixedLength: policyCap,
+            positionTemperatures: adaptivePositionTemperatures(
+                config: verifyConfig, calibrator: calibrator, key: calibrationKey))
         let drafted = Array(fullIDs.prefix(verifyLen))
         if drafted.isEmpty {
             denseStep()
@@ -511,7 +595,7 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         let verifyMs = Date().timeIntervalSince(tVerify) * 1000
         finishRound(
             drafted: drafted, step: verified, draftMs: draftMs, verifyMs: verifyMs,
-            draftLen: fullIDs.count)
+            draftLen: fullIDs.count, rawConfidences: confidences)
     }
 
     /// Accept a verified block. The `DFlashTarget` path uses `dflashRollback`.
@@ -523,7 +607,8 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         step: (logits: MLXArray, fused: MLXArray),
         draftMs: Double,
         verifyMs: Double,
-        draftLen: Int
+        draftLen: Int,
+        rawConfidences: [Float]
     ) {
         let tAccept = Date()
         let argmax = argmaxRows(step.logits)
@@ -561,6 +646,12 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         }
         let rollbackMs = Date().timeIntervalSince(tRoll) * 1000
         let acceptedCount = decision.acceptNormally ? result.accepted : 0
+        if decision.acceptNormally {
+            recordAdaptiveVerifyOutcome(
+                calibrator: calibrator, key: calibrationKey,
+                rawConfidences: rawConfidences, verified: drafted.count,
+                accepted: acceptedCount, prior: verifyConfig.confidenceTemperature)
+        }
         capPolicy.observe(
             accepted: acceptedCount, capUsed: drafted.count,
             scaleToMaxCap: verifyConfig.mode == .adaptive)

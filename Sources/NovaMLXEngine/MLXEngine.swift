@@ -2601,6 +2601,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             kvCache = try model.value.newCache(parameters: parameters)
         }
         let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
+        let speculationMeter = SpeculationMeter()
+        var adaptiveVerifyKey: String?
+        defer { finishAdaptiveVerifyRequest(key: adaptiveVerifyKey) }
+        var decodeTokensPerSecond: Double?
 
         // Try creating iterator with restored cache; fall back to fresh on error
         let iterator: any TokenIteratorProtocol
@@ -2617,6 +2621,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let drafter = try DSparkDrafterStore.shared.drafter(
                         for: NovaMLXPaths.directory(forModelId: draftModelId))
                     let verifyConfig = adaptiveVerifyConfig(for: request)
+                    let calibrationKey = AdaptiveVerifyCalibrator.pairKey(
+                        target: request.model, draft: draftModelId)
+                    beginAdaptiveVerifyRequest(key: calibrationKey)
                     var dsparkIterator = try DSparkTokenIterator(
                         input: effectiveInput,
                         target: target,
@@ -2624,15 +2631,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         mainCache: kvCache,
                         parameters: parameters,
                         processor: processor,
-                        verifyConfig: verifyConfig
+                        verifyConfig: verifyConfig,
+                        calibrationKey: calibrationKey
                     )
+                    adaptiveVerifyKey = calibrationKey
                     dsparkIterator.onSpeculationRound = { round in
+                        speculationMeter.record(proposed: round.proposed, accepted: round.accepted)
                         guard round.cap > 0 else { return }
                         NovaMLXLog.info("[DSpark:\(tag)] \(round.trace)")
                     }
                     iterator = dsparkIterator
                     NovaMLXLog.info(
-                        "[GENERATE:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) kdraft=\(drafter.kdraft) verify=\(verifyConfig.summary)"
+                        "[GENERATE:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) kdraft=\(drafter.kdraft) verify=\(verifyConfig.summary) \(AdaptiveVerifyCalibrator.shared.summary(for: calibrationKey))"
                     )
                 } else {
                     NovaMLXLog.info(
@@ -2673,6 +2683,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             // even when the pool would have built a Qwen3Model from the same files.
             let tag = String(request.id.uuidString.prefix(8))
             do {
+                let calibrationKey = AdaptiveVerifyCalibrator.pairKey(
+                    target: request.model, draft: draftModelId)
+                beginAdaptiveVerifyRequest(key: calibrationKey)
                 if var dflashIterator = try openDFlashIterator(
                     model: model.value,
                     draftModelId: draftModelId,
@@ -2682,9 +2695,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     processor: processor,
                     promptTokenCount: Int(promptTokenCount),
                     logTag: "GENERATE:\(tag)",
-                    verifyConfig: adaptiveVerifyConfig(for: request)
+                    verifyConfig: adaptiveVerifyConfig(for: request),
+                    calibrationKey: calibrationKey
                 ) {
+                    adaptiveVerifyKey = calibrationKey
                     dflashIterator.onSpeculationRound = { round in
+                        speculationMeter.record(proposed: round.proposed, accepted: round.accepted)
                         let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
                         guard round.cap > 0 || profile else { return }
                         NovaMLXLog.info("[DFlash:\(tag)] \(round.trace)")
@@ -2784,6 +2800,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                    let drafter = dflashDrafter, drafter.hasSpeculativeWeights, dflashCanTap
                 {
                     let verifyConfig = adaptiveVerifyConfig(for: request)
+                    let calibrationKey = AdaptiveVerifyCalibrator.pairKey(
+                        target: request.model, draft: draftModelId)
+                    beginAdaptiveVerifyRequest(key: calibrationKey)
                     var dflashIterator = try DFlashTokenIterator(
                         input: effectiveInput,
                         model: model.value,
@@ -2791,16 +2810,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         mainCache: kvCache,
                         parameters: parameters,
                         processor: processor,
-                        verifyConfig: verifyConfig
+                        verifyConfig: verifyConfig,
+                        calibrationKey: calibrationKey
                     )
+                    adaptiveVerifyKey = calibrationKey
                     dflashIterator.onSpeculationRound = { round in
+                        speculationMeter.record(proposed: round.proposed, accepted: round.accepted)
                         let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
                         guard round.cap > 0 || profile else { return }
                         NovaMLXLog.info("[DFlash:\(tag)] \(round.trace)")
                     }
                     iterator = dflashIterator
                     NovaMLXLog.info(
-                        "[GENERATE:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize) verify=\(verifyConfig.summary)"
+                        "[GENERATE:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize) verify=\(verifyConfig.summary) \(AdaptiveVerifyCalibrator.shared.summary(for: calibrationKey))"
                     )
                 } else if dflashDrafter != nil {
                     if parameters.temperature > 0 {
@@ -3092,6 +3114,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 completionTokens = info.generationTokenCount
                 genStopReason = String(describing: info.stopReason)
                 if case .length = info.stopReason { finishReason = .length }
+                decodeTokensPerSecond = info.tokensPerSecond
                 logQwenMtpCompletion(info, tag: String(request.id.uuidString.prefix(8)))
                         NovaMLXLog.debug("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
             case .toolCall(let tc):
@@ -3136,15 +3159,30 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             completionTokens: completionTokens, durationMs: elapsed * 1000,
             finishReason: finishReason.rawValue)
 
-        NovaMLXLog.info("[Engine] Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s) [\(request.model)]")
+        let speculation = speculationMeter.totals
+        if speculation.proposed > 0 {
+            let acceptRate = Double(speculation.accepted) / Double(speculation.proposed)
+            NovaMLXLog.info(
+                "[Engine] Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s) [\(request.model)] speculation verified=\(speculation.proposed) accepted=\(speculation.accepted) accept=\(String(format: "%.0f%%", acceptRate * 100))"
+            )
+        } else {
+            NovaMLXLog.info("[Engine] Generated \(completionTokens) tokens (\(String(format: "%.1f", tps)) tok/s) [\(request.model)]")
+        }
 
         let trimmedText = Self.scrubControlTokens(Self.trimControlTokens(generatedText, patterns: Self.controlTokensForModel(modelId: request.model)))
+        let calibrationTemperatures = adaptiveVerifyKey.map {
+            AdaptiveVerifyCalibrator.shared.temperatures(for: $0)
+        }
 
         return InferenceResult(
             id: request.id, model: request.model, text: trimmedText,
             toolCalls: collectedToolCalls.isEmpty ? nil : collectedToolCalls,
             tokensPerSecond: tps, promptTokens: promptTokenCount, completionTokens: completionTokens,
-            finishReason: finishReason
+            finishReason: finishReason,
+            draftTokensProposed: speculation.proposed,
+            draftTokensAccepted: speculation.accepted,
+            decodeTokensPerSecond: decodeTokensPerSecond,
+            adaptiveVerifyTemperatures: calibrationTemperatures
         )
     }
 
@@ -3440,6 +3478,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         kvCache = try model.value.newCache(parameters: parameters)
                     }
                     let kvCacheBox = MutableSendableBox<[KVCache]?>(kvCache)
+                    var streamAdaptiveVerifyKey: String?
+                    defer { finishAdaptiveVerifyRequest(key: streamAdaptiveVerifyKey) }
 
                     // Try creating iterator with restored cache; fall back to fresh on error
                     let iterator: any TokenIteratorProtocol
@@ -3457,6 +3497,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 let drafter = try DSparkDrafterStore.shared.drafter(
                                     for: NovaMLXPaths.directory(forModelId: draftModelId))
                                 let verifyConfig = adaptiveVerifyConfig(for: request)
+                                let calibrationKey = AdaptiveVerifyCalibrator.pairKey(
+                                    target: request.model, draft: draftModelId)
+                                beginAdaptiveVerifyRequest(key: calibrationKey)
+                                streamAdaptiveVerifyKey = calibrationKey
                                 var dsparkIterator = try DSparkTokenIterator(
                                     input: effectiveInput,
                                     target: target,
@@ -3464,7 +3508,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                     mainCache: kvCache,
                                     parameters: parameters,
                                     processor: processor,
-                                    verifyConfig: verifyConfig
+                                    verifyConfig: verifyConfig,
+                                    calibrationKey: calibrationKey
                                 )
                                 dsparkIterator.onSpeculationRound = { round in
                                     guard round.cap > 0 else { return }
@@ -3472,7 +3517,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 }
                                 iterator = dsparkIterator
                                 NovaMLXLog.info(
-                                    "[STREAM:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) kdraft=\(drafter.kdraft) verify=\(verifyConfig.summary)"
+                                    "[STREAM:\(tag)] DSpark draft=\(draftModelId) block=\(drafter.config.blockSize) kdraft=\(drafter.kdraft) verify=\(verifyConfig.summary) \(AdaptiveVerifyCalibrator.shared.summary(for: calibrationKey))"
                                 )
                             } else {
                                 NovaMLXLog.info(
@@ -3511,6 +3556,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     {
                         let tag = String(request.id.uuidString.prefix(8))
                         do {
+                            let calibrationKey = AdaptiveVerifyCalibrator.pairKey(
+                                target: request.model, draft: draftModelId)
+                            beginAdaptiveVerifyRequest(key: calibrationKey)
+                            streamAdaptiveVerifyKey = calibrationKey
                             if var dflashIterator = try openDFlashIterator(
                                 model: model.value,
                                 draftModelId: draftModelId,
@@ -3520,7 +3569,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 processor: processor,
                                 promptTokenCount: Int(promptTokenCount),
                                 logTag: "STREAM:\(tag)",
-                                verifyConfig: adaptiveVerifyConfig(for: request)
+                                verifyConfig: adaptiveVerifyConfig(for: request),
+                                calibrationKey: calibrationKey
                             ) {
                                 dflashIterator.onSpeculationRound = { round in
                                     let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
@@ -3622,6 +3672,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                let drafter = dflashDrafter, drafter.hasSpeculativeWeights, dflashCanTap
                             {
                                 let verifyConfig = adaptiveVerifyConfig(for: request)
+                                let calibrationKey = AdaptiveVerifyCalibrator.pairKey(
+                                    target: request.model, draft: draftModelId)
+                                beginAdaptiveVerifyRequest(key: calibrationKey)
+                                streamAdaptiveVerifyKey = calibrationKey
                                 var dflashIterator = try DFlashTokenIterator(
                                     input: effectiveInput,
                                     model: model.value,
@@ -3629,7 +3683,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                     mainCache: kvCache,
                                     parameters: parameters,
                                     processor: processor,
-                                    verifyConfig: verifyConfig
+                                    verifyConfig: verifyConfig,
+                                    calibrationKey: calibrationKey
                                 )
                                 dflashIterator.onSpeculationRound = { round in
                                     let profile = ProcessInfo.processInfo.environment["NOVAMLX_DFLASH_PROFILE"] == "1"
@@ -3638,7 +3693,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 }
                                 iterator = dflashIterator
                                 NovaMLXLog.info(
-                                    "[STREAM:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize) verify=\(verifyConfig.summary)"
+                                    "[STREAM:\(tag)] DFlash2 path selector draft=\(draftModelId) block=\(drafter.config.blockSize) verify=\(verifyConfig.summary) \(AdaptiveVerifyCalibrator.shared.summary(for: calibrationKey))"
                                 )
                             } else if dflashDrafter != nil {
                                 if parameters.temperature > 0 {
@@ -3837,6 +3892,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         completionTokens: completionTokens, durationMs: elapsed * 1000,
                         finishReason: finishReason.rawValue)
 
+                    finishAdaptiveVerifyRequest(key: streamAdaptiveVerifyKey)
                     continuation.yield(Token(id: 0, text: "", finishReason: finishReason, promptTokens: Int(promptTokenCount)))
                     continuation.finish()
                 } catch {
