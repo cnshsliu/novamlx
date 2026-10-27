@@ -345,27 +345,53 @@ extension NovaMLXAPIServer {
                         lastProgressAt = now
                     }
                 }
+                var streamedToolIDs: Set<String> = []
+                var toolIndexByID: [String: Int] = [:]
+                func openAIToolIndex(_ id: String) -> Int {
+                    if let existing = toolIndexByID[id] { return existing }
+                    let idx = toolCallCounter.increment()
+                    toolIndexByID[id] = idx
+                    return idx
+                }
+                func writeToolDelta(_ wire: ToolCallWire.Delta) async throws {
+                    let tcDelta = OpenAIToolCallDelta(
+                        index: wire.index,
+                        id: wire.id,
+                        type: wire.type,
+                        function: OpenAIFunctionCallDelta(name: wire.name, arguments: wire.arguments)
+                    )
+                    let chunk = OpenAIStreamChunk(
+                        id: chunkId,
+                        model: responseModel,
+                        choices: [OpenAIStreamChoice(index: 0, delta: OpenAIDelta(toolCalls: [tcDelta]))]
+                    )
+                    let data = try JSONEncoder().encode(chunk)
+                    try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
+                }
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
                         var tokenLogprobs: OpenAILogprobs? = Self.tokenToLogprobEntry(token).map {
                             OpenAILogprobs(content: [$0])
                         }
-                        if let tc = token.toolCall {
-                            let idx = toolCallCounter.increment()
-                            let tcDelta = OpenAIToolCallDelta(
-                                index: idx,
-                                id: tc.id,
-                                type: "function",
-                                function: OpenAIFunctionCallDelta(name: tc.functionName, arguments: tc.arguments)
-                            )
-                            let chunk = OpenAIStreamChunk(
-                                id: chunkId,
-                                model: responseModel,
-                                choices: [OpenAIStreamChoice(index: 0, delta: OpenAIDelta(toolCalls: [tcDelta]))]
-                            )
-                            let data = try JSONEncoder().encode(chunk)
-                            try await writer.write(ByteBuffer(string: "data: \(String(data: data, encoding: .utf8) ?? "")\n\n"))
+                        if let delta = token.toolDelta {
+                            let index = openAIToolIndex(delta.id)
+                            if delta.kind == .started {
+                                streamedToolIDs.insert(delta.id)
+                                try await writeToolDelta(ToolCallWire.openAIStarted(
+                                    index: index, id: delta.id, name: delta.name ?? ""))
+                            } else {
+                                try await writeToolDelta(ToolCallWire.openAIArguments(
+                                    index: index, id: delta.id, arguments: delta.arguments ?? ""))
+                            }
+                        } else if let tc = token.toolCall {
+                            // Incremental streams already sent the name and argument pieces.
+                            // Emitting the finished call again would append the JSON twice.
+                            if !streamedToolIDs.contains(tc.id) {
+                                let index = openAIToolIndex(tc.id)
+                                try await writeToolDelta(ToolCallWire.openAIWholeCall(
+                                    index: index, id: tc.id, name: tc.functionName, arguments: tc.arguments))
+                            }
                         } else if let finish = token.finishReason {
                             lastFinishReason = finish.rawValue
                             if let pt = token.promptTokens { promptTokenCount = pt }

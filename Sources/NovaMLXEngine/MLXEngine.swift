@@ -2456,11 +2456,33 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     NovaMLXLog.error("[generate] \(request.model): VLM model has no chat template — cannot process request")
                     throw NovaMLXError.inferenceFailed("Model '\(request.model)' does not have a chat template and is not compatible with text-only requests.")
                 }
-                // LLM models: fall back to plain text encoding
+                // LLM models: fall back to plain text encoding.
+                // When every non-empty message has its role special in the
+                // vocabulary, encode each region on its own and place the role
+                // marker as one id. A missing marker keeps the one-shot join,
+                // so those token ids do not change. `prepare` stays the path
+                // for templated prompts.
                 NovaMLXLog.warning("[generate] \(request.model): no chat template — falling back to plain text encoding")
-                let plainText = request.messages.compactMap { $0.content }.joined(separator: "\n\n")
                 let tokenizer = await mlxContainer.tokenizer
-                let tokens = tokenizer.encode(text: plainText)
+                let pairs = request.messages.compactMap { message -> (role: String, content: String)? in
+                    guard let content = message.content, !content.isEmpty else { return nil }
+                    return (message.role.rawValue, content)
+                }
+                let tokens: [Int]
+                if let segments = RecipePrompt.segments(messages: pairs, specialID: { tokenizer.convertTokenToId($0) }),
+                   !segments.isEmpty,
+                   case .success(let encoded) = SegmentedPromptEncoder.encode(
+                       segments,
+                       plainEncode: { tokenizer.encode(text: $0) },
+                       specialID: { tokenizer.convertTokenToId($0) }
+                   )
+                {
+                    tokens = encoded
+                    NovaMLXLog.info("[Recipe] segmented encode segments=\(segments.count) tokens=\(tokens.count)")
+                } else {
+                    let plainText = request.messages.compactMap { $0.content }.joined(separator: "\n\n")
+                    tokens = tokenizer.encode(text: plainText)
+                }
                 input = LMInput(tokens: MLXArray(tokens))
             } else {
                 throw error

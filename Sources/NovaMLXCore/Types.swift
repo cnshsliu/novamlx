@@ -257,6 +257,35 @@ public struct ToolCallResult: Codable, Sendable {
     }
 }
 
+/// One incremental tool-call update. `started` carries the name.
+/// `arguments` pieces concatenate to the finished call's arguments string.
+public struct ToolCallDelta: Codable, Sendable, Equatable {
+    public enum Kind: String, Codable, Sendable {
+        case started
+        case arguments
+    }
+
+    public let kind: Kind
+    public let index: Int
+    public let id: String
+    public let name: String?
+    public let arguments: String?
+
+    public init(
+        kind: Kind,
+        index: Int,
+        id: String,
+        name: String? = nil,
+        arguments: String? = nil
+    ) {
+        self.kind = kind
+        self.index = index
+        self.id = id
+        self.name = name
+        self.arguments = arguments
+    }
+}
+
 public struct InferenceRequest: @unchecked Sendable {
     public let id: UUID
     public let model: String
@@ -674,6 +703,9 @@ public struct Token: Codable, Sendable {
     public let topLogprobs: [TopLogprob]?
     public let finishReason: FinishReason?
     public let toolCall: ToolCallResult?
+    /// Set while a tool call is still being assembled. Nil on text and on the
+    /// finished `toolCall` token. Omitted from JSON when nil.
+    public let toolDelta: ToolCallDelta?
     public let promptTokens: Int?
     /// Flint `cached_prompt_tokens` for this request. Nil on other families.
     public let cachedTokens: Int?
@@ -682,7 +714,8 @@ public struct Token: Codable, Sendable {
 
     public init(
         id: Int, text: String, logprob: Float? = nil, topLogprobs: [TopLogprob]? = nil,
-        finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil, promptTokens: Int? = nil,
+        finishReason: FinishReason? = nil, toolCall: ToolCallResult? = nil,
+        toolDelta: ToolCallDelta? = nil, promptTokens: Int? = nil,
         cachedTokens: Int? = nil,
         channels: [HarmonyChannel]? = nil
     ) {
@@ -692,6 +725,7 @@ public struct Token: Codable, Sendable {
         self.topLogprobs = topLogprobs
         self.finishReason = finishReason
         self.toolCall = toolCall
+        self.toolDelta = toolDelta
         self.promptTokens = promptTokens
         self.cachedTokens = cachedTokens
         self.channels = channels

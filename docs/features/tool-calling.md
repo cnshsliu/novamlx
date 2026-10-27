@@ -28,6 +28,12 @@ Anthropic `POST /v1/messages` 使用 `tools: [{name, description, input_schema}]
 
 Responses 的工具定义放在 Modelfile 的 `tools` 字段，由正则加 JSON 解析提取。见 [Modelfile](modelfile.md)。Responses 同时支持 `tool_choice` 透传（auto / required / none / 指定工具），见 [API 兼容性](api-compatibility.md)。
 
+## Streaming
+
+Fused decode can emit a tool name before the call finishes, then argument fragments. Concatenating `delta.tool_calls[].function.arguments` produces the same JSON as the non-streaming `tool_calls` entry. A call that is still assembled in one piece stays a single delta. Responses streams emit `response.function_call_arguments.delta` before `response.function_call_arguments.done`.
+
+Prompt text whose specials are known at render time can be encoded in segments. Plain regions are not scanned for specials. Templated generation still tokenizes through `prepare`.
+
 ## Limits / notes
 
 - Responses 的提取方式是正则 + JSON 解析，目录没有把它写成与 OpenAI 相同的原生 `tool_calls` 结构。

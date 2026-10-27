@@ -127,35 +127,63 @@ enum FlintRecChatTemplate {
     }
 
     /// Jinja render of `chat_template.jinja` (`tokenize=False`).
+    /// The string is the joined segments, so a segment edit cannot drift from `render`.
     static func render(
         messages: [TemplateMessage],
         tools: [FlintOrderedJSON] = [],
         addGenerationPrompt: Bool = true
     ) -> String {
-        var out = ""
+        promptSegments(messages: messages, tools: tools, addGenerationPrompt: addGenerationPrompt)
+            .map(\.text)
+            .joined()
+    }
+
+    /// Template specials are their own segments. Text the template copies
+    /// from the message stays plain, including a special spelling.
+    static func promptSegments(
+        messages: [TemplateMessage],
+        tools: [FlintOrderedJSON] = [],
+        addGenerationPrompt: Bool = true
+    ) -> [PromptSegment] {
+        var segments: [PromptSegment] = []
+        func plain(_ text: String) {
+            guard !text.isEmpty else { return }
+            if case .plain(let existing) = segments.last {
+                segments[segments.count - 1] = .plain(existing + text)
+            } else {
+                segments.append(.plain(text))
+            }
+        }
+        func special(_ token: String) {
+            segments.append(.special(token))
+        }
         var toolsPending = true
         for message in messages {
             if toolsPending && message.role != "system" {
-                out += toolPreamble(tools)
+                segments.append(contentsOf: toolPreambleSegments(tools))
                 toolsPending = false
             }
             switch message.role {
             case "system":
-                out += "<|system|>" + message.content
+                special("<|system|>")
+                plain(message.content)
             case "developer":
-                out += "<|developer|>" + message.content
+                special("<|developer|>")
+                plain(message.content)
             case "user":
-                out += "<|user|>" + message.content
+                special("<|user|>")
+                plain(message.content)
             case "assistant":
-                out += "<|assistant|>"
+                special("<|assistant|>")
                 if let reasoning = message.reasoning, !reasoning.isEmpty {
-                    out += "<think>" + reasoning + "</think>"
+                    special("<think>")
+                    plain(reasoning)
+                    special("</think>")
                 }
-                if !message.content.isEmpty {
-                    out += message.content
-                }
+                plain(message.content)
                 for call in message.toolCalls {
-                    out += "<tool_call>" + call.name
+                    special("<tool_call>")
+                    plain(call.name)
                     for (key, value) in call.arguments {
                         let shown: String
                         if case .string(let raw) = value {
@@ -163,38 +191,82 @@ enum FlintRecChatTemplate {
                         } else {
                             shown = FlintJSONText.python(value)
                         }
-                        out += "<arg_key>\(key)</arg_key><arg_value>\(shown)</arg_value>"
+                        special("<arg_key>")
+                        plain(key)
+                        special("</arg_key>")
+                        special("<arg_value>")
+                        plain(shown)
+                        special("</arg_value>")
                     }
-                    out += "</tool_call>"
+                    special("</tool_call>")
                 }
             case "tool":
-                out += "<|observation|><tool_response>" + message.content + "</tool_response>"
+                special("<|observation|>")
+                special("<tool_response>")
+                plain(message.content)
+                special("</tool_response>")
             default:
                 break
             }
         }
         if toolsPending {
-            out += toolPreamble(tools)
+            segments.append(contentsOf: toolPreambleSegments(tools))
         }
         if addGenerationPrompt {
-            out += "<|assistant|>"
+            special("<|assistant|>")
         }
-        return out
+        return segments
     }
 
-    private static func toolPreamble(_ tools: [FlintOrderedJSON]) -> String {
-        guard !tools.isEmpty else { return "" }
+    private static func toolPreambleSegments(_ tools: [FlintOrderedJSON]) -> [PromptSegment] {
+        guard !tools.isEmpty else { return [] }
         // `{%-` strips the newline before each tag, so the package template is
         // `<tools>\n{json}\n</tools>` and one newline after the example call.
-        var body = "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>"
+        // Adjacent plains are merged so a BPE encode of the region is one shot.
+        var segments: [PromptSegment] = []
+        func plain(_ text: String) {
+            guard !text.isEmpty else { return }
+            if case .plain(let existing) = segments.last {
+                segments[segments.count - 1] = .plain(existing + text)
+            } else {
+                segments.append(.plain(text))
+            }
+        }
+        func special(_ token: String) { segments.append(.special(token)) }
+        special("<|system|>")
+        plain("\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within ")
+        special("<tools>")
+        special("</tools>")
+        plain(" XML tags:\n")
+        special("<tools>")
         for tool in tools {
             let function = tool.field("function") ?? tool
-            body += "\n"
-            body += FlintJSONText.python(function)
-            body += "\n"
+            plain("\n" + FlintJSONText.python(function) + "\n")
         }
-        body += "</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value>...</tool_call>\n"
-        return body
+        special("</tools>")
+        plain("\n\nFor each function call, output the function name and arguments within the following XML format:\n")
+        special("<tool_call>")
+        plain("{function-name}")
+        special("<arg_key>")
+        plain("{arg-key-1}")
+        special("</arg_key>")
+        special("<arg_value>")
+        plain("{arg-value-1}")
+        special("</arg_value>")
+        plain("...")
+        special("</tool_call>")
+        plain("\n")
+        return segments
+    }
+
+    static func fixtureSpecialID(_ token: String) -> Int? {
+        guard let ordinal = fixtureSpecials.firstIndex(of: token) else { return nil }
+        return ordinal + 1
+    }
+
+    /// Codepoint encoder used by `fixtureTokenIDs` for non-special text.
+    static func fixturePlain(_ text: String) -> [Int] {
+        text.unicodeScalars.map { 100 + Int($0.value) }
     }
 
     /// Fixture tokenizer from the alignment test: specials are 1-based in

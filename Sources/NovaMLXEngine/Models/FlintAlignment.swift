@@ -2,6 +2,7 @@ import CoreFoundation
 import CryptoKit
 import Foundation
 import NovaMLXCore
+import NovaMLXUtils
 
 /// Official Recursive `rec` request rules that sit beside the decode kernel.
 ///
@@ -334,6 +335,15 @@ package enum FlintAlignment {
         return .string(raw)
     }
 
+    static func propertySchema(toolName: String, key: String, tools: [[String: Any]]?) -> [String: Any] {
+        dictionary(properties(named: toolName, tools: tools)[key]) ?? [:]
+    }
+
+    /// JSON text of one argument value. String schemas keep the raw text.
+    static func encodedArgument(raw: String, schema: [String: Any]) -> String {
+        typedValue(raw, schema: schema).encodedFragment()
+    }
+
     private static func properties(named name: String, tools: [[String: Any]]?) -> [String: Any] {
         var properties: [String: Any] = [:]
         for tool in tools ?? [] {
@@ -534,6 +544,25 @@ enum FlintJSON: Equatable {
         else { return "{}" }
         return text
     }
+
+    /// One value, not a sorted object. Nested objects still sort their keys.
+    func encodedFragment() -> String {
+        switch self {
+        case .null: return "null"
+        case .bool(let value): return value ? "true" : "false"
+        case .int(let value): return String(value)
+        case .string(let value):
+            return "\"" + JSONStringEscape.body(value) + "\""
+        case .double, .array, .object:
+            let wrapped: [Any] = [jsonObject]
+            guard JSONSerialization.isValidJSONObject(wrapped),
+                  let data = try? JSONSerialization.data(withJSONObject: wrapped, options: [.sortedKeys]),
+                  let text = String(data: data, encoding: .utf8),
+                  text.count >= 2
+            else { return "null" }
+            return String(text.dropFirst().dropLast())
+        }
+    }
 }
 
 /// Streaming split of response text and `<tool_call>` bodies for the fused
@@ -542,6 +571,10 @@ enum FlintJSON: Equatable {
 final class FlintToolCallExtractor: @unchecked Sendable {
     enum Event: Equatable {
         case response(String)
+        /// Name is known. `id` is the same id the finished `.tool` will use.
+        case toolName(name: String, id: String)
+        /// One piece of the arguments JSON. Pieces concatenate to `.tool`'s arguments.
+        case toolArguments(id: String, delta: String)
         case tool(name: String, arguments: String, id: String)
     }
 
@@ -549,6 +582,21 @@ final class FlintToolCallExtractor: @unchecked Sendable {
     private var inCall = false
     private let tools: [[String: Any]]?
     private var identity: FlintAlignment.CallIdentity
+    private var scanOffset = 0
+    private var nameCommitted = false
+    private var callName = ""
+    private var callID = ""
+    private var json = ""
+    private var openedObject = false
+    private var stringOpen = false
+    private var pendingKey: String?
+    private var valuePhase: ValuePhase = .between
+
+    private enum ValuePhase {
+        case between
+        case string
+        case raw
+    }
 
     init(tools: [[String: Any]]?, identity: FlintAlignment.CallIdentity) {
         self.tools = tools
@@ -565,7 +613,7 @@ final class FlintToolCallExtractor: @unchecked Sendable {
                     let before = String(buffer[..<range.lowerBound])
                     if !before.isEmpty { events.append(.response(before)) }
                     buffer = String(buffer[range.upperBound...])
-                    inCall = true
+                    beginCall()
                     continue
                 }
                 let hold = Self.prefixHold(buffer, marker: "<tool_call>")
@@ -580,18 +628,14 @@ final class FlintToolCallExtractor: @unchecked Sendable {
             }
             if let range = buffer.range(of: "</tool_call>") {
                 let body = String(buffer[..<range.lowerBound])
-                buffer = String(buffer[range.upperBound...])
+                let tail = String(buffer[range.upperBound...])
+                buffer = body
+                closeCall(events: &events)
+                buffer = tail
                 inCall = false
-                if let call = FlintAlignment.parseToolCall(body: body, tools: tools) {
-                    events.append(.tool(
-                        name: call.name,
-                        arguments: call.argumentsJSON,
-                        id: identity.nextID()))
-                } else {
-                    events.append(.response("<tool_call>" + body + "</tool_call>"))
-                }
                 continue
             }
+            streamOpen(events: &events)
             break
         }
         return events
@@ -599,15 +643,227 @@ final class FlintToolCallExtractor: @unchecked Sendable {
 
     func finish() -> [Event] {
         if inCall {
+            if nameCommitted {
+                var events: [Event] = []
+                drainArguments(events: &events)
+                closeJSON(events: &events)
+                events.append(.tool(name: callName, arguments: json, id: callID))
+                buffer = ""
+                inCall = false
+                resetCall()
+                return events
+            }
             let text = "<tool_call>" + buffer
             buffer = ""
             inCall = false
+            resetCall()
             return text.isEmpty ? [] : [.response(text)]
         }
         guard !buffer.isEmpty else { return [] }
         let text = buffer
         buffer = ""
         return [.response(text)]
+    }
+
+    private func beginCall() {
+        inCall = true
+        resetCall()
+    }
+
+    private func resetCall() {
+        scanOffset = 0
+        nameCommitted = false
+        callName = ""
+        callID = ""
+        json = ""
+        openedObject = false
+        stringOpen = false
+        pendingKey = nil
+        valuePhase = .between
+    }
+
+    private func closeCall(events: inout [Event]) {
+        if !nameCommitted { _ = commitNameIfPossible(events: &events) }
+        if nameCommitted {
+            drainArguments(events: &events)
+            closeJSON(events: &events)
+            events.append(.tool(name: callName, arguments: json, id: callID))
+        } else {
+            events.append(.response("<tool_call>" + buffer + "</tool_call>"))
+        }
+        resetCall()
+    }
+
+    /// Stream a call that has not seen `</tool_call>` yet.
+    /// A name is committed only at `<arg_key>`, so `write trailing` stays text.
+    private func streamOpen(events: inout [Event]) {
+        if !nameCommitted {
+            if !commitNameIfPossible(events: &events) { return }
+        }
+        drainArguments(events: &events)
+    }
+
+    @discardableResult
+    private func commitNameIfPossible(events: inout [Event]) -> Bool {
+        let rest = tailText()
+        guard let regex = Self.nameCommit,
+              let match = regex.firstMatch(in: rest, range: NSRange(rest.startIndex..., in: rest)),
+              match.range.location != NSNotFound,
+              let nameRange = Range(match.range(at: 1), in: rest)
+        else { return false }
+        let name = String(rest[nameRange])
+        guard !name.isEmpty else { return false }
+        callName = name
+        callID = identity.nextID()
+        nameCommitted = true
+        scanOffset += match.range.length
+        events.append(.toolName(name: callName, id: callID))
+        return true
+    }
+
+    private func drainArguments(events: inout [Event]) {
+        while scanOffset < buffer.count {
+            switch valuePhase {
+            case .string:
+                if !drainString(events: &events) { return }
+            case .raw:
+                if !drainRaw(events: &events) { return }
+            case .between:
+                if !drainBetween(events: &events) { return }
+            }
+        }
+    }
+
+    private func drainBetween(events: inout [Event]) -> Bool {
+        let rest = tailText()
+        let ws = rest.prefix(while: { $0.isWhitespace })
+        if ws.count == rest.count { return false }
+        if !ws.isEmpty {
+            scanOffset += ws.count
+        }
+        let trimmed = tailText()
+        if trimmed.hasPrefix("<arg_key>") {
+            guard let end = trimmed.range(of: "</arg_key>") else { return false }
+            let keyStart = trimmed.index(trimmed.startIndex, offsetBy: "<arg_key>".count)
+            pendingKey = String(trimmed[keyStart..<end.lowerBound])
+            scanOffset += trimmed.distance(from: trimmed.startIndex, to: end.upperBound)
+            return true
+        }
+        if trimmed.hasPrefix("<arg_value>"), let key = pendingKey {
+            let schema = FlintAlignment.propertySchema(toolName: callName, key: key, tools: tools)
+            let live = FlintAlignment.schemaAccepts(schema, kind: "string")
+                && !FlintAlignment.schemaAccepts(schema, kind: "null")
+            scanOffset += "<arg_value>".count
+            if live {
+                emitArg(keyHeader(key, quote: true), events: &events)
+                stringOpen = true
+                valuePhase = .string
+            } else {
+                valuePhase = .raw
+            }
+            return true
+        }
+        if "<arg_key>".hasPrefix(trimmed) || "<arg_value>".hasPrefix(trimmed) { return false }
+        return false
+    }
+
+    private func drainString(events: inout [Event]) -> Bool {
+        let rest = tailText()
+        if let close = rest.range(of: "</arg_value>") {
+            emitArg(JSONStringEscape.body(String(rest[..<close.lowerBound])), events: &events)
+            emitArg("\"", events: &events)
+            stringOpen = false
+            pendingKey = nil
+            valuePhase = .between
+            scanOffset += rest.distance(from: rest.startIndex, to: close.upperBound)
+            return true
+        }
+        let hold = Self.prefixHold(rest, marker: "</arg_value>")
+        let take = rest.count - hold
+        if take > 0 {
+            let end = rest.index(rest.startIndex, offsetBy: take)
+            emitArg(JSONStringEscape.body(String(rest[..<end])), events: &events)
+            scanOffset += take
+        }
+        return false
+    }
+
+    private func drainRaw(events: inout [Event]) -> Bool {
+        let rest = tailText()
+        guard let close = rest.range(of: "</arg_value>"), let key = pendingKey else { return false }
+        let raw = String(rest[..<close.lowerBound])
+        let schema = FlintAlignment.propertySchema(toolName: callName, key: key, tools: tools)
+        emitArg(keyHeader(key, quote: false) + FlintAlignment.encodedArgument(raw: raw, schema: schema), events: &events)
+        pendingKey = nil
+        valuePhase = .between
+        scanOffset += rest.distance(from: rest.startIndex, to: close.upperBound)
+        return true
+    }
+
+    private func keyHeader(_ key: String, quote: Bool) -> String {
+        var delta = ""
+        if !openedObject {
+            delta += "{"
+            openedObject = true
+        } else {
+            delta += ","
+        }
+        delta += "\"" + JSONStringEscape.body(key) + "\":"
+        if quote { delta += "\"" }
+        return delta
+    }
+
+    private func emitArg(_ delta: String, events: inout [Event]) {
+        guard !delta.isEmpty, nameCommitted else { return }
+        json += delta
+        events.append(.toolArguments(id: callID, delta: delta))
+    }
+
+    private func closeJSON(events: inout [Event]) {
+        if stringOpen {
+            emitArg("\"", events: &events)
+            stringOpen = false
+        }
+        if openedObject {
+            emitArg("}", events: &events)
+        } else if json.isEmpty {
+            emitArg("{}", events: &events)
+        }
+    }
+
+    private func tailText() -> String {
+        guard scanOffset < buffer.count else { return "" }
+        let start = buffer.index(buffer.startIndex, offsetBy: scanOffset)
+        return String(buffer[start...])
+    }
+
+    private static let nameCommit: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\A\s*([^<\s]+)\s*(?=<arg_key>)"#)
+    }()
+
+    /// True when more text cannot produce `name<arg_key>`.
+    static func nameIsImpossible(_ rest: String) -> Bool {
+        var index = rest.startIndex
+        while index < rest.endIndex, rest[index].isWhitespace {
+            index = rest.index(after: index)
+        }
+        if index == rest.endIndex { return false }
+        if rest[index] == "<" {
+            let tail = rest[index...]
+            if tail.hasPrefix("<arg_key>") { return false }
+            return !"<arg_key>".hasPrefix(tail)
+        }
+        while index < rest.endIndex, rest[index] != "<", !rest[index].isWhitespace {
+            index = rest.index(after: index)
+        }
+        if index == rest.endIndex { return false }
+        while index < rest.endIndex, rest[index].isWhitespace {
+            index = rest.index(after: index)
+        }
+        if index == rest.endIndex { return false }
+        let tail = rest[index...]
+        if tail.hasPrefix("<arg_key>") { return false }
+        return !"<arg_key>".hasPrefix(tail)
     }
 
     /// Longest suffix of `text` that is a proper prefix of `marker`.
