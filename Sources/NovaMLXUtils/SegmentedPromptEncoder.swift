@@ -139,8 +139,8 @@ public enum JSONStringEscape {
     public static func body(_ text: String) -> String {
         var out = ""
         out.reserveCapacity(text.utf8.count)
-        for scalar in text.unicodeScalars {
-            out += scalar(scalar)
+        for unit in text.unicodeScalars {
+            out += scalar(unit)
         }
         return out
     }
