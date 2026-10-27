@@ -49,7 +49,7 @@ struct PrefixCacheLocationTests {
         let chosen = PrefixCacheLocation.selectRoot(
             preferred: [preferred],
             fallback: fallback,
-            isUsable: PrefixCacheLocation.isUsable
+            isUsable: { PrefixCacheLocation.isUsable($0) }
         )
         #expect(chosen.standardizedFileURL.path == preferred.standardizedFileURL.path)
     }
