@@ -128,9 +128,17 @@ struct FlintPrefixSession: Equatable, Sendable {
     }
 
     /// Successful prefill replaces the anchor with the prompt that was prefilled.
-    mutating func commit(tokens: [Int]) {
+    ///
+    /// `boundaries` are sliding-ring shots taken on the 65536-token grid.
+    /// The anchor keeps the latest of those plus the prompt end, at most two
+    /// positions, matching `PromptCache.checkpoint`.
+    mutating func commit(tokens: [Int], boundaries: [Int] = []) {
         var cache = FlintPrefixEngine.Cache(tokens: tokens)
-        if !tokens.isEmpty {
+        let prior = boundaries.filter { $0 > 0 && $0 < tokens.count }.sorted()
+        if let last = prior.last {
+            cache.checkpoints = [.init(position: last)]
+        }
+        if !tokens.isEmpty, cache.checkpoints.last?.position != tokens.count {
             cache.checkpoint()
         }
         promptCache = cache

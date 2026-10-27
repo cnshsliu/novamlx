@@ -467,6 +467,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     private var flintPrefixes: [String: FlintPrefixSession] = [:]
     private var flintKVTokens: [String: [Int]] = [:]
     private var flintKV: [String: [KVCache]] = [:]
+    /// Sliding rings captured on the 65536-token grid. At most two, like rec.
+    private var flintSlidingShots: [String: [FlintSlidingCheckpoint]] = [:]
     private var flintMetrics: [UUID: (cached: Int, common: Int)] = [:]
     /// One resident-route line per Flint sequence.
     private var flintRouteLogged: Set<UUID> = []
@@ -1135,8 +1137,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         var flintTrial = flintPrefixes[request.model] ?? FlintPrefixSession()
         var flintSelection = FlintPrefixEngine.Selection(cache: nil, common: 0, cached: 0)
         if flintFamily {
-            let taken = flintTrial.takePrefix(ids: allTokens, trimmable: true)
-            flintSelection = FlintPrefixEngine.select(prefix: taken, tokens: allTokens, trimmable: true)
+            let storedNow = flintKV[request.model]
+            let evicted = storedNow.map(FlintSWAReplay.slidingHasEvicted) ?? false
+            let taken = flintTrial.takePrefix(ids: allTokens, trimmable: !evicted)
+            flintSelection = FlintPrefixEngine.select(
+                prefix: taken, tokens: allTokens, trimmable: !evicted)
             flintTrial.noteSelection(flintSelection)
             let line = FlintPrefixEngine.prefillLog(
                 prompt: allTokens.count,
@@ -1147,32 +1152,25 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             if flintSelection.cached > 0,
                let snapTokens = flintKVTokens[request.model],
                snapTokens.count >= flintSelection.cached,
-               let stored = flintKV[request.model]
+               let stored = storedNow,
+               let seq = try await reuseFlintPrefix(
+                request: request,
+                continuation: continuation,
+                container: container,
+                mlxContainer: mlxContainer,
+                parameters: parameters,
+                allTokens: allTokens,
+                promptTokenCount: Int(promptTokenCount),
+                maxTokens: maxTokens,
+                hostGrammar: hostGrammar,
+                stored: stored,
+                snapCount: snapTokens.count,
+                kept: flintSelection.cached,
+                evicted: evicted,
+                shots: flintSlidingShots[request.model] ?? [],
+                session: flintTrial)
             {
-                let copies = stored.map { $0.copy() }
-                let drop = snapTokens.count - flintSelection.cached
-                let trimmed = drop == 0 || copies.allSatisfy { $0.trim(drop) >= drop }
-                if trimmed && flintSelection.cached < allTokens.count {
-                    let remaining = Array(allTokens.dropFirst(flintSelection.cached))
-                    let seq = try await prefillRemaining(
-                        request: request,
-                        continuation: continuation,
-                        container: container,
-                        mlxContainer: mlxContainer,
-                        parameters: parameters,
-                        restoredCaches: copies,
-                        remainingTokenIds: remaining,
-                        cachedTokenCount: flintSelection.cached,
-                        allTokens: allTokens,
-                        promptTokenCount: Int(promptTokenCount),
-                        maxTokens: maxTokens,
-                        hostGrammar: hostGrammar)
-                    flintTrial.commit(tokens: allTokens)
-                    flintPrefixes[request.model] = flintTrial
-                    flintKVTokens[request.model] = allTokens
-                    flintKV[request.model] = seq.caches.map { $0.copy() }
-                    return seq
-                }
+                return seq
             }
         }
 
@@ -1259,6 +1257,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         // Run entire prefill + first token sampling inside perform to ensure
         // correct MLX lazy evaluation context.
         let cachesBox = MutableSendableBox<[KVCache]?>(nil)
+        let flintShotBox = MutableSendableBox<[FlintSlidingCheckpoint]>([])
         let prefillResultBox = try await mlxContainer.perform { context in
             let model = context.model
             let caches = try model.newCache(parameters: prefillParams)
@@ -1280,6 +1279,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 eval(lastLogits)
                 eval(caches)
                 offset = end
+                if flintFamily, offset > 0, offset % FlintPrefixEngine.productionChunkSize == 0 {
+                    flintShotBox.value = FlintSlidingCheckpoint.pushed(
+                        flintShotBox.value, position: offset, caches: caches)
+                }
             }
             let prefillElapsed = Date().timeIntervalSince(prefillStart)
             NovaMLXLog.info("[Prefill:\(reqTag)] Forward pass completed in \(String(format: "%.1f", prefillElapsed))s for \(tokenIds.count) tokens")
@@ -1379,7 +1382,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             throw NovaMLXError.inferenceFailed("Prefill produced no cache")
         }
         if flintFamily {
-            flintTrial.commit(tokens: allTokens)
+            let shots = flintShotBox.value
+            flintSlidingShots[request.model] = shots
+            flintTrial.commit(tokens: allTokens, boundaries: shots.map(\.position))
             flintPrefixes[request.model] = flintTrial
             flintKVTokens[request.model] = allTokens
             flintKV[request.model] = caches.map { $0.copy() }
@@ -1479,6 +1484,79 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         return seq
     }
 
+    /// Trim, or restore a sliding checkpoint and replay the suffix.
+    /// Nil falls through to a full prefill. `trial` is committed only on success.
+    private func reuseFlintPrefix(
+        request: InferenceRequest,
+        continuation: AsyncThrowingStream<Token, Error>.Continuation,
+        container: ModelContainer,
+        mlxContainer: MLXLMCommon.ModelContainer,
+        parameters: GenerateParameters,
+        allTokens: [Int],
+        promptTokenCount: Int,
+        maxTokens: Int,
+        hostGrammar: HostGrammarSession?,
+        stored: [KVCache],
+        snapCount: Int,
+        kept: Int,
+        evicted: Bool,
+        shots: [FlintSlidingCheckpoint],
+        session: FlintPrefixSession
+    ) async throws -> ActiveStreamSequence? {
+        let decision = FlintSWAReplay.decide(
+            snap: snapCount, kept: kept, prompt: allTokens.count,
+            evicted: evicted, checkpoints: shots.map(\.position))
+        if case .full = decision { return nil }
+        var trial = session
+        let copies = stored.map { $0.copy() }
+        let resumeAt: Int
+        let keptShots: [FlintSlidingCheckpoint]
+        switch decision {
+        case .trim(let drop):
+            let trimmed = drop == 0 || copies.allSatisfy { $0.trim(drop) >= drop }
+            guard trimmed, kept < allTokens.count else { return nil }
+            resumeAt = kept
+            keptShots = shots.filter { $0.position <= kept }
+        case .replay(let position):
+            guard let shot = shots.last(where: { $0.position == position }) else { return nil }
+            shot.restore(into: copies)
+            let rewind = snapCount - position
+            guard FlintSWAReplay.trimKeepingSliding(copies, drop: rewind),
+                position < allTokens.count
+            else { return nil }
+            NovaMLXLog.info("[Flint] SWA replay-tail from \(position)")
+            let common = flintMetrics[request.id]?.common ?? kept
+            flintMetrics[request.id] = (position, common)
+            resumeAt = position
+            keptShots = shots.filter { $0.position <= position }
+        case .full:
+            return nil
+        }
+        let shotBox = MutableSendableBox(keptShots)
+        let seq = try await prefillRemaining(
+            request: request,
+            continuation: continuation,
+            container: container,
+            mlxContainer: mlxContainer,
+            parameters: parameters,
+            restoredCaches: copies,
+            remainingTokenIds: Array(allTokens.dropFirst(resumeAt)),
+            cachedTokenCount: resumeAt,
+            allTokens: allTokens,
+            promptTokenCount: promptTokenCount,
+            maxTokens: maxTokens,
+            hostGrammar: hostGrammar,
+            chunkSize: parameters.prefill.resolvedStepSize(),
+            slidingShots: shotBox)
+        let nextShots = shotBox.value
+        flintSlidingShots[request.model] = nextShots
+        trial.commit(tokens: allTokens, boundaries: nextShots.map(\.position))
+        flintPrefixes[request.model] = trial
+        flintKVTokens[request.model] = allTokens
+        flintKV[request.model] = seq.caches.map { $0.copy() }
+        return seq
+    }
+
     /// Prefill only the remaining tokens after a prefix cache hit.
     /// Runs model forward pass on remaining tokens with restored KV caches.
     private func prefillRemaining(
@@ -1493,7 +1571,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         allTokens: [Int],
         promptTokenCount: Int,
         maxTokens: Int,
-        hostGrammar: HostGrammarSession?
+        hostGrammar: HostGrammarSession?,
+        chunkSize: Int? = nil,
+        slidingShots: MutableSendableBox<[FlintSlidingCheckpoint]>? = nil
     ) async throws -> ActiveStreamSequence {
         // Run forward pass inside perform — model() must be called within
         // SerialAccessContainer to ensure correct MLX lazy evaluation context.
@@ -1518,8 +1598,32 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let remainingArray = MLXArray(remainingTokenIds.map { Int32($0) })
         let firstTokenIdBox = await mlxContainer.perform(nonSendable: (remainingArray, restoredCaches)) { context, values in
             let (remaining, caches) = values
-            let logits = context.model(remaining.reshaped(1, remainingTokenIds.count), cache: caches)
-            eval(logits)
+            let logits: MLXArray
+            if let chunkSize, chunkSize > 0, remainingTokenIds.count > chunkSize {
+                var last = MLXArray()
+                var cursor = 0
+                let total = remainingTokenIds.count
+                while cursor < total {
+                    let end = min(cursor + chunkSize, total)
+                    let chunk = remaining[cursor ..< end]
+                    last = context.model(chunk.reshaped(1, end - cursor), cache: caches)
+                    eval(last)
+                    eval(caches)
+                    cursor = end
+                    let absolute = cachedTokenCount + cursor
+                    if let slidingShots, absolute > 0,
+                        absolute % FlintPrefixEngine.productionChunkSize == 0
+                    {
+                        let prior = slidingShots.value.filter { $0.position < absolute }
+                        slidingShots.value = FlintSlidingCheckpoint.pushed(
+                            prior, position: absolute, caches: caches)
+                    }
+                }
+                logits = last
+            } else {
+                logits = context.model(remaining.reshaped(1, remainingTokenIds.count), cache: caches)
+                eval(logits)
+            }
             var logitsToSample = logits[0..., -1, 0...]
             // NaN/inf check — cast to float32 to avoid false positives from
             // float16 sum overflow (32K+ vocab logits easily exceed float16 max).
