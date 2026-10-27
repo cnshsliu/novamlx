@@ -11,6 +11,12 @@ public protocol PrefixCacheLayerUnwrapping: KVCache {
     var prefixCacheLayer: any KVCache { get }
 }
 
+/// Sliding-window ring whose stored length is the architecture window.
+///
+/// Prefix cache must treat this like ``RotatingKVCache``: saving the ring as a
+/// full-attention cache restores tokens the window has already dropped.
+public protocol BoundedSlidingKVCache: KVCache {}
+
 public enum CacheBlockExtractor {
 
     /// The layer prefix cache should record. Wrappers unwrap once.
@@ -23,7 +29,10 @@ public enum CacheBlockExtractor {
 
     /// True when any layer is a sliding-window ring, including through a wrapper.
     public static func usesRotatingKV(_ cache: [KVCache]) -> Bool {
-        cache.contains { canonicalLayer($0) is RotatingKVCache }
+        cache.contains { layer in
+            let canonical = canonicalLayer(layer)
+            return canonical is RotatingKVCache || canonical is BoundedSlidingKVCache
+        }
     }
 
     public static func extractBlockSlices(
@@ -44,6 +53,7 @@ public enum CacheBlockExtractor {
             // MambaCache/ArraysCache have fixed-size state — must NOT be sliced.
             let isKVType = layer is KVCacheSimple
                 || layer is RotatingKVCache
+                || layer is BoundedSlidingKVCache
                 || layer is ChunkedKVCache
                 || layer is QuantizedKVCache
 
@@ -82,7 +92,8 @@ public enum CacheBlockExtractor {
         var mergedLayers: [[MLXArray]] = Array(repeating: [], count: numLayers)
         let isKVMask: [Bool] = (0..<numLayers).map { i in
             let cls = i < layerClasses.count ? layerClasses[i] : "KVCache"
-            return cls == "KVCache" || cls == "RotatingKVCache" || cls == "ChunkedKVCache" || cls == "QuantizedKVCache"
+            return cls == "KVCache" || cls == "RotatingKVCache" || cls == "FlintSlidingKVCache"
+                || cls == "ChunkedKVCache" || cls == "QuantizedKVCache"
         }
 
         for blockData in blockDataList {
@@ -120,6 +131,14 @@ public enum CacheBlockExtractor {
                 cache = RotatingKVCache(maxSize: maxSize)
                 if !metaState.isEmpty { cache.metaState = metaState }
                 if stateArrays.count == 2 { cache.state = stateArrays }
+            case "FlintSlidingKVCache":
+                // The live ring is not written to the block store. A stale file
+                // still has to come back as a window, not a full-attention cache.
+                var maxSize = 513
+                if let v = Int(metaState.first ?? ""), v > 0 { maxSize = v }
+                cache = RotatingKVCache(maxSize: maxSize)
+                if !metaState.isEmpty { cache.metaState = metaState }
+                if stateArrays.count == 2 { cache.state = stateArrays }
             case "QuantizedKVCache":
                 cache = QuantizedKVCache()
                 if !metaState.isEmpty { cache.metaState = metaState }
@@ -151,6 +170,7 @@ public enum CacheBlockExtractor {
             case is ChunkedKVCache: "ChunkedKVCache"
             case is KVCacheSimple: "KVCache"
             case is RotatingKVCache: "RotatingKVCache"
+            case is BoundedSlidingKVCache: "FlintSlidingKVCache"
             case is QuantizedKVCache: "QuantizedKVCache"
             case is MambaCache: "MambaCache"
             case is ArraysCache: "ArraysCache"

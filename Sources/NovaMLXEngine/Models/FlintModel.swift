@@ -12,7 +12,7 @@ import NovaMLXUtils
 // Architecture: 49-layer decoder, GQA (32 q / 4 kv heads, head_dim 128) with
 // per-head QK RMSNorm and a learned per-head attention sink (`softmax_offset`,
 // GPT-OSS style). `layer_types` mixes sliding-window-513 layers (RoPE,
-// RotatingKVCache) with full-attention layers (no positional encoding,
+// `FlintSlidingKVCache`) with full-attention layers (no positional encoding,
 // KVCacheSimple). MoE from layer 2: sigmoid routing to 6 of 256 experts with
 // renormalized scores plus an ungated shared expert; layers 0-1 are dense.
 
@@ -36,6 +36,9 @@ public struct FlintConfiguration: Codable {
     var ropeTheta: Float = 10000.0
     var maxPositionEmbeddings: Int?
     var tieWordEmbeddings: Bool = false
+    /// YOCO / Gemma-style cross-decoder tail. Official Flint leaves this at 0,
+    /// so every full-attention layer keeps its own KV.
+    var numKVSharedLayers: Int = 0
     /// Transformers nests the theta in `rope_parameters` instead of the
     /// top-level `rope_theta`; the nested value wins when present.
     var ropeParameters: [String: Double]?
@@ -65,6 +68,7 @@ public struct FlintConfiguration: Codable {
         case mlxExport = "mlx_export"
         case maxPositionEmbeddings = "max_position_embeddings"
         case tieWordEmbeddings = "tie_word_embeddings"
+        case numKVSharedLayers = "num_kv_shared_layers"
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,6 +106,7 @@ public struct FlintConfiguration: Codable {
         }
         maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
         tieWordEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        numKVSharedLayers = try c.decodeIfPresent(Int.self, forKey: .numKVSharedLayers) ?? 0
         // mlx_export mixes numeric markers with a layer-index array and a
         // string scale rule. A strict [String: Double] decode throws and the
         // whole config fails; skipping the key leaves the INT4 gate dark.
@@ -200,14 +205,78 @@ class FlintAttention: Module {
             (keys, values) = cache.update(keys: keys, values: values)
         }
 
-        let out = MLXFast.scaledDotProductAttention(
+        let out = Self.attend(
             queries: queries, keys: keys, values: values,
-            scale: scale,
-            mask: mask,
-            sinks: softmaxOffset
-        )
+            scale: scale, mask: mask, sinks: softmaxOffset,
+            window: rope == nil ? nil : args.slidingWindow)
 
         return oProj(out.swappedAxes(1, 2).reshaped(B, L, -1))
+    }
+
+    /// Cross-decoder step. `reuseKV` is the source layer's K/V for this token,
+    /// already written into that layer's cache. This layer projects Q only.
+    func callAsFunction(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?,
+        reuseKV: (MLXArray, MLXArray),
+        ropeAt: RoPEOffset
+    ) -> MLXArray {
+        let (B, L) = (x.dim(0), x.dim(1))
+        var queries = qNorm(qProj(x).reshaped(B, L, args.attentionHeads, -1))
+            .transposed(0, 2, 1, 3)
+        if rope != nil {
+            queries = applyRotaryPosition(rope!, to: queries, offset: ropeAt)
+        }
+        let out = Self.attend(
+            queries: queries, keys: reuseKV.0, values: reuseKV.1,
+            scale: scale, mask: mask, sinks: softmaxOffset,
+            window: rope == nil ? nil : args.slidingWindow)
+        return oProj(out.swappedAxes(1, 2).reshaped(B, L, -1))
+    }
+
+    /// K/V that just went into SDPA, so a YOCO consumer can reuse them.
+    func publishedKV(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) -> (MLXArray, (MLXArray, MLXArray)) {
+        let (B, L) = (x.dim(0), x.dim(1))
+        var queries = qNorm(qProj(x).reshaped(B, L, args.attentionHeads, -1))
+            .transposed(0, 2, 1, 3)
+        var keys = kNorm(kProj(x).reshaped(B, L, args.kvHeads, -1))
+            .transposed(0, 2, 1, 3)
+        var values = vProj(x).reshaped(B, L, args.kvHeads, -1).transposed(0, 2, 1, 3)
+        if let rope {
+            let offset = cache?.ropeOffset
+            queries = applyRotaryPosition(rope, to: queries, offset: offset)
+            keys = applyRotaryPosition(rope, to: keys, offset: offset)
+        }
+        if let cache {
+            (keys, values) = cache.update(keys: keys, values: values)
+        }
+        let out = Self.attend(
+            queries: queries, keys: keys, values: values,
+            scale: scale, mask: mask, sinks: softmaxOffset,
+            window: rope == nil ? nil : args.slidingWindow)
+        return (oProj(out.swappedAxes(1, 2).reshaped(B, L, -1)), (keys, values))
+    }
+
+    /// Sliding layers whose key span is longer than the window replay the tail
+    /// in tiles. A tile that cannot slice the mask falls back to one SDPA.
+    private static func attend(
+        queries: MLXArray, keys: MLXArray, values: MLXArray,
+        scale: Float, mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        sinks: MLXArray, window: Int?
+    ) -> MLXArray {
+        if let window,
+            let tiled = FlintSWAAttention.replay(
+                queries: queries, keys: keys, values: values,
+                scale: scale, mask: mask, sinks: sinks, window: window)
+        {
+            return tiled
+        }
+        return MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: values,
+            scale: scale, mask: mask, sinks: sinks)
     }
 }
 
@@ -294,6 +363,31 @@ class FlintDecoderLayer: Module {
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
         let h = x + selfAttn(inputNorm(x), mask: mask, cache: cache)
+        return mix(h)
+    }
+
+    /// Source layer of a YOCO tail: same block, and the K/V SDPA just used.
+    func forwardPublishing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) -> (MLXArray, (MLXArray, MLXArray)) {
+        let (attn, kv) = selfAttn.publishedKV(inputNorm(x), mask: mask, cache: cache)
+        return (mix(x + attn), kv)
+    }
+
+    /// Cross-decoder layer. Q is this layer's; K/V are the source layer's.
+    func forwardReusing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?,
+        reuseKV: (MLXArray, MLXArray),
+        ropeAt: RoPEOffset
+    ) -> MLXArray {
+        let attn = selfAttn(
+            inputNorm(x), mask: mask, cache: cache, reuseKV: reuseKV, ropeAt: ropeAt)
+        return mix(x + attn)
+    }
+
+    private func mix(_ h: MLXArray) -> MLXArray {
         let normed = postNorm(h)
         if let moe = mlp as? FlintSparseMoeBlock {
             return h + moe(normed)
@@ -417,6 +511,8 @@ public class FlintModelInner: Module {
     let windowSize: Int
     let slidingAttentionIndex: Int
     let fullAttentionIndex: Int
+    /// Identity unless `num_kv_shared_layers` is set. Official Flint is identity.
+    let yoco: FlintYOCOLayout
 
     /// Lazily-built compiled single-token decode path (nil until first use).
     nonisolated(unsafe) private(set) var compiledLayers: [FlintCompiledLayer]?
@@ -432,6 +528,8 @@ public class FlintModelInner: Module {
         self.windowSize = config.slidingWindow
         self.slidingAttentionIndex = layerTypes.firstIndex(of: "sliding_attention") ?? 0
         self.fullAttentionIndex = layerTypes.firstIndex(of: "full_attention") ?? 0
+        self.yoco = FlintYOCOLayout.make(
+            layerTypes: config.layerTypes, sharedTail: config.numKVSharedLayers)
     }
 
     /// Single-token compiled decode: (tokenIds [1,1], position offset pair) -> logits-side hidden.
@@ -439,6 +537,7 @@ public class FlintModelInner: Module {
     func compiledDecode(
         _ inputs: MLXArray, cache: [KVCache], slidingPos: MLXArray, fullPos: MLXArray
     ) -> MLXArray? {
+        guard !yoco.sharesKV else { return nil }
         guard inputs.dim(1) == 1, cache.count == layers.count else { return nil }
         if compiledLayers == nil {
             compiledLayers = layers.map { FlintCompiledLayer($0, args: config) }
@@ -456,6 +555,9 @@ public class FlintModelInner: Module {
     ) -> MLXArray {
         var x = inputEmbeddings ?? embedTokens(inputs)
         let caches: [KVCache?] = cache ?? [KVCache?](repeating: nil, count: layers.count)
+        if yoco.sharesKV {
+            return forwardSharing(x, caches: caches)
+        }
 
         let seqLen = x.dim(1)
         var fullMask: MLXFast.ScaledDotProductAttentionMaskMode?
@@ -479,6 +581,53 @@ public class FlintModelInner: Module {
             x = layer(x, mask: maskMode, cache: caches[i])
         }
 
+        return norm(x)
+    }
+
+    /// YOCO tail. Source layers publish the K/V they just attended with.
+    /// Alias layers project Q only and do not write a cache. The rope offset
+    /// is the source cache's offset before that source update.
+    private func forwardSharing(_ x0: MLXArray, caches: [KVCache?]) -> MLXArray {
+        var x = x0
+        let seqLen = x.dim(1)
+        var fullMask: MLXFast.ScaledDotProductAttentionMaskMode?
+        var slidingMask: MLXFast.ScaledDotProductAttentionMaskMode?
+        var published: [Int: (MLXArray, MLXArray)] = [:]
+        var ropeAt: [Int: RoPEOffset] = [:]
+
+        for (i, layer) in layers.enumerated() {
+            let sliding = layerTypes[i] != "full_attention"
+            let maskMode: MLXFast.ScaledDotProductAttentionMaskMode
+            if sliding {
+                if slidingMask == nil {
+                    let anchor = yoco.source[slidingAttentionIndex]
+                    slidingMask = makeAttentionMask(
+                        n: seqLen, cache: caches[anchor], windowSize: windowSize)
+                }
+                maskMode = slidingMask!
+            } else {
+                if fullMask == nil {
+                    let anchor = yoco.source[fullAttentionIndex]
+                    fullMask = makeAttentionMask(
+                        n: seqLen, cache: caches[anchor], windowSize: nil)
+                }
+                maskMode = fullMask!
+            }
+
+            if yoco.isAlias(i) {
+                let source = yoco.source[i]
+                guard let kv = published[source], let rope = ropeAt[source] else {
+                    fatalError("YOCO layer \(i) ran before source \(source)")
+                }
+                x = layer.forwardReusing(
+                    x, mask: maskMode, cache: caches[source], reuseKV: kv, ropeAt: rope)
+            } else {
+                ropeAt[i] = caches[i]?.ropeOffset ?? .scalar(0)
+                let (next, kv) = layer.forwardPublishing(x, mask: maskMode, cache: caches[i])
+                published[i] = kv
+                x = next
+            }
+        }
         return norm(x)
     }
 }
@@ -597,6 +746,10 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             NovaMLXLog.info("[Flint] rec megakernel off: not the official INT4 export")
             return nil
         }
+        guard !model.yoco.sharesKV else {
+            NovaMLXLog.info("[Flint] rec megakernel off: num_kv_shared_layers compacts KV")
+            return nil
+        }
         do {
             let packed = try FlintRecPacker.pack(self)
             let kernel = FlintRecKernel(packed: packed)
@@ -610,16 +763,42 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
         }
     }
 
+    /// Default Flint sliding layers use the bounded ring. `kvBits`, `maxKVSize`,
+    /// `kvCache`, or `kvScheme` keep `makeHybridAttentionKVCache` so quant and
+    /// rewind stay on that path.
+    static func usesBoundedSlidingCache(_ parameters: GenerateParameters?) -> Bool {
+        guard let parameters else { return true }
+        if parameters.kvBits != nil || parameters.maxKVSize != nil || parameters.kvCache != nil {
+            return false
+        }
+        if parameters.kvScheme != nil { return false }
+        return true
+    }
+
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
-        let raw = try model.layerTypes.map { layerType in
-            try makeHybridAttentionKVCache(
-                parameters: parameters,
-                slidingWindow: configuration.slidingWindow,
-                usesSlidingWindow: layerType != "full_attention")
+        let yoco = model.yoco
+        let bounded = Self.usesBoundedSlidingCache(parameters)
+        var raw: [KVCache] = []
+        raw.reserveCapacity(model.layerTypes.count)
+        for (index, layerType) in model.layerTypes.enumerated() {
+            if yoco.isAlias(index) {
+                raw.append(FlintYOCOAliasCache(source: yoco.source[index]))
+                continue
+            }
+            let sliding = layerType != "full_attention"
+            if sliding && bounded {
+                raw.append(FlintSlidingKVCache(windowSize: configuration.slidingWindow))
+            } else {
+                raw.append(
+                    try makeHybridAttentionKVCache(
+                        parameters: parameters,
+                        slidingWindow: configuration.slidingWindow,
+                        usesSlidingWindow: sliding))
+            }
         }
         // Quantized KV cannot be copied into the megakernel's bf16 rings.
-        // Leave those caches unwrapped so eager SDPA keeps its quant path.
-        guard isOfficialInt4, parameters?.kvBits == nil else { return raw }
+        // A YOCO tail has no per-layer KV for the kernel to ingest.
+        guard isOfficialInt4, parameters?.kvBits == nil, !yoco.sharesKV else { return raw }
         guard !raw.contains(where: { $0 is QuantizedKVCacheProtocol }) else { return raw }
         return raw.enumerated().map { index, cache in
             FlintRecCacheProxy(inner: cache, layer: index, model: self)

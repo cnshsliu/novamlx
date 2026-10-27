@@ -70,6 +70,13 @@ struct FlintPrefixTests {
         #expect(hit.common == 3)
         #expect(hit.cached == 3)
         #expect(extended.chunkSize == FlintPrefixEngine.productionChunkSize)
+
+        var bounded = FlintPrefixSession()
+        bounded.commit(tokens: Array(0 ..< 100), boundaries: [40, 80])
+        #expect(bounded.promptCache?.checkpoints.map(\.position) == [80, 100])
+        var exact = FlintPrefixSession()
+        exact.commit(tokens: Array(0 ..< 80), boundaries: [40, 80])
+        #expect(exact.promptCache?.checkpoints.map(\.position) == [40, 80])
     }
 
     @Test("prepare_prefix keeps full chunks and a cancel leaves the anchor")

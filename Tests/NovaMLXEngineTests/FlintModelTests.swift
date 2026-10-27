@@ -78,6 +78,7 @@ struct FlintModelTests {
         #expect(config.layerTypes.count == 49)
         #expect(config.layerTypes.filter { $0 == "full_attention" }.count == 14)
         #expect(config.layerTypes.filter { $0 == "sliding_attention" }.count == 35)
+        #expect(config.numKVSharedLayers == 0)
 
         let model = FlintModel(config)
         #expect(model.vocabularySize == 150144)
@@ -113,16 +114,23 @@ struct FlintModelTests {
         #expect(config.ropeTheta == 123456.0)
     }
 
-    @Test("newCache mixes rotating caches (SWA) and full attention caches")
+    @Test("newCache mixes a bounded sliding ring with full attention caches")
     func testHybridCache() throws {
         let config = try JSONDecoder.json5().decode(
             FlintConfiguration.self, from: Data(Self.configJSON().utf8))
         let model = FlintModel(config)
         let caches = try model.newCache(parameters: nil)
         #expect(caches.count == 49)
-        #expect(caches.filter { $0 is RotatingKVCache }.count == 35)
-        // Full-attention layers get a non-rotating cache.
-        #expect(caches.filter { !($0 is RotatingKVCache) }.count == 14)
+        #expect(caches.filter { $0 is FlintSlidingKVCache }.count == 35)
+        // Full-attention layers keep a growing cache. Flint is not YOCO.
+        #expect(caches.filter { !($0 is FlintSlidingKVCache) && !($0 is RotatingKVCache) }.count == 14)
+        let capped = try model.newCache(parameters: GenerateParameters(maxKVSize: 128))
+        #expect(capped.filter { $0 is FlintSlidingKVCache }.isEmpty)
+        // maxKVSize is the previous hybrid policy: every attention layer rotates,
+        // and the architecture window is capped by the request. Full-attention
+        // layers are included, so this is 49 rather than the 35 sliding layers.
+        #expect(capped.filter { $0 is RotatingKVCache }.count == 49)
+        #expect(capped.allSatisfy { ($0 as? RotatingKVCache)?.maxSize == 128 })
     }
 
     @Test("sanitize stacks per-expert weights into switch_mlp and views uint8 as uint32")
@@ -169,12 +177,12 @@ struct FlintModelTests {
         let caches = try model.newCache(parameters: nil)
         let proxies = caches.compactMap { $0 as? FlintRecCacheProxy }
         #expect(proxies.count == 49)
-        #expect(proxies.map(\.inner).filter { $0 is RotatingKVCache }.count == 35)
-        #expect(proxies.map(\.inner).filter { !($0 is RotatingKVCache) }.count == 14)
+        #expect(proxies.map(\.inner).filter { $0 is FlintSlidingKVCache }.count == 35)
+        #expect(proxies.map(\.inner).filter { !($0 is FlintSlidingKVCache) }.count == 14)
         // Prefix cache must still see the sliding rings through the proxy,
         // or the rotating-cache skip turns off and a later restore flattens them.
         let classes = CacheBlockExtractor.getLayerClasses(from: caches)
-        #expect(classes.filter { $0 == "RotatingKVCache" }.count == 35)
+        #expect(classes.filter { $0 == "FlintSlidingKVCache" }.count == 35)
         #expect(classes.filter { $0 == "KVCache" }.count == 14)
         #expect(CacheBlockExtractor.usesRotatingKV(caches))
         #expect(!CacheBlockExtractor.usesRotatingKV(Array(caches.prefix(2))))
