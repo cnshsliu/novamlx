@@ -70,7 +70,7 @@ DFlash2 and DSpark schedule how many drafted tokens the target model scores. The
 
 ## Qwen MTP (greedy)
 
-A Qwen3.5 / Qwen3.8 companion whose `config.json` is an MTP head (`qwen3_5_mtp`, `qwen3_8_mtp`, or another `*_mtp` type) is not loaded as a second chat model. At temperature 0, generate and stream load that head with MLXLMCommon `MTPDrafterModelFactory` and verify drafts with `MTPSpeculativeTokenIterator`. Acceptance is the target argmax: a matching draft prefix is kept, and the first target token that disagrees is appended. That is the same token sequence as ordinary greedy decode on the same prompt. Temperature above 0 does not run this loop.
+A Qwen3.5 / Qwen3.8 companion whose `config.json` is an MTP head (`qwen3_5_mtp`, `qwen3_8_mtp`, or another `*_mtp` type) is not loaded as a second chat model. At temperature 0, generate and stream load that head with `MTPDrafterModelFactory.shared` and verify drafts with `MTPSpeculativeTokenIterator`. Text and VLM creators register on the same registry; the loaded class must be `Qwen35MTPDraftModel` for a text target or `Qwen35VLMNextNDraftModel` for `MLXVLM.Qwen35`. Acceptance is the target argmax: a matching draft prefix is kept, and the first target token that disagrees is appended. That is the same token sequence as ordinary greedy decode on the same prompt. Temperature above 0 does not run this loop.
 
 The older Engine `MtpTokenIterator` (`MtpTarget` / `MtpDrafter`) did not verify drafts. It is disabled. An in-graph head that still conforms to those Nova protocols (DeepSeek V4) stays on serial decode until it is ported to `MTPDrafterModel`. Those two protocols are not the MLXLMCommon drafter protocol.
 

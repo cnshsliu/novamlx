@@ -68,10 +68,10 @@ public final class QwenMtpDrafterStore: @unchecked Sendable {
             return box.model
         }
         await QwenMtpRegistration.ensure()
-        let factory = vision
-            ? MTPDrafterModelFactory.visionLanguage
-            : MTPDrafterModelFactory.shared
-        let container = try await factory.loadContainer(
+        // Text and VLM registrations both land on MTPDrafterTypeRegistry.shared.
+        // This tree's factory is MTPDrafterModelFactory.shared; model_type
+        // selects the head. `vision` only splits the cache key.
+        let container = try await MTPDrafterModelFactory.shared.loadContainer(
             from: directory, using: LocalTokenizerLoader())
         lock.withLock { containers[key] = container }
         let box = await container.perform { context in
@@ -151,9 +151,16 @@ func openQwenMtpIterator(
     let directory = NovaMLXPaths.directory(forModelId: draftModelId)
     let drafter = try await QwenMtpDrafterStore.shared.drafter(
         directory: directory, vision: vision)
-    guard drafter.isCompatible(with: model) else {
+    // MTPDrafterModel does not declare isCompatible. The target class was
+    // already chosen above; the loaded head must be the matching concrete type.
+    // A mismatch stays on serial decode. The VLM head traps on a text target
+    // inside prepareDrafterState, so this check runs before the iterator.
+    let drafterMatchesTarget = vision
+        ? drafter is Qwen35VLMNextNDraftModel
+        : drafter is Qwen35MTPDraftModel
+    guard drafterMatchesTarget else {
         NovaMLXLog.info(
-            "[\(logTag)] Qwen MTP '\(draftModelId)' is incompatible with \(type(of: model)) — serial decode"
+            "[\(logTag)] Qwen MTP '\(draftModelId)' loaded \(type(of: drafter)), which does not match \(type(of: model)) — serial decode"
         )
         return nil
     }
