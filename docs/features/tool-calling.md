@@ -45,5 +45,6 @@ Prompt text whose specials are known at render time can be encoded in segments. 
 - [Modelfile](modelfile.md)
 - [Anthropic↔OpenAI 翻译桥](anthropic-openai-bridge.md)
 - [Nemotron 3.5 Bolt 文本](nemotron-bolt-text.md)（该模型的工具调用为 XML）
+- [GLM-5.3-Flash 文本](glm-5-3-flash.md)（该模型的工具调用为检查点里的 GLM XML）
 
 正文来自 `features.zh-CN.md`「工具调用」；标题与 pitch 为英文。

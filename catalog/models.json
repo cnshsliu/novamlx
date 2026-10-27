@@ -1,7 +1,59 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-26T11:42:49Z",
+  "updatedAt": "2026-10-27T16:50:00Z",
   "models": [
+    {
+      "id": "TensorFold/GLM-5.3-Flash-MLX-2bit-MTP",
+      "url": "https://huggingface.co/TensorFold/GLM-5.3-Flash-MLX-2bit-MTP",
+      "name": "GLM-5.3-Flash hybrid 2-bit",
+      "description": "Text-only GLM-5.3-Flash (glm5_next) hybrid 2-bit (~111 GB): the catalog choice for 128 GB unified memory (MacMaxPro). Routed experts at 2-bit, other language weights at higher precision. Context is capped at 32,768 tokens. MTP tensors ship in the checkpoint and are not used as a drafter. Vision weights are dropped. Z.ai publishes no Apple Silicon tok/s. A local copy may already sit at /Volumes/Samsung768/Models/TensorFold/GLM-5.3-Flash-MLX-2bit-MTP. This repository is a standalone hybrid 2-bit checkpoint, not an orcarouter 2bit-lite subfolder.",
+      "category": "llm",
+      "family": "glm",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "2bit",
+      "size": "~111 GB (hybrid 2-bit)",
+      "sizeBytes": 111317859192,
+      "minRamGB": 128,
+      "addedAt": "2026-10-27T00:00:00Z",
+      "tags": [
+        "MLX",
+        "2-bit",
+        "GLM",
+        "MoE",
+        "glm5_next"
+      ],
+      "capabilities": [
+        "thinking",
+        "tools"
+      ]
+    },
+    {
+      "id": "mlx-community/GLM-5.3-Flash-4bit",
+      "url": "https://huggingface.co/mlx-community/GLM-5.3-Flash-4bit",
+      "name": "GLM-5.3-Flash 4-bit (256 GB)",
+      "description": "Text-only GLM-5.3-Flash (glm5_next): hybrid linear attention and sparse MLA, mHC, 288-expert MoE. mlx-community 4-bit (~204 GB). Needs 256 GB unified memory — a 128 GB machine cannot load it; use TensorFold/GLM-5.3-Flash-MLX-2bit-MTP instead. Context is capped at 32,768 tokens. Thinking and GLM XML tool calls come from the checkpoint chat template. Vision weights are dropped. Not the zai-org FP8 or BF16 checkpoint. Z.ai publishes no Apple Silicon tok/s.",
+      "category": "llm",
+      "family": "glm",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "4bit",
+      "size": "~204 GB (4-bit)",
+      "sizeBytes": 203992076296,
+      "minRamGB": 256,
+      "addedAt": "2026-10-27T00:00:00Z",
+      "tags": [
+        "MLX",
+        "4-bit",
+        "GLM",
+        "MoE",
+        "glm5_next"
+      ],
+      "capabilities": [
+        "thinking",
+        "tools"
+      ]
+    },
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
       "url": "https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",

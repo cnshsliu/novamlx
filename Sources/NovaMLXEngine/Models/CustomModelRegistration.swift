@@ -31,6 +31,19 @@ enum CustomModelRegistration {
                     DeepseekV4Configuration.self, from: flat)
                 return DeepseekV4Model(configuration)
             })
+        // Glm5NextConfiguration.decode unwraps text_config. JSONDecoder, not json5.
+        await LLMTypeRegistry.shared.registerModelType(
+            "glm5_next",
+            creator: { data in
+                let configuration = try Glm5NextConfiguration.decode(from: data)
+                return Glm5NextModel(configuration)
+            })
+        await LLMTypeRegistry.shared.registerModelType(
+            "glm5_next_text",
+            creator: { data in
+                let configuration = try Glm5NextConfiguration.decode(from: data)
+                return Glm5NextModel(configuration)
+            })
         // Decodable-only: Bolt's time_step_limit uses {"__float__": "Infinity"}.
         await LLMTypeRegistry.shared.registerModelType(
             "nemotron_h_puzzle",

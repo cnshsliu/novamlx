@@ -778,6 +778,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Distributed inference Workers may intentionally exceed the recommended working set
         // since they only use a subset of layers. Skip the gate when explicitly requested.
         if !skipMemoryGate {
+        if let configJson, Glm5NextMemory.isTextModel(configJson) {
+            let weightBytes = Glm5NextMemory.indexedWeightBytes(at: url)
+                ?? Self.estimateModelWeightSize(at: url)
+                ?? 0
+            if let message = Glm5NextMemory.refusalMessage(
+                modelId: config.identifier.id,
+                weightBytes: weightBytes,
+                physicalBytes: ProcessInfo.processInfo.physicalMemory
+            ) {
+                NovaMLXLog.error("[MemoryGate] \(message)")
+                throw NovaMLXError.configurationError(message)
+            }
+        }
         if let configJson, NemotronHPuzzleMemory.isTextPuzzle(configJson) {
             if let vision = configJson["vision_config"], !(vision is NSNull) {
                 throw NovaMLXError.configurationError(
@@ -921,7 +934,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             // Multimodal models (Qwen3.5) store attention params in text_config
             let tc = (json["text_config"] as? [String: Any]) ?? json
-            if let hd = tc["head_dim"] as? Int {
+            if let hd = tc["head_dim"] as? Int, hd > 0 {
                 headDim = hd
             } else if let hs = tc["hidden_size"] as? Int,
                       let nah = tc["num_attention_heads"] as? Int, nah > 0 {
@@ -935,6 +948,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if let maxPos = tc["max_position_embeddings"] as? Int, maxPos > 0 {
                 container.config.contextLength = maxPos
                 NovaMLXLog.info("[Engine] Auto-detected context length: \(maxPos) tokens for \(config.identifier.displayName)")
+            }
+
+            let rootType = (json["model_type"] as? String)?.lowercased() ?? ""
+            let textType = (tc["model_type"] as? String)?.lowercased() ?? ""
+            if rootType == "glm5_next" || rootType == "glm5_next_text"
+                || textType == "glm5_next_text"
+            {
+                if let rank = tc["kv_lora_rank"] as? Int, rank > 0 {
+                    headDim = rank
+                }
+                let cap = Glm5NextMemory.validatedContextTokens
+                if container.config.contextLength > cap {
+                    NovaMLXLog.info(
+                        "[Engine] GLM-5.3-Flash text path caps context at \(cap) tokens (checkpoint advertises \(container.config.contextLength))"
+                    )
+                    container.config.contextLength = cap
+                }
+                container.config.hasLinearAttention = true
+                NovaMLXLog.info("[Engine] Detected glm5_next text model — will use ContinuousBatcher")
             }
 
             // Detect hybrid linear attention models (e.g. Qwen3.5, bailing_hybrid).
@@ -3162,6 +3194,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 genStopReason = String(describing: info.stopReason)
                 if case .length = info.stopReason { finishReason = .length }
                 decodeTokensPerSecond = info.tokensPerSecond
+                logGlmChatDecode(
+                    container: container,
+                    model: model.value,
+                    promptTokens: Int(promptTokenCount),
+                    generationTokens: info.generationTokenCount,
+                    tokensPerSecond: info.tokensPerSecond)
                 logQwenMtpCompletion(info, tag: String(request.id.uuidString.prefix(8)))
                         NovaMLXLog.debug("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
             case .toolCall(let tc):
@@ -3898,6 +3936,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             completionTokens = info.generationTokenCount
                             infoStopReason = String(describing: info.stopReason)
                             if case .length = info.stopReason { finishReason = .length }
+                            logGlmChatDecode(
+                                container: container,
+                                model: model.value,
+                                promptTokens: Int(promptTokenCount),
+                                generationTokens: info.generationTokenCount,
+                                tokensPerSecond: info.tokensPerSecond)
                             logQwenMtpCompletion(info, tag: reqTag)
                             NovaMLXLog.debug("[STREAM:\(reqTag)] Info: tokens=\(info.generationTokenCount), stopReason=\(infoStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
                         case .toolCall(let tc):
