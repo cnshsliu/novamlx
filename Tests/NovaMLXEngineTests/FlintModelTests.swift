@@ -126,7 +126,11 @@ struct FlintModelTests {
         #expect(caches.filter { !($0 is FlintSlidingKVCache) && !($0 is RotatingKVCache) }.count == 14)
         let capped = try model.newCache(parameters: GenerateParameters(maxKVSize: 128))
         #expect(capped.filter { $0 is FlintSlidingKVCache }.isEmpty)
-        #expect(capped.filter { $0 is RotatingKVCache }.count == 35)
+        // maxKVSize is the previous hybrid policy: every attention layer rotates,
+        // and the architecture window is capped by the request. Full-attention
+        // layers are included, so this is 49 rather than the 35 sliding layers.
+        #expect(capped.filter { $0 is RotatingKVCache }.count == 49)
+        #expect(capped.allSatisfy { ($0 as? RotatingKVCache)?.maxSize == 128 })
     }
 
     @Test("sanitize stacks per-expert weights into switch_mlp and views uint8 as uint32")
