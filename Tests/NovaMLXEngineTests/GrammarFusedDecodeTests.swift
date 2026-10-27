@@ -96,11 +96,11 @@ struct GrammarFusedDecodeTests {
 
     @Test("session, VLM, hybrid, draft, MTP, and serial decode still leave")
     func specializedReasonsLeaveFused() {
-        #expect(GrammarFusedRoute.choose(plainInputs(isVLM: true, hasJSONObject: true)) == .continuousBatcher("VLM"))
-        #expect(GrammarFusedRoute.choose(plainInputs(hasLinearAttention: true, hasRegex: true)) == .continuousBatcher("hybrid"))
-        #expect(GrammarFusedRoute.choose(plainInputs(hasDraftModel: true, hasGBNF: true)) == .continuousBatcher("draft-model"))
-        #expect(GrammarFusedRoute.choose(plainInputs(hasNativeMTP: true, hasJSONSchema: true)) == .continuousBatcher("native-mtp"))
-        #expect(GrammarFusedRoute.choose(plainInputs(forceSerialDecode: true, hasJSONObject: true)) == .continuousBatcher("serial-decode"))
+        #expect(GrammarFusedRoute.choose(plainInputs(hasJSONObject: true, isVLM: true)) == .continuousBatcher("VLM"))
+        #expect(GrammarFusedRoute.choose(plainInputs(hasRegex: true, hasLinearAttention: true)) == .continuousBatcher("hybrid"))
+        #expect(GrammarFusedRoute.choose(plainInputs(hasGBNF: true, hasDraftModel: true)) == .continuousBatcher("draft-model"))
+        #expect(GrammarFusedRoute.choose(plainInputs(hasJSONSchema: true, hasNativeMTP: true)) == .continuousBatcher("native-mtp"))
+        #expect(GrammarFusedRoute.choose(plainInputs(hasJSONObject: true, forceSerialDecode: true)) == .continuousBatcher("serial-decode"))
         #expect(GrammarFusedRoute.choose(plainInputs(hasSession: true, hasJSONObject: true)) == .continuousBatcher("session"))
     }
 
