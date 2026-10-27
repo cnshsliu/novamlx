@@ -134,6 +134,9 @@ curl -X POST localhost:6590/v1/chat/completions \
 - A packet whose new text contains `<` (a tool marker, a think tag, or half a tag) is still decoded token by token. A greedy packet with no `<` is decoded once, then handed to the parser.
 - Text-to-3D and similar paths are separate from Flint. Flint is a text agent model.
 - TurboQuant KV cache drops attention sinks (the same tradeoff as GPT-OSS) and is off by default.
+- On M4 Max the decode shader vectorizes KV-team loads. `dot16` stays the ushort loop. Replacing it with `dot16_w197_bias23` left single-token decode on the eager token and made the resident packet repeat one id. `down_all_w197_bias23` still calls the wide dot.
+- Official `RecursiveSI/flint-int4` sets `router_expert_bias` false and does not store `mlp.expert_bias`. Load fills a float32 zero vector (`num_experts`) on each MoE layer, the same default as `rec`. A checkpoint tensor at `mlp.gate.expert_bias` is moved onto the MoE block. Layers in `mlp_only_layers` stay dense and do not receive one.
+- Official `RecursiveSI/flint-int4` `config.json` sets `kv_key_bits` 8, `kv_value_bits` 8, and `kv_group_size` 64. That is affine int8 KV, not MXFP4. The Mac `rec` speed path does not use it: `QATSession` stores prefill and decode KV in bf16 blocks (`KVStorage`). `MixedQuantizedKVCache` is only `Model.make_cache`, which that engine does not call. Nova's megakernel rings stay bf16 for the same reason. `kvBits` on a request still selects the hybrid quantized cache and turns the megakernel off.
 - 190.7 / 226.8 in [Speed](#speed) are `FlintSpeedTests` rec decode. FLINT-CHAT **217.3** is the chat decode window, below the same run's LOOP-RESULT **223.3**. The official 196.8 and llama.cpp ~89.7 are labeled-source comparisons, not a re-run this time. 1.8.0's 181.6 / 214.7 (packet=8) is the earlier record.
 
 ## Related

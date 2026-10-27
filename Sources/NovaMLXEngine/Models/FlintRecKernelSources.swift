@@ -9,6 +9,11 @@
 // `FlintRecKernel` before the scratch aliases below. The 76/64/64 render is
 // that pipeline with the M4 Max / M5 Max resident pool (rec device profile
 // and the M4 Max measurements in recursive-oss/rec#17).
+// `FlintRecMaxKernel` applies the KV-load half of rec's later
+// `kernels/m4_max.py` pass (vec4 loads in `attention_partial_path_w53`) when
+// the device is M4 Max. It does not retarget `dot16`: the resident packet
+// repeats one id when every dot uses `dot16_w197_bias23`. `down_all` already
+// calls that wide dot. M5 Max and M4 Pro keep this render.
 //
 // Scratch aliases: workspace, partials, statistics, routing, and trace are
 // session inputs. MLX marks inputs const; the kernel const-casts them the

@@ -3,6 +3,7 @@ import Metal
 import MLX
 import MLXFast
 import NovaMLXCore
+import NovaMLXUtils
 
 // MARK: - Launch profile
 
@@ -143,9 +144,14 @@ public final class FlintRecKernel: @unchecked Sendable {
 
     init(banks: [MLXArray], metadata: MLXArray, silu: MLXArray, configuration: MLXArray) {
         let launch = FlintRecLaunch.current()
-        let sources = launch == .max
-            ? (FlintRecKernelSources.headerMax, FlintRecKernelSources.bodyMax)
-            : (FlintRecKernelSources.headerPro, FlintRecKernelSources.bodyPro)
+        let deviceName = MTLCreateSystemDefaultDevice()?.name ?? ""
+        let body = launch == .max
+            ? FlintRecKernelSources.bodyMax
+            : FlintRecKernelSources.bodyPro
+        let header = FlintRecMaxKernel.header(launch: launch, deviceName: deviceName)
+        if header.contains("load4") {
+            NovaMLXLog.info("[Flint] M4 Max decode KV loads are vec4")
+        }
         self.launch = launch
         self.banks = banks
         self.metadata = metadata
@@ -162,11 +168,11 @@ public final class FlintRecKernel: @unchecked Sendable {
                 "trace", "workspace", "partials", "statistics", "routing",
             ],
             outputNames: ["logits", "diagnostic", "profile"],
-            source: sources.1,
-            header: sources.0,
+            source: body,
+            header: header,
             ensureRowContiguous: true
         )
-        if let resident = FlintRecResident.body(from: sources.1, workers: launch.workers) {
+        if let resident = FlintRecResident.body(from: body, workers: launch.workers) {
             self.greedyKernel = MLXFast.metalKernel(
                 name: "flint_int4_greedy_resident\(FlintRecResident.width)_\(launch.workers)",
                 inputNames: (0..<13).map { "bank\($0)" } + [
@@ -176,7 +182,7 @@ public final class FlintRecKernel: @unchecked Sendable {
                 ],
                 outputNames: ["logits", "diagnostic", "profile"],
                 source: resident,
-                header: sources.0,
+                header: header,
                 ensureRowContiguous: true
             )
         } else {
