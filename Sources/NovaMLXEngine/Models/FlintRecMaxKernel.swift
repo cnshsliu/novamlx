@@ -1,5 +1,6 @@
 import Foundation
 import NovaMLXCore
+import NovaMLXUtils
 
 // MARK: - M4 Max decode KV / INT4 dot
 
