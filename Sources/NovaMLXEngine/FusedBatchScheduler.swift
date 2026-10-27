@@ -2263,13 +2263,20 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             // it in `batchWidth` would knock a lone Flint sequence off
             // packet-16.
             var failedGrammar: [ActiveStreamSequence] = []
-            let decoding = active.filter { seq in
-                guard let grammar = seq.hostGrammar else { return true }
+            var decoding: [ActiveStreamSequence] = []
+            decoding.reserveCapacity(active.count)
+            for seq in active {
+                guard let grammar = seq.hostGrammar else {
+                    decoding.append(seq)
+                    continue
+                }
                 if grammar.hasFailed() {
                     failedGrammar.append(seq)
-                    return false
+                    continue
                 }
-                return grammar.readyMask() != nil
+                if grammar.readyMask() != nil {
+                    decoding.append(seq)
+                }
             }
             for var seq in failedGrammar {
                 if seq.safeFinish(throwing: NovaMLXError.inferenceFailed(
