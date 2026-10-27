@@ -226,6 +226,9 @@ extension NovaMLXAPIServer {
             var textMessageStarted = false
             var reasoningStarted = false
             var sequenceNumber = 0
+            var toolPlan = ResponsesToolPlan()
+            var functionItemID: [String: String] = [:]
+            var functionOutputIndex: [String: Int] = [:]
 
             func sse(_ event: String, _ data: Encodable) async throws {
                 sequenceNumber += 1
@@ -239,6 +242,55 @@ extension NovaMLXAPIServer {
                 try await writer.write(ByteBuffer(string: "event: \(event)\ndata: \(String(data: jsonData, encoding: .utf8) ?? "{}")\n\n"))
             }
 
+            func closeNarrative() async throws {
+                if reasoningStarted {
+                    let summary = reasoningText.isEmpty ? nil : [ResponsesReasoningSummary(text: String(reasoningText.prefix(500)))]
+                    try await sse("response.reasoning.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                    try await sse("response.reasoning_text.done", ResponsesSSEReasoningDone(itemId: rsId, outputIndex: currentOutputIndex, summary: summary))
+                    try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .reasoning(ResponseOutputReasoning(id: rsId, summary: summary))))
+                    outputItems.append(.reasoning(ResponseOutputReasoning(id: rsId, summary: summary)))
+                    currentOutputIndex += 1
+                    reasoningStarted = false
+                    reasoningText = ""
+                }
+                if textMessageStarted {
+                    try await sse("response.output_text.done", ResponsesSSETextDone(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, text: fullText))
+                    try await sse("response.content_part.done", ResponsesSSEContentPartDone(itemId: msgId, outputIndex: currentOutputIndex, contentIndex: 0, part: ResponseContentItem(text: fullText)))
+                    try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: currentOutputIndex, item: .message(ResponseOutputMessage(id: msgId, content: [ResponseContentItem(text: fullText)]))))
+                    outputItems.append(.message(ResponseOutputMessage(id: msgId, content: [ResponseContentItem(text: fullText)])))
+                    currentOutputIndex += 1
+                    textMessageStarted = false
+                    fullText = ""
+                }
+            }
+
+            func emitToolStep(_ step: ResponsesToolPlan.Step) async throws {
+                switch step {
+                case .added(let callID, let name):
+                    try await closeNarrative()
+                    let itemID = "fc_\(callID)"
+                    let index = currentOutputIndex
+                    functionItemID[callID] = itemID
+                    functionOutputIndex[callID] = index
+                    let item = ResponseOutputItem.functionCall(ResponseOutputFunctionCall(
+                        id: itemID, callId: callID, name: name, arguments: "", status: "in_progress"))
+                    try await sse("response.output_item.added", ResponsesSSEOutputItemAdded(outputIndex: index, item: item))
+                case .argumentDelta(let callID, let delta):
+                    guard let itemID = functionItemID[callID], let index = functionOutputIndex[callID] else { return }
+                    try await sse("response.function_call_arguments.delta", ResponsesSSEFunctionCallArgsDelta(
+                        itemId: itemID, outputIndex: index, callId: callID, delta: delta))
+                case .done(let callID, let name, let arguments):
+                    guard let itemID = functionItemID[callID], let index = functionOutputIndex[callID] else { return }
+                    try await sse("response.function_call_arguments.done", ResponsesSSEFunctionCallArgsDone(
+                        itemId: itemID, outputIndex: index, callId: callID, arguments: arguments))
+                    let item = ResponseOutputItem.functionCall(ResponseOutputFunctionCall(
+                        id: itemID, callId: callID, name: name, arguments: arguments, status: "completed"))
+                    try await sse("response.output_item.done", ResponsesSSEOutputItemDone(outputIndex: index, item: item))
+                    outputItems.append(item)
+                    if index == currentOutputIndex { currentOutputIndex += 1 }
+                }
+            }
+
             do {
                 let emptyResp = ResponsesSSEResponse(id: responseId, status: "in_progress", model: modelId)
                 try await sse("response.created", ResponsesSSECreated(response: emptyResp))
@@ -247,6 +299,22 @@ extension NovaMLXAPIServer {
                 for try await event in keepAliveStream {
                     switch event {
                     case .token(let token):
+                        if token.toolDelta != nil || token.toolCall != nil {
+                            if let delta = token.toolDelta {
+                                for step in toolPlan.observeDelta(
+                                    id: delta.id, kind: delta.kind, name: delta.name, arguments: delta.arguments
+                                ) {
+                                    try await emitToolStep(step)
+                                }
+                            }
+                            if let tc = token.toolCall {
+                                for step in toolPlan.observeFinished(
+                                    id: tc.id, name: tc.functionName, arguments: tc.arguments
+                                ) {
+                                    try await emitToolStep(step)
+                                }
+                            }
+                        }
                         if !token.text.isEmpty {
                             let parsed = thinkingParser.feed(token.text)
                             if parsed.type == .thinking && !parsed.text.isEmpty {

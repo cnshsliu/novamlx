@@ -149,7 +149,12 @@ struct ActiveStreamSequence: @unchecked Sendable {
         /// derives call ids from the seed (`rec` `chat.py`). Nil keeps the
         /// stock processor for every other family.
         var flintExtractor: FlintToolCallExtractor?
+        /// JSON, Qwen XML, and flint-shaped calls on families that are not Flint.
+        /// Flint itself uses `flintExtractor` so argument types follow the schema.
+        let incremental = IncrementalToolFeed()
         var emittedToolCall = false
+        private var toolIndex = 0
+        private var indexByID: [String: Int] = [:]
         init(processor: ToolCallProcessor) {
             self.processor = processor
         }
@@ -157,14 +162,20 @@ struct ActiveStreamSequence: @unchecked Sendable {
         enum Piece {
             case text(String)
             case call(ToolCallResult)
+            case delta(ToolCallDelta)
         }
 
         func feedPieces(_ text: String) -> [Piece] {
             if let flintExtractor {
-                return flintExtractor.feed(text).map(Self.piece)
+                return flintExtractor.feed(text).map { self.piece($0) }
             }
+            let streamed = incremental.feed(text)
+            if streamed.ownsChunk {
+                return streamed.events.map { self.piece($0) }
+            }
+            guard !streamed.processorText.isEmpty else { return [] }
             var pieces: [Piece] = []
-            for out in processor.processChunkOutputs(text) {
+            for out in processor.processChunkOutputs(streamed.processorText) {
                 switch out {
                 case .response(let text):
                     pieces.append(.text(text))
@@ -179,9 +190,24 @@ struct ActiveStreamSequence: @unchecked Sendable {
 
         func finishPieces() -> [Piece] {
             if let flintExtractor {
-                return flintExtractor.finish().map(Self.piece)
+                return flintExtractor.finish().map { self.piece($0) }
             }
+            let streamed = incremental.finish()
             var pieces: [Piece] = []
+            if streamed.ownsChunk {
+                pieces.append(contentsOf: streamed.events.map { self.piece($0) })
+            } else if !streamed.processorText.isEmpty {
+                for out in processor.processChunkOutputs(streamed.processorText) {
+                    switch out {
+                    case .response(let text):
+                        pieces.append(.text(text))
+                    case .toolCall(let tc):
+                        pieces.append(.call(ActiveStreamSequence.toolCallResult(tc)))
+                    case .rejectedToolCall:
+                        break
+                    }
+                }
+            }
             for out in processor.processEOSOutputs() {
                 switch out {
                 case .response(let text):
@@ -195,13 +221,38 @@ struct ActiveStreamSequence: @unchecked Sendable {
             return pieces
         }
 
-        private static func piece(_ event: FlintToolCallExtractor.Event) -> Piece {
+        private func piece(_ event: FlintToolCallExtractor.Event) -> Piece {
             switch event {
             case .response(let text):
                 return .text(text)
+            case .toolName(let name, let id):
+                return .delta(ToolCallDelta(kind: .started, index: openIndex(id: id), id: id, name: name))
+            case .toolArguments(let id, let delta):
+                return .delta(ToolCallDelta(kind: .arguments, index: openIndex(id: id), id: id, arguments: delta))
             case .tool(let name, let arguments, let id):
                 return .call(ToolCallResult(id: id, functionName: name, arguments: arguments))
             }
+        }
+
+        private func piece(_ event: IncrementalToolFeed.Event) -> Piece {
+            switch event {
+            case .text(let text):
+                return .text(text)
+            case .started(let id, let name):
+                return .delta(ToolCallDelta(kind: .started, index: openIndex(id: id), id: id, name: name))
+            case .arguments(let id, let delta):
+                return .delta(ToolCallDelta(kind: .arguments, index: openIndex(id: id), id: id, arguments: delta))
+            case .finished(let id, let name, let arguments):
+                return .call(ToolCallResult(id: id, functionName: name, arguments: arguments))
+            }
+        }
+
+        private func openIndex(id: String) -> Int {
+            if let existing = indexByID[id] { return existing }
+            let index = toolIndex
+            toolIndex += 1
+            indexByID[id] = index
+            return index
         }
     }
 
@@ -237,6 +288,8 @@ struct ActiveStreamSequence: @unchecked Sendable {
             case .call(let call):
                 state.emittedToolCall = true
                 safeYield(Token(id: 0, text: "", toolCall: call))
+            case .delta(let delta):
+                safeYield(Token(id: 0, text: "", toolDelta: delta))
             }
             first = false
         }
@@ -252,6 +305,8 @@ struct ActiveStreamSequence: @unchecked Sendable {
             case .call(let call):
                 state.emittedToolCall = true
                 safeYield(Token(id: 0, text: "", toolCall: call))
+            case .delta(let delta):
+                safeYield(Token(id: 0, text: "", toolDelta: delta))
             }
         }
     }
@@ -837,6 +892,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             case .call(let call):
                 state.emittedToolCall = true
                 continuation.yield(Token(id: 0, text: "", toolCall: call))
+            case .delta(let delta):
+                continuation.yield(Token(id: 0, text: "", toolDelta: delta))
             }
             first = false
         }
@@ -856,6 +913,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             case .call(let call):
                 state.emittedToolCall = true
                 continuation.yield(Token(id: 0, text: "", toolCall: call))
+            case .delta(let delta):
+                continuation.yield(Token(id: 0, text: "", toolDelta: delta))
             }
         }
     }
