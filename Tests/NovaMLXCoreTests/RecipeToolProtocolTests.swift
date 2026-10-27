@@ -28,7 +28,7 @@ struct RecipeToolProtocolTests {
     }
 
     @Test("special ranges must be ordered and on scalar boundaries")
-    func testSegmentRangeChecks() {
+    func testSegmentRangeChecks() throws {
         #expect(throws: SegmentedPromptEncoder.EncodeError.self) {
             try SegmentedPromptEncoder.segments(text: "abcd", specialUTF8Ranges: [0..<2, 1..<3]).get()
         }
