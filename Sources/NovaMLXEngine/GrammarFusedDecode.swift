@@ -318,6 +318,7 @@ final class HostGrammarSession: @unchecked Sendable {
     private var mask: [Bool]?
     private var vocab = 0
     private var slowCompileInFlight = false
+    private var compileFailed = false
     private var compileGeneration = 0
 
     init(grammar: any FusedHostGrammar, kind: HostGrammarKind) {
@@ -370,8 +371,13 @@ final class HostGrammarSession: @unchecked Sendable {
         let hit = grammar.fusedLastCompileWasCacheHit
         lock.lock()
         vocab = vocabSize
-        if !bits.isEmpty {
+        if bits.isEmpty {
+            mask = nil
+            compileFailed = true
+            slowCompileInFlight = false
+        } else {
             mask = bits
+            compileFailed = false
             slowCompileInFlight = false
         }
         lock.unlock()
@@ -386,6 +392,14 @@ final class HostGrammarSession: @unchecked Sendable {
         defer { lock.unlock() }
         if slowCompileInFlight { return nil }
         return mask
+    }
+
+    /// The last compile stored no bits. The sequence must stop. An empty
+    /// mask is not "ready": treating it as ready would sample unconstrained.
+    func hasFailed() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return compileFailed
     }
 
     /// Advance the FSM. `true` means the caller must `scheduleSlowCompile`
@@ -415,7 +429,14 @@ final class HostGrammarSession: @unchecked Sendable {
         let generation = compileGeneration
         let vocabSize = vocab
         lock.unlock()
-        guard vocabSize > 0 else { return }
+        guard vocabSize > 0 else {
+            lock.lock()
+            compileFailed = true
+            slowCompileInFlight = false
+            lock.unlock()
+            NovaMLXLog.error("[Grammar] compile skipped kind=\(kind.rawValue) reason=unknown-vocab")
+            return
+        }
         Task.detached { [grammar, kind, weak self] in
             let started = Date()
             let bits = grammar.fusedCompileMask(vocabSize: vocabSize)
@@ -423,17 +444,29 @@ final class HostGrammarSession: @unchecked Sendable {
             guard let self else { return }
             self.lock.lock()
             let installed: Bool
+            let failedEmpty: Bool
             if self.compileGeneration == generation {
-                if !bits.isEmpty { self.mask = bits }
+                if bits.isEmpty {
+                    self.mask = nil
+                    self.compileFailed = true
+                    failedEmpty = true
+                } else {
+                    self.mask = bits
+                    self.compileFailed = false
+                    failedEmpty = false
+                }
                 self.slowCompileInFlight = false
-                installed = true
+                installed = !bits.isEmpty
             } else {
                 installed = false
+                failedEmpty = false
             }
             self.lock.unlock()
             if installed {
                 NovaMLXLog.debug(
                     "[Grammar] refreshed kind=\(kind.rawValue) elapsedMs=\(String(format: "%.1f", elapsedMs))")
+            } else if failedEmpty {
+                NovaMLXLog.error("[Grammar] compile produced an empty mask kind=\(kind.rawValue)")
             }
         }
     }

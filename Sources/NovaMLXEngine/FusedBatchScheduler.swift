@@ -2004,7 +2004,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         do {
             let seq = try await openSequence(request: item.request, continuation: item.continuation)
             if !seq.isFinished {
-                _ = await adoptIfNotCancelled(seq, modelId: modelId)
+                // The run loop may already have exited: this prefill was
+                // detached so grammar compile would not block it, and the
+                // queue entry is gone. Start the loop again once the
+                // sequence is in the decode set.
+                if await adoptIfNotCancelled(seq, modelId: modelId) {
+                    scheduleRunLoop()
+                }
             } else {
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
@@ -2256,9 +2262,26 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             // this forward and rejoins when `readyMask()` returns. Counting
             // it in `batchWidth` would knock a lone Flint sequence off
             // packet-16.
+            var failedGrammar: [ActiveStreamSequence] = []
             let decoding = active.filter { seq in
                 guard let grammar = seq.hostGrammar else { return true }
+                if grammar.hasFailed() {
+                    failedGrammar.append(seq)
+                    return false
+                }
                 return grammar.readyMask() != nil
+            }
+            for var seq in failedGrammar {
+                if seq.safeFinish(throwing: NovaMLXError.inferenceFailed(
+                    "Grammar compile produced an empty mask")) {
+                    seq._finishedByDecodeStep = true
+                    await budgetTracker.release(sequenceId: seq.id)
+                    lock.withLock {
+                        activeByModel[modelId]?.removeAll { $0.id == seq.id }
+                        activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                        cancelledRequestIds.remove(seq.id)
+                    }
+                }
             }
             if decoding.isEmpty {
                 anyActive = true
