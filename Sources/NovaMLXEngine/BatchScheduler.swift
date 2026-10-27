@@ -39,6 +39,8 @@ public final class BatchScheduler: @unchecked Sendable {
     private var _totalFusedSteps: UInt64 = 0
     private var _totalTokensViaFused: UInt64 = 0
     private var _peakBatchWidth: Int = 0
+    private var _peakFusedForwardWidth: Int = 0
+    private var _totalFusedForwards: UInt64 = 0
     private var _totalBatches: UInt64 = 0
 
     public init(engine: MLXEngine, maxBatchSize: Int = 8) {
@@ -222,36 +224,35 @@ public final class BatchScheduler: @unchecked Sendable {
                 if batchSize > _peakBatchWidth { _peakBatchWidth = batchSize }
             }
 
-            guard let firstCaches = active.first?.caches, !firstCaches.isEmpty else {
-                lock.withLock { activeByModel[modelId] = sequences }
-                continue
-            }
-            let numLayers = firstCaches.count
-
-            let stackedTokens = stacked(
-                active.map { MLXArray(Int32($0.generatedTokens.last!)) },
-                axis: 0
-            ).reshaped(batchSize, 1)
-
-            let fusedCaches: [KVCache] = (0..<numLayers).map { layerIdx in
-                let fbc = FusedBatchKVCache(maxBatchSize: maxBatchSize)
-                for seq in active {
-                    if let simpleCache = seq.caches[layerIdx] as? KVCacheSimple {
-                        _ = fbc.addSequence(id: seq.id, prefillCache: simpleCache)
+            // Same cohort rule as FusedBatchScheduler: one forward per equal
+            // KVCacheSimple offset. Unequal lengths and other cache types get
+            // their own forward so RoPE stays on that sequence's offset.
+            let offsets = active.map { DecodeFusePlanner.cacheOffset(of: $0.caches) }
+            let lanes = DecodeFusePlanner.lanes(cacheOffsets: offsets)
+            var rowLogits: [Int: MLXArray] = [:]
+            for lane in lanes {
+                switch lane.kind {
+                case .cohort(let offset):
+                    let group = lane.indices.map { active[$0] }
+                    if let logits = await cohortLogits(sequences: group, mlxContainer: mlxContainer) {
+                        noteFusedForward(width: group.count, offset: offset, modelId: modelId)
+                        for (local, index) in lane.indices.enumerated() {
+                            rowLogits[index] = logits[local][0..., -1, 0...]
+                        }
+                    } else {
+                        for index in lane.indices {
+                            if let row = await serialRowLogits(sequence: active[index], mlxContainer: mlxContainer) {
+                                rowLogits[index] = row
+                            }
+                        }
+                    }
+                case .serial:
+                    let index = lane.indices[0]
+                    if let row = await serialRowLogits(sequence: active[index], mlxContainer: mlxContainer) {
+                        rowLogits[index] = row
                     }
                 }
-                return fbc
             }
-
-            let logitsBox = await mlxContainer.perform(
-                nonSendable: (stackedTokens, fusedCaches)
-            ) { context, values in
-                let (tokens, caches) = values
-                let rawLogits = context.model(tokens, cache: caches)
-                eval(rawLogits)
-                return SendableBox(rawLogits)
-            }
-            let logits = logitsBox.value
 
             let eosId = container.tokenizer?.eosTokenId
             let isFlint = container.identifier.family == .flint
@@ -263,7 +264,7 @@ public final class BatchScheduler: @unchecked Sendable {
                         checkpoint: container.flintFinishStopIds,
                         tokenizerEOS: eosId)
                     : []
-                var seqLogits = logits[i][0..., -1, 0...]
+                guard var seqLogits = rowLogits[i] else { continue }
                 if let grammar = seq.flintGrammar {
                     seqLogits = FlintStructuralGrammar.suppress(
                         grammar.maskedTokenIds(vocabSize: seqLogits.dim(-1)), in: seqLogits)
@@ -337,9 +338,85 @@ public final class BatchScheduler: @unchecked Sendable {
                 totalFusedSteps: _totalFusedSteps,
                 totalTokensViaFused: _totalTokensViaFused,
                 peakBatchWidth: _peakBatchWidth,
-                totalBatches: _totalBatches
+                totalBatches: _totalBatches,
+                peakFusedForwardWidth: _peakFusedForwardWidth,
+                totalFusedForwards: _totalFusedForwards
             )
         }
+    }
+
+    private func noteFusedForward(width: Int, offset: Int, modelId: String) {
+        lock.withLock {
+            let first = _totalFusedForwards == 0
+            _totalFusedForwards += 1
+            if width > _peakFusedForwardWidth {
+                _peakFusedForwardWidth = width
+                NovaMLXLog.info("[BatchScheduler] peak shared forward width=\(width) offset=\(offset) model=\(modelId)")
+            } else if first {
+                NovaMLXLog.info("[BatchScheduler] shared forward width=\(width) offset=\(offset) model=\(modelId)")
+            }
+        }
+        NovaMLXLog.debug("[BatchScheduler] shared forward width=\(width) offset=\(offset) model=\(modelId)")
+    }
+
+    /// Stacked decode for one equal-offset cohort. Nil when the forward cannot
+    /// be built; KV is untouched in that case.
+    private func cohortLogits(
+        sequences: [ActiveBatchSequence],
+        mlxContainer: MLXLMCommon.ModelContainer
+    ) async -> MLXArray? {
+        guard sequences.count >= 2,
+              let layerCount = sequences.first?.caches.count, layerCount > 0,
+              sequences.allSatisfy({ $0.caches.count == layerCount }),
+              sequences.allSatisfy({ $0.generatedTokens.last != nil })
+        else { return nil }
+
+        var fusedCaches: [KVCache] = []
+        fusedCaches.reserveCapacity(layerCount)
+        for layerIdx in 0..<layerCount {
+            let fused = FusedBatchKVCache(maxBatchSize: max(maxBatchSize, sequences.count))
+            for seq in sequences {
+                guard let simple = seq.caches[layerIdx] as? KVCacheSimple else { return nil }
+                _ = fused.addSequence(id: seq.id, prefillCache: simple)
+            }
+            guard fused.activeCount == sequences.count else { return nil }
+            fusedCaches.append(fused)
+        }
+
+        let stackedTokens = stacked(
+            sequences.map { MLXArray(Int32($0.generatedTokens.last!)) },
+            axis: 0
+        ).reshaped(sequences.count, 1)
+
+        let logitsBox = await mlxContainer.perform(
+            nonSendable: (stackedTokens, fusedCaches, sequences)
+        ) { context, values in
+            let (tokens, caches, seqs) = values
+            let rawLogits = context.model(tokens, cache: caches)
+            eval(rawLogits)
+            for seq in seqs {
+                eval(seq.caches)
+            }
+            return SendableBox(rawLogits)
+        }
+        return logitsBox.value
+    }
+
+    /// One sequence, its own caches. Used for unequal offsets and non-simple KV.
+    private func serialRowLogits(
+        sequence: ActiveBatchSequence,
+        mlxContainer: MLXLMCommon.ModelContainer
+    ) async -> MLXArray? {
+        guard let last = sequence.generatedTokens.last, !sequence.caches.isEmpty else { return nil }
+        let token = MLXArray(Int32(last)).reshaped(1, 1)
+        let box = await mlxContainer.perform(nonSendable: (token, sequence.caches)) { context, values in
+            let (tokens, caches) = values
+            let raw = context.model(tokens, cache: caches)
+            eval(raw)
+            eval(caches)
+            return SendableBox(raw)
+        }
+        return box.value[0..., -1, 0...]
     }
 }
 
@@ -350,4 +427,26 @@ public struct BatchSchedulerMetrics: Codable, Sendable {
     public let totalTokensViaFused: UInt64
     public let peakBatchWidth: Int
     public let totalBatches: UInt64
+    public let peakFusedForwardWidth: Int
+    public let totalFusedForwards: UInt64
+
+    public init(
+        pendingCount: Int,
+        activeSequences: Int,
+        totalFusedSteps: UInt64,
+        totalTokensViaFused: UInt64,
+        peakBatchWidth: Int,
+        totalBatches: UInt64,
+        peakFusedForwardWidth: Int = 0,
+        totalFusedForwards: UInt64 = 0
+    ) {
+        self.pendingCount = pendingCount
+        self.activeSequences = activeSequences
+        self.totalFusedSteps = totalFusedSteps
+        self.totalTokensViaFused = totalTokensViaFused
+        self.peakBatchWidth = peakBatchWidth
+        self.totalBatches = totalBatches
+        self.peakFusedForwardWidth = peakFusedForwardWidth
+        self.totalFusedForwards = totalFusedForwards
+    }
 }
