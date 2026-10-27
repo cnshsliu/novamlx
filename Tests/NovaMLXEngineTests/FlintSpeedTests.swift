@@ -227,6 +227,66 @@ struct FlintSpeedTests {
         #expect(stats.packetSteps == n)
         #expect(stats.chatTokens == n)
 
+        // M4 Max prefill A/B. Official rec fuses gate+up only when the sorted
+        // expert rows are at least `4 * num_experts` (256 experts → 1024 rows,
+        // 171 tokens at top-6). Nova's Flint prefill chunk is 512, which is
+        // over that line. 2048 is one forward at rec's M4 Max chunk; Nova
+        // still chunks production prefill at 512. Shader compile is in the
+        // warmup. This does not assert a speedup — paste the PREFILL-AB lines
+        // into the PR. `NOVA_FLINT_PREFILL_GATEUP=0` is the same SwitchGLU arm
+        // for a full server run.
+        let prefill = try await container.perform { context -> [String] in
+            let name = FlintM4MaxPrefill.deviceName
+            guard FlintM4MaxPrefill.deviceIsM4Max(name) else {
+                return ["PREFILL-SKIP: device \(name) is not M4 Max"]
+            }
+            let previous = FlintM4MaxPrefill.route
+            defer { FlintM4MaxPrefill.route = previous }
+
+            func once(_ tokens: Int) throws -> Int {
+                let before = FlintM4MaxPrefill.fusedCalls
+                let ids = MLXArray([Int32](repeating: 1, count: tokens)).reshaped([1, tokens])
+                let caches = try context.model.newCache(parameters: nil)
+                let logits = context.model(ids, cache: caches)
+                eval(logits)
+                return FlintM4MaxPrefill.fusedCalls - before
+            }
+            func time(_ tokens: Int, _ route: FlintM4MaxPrefill.Route, _ label: String) throws -> String {
+                FlintM4MaxPrefill.route = route
+                _ = try once(tokens)
+                let t0 = Date()
+                let launches = try once(tokens)
+                let seconds = Date().timeIntervalSince(t0)
+                let rate = Double(tokens) / seconds
+                return String(
+                    format: "PREFILL-AB tokens=%d route=%@ %.1f tok/s (%.3fs, fusedLaunches=%d)",
+                    tokens, label, rate, seconds, launches)
+            }
+
+            var lines = [
+                "PREFILL-DEVICE: \(name)",
+                "PREFILL-THRESHOLD: rows >= \(256 * FlintM4MaxPrefill.rowFactor) (4 * num_experts), top-6, production chunk 512",
+            ]
+            // Compile on the 512 fused warmup inside time()'s first once().
+            for tokens in [512, 2048] {
+                lines.append(try time(tokens, .fused, "fused"))
+                lines.append(try time(tokens, .switchGLU, "switch"))
+                if tokens == 512 {
+                    lines.append(try time(tokens, .fused, "fused-repeat"))
+                    lines.append(try time(tokens, .switchGLU, "switch-repeat"))
+                }
+            }
+            return lines
+        }
+        for line in prefill { print(line) }
+        if !prefill.contains(where: { $0.hasPrefix("PREFILL-SKIP") }) {
+            let fused = prefill.filter { $0.contains("route=fused ") || $0.contains("route=fused-repeat") }
+            let switched = prefill.filter { $0.contains("route=switch") }
+            #expect(!fused.isEmpty)
+            #expect(fused.allSatisfy { $0.contains("fusedLaunches=0") == false })
+            #expect(switched.allSatisfy { $0.contains("fusedLaunches=0") })
+        }
+
         // MegaDecode is an obsolete compile experiment. After a successful rec
         // loop it still launches and GPU-timeouts, which fails this suite.
         // The microbench / dump probes below it are the same optional A/B.
