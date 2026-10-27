@@ -3,6 +3,7 @@ import Metal
 import MLX
 import MLXFast
 import NovaMLXCore
+import NovaMLXUtils
 
 // MARK: - Launch profile
 
