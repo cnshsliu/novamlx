@@ -186,6 +186,40 @@ struct FlintModelTests {
         #expect(classes.filter { $0 == "KVCache" }.count == 14)
         #expect(CacheBlockExtractor.usesRotatingKV(caches))
         #expect(!CacheBlockExtractor.usesRotatingKV(Array(caches.prefix(2))))
+        // The whole stack includes sliding rings, so it must not be flattened
+        // into the block-hash SSD store. The two leading full-attention
+        // layers, alone, are not a sliding ring.
+        #expect(!CacheBlockExtractor.admitsLongTermKV(caches))
+        #expect(CacheBlockExtractor.admitsLongTermKV(Array(caches.prefix(2))))
+    }
+
+    @Test("sliding ring is not written to the long-term prefix store")
+    func testSlidingSkipsLongTermPrefixStore() {
+        let sliding = FlintSlidingKVCache(windowSize: 4)
+        let rotating = RotatingKVCache(maxSize: 4, step: 4)
+        let plain = KVCacheSimple()
+        #expect(!CacheBlockExtractor.admitsLongTermKV([sliding]))
+        #expect(!CacheBlockExtractor.admitsLongTermKV([rotating]))
+        #expect(CacheBlockExtractor.admitsLongTermKV([plain]))
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("flint-prefix-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = PrefixCacheManager(
+            config: PrefixCacheConfig(
+                blockSize: 4,
+                maxBlocks: 16,
+                initialBlocks: 4,
+                ssdCacheDir: dir,
+                hotCacheMaxBytes: 1_000_000,
+                ttl: 60
+            ),
+            modelName: "flint-sliding"
+        )
+        manager.storeCache(tokenIds: Array(0..<8), cache: [sliding, plain])
+        let stats = manager.getStats()
+        #expect(stats.ssdBlockCount == 0)
+        #expect(stats.hotCacheBlockCount == 0)
     }
 
     @Test("rec trim drops the decode suffix and leaves eager prefill in place")

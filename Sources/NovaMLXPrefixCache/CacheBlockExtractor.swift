@@ -35,6 +35,15 @@ public enum CacheBlockExtractor {
         }
     }
 
+    /// Long-term prefix files store a full sequence axis. A sliding ring
+    /// (``RotatingKVCache`` or Flint's ``BoundedSlidingKVCache``) has already
+    /// dropped tokens outside its window, so flattening it would restore a
+    /// prefix the model no longer has. Flint keeps that prefix in its own
+    /// in-memory `select_prefix` snapshot instead.
+    public static func admitsLongTermKV(_ cache: [KVCache]) -> Bool {
+        !cache.isEmpty && !usesRotatingKV(cache)
+    }
+
     public static func extractBlockSlices(
         cache: [KVCache],
         startIdx: Int,

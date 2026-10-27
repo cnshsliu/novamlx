@@ -34,6 +34,10 @@
 
 可以多实例。跨实例可共享的只有 `models/`。
 
+## 前缀缓存目录
+
+长期 prefix KV 的根目录、TTL 和热 RAM 预算见 [KV cache](kv-cache.md)。路径文件是 `~/.config/novamlx/prefix-cache-path`（第一行优先，外置盘不在就用下一行），数值在 `prefix-cache.json`，也可用 `NOVA_PREFIX_CACHE_ROOT`、`NOVA_PREFIX_CACHE_TTL`、`NOVA_PREFIX_CACHE_HOT_BYTES`、`NOVA_PREFIX_CACHE_MAX_BYTES`。不要求 `/Volumes/...` 一定挂载。
+
 ## 引擎默认
 
 `ModelFamilyRegistry` 提供按家族的 KV 精度、prefill 块大小、上下文和草稿模型推荐。见 [模型架构](model-architectures.md)。

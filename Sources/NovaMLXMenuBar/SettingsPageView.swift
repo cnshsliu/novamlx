@@ -762,7 +762,11 @@ struct SettingsPageView: View {
                     exclusiveAutoUnload: appState.exclusiveAutoUnload,
                     enforceToolSchemas: current.enforceToolSchemas,
                     autoLoad: current.autoLoad,
-                    cluster: clusterSettings
+                    cluster: clusterSettings,
+                    prefixCacheRoots: current.prefixCacheRoots,
+                    prefixCacheTTLSeconds: current.prefixCacheTTLSeconds,
+                    prefixCacheHotBytes: current.prefixCacheHotBytes,
+                    prefixCacheMaxBytes: current.prefixCacheMaxBytes
                 )
                 await config.setServerConfig(newServerConfig)
                 await config.setDefaultModel(cfgDefaultModel.isEmpty ? nil : cfgDefaultModel)
@@ -952,7 +956,11 @@ struct SettingsPageView: View {
                 exclusiveAutoUnload: appState.exclusiveAutoUnload,
                 enforceToolSchemas: currentServer.enforceToolSchemas,
                 autoLoad: currentServer.autoLoad,
-                cluster: clusterSettings
+                cluster: clusterSettings,
+                prefixCacheRoots: currentServer.prefixCacheRoots,
+                prefixCacheTTLSeconds: currentServer.prefixCacheTTLSeconds,
+                prefixCacheHotBytes: currentServer.prefixCacheHotBytes,
+                prefixCacheMaxBytes: currentServer.prefixCacheMaxBytes
             )
             await config.setServerConfig(newServer)
         }

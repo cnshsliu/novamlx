@@ -3179,8 +3179,11 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     inferenceTime: elapsed
                 )
 
-                // Store prefix cache blocks for this sequence's prompt
-                if !seq.promptTokenIds.isEmpty {
+                // Store prefix cache blocks for this sequence's prompt.
+                // Flint keeps `select_prefix` and the sliding ring in memory.
+                // `storeCache` also refuses a sliding window, so a ring cannot
+                // be flattened into the long-term files.
+                if container.identifier.family != .flint, !seq.promptTokenIds.isEmpty {
                     if let prefixCache = engine.getOrCreatePrefixCacheManager(modelId: seq.modelId) {
                         prefixCache.storeCache(tokenIds: seq.promptTokenIds, cache: seq.caches)
                     }

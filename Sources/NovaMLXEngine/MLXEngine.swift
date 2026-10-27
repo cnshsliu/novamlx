@@ -505,6 +505,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// `true` matches the historical behavior; engine sync from configuration
     /// happens via `setPrefixCacheEnabled(_:)`.
     private var prefixCacheEnabled: Bool = true
+    /// In-memory override for the long-term prefix store. Nil fields fall
+    /// through to `NOVA_PREFIX_CACHE_*` and `~/.config/novamlx/prefix-cache-*`.
+    private var prefixCacheExplicit = PrefixCacheLocation.Persisted()
     /// Per-model cache of `TokenMaskBuilder` instances. Built on first
     /// structured-output request; invalidated on model unload. Avoids the
     /// per-request cost of decoding every token in the vocabulary (250k+
@@ -1246,24 +1249,42 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         lock.withLock { prefixCacheManagers[modelId]?.clear() }
     }
 
+    /// Override long-term prefix storage for this process. Nil fields keep
+    /// the env / config-file / built-in fallback resolution. Existing
+    /// managers keep the root they were created with; restart to move them.
+    public func setPrefixCachePersistence(_ settings: PrefixCacheLocation.Persisted) {
+        lock.withLock { prefixCacheExplicit = settings }
+    }
+
     func getOrCreatePrefixCacheManager(modelId: String) -> PrefixCacheManager? {
-        lock.withLock {
-            // Operational kill switch (ServerConfig.prefixCacheEnabled). When
-            // disabled, never instantiate or return a manager — callers should
-            // treat `nil` as "no prefix cache for this request".
+        let snapshot = lock.withLock { () -> (enabled: Bool, existing: PrefixCacheManager?, explicit: PrefixCacheLocation.Persisted) in
+            (prefixCacheEnabled, prefixCacheManagers[modelId], prefixCacheExplicit)
+        }
+        // Operational kill switch (ServerConfig.prefixCacheEnabled). When
+        // disabled, never instantiate or return a manager — callers should
+        // treat `nil` as "no prefix cache for this request".
+        guard snapshot.enabled else { return nil }
+        if let existing = snapshot.existing { return existing }
+
+        let resolved = PrefixCacheLocation.resolveProduction(explicit: snapshot.explicit)
+        let ssdDir = PrefixCacheLocation.modelDirectory(modelId: modelId, root: resolved.root)
+        let config = PrefixCacheConfig(
+            blockSize: 64,
+            maxBlocks: 4096,
+            initialBlocks: 256,
+            ssdCacheDir: ssdDir,
+            ssdMaxSizeBytes: resolved.ssdMaxSizeBytes,
+            hotCacheMaxBytes: resolved.hotCacheMaxBytes,
+            ttl: resolved.ttlSeconds
+        )
+        let manager = PrefixCacheManager(config: config, modelName: modelId)
+        NovaMLXLog.info(
+            "[PrefixCache] \(modelId) root=\(resolved.root.path) ttl=\(Int(resolved.ttlSeconds))s "
+                + "hot=\(resolved.hotCacheMaxBytes)"
+        )
+        return lock.withLock {
             guard prefixCacheEnabled else { return nil }
-            if let existing = prefixCacheManagers[modelId] {
-                return existing
-            }
-            let ssdDir = NovaMLXPaths.prefixCacheDir(for: modelId)
-            let config = PrefixCacheConfig(
-                blockSize: 64,
-                maxBlocks: 4096,
-                initialBlocks: 256,
-                ssdCacheDir: ssdDir,
-                ssdMaxSizeBytes: 5 * 1024 * 1024 * 1024  // 5 GB (down from 100 GB)
-            )
-            let manager = PrefixCacheManager(config: config, modelName: modelId)
+            if let existing = prefixCacheManagers[modelId] { return existing }
             prefixCacheManagers[modelId] = manager
             return manager
         }
@@ -1292,7 +1313,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
     public func cleanupOrphanedCacheDirs(downloadedModelIds: Set<String>) {
         let fm = FileManager.default
-        let cacheBase = NovaMLXPaths.prefixCacheBaseDir
+        let explicit = lock.withLock { prefixCacheExplicit }
+        let cacheBase = PrefixCacheLocation.resolveProduction(explicit: explicit).root
         guard let contents = try? fm.contentsOfDirectory(at: cacheBase, includingPropertiesForKeys: nil) else { return }
         var cleaned = 0
         for dir in contents {

@@ -33,7 +33,15 @@ struct NovaMLXWorker {
             let cfg = await NovaMLXConfiguration.shared.serverConfig
             engine.setPrefixCacheEnabled(cfg.prefixCacheEnabled)
             await engine.applyResourceLimits(gpuRaw: cfg.maxGpuMemory, ramRaw: cfg.maxProcessMemory)
-            NovaMLXLog.info("[Worker] prefixCacheEnabled=\(cfg.prefixCacheEnabled) gpu=\(cfg.maxGpuMemory) ram=\(cfg.maxProcessMemory)")
+            // Env beats the config files. ServerConfig mirrors those files for
+            // the admin API; passing it as an explicit override would hide
+            // NOVA_PREFIX_CACHE_ROOT.
+            let prefix = PrefixCacheLocation.resolveProduction()
+            NovaMLXLog.info(
+                "[Worker] prefixCacheEnabled=\(cfg.prefixCacheEnabled) root=\(prefix.root.path) "
+                    + "ttl=\(Int(prefix.ttlSeconds))s hot=\(prefix.hotCacheMaxBytes) "
+                    + "gpu=\(cfg.maxGpuMemory) ram=\(cfg.maxProcessMemory)"
+            )
         } catch {
             NovaMLXLog.warning("[Worker] failed to load config (\(error)) — prefix cache stays at default")
         }

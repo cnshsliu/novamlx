@@ -8,7 +8,12 @@ public struct PrefixCacheConfig: Sendable {
     public let initialBlocks: Int
     public let ssdCacheDir: URL?
     public let ssdMaxSizeBytes: UInt64
+    /// Decoded blocks kept in RAM ahead of ``ssdCacheDir``. `0` turns the
+    /// tier off: disk reads stay asynchronous and are not retained. The
+    /// engine default, when the user has not set a budget, is 256 MiB.
     public let hotCacheMaxBytes: Int
+    /// Long-term entry lifetime, measured from `created_at`. The engine
+    /// default is 24 hours.
     public let ttl: TimeInterval
 
     public init(

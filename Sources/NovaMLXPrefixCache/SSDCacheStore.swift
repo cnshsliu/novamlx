@@ -9,6 +9,25 @@ struct SSDIndexEntry: Sendable {
     let fileSize: UInt64
     let tokenCount: Int
     let lastAccess: Date
+    /// Wall time the block was first written. TTL is measured from this, not
+    /// from last access, so a hot read does not keep an expired file alive.
+    let createdAt: Date
+
+    init(
+        blockHash: BlockHash,
+        filePath: URL,
+        fileSize: UInt64,
+        tokenCount: Int,
+        lastAccess: Date,
+        createdAt: Date? = nil
+    ) {
+        self.blockHash = blockHash
+        self.filePath = filePath
+        self.fileSize = fileSize
+        self.tokenCount = tokenCount
+        self.lastAccess = lastAccess
+        self.createdAt = createdAt ?? lastAccess
+    }
 }
 
 final class SSDCacheIndex: @unchecked Sendable {
@@ -51,6 +70,29 @@ final class SSDCacheIndex: @unchecked Sendable {
 
     func contains(_ hash: BlockHash) -> Bool {
         lock.withLock { entries[key(hash)] != nil }
+    }
+
+    /// Index lookup that does not refresh LRU. Used for TTL checks.
+    func peek(_ hash: BlockHash) -> SSDIndexEntry? {
+        lock.withLock { entries[key(hash)] }
+    }
+
+    /// Drop entries whose `createdAt` is older than `ttl` at `now`.
+    func removeExpired(ttl: TimeInterval, now: Date) -> [SSDIndexEntry] {
+        lock.withLock {
+            var removed: [SSDIndexEntry] = []
+            let stale = entries.compactMap { key, entry -> String? in
+                now.timeIntervalSince(entry.createdAt) > ttl ? key : nil
+            }
+            for k in stale {
+                if let entry = entries.removeValue(forKey: k) {
+                    totalSize -= entry.fileSize
+                    lruOrder.removeAll { $0 == k }
+                    removed.append(entry)
+                }
+            }
+            return removed
+        }
     }
 
     func remove(_ hash: BlockHash) -> SSDIndexEntry? {
@@ -102,13 +144,20 @@ public final class SSDCacheStore: @unchecked Sendable {
     private let cacheDir: URL
     private let index: SSDCacheIndex
     private let ttl: TimeInterval
+    private let now: @Sendable () -> Date
     private let writeQueue = DispatchQueue(label: "com.novamlx.ssd-cache-writer", qos: .utility)
     private let lock = NovaMLXLock()
 
-    public init(cacheDir: URL, maxSize: UInt64, ttl: TimeInterval = 86400) {
+    public init(
+        cacheDir: URL,
+        maxSize: UInt64,
+        ttl: TimeInterval = 86400,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.cacheDir = cacheDir
         self.index = SSDCacheIndex(maxSize: maxSize)
         self.ttl = ttl
+        self.now = now
         initializeDirectories()
         scanExistingFiles()
     }
@@ -145,10 +194,10 @@ public final class SSDCacheStore: @unchecked Sendable {
                 let metadata = try readSafetensorsMetadata(url: fileURL)
                 guard !metadata.isEmpty, let hashHex = metadata["block_hash"] else { continue }
 
-                // TTL check — prune expired entries
-                if let createdAtStr = metadata["created_at"],
-                   let createdAt = Double(createdAtStr),
-                   Date().timeIntervalSince(Date(timeIntervalSince1970: createdAt)) > ttl {
+                // TTL check — prune expired entries. A missing created_at
+                // keeps the file (legacy blocks are not wiped on upgrade).
+                let createdAt = Self.createdDate(from: metadata) ?? now()
+                if isExpired(createdAt: createdAt, at: now()) {
                     try? FileManager.default.removeItem(at: fileURL)
                     pruned += 1
                     continue
@@ -174,7 +223,8 @@ public final class SSDCacheStore: @unchecked Sendable {
                     filePath: fileURL,
                     fileSize: fileSize,
                     tokenCount: tokenCount,
-                    lastAccess: Date()
+                    lastAccess: now(),
+                    createdAt: createdAt
                 )
                 index.add(entry)
             } catch {
@@ -188,7 +238,24 @@ public final class SSDCacheStore: @unchecked Sendable {
     }
 
     public func hasBlock(_ hash: BlockHash) -> Bool {
-        index.contains(hash)
+        guard let entry = index.peek(hash) else { return false }
+        if isExpired(createdAt: entry.createdAt, at: now()) {
+            discard(entry)
+            return false
+        }
+        return true
+    }
+
+    /// Drop expired index entries and delete their files off the caller thread.
+    public func discardExpired(now: Date) {
+        let removed = index.removeExpired(ttl: ttl, now: now)
+        guard !removed.isEmpty else { return }
+        writeQueue.async {
+            for entry in removed {
+                try? FileManager.default.removeItem(at: entry.filePath)
+            }
+        }
+        NovaMLXLog.info("SSD cache expired \(removed.count) blocks (TTL=\(Int(ttl))s)")
     }
 
     public func saveBlock(
@@ -208,7 +275,7 @@ public final class SSDCacheStore: @unchecked Sendable {
             "token_count": String(tokenCount),
             "num_layers": String(cacheData.count),
             "model_name": modelName,
-            "created_at": String(Date().timeIntervalSince1970),
+            "created_at": String(now().timeIntervalSince1970),
         ]
         if !layerClasses.isEmpty {
             if let data = try? JSONEncoder().encode(layerClasses) {
@@ -246,7 +313,8 @@ public final class SSDCacheStore: @unchecked Sendable {
             filePath: path,
             fileSize: UInt64(estimatedSize),
             tokenCount: tokenCount,
-            lastAccess: Date()
+            lastAccess: now(),
+            createdAt: now()
         )
         index.add(entry)
 
@@ -270,6 +338,10 @@ public final class SSDCacheStore: @unchecked Sendable {
 
     public func loadBlock(_ hash: BlockHash) -> (arrays: [String: [MLXArray]], metadata: [String: String], numLayers: Int)? {
         if let entry = index.get(hash) {
+            if isExpired(createdAt: entry.createdAt, at: now()) {
+                discard(entry)
+                return nil
+            }
             guard FileManager.default.fileExists(atPath: entry.filePath.path) else {
                 _ = index.remove(hash)
                 return nil
@@ -344,17 +416,43 @@ public final class SSDCacheStore: @unchecked Sendable {
             try FileManager.default.moveItem(at: tempPath, to: pending.filePath)
             let attrs = try FileManager.default.attributesOfItem(atPath: pending.filePath.path)
             let actualSize = attrs[.size] as? UInt64 ?? 0
+            let createdAt = Self.createdDate(from: pending.metadata) ?? now()
+            if isExpired(createdAt: createdAt, at: now()) {
+                try? FileManager.default.removeItem(at: pending.filePath)
+                _ = index.remove(pending.blockHash)
+                return
+            }
             let updated = SSDIndexEntry(
                 blockHash: pending.blockHash,
                 filePath: pending.filePath,
                 fileSize: actualSize,
                 tokenCount: Int(pending.metadata["token_count"] ?? "0") ?? 0,
-                lastAccess: Date()
+                lastAccess: now(),
+                createdAt: createdAt
             )
             index.add(updated)
         } catch {
             NovaMLXLog.debug("SSD cache write failed: \(error)")
             _ = index.remove(pending.blockHash)
         }
+    }
+
+    private func isExpired(createdAt: Date, at instant: Date) -> Bool {
+        instant.timeIntervalSince(createdAt) > ttl
+    }
+
+    private func discard(_ entry: SSDIndexEntry) {
+        _ = index.remove(entry.blockHash)
+        let path = entry.filePath
+        writeQueue.async {
+            try? FileManager.default.removeItem(at: path)
+        }
+    }
+
+    private static func createdDate(from metadata: [String: String]) -> Date? {
+        guard let createdAtStr = metadata["created_at"], let createdAt = Double(createdAtStr) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: createdAt)
     }
 }

@@ -130,6 +130,19 @@ public actor NovaMLXConfiguration {
             exclusiveAutoUnload: server.exclusiveAutoUnload,
             enforceToolSchemas: server.enforceToolSchemas
         )
+        let prefixPersisted = PrefixCacheLocation.Persisted(
+            roots: server.prefixCacheRoots,
+            ttlSeconds: server.prefixCacheTTLSeconds,
+            hotCacheMaxBytes: server.prefixCacheHotBytes,
+            ssdMaxSizeBytes: server.prefixCacheMaxBytes
+        )
+        if !prefixPersisted.isEmpty {
+            do {
+                try PrefixCacheLocation.persist(prefixPersisted, to: PrefixCacheLocation.defaultConfigDirectory())
+            } catch {
+                log.warning("[Configuration] prefix-cache settings write failed: \(String(describing: error))")
+            }
+        }
         do {
             try NovaDB.shared.configStore.update { existing in
                 existing = record
@@ -147,6 +160,7 @@ public actor NovaMLXConfiguration {
         let cluster: ServerConfig.ClusterSettings? = decodeJSONString(record.clusterConfig, nil as ServerConfig.ClusterSettings?)
         let autoLoad: AutoLoadConfig = decodeJSONString(record.autoLoad, .init())
 
+        let prefixFile = PrefixCacheLocation.loadPersisted(from: PrefixCacheLocation.defaultConfigDirectory())
         _serverConfig = ServerConfig(
             host: record.host,
             port: record.port,
@@ -165,7 +179,11 @@ public actor NovaMLXConfiguration {
             exclusiveAutoUnload: record.exclusiveAutoUnload,
             enforceToolSchemas: record.enforceToolSchemas,
             autoLoad: autoLoad,
-            cluster: cluster
+            cluster: cluster,
+            prefixCacheRoots: prefixFile.roots,
+            prefixCacheTTLSeconds: prefixFile.ttlSeconds,
+            prefixCacheHotBytes: prefixFile.hotCacheMaxBytes,
+            prefixCacheMaxBytes: prefixFile.ssdMaxSizeBytes
         )
         if let model = record.defaultModel, !model.isEmpty { _defaultModel = model }
         if !record.hfEndpoint.isEmpty { _huggingfaceEndpoint = record.hfEndpoint }

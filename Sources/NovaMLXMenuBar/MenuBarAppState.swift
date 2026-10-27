@@ -308,7 +308,11 @@ public final class MenuBarAppState: ObservableObject {
             exclusiveAutoUnload: current.exclusiveAutoUnload,
             enforceToolSchemas: current.enforceToolSchemas,
             autoLoad: current.autoLoad,
-            cluster: current.cluster
+            cluster: current.cluster,
+            prefixCacheRoots: current.prefixCacheRoots,
+            prefixCacheTTLSeconds: current.prefixCacheTTLSeconds,
+            prefixCacheHotBytes: current.prefixCacheHotBytes,
+            prefixCacheMaxBytes: current.prefixCacheMaxBytes
         )
         await NovaMLXConfiguration.shared.setServerConfig(updated)
         await NovaMLXConfiguration.shared.syncToStore()
@@ -335,7 +339,11 @@ public final class MenuBarAppState: ObservableObject {
             exclusiveAutoUnload: enabled,
             enforceToolSchemas: current.enforceToolSchemas,
             autoLoad: current.autoLoad,
-            cluster: current.cluster
+            cluster: current.cluster,
+            prefixCacheRoots: current.prefixCacheRoots,
+            prefixCacheTTLSeconds: current.prefixCacheTTLSeconds,
+            prefixCacheHotBytes: current.prefixCacheHotBytes,
+            prefixCacheMaxBytes: current.prefixCacheMaxBytes
         )
         await NovaMLXConfiguration.shared.setServerConfig(updated)
         await NovaMLXConfiguration.shared.syncToStore()
@@ -380,7 +388,11 @@ public final class MenuBarAppState: ObservableObject {
             exclusiveAutoUnload: current.exclusiveAutoUnload,
             enforceToolSchemas: current.enforceToolSchemas,
             autoLoad: current.autoLoad,
-            cluster: current.cluster
+            cluster: current.cluster,
+            prefixCacheRoots: current.prefixCacheRoots,
+            prefixCacheTTLSeconds: current.prefixCacheTTLSeconds,
+            prefixCacheHotBytes: current.prefixCacheHotBytes,
+            prefixCacheMaxBytes: current.prefixCacheMaxBytes
         )
         await NovaMLXConfiguration.shared.setServerConfig(updated)
         await NovaMLXConfiguration.shared.syncToStore()
