@@ -714,12 +714,17 @@ public struct DFlashTokenIterator: TokenIteratorProtocol {
         for index in mainCache.indices {
             var live = mainCache[index]
             let saved = cacheBackup[index]
-            live.state = saved.state
-            mainCache[index] = live
-            if let liveBase = mainCache[index] as? BaseKVCache,
-               let savedBase = saved as? BaseKVCache
-            {
+            if let liveBase = live as? BaseKVCache, let savedBase = saved as? BaseKVCache {
+                live.state = saved.state
+                mainCache[index] = live
                 liveBase.offset = savedBase.offset
+            } else {
+                // Flint's ring and the rec proxy are not BaseKVCache. Their
+                // absolute offset lives in metaState and must be installed
+                // before state, which keeps a larger offset when one is set.
+                live.metaState = saved.metaState
+                live.state = saved.state
+                mainCache[index] = live
             }
         }
     }

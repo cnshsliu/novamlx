@@ -22,8 +22,12 @@ import NovaMLXPrefixCache
 
 /// Flint sliding-window KV. Memory is the window, including after the prompt
 /// is longer than the window and during later decode steps.
-public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
+///
+/// Conforms to ``KVCache`` directly. ``BaseKVCache`` is not subclassable from
+/// this module: its initializer is internal and its stored knobs are not open.
+public final class FlintSlidingKVCache: KVCache, BoundedSlidingKVCache {
     public let windowSize: Int
+    public var offset: Int = 0
     /// Tokens currently stored. Always `min(offset, windowSize)` after a write.
     public private(set) var storedLength: Int = 0
 
@@ -37,20 +41,19 @@ public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
         precondition(windowSize > 0)
         self.windowSize = windowSize
         self.capacity = windowSize
-        super.init()
     }
 
-    public override var maxSize: Int? { windowSize }
+    public var maxSize: Int? { windowSize }
 
-    public override var evictedTokenCount: Int {
+    public var evictedTokenCount: Int {
         max(0, offset - storedLength)
     }
 
-    public override func innerState() -> [MLXArray] {
+    public func innerState() -> [MLXArray] {
         (keySlots + valueSlots).compactMap { $0 }
     }
 
-    public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+    public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let count = keys.dim(2)
         if count == 1 {
             return updateOne(keys: keys, values: values)
@@ -81,12 +84,12 @@ public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
     /// The ring keeps only the last `window` rows, left-aligned.
     private func updateChunk(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         ensureBuffers(like: keys, values: values)
-        let (priorK, priorV) = temporal(slot: slot)
+        let prior = temporal(slot: slot)
         let attentionK: MLXArray
         let attentionV: MLXArray
-        if let priorK, let priorV, storedLength > 0 {
-            attentionK = concatenated([priorK, keys], axis: 2)
-            attentionV = concatenated([priorV, values], axis: 2)
+        if let prior, storedLength > 0 {
+            attentionK = concatenated([prior.0, keys], axis: 2)
+            attentionV = concatenated([prior.1, values], axis: 2)
         } else {
             attentionK = keys
             attentionV = values
@@ -140,7 +143,7 @@ public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
         )
     }
 
-    public override var state: [MLXArray] {
+    public var state: [MLXArray] {
         get {
             guard let pair = temporal(slot: slot) else { return [] }
             return [pair.0, pair.1]
@@ -167,7 +170,7 @@ public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
         }
     }
 
-    public override var metaState: [String] {
+    public var metaState: [String] {
         get {
             [
                 String(windowSize), String(offset), String(storedLength),
@@ -190,20 +193,20 @@ public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
 
     /// Exact only while every token is still in the ring (`offset == stored`).
     /// After the window overwrites a row, rewind goes through a checkpoint.
-    public override var isTrimmable: Bool {
+    public var isTrimmable: Bool {
         storedLength > 0 && offset == storedLength
     }
 
-    public override var maxTrimCount: Int {
+    public var maxTrimCount: Int {
         isTrimmable ? storedLength : 0
     }
 
-    public override func isTrimmable(after positions: Int) -> Bool {
+    public func isTrimmable(after positions: Int) -> Bool {
         positions >= 0 && isTrimmable && offset + positions <= windowSize
     }
 
     @discardableResult
-    public override func trim(_ n: Int) -> Int {
+    public func trim(_ n: Int) -> Int {
         guard n > 0, isTrimmable else { return 0 }
         let trimmed = min(n, storedLength)
         storedLength -= trimmed
@@ -212,7 +215,7 @@ public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
         return trimmed
     }
 
-    public override func makeMask(
+    public func makeMask(
         n: Int, windowSize requested: Int?, returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
         let window = requested ?? windowSize
@@ -221,7 +224,7 @@ public final class FlintSlidingKVCache: BaseKVCache, BoundedSlidingKVCache {
         return .array(createCausalMask(n: n, offset: storedLength, windowSize: window))
     }
 
-    public override func copy() -> any KVCache {
+    public func copy() -> any KVCache {
         let clone = FlintSlidingKVCache(windowSize: windowSize)
         clone.offset = offset
         clone.storedLength = storedLength
@@ -502,26 +505,55 @@ struct FlintYOCOLayout: Equatable, Sendable {
 }
 
 /// Placeholder for a YOCO cross-decoder layer. The source layer holds the KV.
-public final class FlintYOCOAliasCache: BaseKVCache {
+public final class FlintYOCOAliasCache: KVCache {
     public let source: Int
+    public var offset: Int = 0
 
     public init(source: Int) {
         self.source = source
-        super.init()
     }
 
-    public override var isTrimmable: Bool { true }
+    public var maxSize: Int? { nil }
 
-    public override var maxTrimCount: Int { Int.max }
+    public var isTrimmable: Bool { true }
 
-    @discardableResult
-    public override func trim(_ n: Int) -> Int { max(0, n) }
+    public var maxTrimCount: Int { Int.max }
 
-    public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+    public func innerState() -> [MLXArray] { [] }
+
+    public var state: [MLXArray] {
+        get { [] }
+        set {
+            if !newValue.isEmpty {
+                fatalError("YOCO alias layer \(source) has no KV of its own")
+            }
+        }
+    }
+
+    public var metaState: [String] {
+        get { [String(source), String(offset)] }
+        set {
+            if newValue.count >= 2, let offsetVal = Int(newValue[1]) {
+                offset = offsetVal
+            }
+        }
+    }
+
+    public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         fatalError("YOCO alias layer \(source) has no KV of its own")
     }
 
-    public override func copy() -> any KVCache {
+    @discardableResult
+    public func trim(_ n: Int) -> Int { max(0, n) }
+
+    public func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if n == 1, !returnArray { return .none }
+        return .causal
+    }
+
+    public func copy() -> any KVCache {
         let clone = FlintYOCOAliasCache(source: source)
         clone.offset = offset
         return clone
