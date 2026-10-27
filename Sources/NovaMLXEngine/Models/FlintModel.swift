@@ -336,11 +336,15 @@ class FlintSparseMoeBlock: Module {
 
     /// Fused sigmoid top-k (`FlintExpertRouting`) plus the ungated shared
     /// expert. Selection uses `expertBias`; the mixture weights do not.
+    ///
+    /// On M4 Max, a prefill whose sorted expert rows are at least
+    /// `4 * numExperts` uses the rec steel gate+up kernel. Everything else,
+    /// including decode-sized calls, stays on `SwitchGLU`.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let logits = gate(x.asType(.float32))
         let (inds, weights) = FlintExpertRouting.route(
             logits: logits, bias: expertBias, topK: topK)
-        let y = switchMLP(x, inds)
+        let y = FlintM4MaxPrefill.project(switchMLP, x: x, indices: inds) ?? switchMLP(x, inds)
         let combined = weightedExpertSum(y, weights.asType(y.dtype))
         return combined + sharedExpert(x)
     }
