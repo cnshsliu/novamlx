@@ -23,6 +23,7 @@ DFlash2 and DSpark now default to an adaptive verification length. The draft mod
 - Defaults: minimum prefix 1, maximum equal to the draft budget; fixed cost 2; marginal cost 0.40 per draft inside the fast SDPA window and 0.55 outside it; the fast window is 4 drafts. DSpark's fixed mode still stops at that window (at most 4 drafts). Adaptive mode crosses it only when confidence is high enough.
 - Companion attach is unchanged: known-faster attaches automatically, known-slower stays unloaded, and uncertain asks once at load and is remembered. Adaptive verification does not turn speculative decoding on forever.
 - Each round's log includes `draft` (draft length), `verified` (length actually verified), and `accepted` (draft tokens accepted).
+- Online sequential temperature scaling records each verified round's accept/reject labels and refits when the request finishes, then keeps that fit for the same target and draft. Fixed mode still records labels and still verifies the historical block.
 
 Request fields `adaptive_verify_min` / `adaptive_verify_max` override the minimum and maximum prefix. Cost and window use environment variables: `NOVAMLX_ADAPTIVE_VERIFY_FIXED_COST`, `NOVAMLX_ADAPTIVE_VERIFY_MARGINAL_COST`, `NOVAMLX_ADAPTIVE_VERIFY_SLOW_MARGINAL_COST`, `NOVAMLX_ADAPTIVE_VERIFY_FAST_DRAFTS`, `NOVAMLX_ADAPTIVE_VERIFY_MARGIN_SCALE`, `NOVAMLX_ADAPTIVE_VERIFY_TEMPERATURE`.
 
@@ -54,6 +55,8 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 ```
 
 Replace `adaptive_verify` with `fixed` for the fixed block. Compare `draft`, `verified`, and `accepted` in the log. To turn it off for the process, set `NOVAMLX_ADAPTIVE_VERIFY=fixed` when launching NovaMLX.
+
+For a repeated adaptive-versus-fixed measurement on a Mac, use `Scripts/adaptive-verify-ab.py`. Restart NovaMLX with `NOVAMLX_ADAPTIVE_VERIFY_CALIBRATION_PATH` set so the run has its own calibration file. The script warms up on the fixed block (those labels teach the online temperatures), then measures both modes and writes decode tok/s and accept rate. See [speculative decoding](../features/speculative-decoding.md).
 
 ## Limits / out of scope
 

@@ -545,6 +545,17 @@ public struct InferenceResult: Codable, Sendable {
     public let commonPrefixTokens: Int
     public let finishReason: FinishReason
     public let tokenLogprobs: [Token]?
+    /// Draft tokens the target scored (DFlash2 / DSpark `verified`). 0 when this
+    /// request did not run that loop.
+    public let draftTokensProposed: Int
+    /// Greedy draft tokens kept from `draftTokensProposed`.
+    public let draftTokensAccepted: Int
+    /// `GenerateCompletionInfo.tokensPerSecond` (generation interval, prefill excluded
+    /// when the runtime reports it that way). Nil when the info event did not run.
+    public let decodeTokensPerSecond: Double?
+    /// Learned per-position verify temperatures for this draft+target pair.
+    /// Nil when the request was not DFlash2 / DSpark. Empty means the prior is still in use.
+    public let adaptiveVerifyTemperatures: [Float]?
 
     public init(
         id: UUID,
@@ -557,7 +568,11 @@ public struct InferenceResult: Codable, Sendable {
         finishReason: FinishReason,
         tokenLogprobs: [Token]? = nil,
         cachedTokens: Int = 0,
-        commonPrefixTokens: Int = 0
+        commonPrefixTokens: Int = 0,
+        draftTokensProposed: Int = 0,
+        draftTokensAccepted: Int = 0,
+        decodeTokensPerSecond: Double? = nil,
+        adaptiveVerifyTemperatures: [Float]? = nil
     ) {
         self.id = id
         self.model = model
@@ -570,11 +585,17 @@ public struct InferenceResult: Codable, Sendable {
         self.commonPrefixTokens = commonPrefixTokens
         self.finishReason = finishReason
         self.tokenLogprobs = tokenLogprobs
+        self.draftTokensProposed = draftTokensProposed
+        self.draftTokensAccepted = draftTokensAccepted
+        self.decodeTokensPerSecond = decodeTokensPerSecond
+        self.adaptiveVerifyTemperatures = adaptiveVerifyTemperatures
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, model, text, toolCalls, tokensPerSecond, promptTokens, completionTokens
         case cachedTokens, commonPrefixTokens, finishReason, tokenLogprobs
+        case draftTokensProposed, draftTokensAccepted, decodeTokensPerSecond
+        case adaptiveVerifyTemperatures
     }
 
     public init(from decoder: Decoder) throws {
@@ -590,6 +611,10 @@ public struct InferenceResult: Codable, Sendable {
         commonPrefixTokens = try container.decodeIfPresent(Int.self, forKey: .commonPrefixTokens) ?? 0
         finishReason = try container.decode(FinishReason.self, forKey: .finishReason)
         tokenLogprobs = try container.decodeIfPresent([Token].self, forKey: .tokenLogprobs)
+        draftTokensProposed = try container.decodeIfPresent(Int.self, forKey: .draftTokensProposed) ?? 0
+        draftTokensAccepted = try container.decodeIfPresent(Int.self, forKey: .draftTokensAccepted) ?? 0
+        decodeTokensPerSecond = try container.decodeIfPresent(Double.self, forKey: .decodeTokensPerSecond)
+        adaptiveVerifyTemperatures = try container.decodeIfPresent([Float].self, forKey: .adaptiveVerifyTemperatures)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -605,6 +630,10 @@ public struct InferenceResult: Codable, Sendable {
         try container.encode(commonPrefixTokens, forKey: .commonPrefixTokens)
         try container.encode(finishReason, forKey: .finishReason)
         try container.encodeIfPresent(tokenLogprobs, forKey: .tokenLogprobs)
+        try container.encode(draftTokensProposed, forKey: .draftTokensProposed)
+        try container.encode(draftTokensAccepted, forKey: .draftTokensAccepted)
+        try container.encodeIfPresent(decodeTokensPerSecond, forKey: .decodeTokensPerSecond)
+        try container.encodeIfPresent(adaptiveVerifyTemperatures, forKey: .adaptiveVerifyTemperatures)
     }
 }
 

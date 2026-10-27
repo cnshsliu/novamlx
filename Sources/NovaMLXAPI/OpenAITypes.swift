@@ -557,6 +557,58 @@ public struct OpenAIChoice: Codable, Sendable {
     }
 }
 
+/// DFlash2 / DSpark verify counters for one completion. Omitted when that loop did not run.
+public struct NovaSpeculationUsage: Codable, Sendable, Equatable {
+    /// Draft tokens the target scored.
+    public let proposed: Int
+    public let accepted: Int
+    public let acceptRate: Double
+    /// Engine generation tokens per second. Prefill is outside this interval when
+    /// the runtime's completion info reports generation time only.
+    public let decodeTokensPerSecond: Double?
+    /// Learned sequential-temperature-scaling values. Empty means the prior is still in use.
+    public let temperatures: [Double]?
+
+    public init(
+        proposed: Int,
+        accepted: Int,
+        decodeTokensPerSecond: Double?,
+        temperatures: [Float]?
+    ) {
+        self.proposed = proposed
+        self.accepted = accepted
+        self.acceptRate = proposed > 0 ? Double(accepted) / Double(proposed) : 0
+        self.decodeTokensPerSecond = decodeTokensPerSecond
+        self.temperatures = temperatures?.map { Double($0) }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case proposed
+        case accepted
+        case acceptRate = "accept_rate"
+        case decodeTokensPerSecond = "decode_tokens_per_second"
+        case temperatures
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        proposed = try container.decode(Int.self, forKey: .proposed)
+        accepted = try container.decode(Int.self, forKey: .accepted)
+        acceptRate = try container.decode(Double.self, forKey: .acceptRate)
+        decodeTokensPerSecond = try container.decodeIfPresent(Double.self, forKey: .decodeTokensPerSecond)
+        temperatures = try container.decodeIfPresent([Double].self, forKey: .temperatures)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(proposed, forKey: .proposed)
+        try container.encode(accepted, forKey: .accepted)
+        try container.encode(acceptRate, forKey: .acceptRate)
+        try container.encodeIfPresent(decodeTokensPerSecond, forKey: .decodeTokensPerSecond)
+        try container.encodeIfPresent(temperatures, forKey: .temperatures)
+    }
+}
+
 public struct OpenAIUsage: Codable, Sendable {
     public let promptTokens: Int
     public let completionTokens: Int
@@ -564,19 +616,50 @@ public struct OpenAIUsage: Codable, Sendable {
     /// Prefix-cache hits, nested as prompt_tokens_details.cached_tokens
     /// (OpenAI-standard shape). Nil = not measured (old clients see no key).
     public let promptTokensDetails: PromptTokensDetails?
+    /// Present when DFlash2 or DSpark verified at least one draft token.
+    public let speculation: NovaSpeculationUsage?
 
     private enum CodingKeys: String, CodingKey {
         case promptTokens = "prompt_tokens"
         case completionTokens = "completion_tokens"
         case totalTokens = "total_tokens"
         case promptTokensDetails = "prompt_tokens_details"
+        case speculation = "nova_speculation"
     }
 
-    public init(promptTokens: Int, completionTokens: Int, cachedTokens: Int? = nil) {
+    public init(
+        promptTokens: Int,
+        completionTokens: Int,
+        cachedTokens: Int? = nil,
+        speculation: NovaSpeculationUsage? = nil
+    ) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.totalTokens = promptTokens + completionTokens
         self.promptTokensDetails = cachedTokens.map { PromptTokensDetails(cachedTokens: $0) }
+        self.speculation = speculation
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        promptTokens = try container.decode(Int.self, forKey: .promptTokens)
+        completionTokens = try container.decode(Int.self, forKey: .completionTokens)
+        totalTokens = try container.decode(Int.self, forKey: .totalTokens)
+        promptTokensDetails = try container.decodeIfPresent(PromptTokensDetails.self, forKey: .promptTokensDetails)
+        speculation = try container.decodeIfPresent(NovaSpeculationUsage.self, forKey: .speculation)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(promptTokens, forKey: .promptTokens)
+        try container.encode(completionTokens, forKey: .completionTokens)
+        try container.encode(totalTokens, forKey: .totalTokens)
+        if let promptTokensDetails {
+            try container.encode(promptTokensDetails, forKey: .promptTokensDetails)
+        } else {
+            try container.encodeNil(forKey: .promptTokensDetails)
+        }
+        try container.encodeIfPresent(speculation, forKey: .speculation)
     }
 }
 

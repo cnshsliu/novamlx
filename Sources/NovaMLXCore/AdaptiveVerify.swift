@@ -40,7 +40,9 @@ public struct AdaptiveVerifyConfig: Sendable, Equatable {
     /// DFlash2 has no confidence head. Gap between the top two draft scores,
     /// in logit units, is mapped with a sigmoid of scale `marginScale`.
     public var marginScale: Float
-    /// Softens a calibrated head: sigmoid(logit(p) / temperature). 1 leaves p unchanged.
+    /// Cold-start prior for sequential temperature scaling. 1 leaves p unchanged.
+    /// `AdaptiveVerifyCalibrator` replaces this per position once it has enough
+    /// accept/reject labels for the draft+target pair.
     public var confidenceTemperature: Float
 
     public init(
@@ -131,7 +133,15 @@ public struct AdaptiveVerifyConfig: Sendable, Equatable {
     /// vector-SDPA cap). Fixed mode and a missing confidence signal both
     /// return that length, clamped to the draft. Adaptive mode searches
     /// prefixes of the confidence vector.
-    public func verifyLength(confidences: [Float], draftCount: Int, fixedLength: Int) -> Int {
+    /// `positionTemperatures` are absolute sequential-temperature-scaling values,
+    /// one per draft position. A missing entry uses `confidenceTemperature`.
+    /// Fixed mode ignores them and returns the historical block.
+    public func verifyLength(
+        confidences: [Float],
+        draftCount: Int,
+        fixedLength: Int,
+        positionTemperatures: [Float]? = nil
+    ) -> Int {
         let available = max(draftCount, 0)
         guard available > 0 else { return 0 }
         let fallback = clampedFixed(fixedLength, available: available)
@@ -143,13 +153,17 @@ public struct AdaptiveVerifyConfig: Sendable, Equatable {
         let ceiling = min(signaled, maxVerify ?? signaled)
         guard ceiling > 0 else { return 0 }
         let floor = min(max(minVerify, 1), ceiling)
+        let temperatures = positionTemperatures ?? []
 
         var bestK = floor
         var bestScore = -Double.infinity
         var survival = 1.0
         var expectedAccepted = 0.0
         for k in 1 ... ceiling {
-            let p = adjustedProbability(confidences[k - 1])
+            let temperature = (k - 1) < temperatures.count
+                ? temperatures[k - 1]
+                : confidenceTemperature
+            let p = Self.scaledProbability(confidences[k - 1], temperature: temperature)
             survival *= p
             expectedAccepted += survival
             let expectedTokens = 1 + expectedAccepted
@@ -161,6 +175,28 @@ public struct AdaptiveVerifyConfig: Sendable, Equatable {
             }
         }
         return bestK
+    }
+
+    /// Temperature scaling: sigmoid(logit(p) / T). T > 1 softens (shorter verify).
+    /// T < 1 sharpens (longer verify). Order of confidences is unchanged.
+    public static func scaledProbability(_ raw: Float, temperature: Float) -> Double {
+        var p = Double(raw)
+        if p.isNaN || p < 0 { p = 0 }
+        if p > 1 { p = 1 }
+        let scale = Double(temperature > 1e-4 ? temperature : 1)
+        if abs(scale - 1) > 1e-6, p > 0, p < 1 {
+            let logit = log(p / (1 - p))
+            let x = logit / scale
+            if x >= 0 {
+                p = 1 / (1 + exp(-x))
+            } else {
+                let z = exp(x)
+                p = z / (1 + z)
+            }
+        }
+        if p < 1e-6 { p = 1e-6 }
+        if p > 1 - 1e-6 { p = 1 - 1e-6 }
+        return p
     }
 
     /// Sigmoid of the top-1 / top-2 score gap. A tie is 0.5. DFlash2 uses this
@@ -207,26 +243,6 @@ public struct AdaptiveVerifyConfig: Sendable, Equatable {
         let slow = max(k - fastKernelMaxDrafts, 0)
         total += Double(fast) * marginalCost + Double(slow) * slowMarginalCost
         return max(total, 1e-6)
-    }
-
-    private func adjustedProbability(_ raw: Float) -> Double {
-        var p = Double(raw)
-        if p.isNaN || p < 0 { p = 0 }
-        if p > 1 { p = 1 }
-        let temperature = Double(confidenceTemperature)
-        if abs(temperature - 1) > 1e-6, p > 0, p < 1 {
-            let logit = log(p / (1 - p))
-            let x = logit / temperature
-            if x >= 0 {
-                p = 1 / (1 + exp(-x))
-            } else {
-                let z = exp(x)
-                p = z / (1 + z)
-            }
-        }
-        if p < 1e-6 { p = 1e-6 }
-        if p > 1 - 1e-6 { p = 1 - 1e-6 }
-        return p
     }
 
     private static func envDouble(_ raw: String?) -> Double? {

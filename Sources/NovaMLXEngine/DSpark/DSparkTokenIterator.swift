@@ -151,6 +151,8 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
     private let tap: [Int]
     private let maxCap: Int
     private let verifyConfig: AdaptiveVerifyConfig
+    private let calibrationKey: String?
+    private let calibrator: AdaptiveVerifyCalibrator?
 
     public init(
         input: LMInput,
@@ -159,7 +161,9 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         mainCache: [KVCache]? = nil,
         parameters: GenerateParameters,
         processor: LogitProcessor? = nil,
-        verifyConfig: AdaptiveVerifyConfig = .resolved()
+        verifyConfig: AdaptiveVerifyConfig = .resolved(),
+        calibrationKey: String? = nil,
+        calibrator: AdaptiveVerifyCalibrator? = nil
     ) throws {
         self.target = target
         self.drafter = drafter
@@ -172,6 +176,8 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         self.tap = drafter.config.targetLayerIds
         self.maxCap = Swift.max(1, drafter.kdraft)
         self.verifyConfig = verifyConfig
+        self.calibrationKey = calibrationKey
+        self.calibrator = calibrationKey == nil ? nil : (calibrator ?? .shared)
         // This head ships no embed_tokens / lm_head — run on the target's raw tables.
         drafter.bind(
             embed: { [target] ids in target.dflashEmbed(ids) },
@@ -252,7 +258,9 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
             cap: draftCap, anchorId: pending)
         let confidences = confidenceScheduleOverride ?? draft.confidences
         let verifyLen = verifyConfig.verifyLength(
-            confidences: confidences, draftCount: draft.tokens.count, fixedLength: kernelCap)
+            confidences: confidences, draftCount: draft.tokens.count, fixedLength: kernelCap,
+            positionTemperatures: adaptivePositionTemperatures(
+                config: verifyConfig, calibrator: calibrator, key: calibrationKey))
         let drafted = Array(draft.tokens.prefix(verifyLen))
         let draftMs = Date().timeIntervalSince(tDraft) * 1000
 
@@ -267,7 +275,8 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         let verifyMs = Date().timeIntervalSince(tVerify) * 1000
         finishRound(
             drafted: drafted, argmax: argmax, fused: vFused,
-            draftMs: draftMs, verifyMs: verifyMs, draftLen: draft.tokens.count)
+            draftMs: draftMs, verifyMs: verifyMs, draftLen: draft.tokens.count,
+            rawConfidences: confidences)
     }
 
     /// One target token. Still a tapped `dflashVerify` — the anchor's fused row must
@@ -309,7 +318,8 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
 
     private mutating func finishRound(
         drafted: [Int], argmax: [Int], fused: MLXArray,
-        draftMs: Double, verifyMs: Double, draftLen: Int
+        draftMs: Double, verifyMs: Double, draftLen: Int,
+        rawConfidences: [Float]
     ) {
         let tAccept = Date()
         let result = DFlashAccept.greedy(drafted: drafted, targetArgmax: argmax)
@@ -317,6 +327,10 @@ public struct DSparkTokenIterator: TokenIteratorProtocol {
         let n = result.accepted
         totalProposed += drafted.count
         totalAccepted += n
+        recordAdaptiveVerifyOutcome(
+            calibrator: calibrator, key: calibrationKey,
+            rawConfidences: rawConfidences, verified: drafted.count,
+            accepted: n, prior: verifyConfig.confidenceTemperature)
         let tRoll = Date()
         target.dflashRollback(
             cache: mainCache, nRejected: drafted.count - n, specWidth: 1 + drafted.count)

@@ -424,6 +424,7 @@ struct NovaMLXCLI {
             print(config.summary)
             print("Pass --confidence 0.92,0.88,0.4 or --margin 4,4,0.2 to schedule a prefix.")
             print("Fixed block for comparison: --mode fixed")
+            print("Mac tok/s and accept-rate A/B: python3 Scripts/adaptive-verify-ab.py --help")
             return
         }
         var adaptive = config
