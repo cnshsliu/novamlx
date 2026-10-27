@@ -315,6 +315,55 @@ struct FlintModelTests {
         #expect(FlintRecResident.body(from: FlintRecKernelSources.bodyMax, workers: 40) == nil)
     }
 
+    @Test("M4 Max decode shader vectorizes KV loads and keeps the Pro shader scalar")
+    func testM4MaxKVLoads() throws {
+        let maxHeader = try #require(FlintRecMaxKernel.apply(to: FlintRecKernelSources.headerMax))
+        let proHeader = try #require(FlintRecMaxKernel.apply(to: FlintRecKernelSources.headerPro))
+        for header in [maxHeader, proHeader] {
+            #expect(header.contains("vec<bfloat16_t,4> load4"))
+            #expect(header.contains("key_base.load4(at)"))
+            #expect(header.contains("key_base.load4(uint(token)*128)"))
+            #expect(header.contains("key_base.load4(at+parts*128)"))
+            let dot = header.range(of: "inline float dot16(")
+            let wide = header.range(of: "inline float dot16_w197_bias23(")
+            #expect(dot != nil)
+            #expect(wide != nil)
+            if let dot, let wide {
+                let body = header[dot.lowerBound..<wide.lowerBound]
+                #expect(body.contains("0x4b000000u"))
+                #expect(!body.contains("(p[j]&15u)"))
+            }
+            // The non-team partial stays scalar. rec only rewrites path_w53.
+            #expect(header.contains("key[j]=float(key_base[at+j])"))
+        }
+        #expect(!FlintRecKernelSources.headerMax.contains("load4"))
+        #expect(!FlintRecKernelSources.headerPro.contains("load4"))
+        #expect(FlintRecMaxKernel.header(launch: .max, deviceName: "Apple M4 Max").contains("load4"))
+        #expect(FlintRecMaxKernel.header(launch: .pro, deviceName: "Apple M4 Max").contains("load4"))
+        #expect(!FlintRecMaxKernel.header(launch: .max, deviceName: "Apple M5 Max").contains("load4"))
+        #expect(!FlintRecMaxKernel.header(launch: .pro, deviceName: "Apple M4 Pro").contains("load4"))
+        #expect(!FlintRecMaxKernel.header(launch: .max, deviceName: "").contains("load4"))
+    }
+
+    @Test("sanitize moves a router expert bias onto the MoE block")
+    func testSanitizeExpertBias() throws {
+        let config = try JSONDecoder.json5().decode(
+            FlintConfiguration.self, from: Data(Self.configJSON().utf8))
+        let model = FlintModel(config)
+        let bias = MLXArray.ones([256], dtype: .float32)
+        let out = model.sanitize(weights: [
+            "model.layers.2.mlp.gate.expert_bias": bias
+        ])
+        #expect(out["model.layers.2.mlp.gate.expert_bias"] == nil)
+        let moved = try #require(out["model.layers.2.mlp.expert_bias"])
+        #expect(moved.shape == [256])
+        let dense = model.sanitize(weights: [
+            "model.layers.0.mlp.gate.expert_bias": bias
+        ])
+        #expect(dense["model.layers.0.mlp.gate.expert_bias"] != nil)
+        #expect(dense["model.layers.0.mlp.expert_bias"] == nil)
+    }
+
     /// The shader is back on the ushort loop. This checks the 2^23 form
     /// against that loop for the masks the vector dot used.
     @Test("int4 nibble conversion matches the unshifted ushort dot")

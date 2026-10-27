@@ -13,8 +13,8 @@ import NovaMLXUtils
 // per-head QK RMSNorm and a learned per-head attention sink (`softmax_offset`,
 // GPT-OSS style). `layer_types` mixes sliding-window-513 layers (RoPE,
 // `FlintSlidingKVCache`) with full-attention layers (no positional encoding,
-// KVCacheSimple). MoE from layer 2: sigmoid routing to 6 of 256 experts with
-// renormalized scores plus an ungated shared expert; layers 0-1 are dense.
+// KVCacheSimple). MoE from layer 2: fused sigmoid routing to 6 of 256 experts
+// with renormalized scores plus an ungated shared expert; layers 0-1 are dense.
 
 public struct FlintConfiguration: Codable {
     var modelType: String
@@ -304,6 +304,9 @@ class FlintSparseMoeBlock: Module {
     @ModuleInfo(key: "gate") var gate: Linear
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
     @ModuleInfo(key: "shared_expert") var sharedExpert: FlintMLP
+    /// Added to sigmoid scores before the top-k. Not a weight. Official
+    /// flint-int4 leaves this at zero (`router_expert_bias` false).
+    @ParameterInfo(key: "expert_bias") var expertBias: MLXArray
 
     init(_ args: FlintConfiguration) {
         self.topK = args.numExpertsPerTok
@@ -317,21 +320,17 @@ class FlintSparseMoeBlock: Module {
             dimensions: args.hiddenSize,
             hiddenDimensions: args.sharedExpertIntermediateSize
         )
+        _expertBias.wrappedValue = MLXArray.zeros([args.numExperts], dtype: .float32)
     }
 
-    /// Sigmoid routing: top-k by score, renormalized; plus an ungated shared
-    /// expert (flint.py's fallback math — the Swift port has no
-    /// `expert_routing` Metal kernel).
+    /// Fused sigmoid top-k (`FlintExpertRouting`) plus the ungated shared
+    /// expert. Selection uses `expertBias`; the mixture weights do not.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let logits = gate(x.asType(.float32))
-        let scores0 = sigmoid(logits)
-        let k = topK
-        let inds = argPartition(-scores0, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        var scores = takeAlong(scores0, inds, axis: -1)
-        scores = scores / scores.sum(axis: -1, keepDims: true)
-
+        let (inds, weights) = FlintExpertRouting.route(
+            logits: logits, bias: expertBias, topK: topK)
         let y = switchMLP(x, inds)
-        let combined = weightedExpertSum(y, scores.asType(y.dtype))
+        let combined = weightedExpertSum(y, weights.asType(y.dtype))
         return combined + sharedExpert(x)
     }
 }
@@ -797,6 +796,9 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
             }
         }
         // Quantized KV cannot be copied into the megakernel's bf16 rings.
+        // flint-int4 config.json says kv_key_bits/kv_value_bits 8, but rec's
+        // Mac engine stores decode KV as bf16 blocks. Those config fields
+        // only feed Model.make_cache, which QATSession does not call.
         // A YOCO tail has no per-layer KV for the kernel to ingest.
         guard isOfficialInt4, parameters?.kvBits == nil, !yoco.sharesKV else { return raw }
         guard !raw.contains(where: { $0 is QuantizedKVCacheProtocol }) else { return raw }
@@ -1136,6 +1138,12 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
                     w.removeValue(forKey: "\(prefix).experts.\(e).\(n).weight")!
                 }
                 w["\(prefix).switch_mlp.\(n).weight"] = MLX.stacked(toJoin)
+            }
+            // rec stores this on the router. The block owns it so the fused
+            // kernel and the megakernel packer see one tensor.
+            let biasKey = "\(prefix).gate.expert_bias"
+            if let bias = w.removeValue(forKey: biasKey) {
+                w["\(prefix).expert_bias"] = bias
             }
         }
 

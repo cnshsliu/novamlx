@@ -117,10 +117,12 @@ public enum FlintRecPacker {
                 d[7] = add(attn.softmaxOffset.asType(.bfloat16))
 
                 if isSparse, let moe {
-                    // Router weight (fp32) + zero expert bias + bf16 copy at 60.
+                    // Router weight (fp32) + expert bias + bf16 copy at 60.
+                    // Bias is zeros on RecursiveSI/flint-int4. Slot 9 is what
+                    // `w3_route_own_rank` adds before the top-6.
                     let routerW = moe.gate.weight.asType(.float32)
                     d[8] = add(routerW)
-                    d[9] = add(MLXArray.zeros([256], dtype: .float32))
+                    d[9] = add(moe.expertBias.asType(.float32))
                     d[60] = add(routerW.asType(.bfloat16))
                 }
 
