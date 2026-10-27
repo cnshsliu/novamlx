@@ -71,6 +71,12 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
     private let eosTokenIds: Set<Int>
     private let maskBuilder: TokenMaskBuilder
     private var escapeNext = false
+    private let schemaFingerprint: String
+    private var scopeModelId: String?
+    private var scopeEosKey: String?
+    private var cachedKey: String?
+    private var cachedBits: [Bool]?
+    var fusedLastCompileWasCacheHit: Bool = false
 
     /// Parent-aware FSM states.
     ///
@@ -124,6 +130,7 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
 
     public init(schema: [String: Any], tokenizer: NovaMLXEngine.Tokenizer) {
         self.rootSchema = SchemaNode.parse(schema)
+        self.schemaFingerprint = Self.fingerprint(schema)
         self.state = .expectValue(rootSchema)
         self.tokenizer = tokenizer
         self.eosTokenIds = tokenizer.eosTokenId.map { [$0] } ?? []
@@ -133,6 +140,7 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
     /// Caller-supplied builder for cache reuse.
     init(schema: [String: Any], tokenizer: NovaMLXEngine.Tokenizer, sharedBuilder: TokenMaskBuilder) {
         self.rootSchema = SchemaNode.parse(schema)
+        self.schemaFingerprint = Self.fingerprint(schema)
         self.state = .expectValue(rootSchema)
         self.tokenizer = tokenizer
         self.eosTokenIds = tokenizer.eosTokenId.map { [$0] } ?? []
@@ -142,6 +150,7 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
     /// Caller-supplied builder + full EOS set from model config.
     init(schema: [String: Any], tokenizer: NovaMLXEngine.Tokenizer, sharedBuilder: TokenMaskBuilder, allEosTokenIds: Set<Int>) {
         self.rootSchema = SchemaNode.parse(schema)
+        self.schemaFingerprint = Self.fingerprint(schema)
         self.state = .expectValue(rootSchema)
         self.tokenizer = tokenizer
         self.eosTokenIds = allEosTokenIds
@@ -151,20 +160,43 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
     public func prompt(_ prompt: MLXArray) {}
 
     public func process(logits: MLXArray) -> MLXArray {
-        if maskBuilder.vocabSize == 0 {
-            maskBuilder.materialize(vocabSize: logits.shape[logits.shape.count - 1])
+        let dim = logits.shape[logits.shape.count - 1]
+        if maskBuilder.vocabSize == 0 || dim > maskBuilder.vocabSize {
+            maskBuilder.materialize(vocabSize: dim)
         }
+        let bits = bitsForCurrentState(vocabSize: maskBuilder.vocabSize)
+        return TokenMaskBuilder.applyMask(MLXArray(bits)[.newAxis, 0...], to: logits)
+    }
+
+    public func didSample(token: MLXArray) {
+        let tokenId = token.item(Int.self)
+        _ = fusedConsume(tokenId: tokenId, text: tokenizer.decode([tokenId]))
+    }
+
+    /// Full-vocab mask for the state we are in. Repeated visits of the same
+    /// state reuse the cached bits instead of scanning again.
+    private func bitsForCurrentState(vocabSize: Int) -> [Bool] {
+        let key = stateCacheKey(vocabSize: vocabSize)
+        if cachedKey == key, let cachedBits { return cachedBits }
+        let modelId = scopeModelId ?? ""
+        let (bits, hit) = SchemaGrammarMaskCache.tables.value(for: key, modelId: modelId) {
+            self.scanMask(vocabSize: vocabSize)
+        }
+        cachedKey = key
+        cachedBits = bits
+        fusedLastCompileWasCacheHit = hit
+        if let modelId = scopeModelId {
+            GrammarVocabHint.shared.note(modelId: modelId, vocab: vocabSize)
+        }
+        return bits
+    }
+
+    private func scanMask(vocabSize: Int) -> [Bool] {
         // Two-stage filter:
-        //   1. First-char (cheap): drops most of vocab using the existing
-        //      `allowedChars()` set against `tokenFirstChars`.
+        //   1. First-char (cheap): drops most of vocab using `allowedChars()`.
         //   2. Full-token simulation (strict): walks every char of each
-        //      first-char-passing token through the strict pure stepper.
-        //      This prevents the historical regression where multi-char
-        //      tokens like ` thoughtful` would slip past first-char masking
-        //      from `.expectValue` (Boolean schema) — char `t` looks like
-        //      the start of `true`, but the rest of the token is garbage.
-        //      `Self.stepStrict` validates each char against the FSM and
-        //      rejects the token outright.
+        //      survivor through the stepper. A token like ` thoughtful` is
+        //      not a boolean just because it starts with `t`.
         let allowed = allowedChars()
         let eosAllowed: Bool
         if case .done = state {
@@ -172,59 +204,40 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
         } else {
             eosAllowed = false
         }
-
-        let vocabSize = maskBuilder.vocabSize
         var maskValues = [Bool](repeating: false, count: vocabSize)
-
         for i in 0..<vocabSize {
             if eosTokenIds.contains(i) {
                 maskValues[i] = eosAllowed
                 continue
             }
             let text = maskBuilder.decodedText(for: i)
-            if text.isEmpty {
-                // Empty/padding tokens — never sample them. Distinct from
-                // whitespace-only tokens (those have a real decoded text).
-                continue
-            }
-            // First-char fast filter
+            if text.isEmpty { continue }
             let firstNonWS = text.first(where: { !$0.isWhitespace && $0 != "▁" && $0 != " " })
-            if let fc = firstNonWS, !allowed.contains(fc) {
-                continue
-            }
-            // Strict full-token simulation
+            if let fc = firstNonWS, !allowed.contains(fc) { continue }
             if simulateTokenIsValid(text: text) {
                 maskValues[i] = true
             }
         }
-
-        let mask = MLXArray(maskValues)[.newAxis, 0...]
-        return TokenMaskBuilder.applyMask(mask, to: logits)
+        return maskValues
     }
 
-    public func didSample(token: MLXArray) {
-        let tokenId = token.item(Int.self)
-        if eosTokenIds.contains(tokenId) { return }
-        let text = tokenizer.decode([tokenId])
-
-        // Walk the runtime FSM through every char. We use the strict stepper
-        // here too (not the legacy `advance`) so runtime and mask precompute
-        // stay in sync. On any violation — which should be impossible if the
-        // mask was applied correctly — clamp to `.done` to force EOS on the
-        // next process call. This is the same defensive pattern used by
-        // `JSONLogitProcessor.didSample`.
+    private func advance(text: String) {
         var simState = state
         var simEscape = escapeNext
         for char in text {
             guard let next = Self.stepStrict(state: simState, escapeNext: &simEscape, char: char) else {
                 state = .done
                 escapeNext = false
+                cachedKey = nil
+                cachedBits = nil
                 return
             }
             simState = next
         }
         state = simState
         escapeNext = simEscape
+        cachedKey = nil
+        cachedBits = nil
     }
 
     /// Walk every char of `text` through the strict stepper from the current
@@ -496,5 +509,107 @@ public final class SchemaGuidedProcessor: LogitProcessor, @unchecked Sendable {
             }
             return nil
         }
+    }
+
+    private func stateCacheKey(vocabSize: Int) -> String {
+        let model = scopeModelId ?? ""
+        let eos = scopeEosKey ?? ""
+        return "schema|\(model)|\(eos)|\(vocabSize)|\(schemaFingerprint)|\(escapeNext)|\(Self.describe(state))"
+    }
+
+    private static func fingerprint(_ schema: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(schema),
+              let data = try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8)
+        else { return String(describing: schema) }
+        return text
+    }
+
+    private static func describe(_ node: SchemaNode) -> String {
+        switch node.type {
+        case .object(let props, let required):
+            let body = props.keys.sorted().map { "\($0):\(describe(props[$0]!))" }.joined(separator: ",")
+            return "obj{\(body)}req[\(required.sorted().joined(separator: ","))]"
+        case .array(let items):
+            return "arr(\(items.map { describe($0) } ?? "any"))"
+        case .stringEnum(let values):
+            return "enum[\(values.joined(separator: ","))]"
+        case .string: return "str"
+        case .integer: return "int"
+        case .number: return "num"
+        case .boolean: return "bool"
+        case .null: return "null"
+        case .anyOf(let nodes):
+            return "any[\(nodes.map { describe($0) }.joined(separator: "|"))]"
+        case .anything: return "any"
+        }
+    }
+
+    private static func describe(_ state: SchemaState) -> String {
+        switch state {
+        case .expectValue(let node):
+            return "val(\(describe(node)))"
+        case .objectKey(let node, let props, let required, let returnTo):
+            return "okey(\(describe(node)),\(describe(SchemaNode(type: .object(properties: props, required: required)))),>\(describe(returnTo)))"
+        case .inObjectKey(let node, let props, let required, let partial, let returnTo):
+            return "inkey(\(describe(node)),\(partial),\(describe(SchemaNode(type: .object(properties: props, required: required)))),>\(describe(returnTo)))"
+        case .objectColon(let node, let props, let required, let key, let returnTo):
+            return "colon(\(describe(node)),\(key),\(props.count),\(required.count),>\(describe(returnTo)))"
+        case .objectValue(let node, let props, let required, let value, let returnTo):
+            return "oval(\(describe(node)),\(describe(value)),\(props.count),\(required.count),>\(describe(returnTo)))"
+        case .objectComma(let node, let props, let required, let returnTo):
+            return "ocomma(\(describe(node)),\(describe(SchemaNode(type: .object(properties: props, required: required)))),>\(describe(returnTo)))"
+        case .arrayValue(let node, let item, let returnTo):
+            return "aval(\(describe(node)),\(item.map { describe($0) } ?? "any"),>\(describe(returnTo)))"
+        case .arrayComma(let node, let item, let returnTo):
+            return "acomma(\(describe(node)),\(item.map { describe($0) } ?? "any"),>\(describe(returnTo)))"
+        case .inString(let returnTo):
+            return "str(>\(describe(returnTo)))"
+        case .inNumber(let returnTo):
+            return "num(>\(describe(returnTo)))"
+        case .inLiteral(let literal, let index, let returnTo):
+            return "lit(\(literal)@\(index),>\(describe(returnTo)))"
+        case .done:
+            return "done"
+        }
+    }
+}
+
+enum SchemaGrammarMaskCache {
+    static let tables = GrammarMaskTable<[Bool]>()
+}
+
+extension SchemaGuidedProcessor: FusedHostGrammar {
+    func fusedSetScope(modelId: String, eosKey: String) {
+        scopeModelId = modelId
+        scopeEosKey = eosKey
+    }
+
+    func fusedCompileMask(vocabSize: Int) -> [Bool] {
+        if maskBuilder.vocabSize < vocabSize {
+            maskBuilder.materialize(vocabSize: vocabSize)
+        }
+        return bitsForCurrentState(vocabSize: maskBuilder.vocabSize > 0 ? maskBuilder.vocabSize : vocabSize)
+    }
+
+    func fusedConsume(tokenId: Int, text: String) -> Bool {
+        if eosTokenIds.contains(tokenId) { return false }
+        advance(text: text)
+        let vocab = maskBuilder.vocabSize
+        guard vocab > 0 else { return true }
+        let key = stateCacheKey(vocabSize: vocab)
+        if let bits = SchemaGrammarMaskCache.tables.peek(key), !bits.isEmpty {
+            cachedKey = key
+            cachedBits = bits
+            fusedLastCompileWasCacheHit = true
+            return false
+        }
+        // The decode step must not scan the vocabulary. The session compiles
+        // this state on a detached task and the sequence rejoins when it lands.
+        return true
+    }
+
+    func fusedCurrentMask() -> [Bool]? {
+        cachedBits
     }
 }

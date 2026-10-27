@@ -105,7 +105,7 @@ Official `rec` keeps resident decode under grammar and under recommended samplin
 | `stream: true` and logprobs | HTTP 400 | HTTP 400, `Token logprobs require stream=false` |
 | Non-stream logprobs | Filtered packet | Single-step, so each token keeps its logprobs |
 | Two sequences at once | Single session only | Single-step |
-| JSON schema, regex, or GBNF | Not the flint grammar | Single-step on the serial iterator, which applies that mask. Fused decode does not apply those masks; a greedy request there still uses the device packet |
+| JSON schema, JSON object, regex, or GBNF | Not the flint grammar | Single-step on fused decode. The host mask is applied before the sample. The device packet and the filtered packet stay off. Compile is cached and runs off the decode loop; a sequence whose next mask is not ready yet rejoins when it is |
 
 A filtered step refuses a token the grammar mask forbids (a second `<think>`, token 150006, after the answer has started). `<|end_of_text|>`, `<|user|>`, and `<|observation|>` stay sampleable inside the open think and finish the turn there. `<|developer|>` is masked in the answer and is not a grammar stop. Sampling it during think finishes the turn: it is a checkpoint EOS id. The mask is checked before the stop set, so a masked id is not accepted as a finish token. Default Flint chat (structural grammar, temperature 0, `generation_config.json` top-p 0.95 and top-k 20, one sequence) uses the filtered packet, width 16. The log line is `[Flint] resident route filtered`.
 

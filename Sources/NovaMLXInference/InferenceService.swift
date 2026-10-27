@@ -224,29 +224,32 @@ public final class InferenceService: @unchecked Sendable {
         let hasLinearAttention = container?.config.hasLinearAttention == true
         let nativeMtp = hasNativeMtp(resolvedId)
 
-        // Session, grammar, VLM, hybrid, native MTP head, and draft-model paths use
-        // engine TokenIterator. Qwen companion MTP uses MLXLMCommon verify.
+        // Session, VLM, hybrid, native MTP head, and draft-model paths use
+        // engine TokenIterator. JSON / schema / regex / GBNF stay on fused.
+        // Qwen companion MTP uses MLXLMCommon verify.
         let hasDraftModel = finalRequest.draftModel != nil
-        let needsSpecialized = finalRequest.sessionId != nil ||
-            finalRequest.jsonSchemaDef != nil ||
-            finalRequest.responseFormat == .jsonObject ||
-            finalRequest.regexPattern != nil ||
-            finalRequest.gbnfGrammar != nil ||
-            isVLM ||
-            hasLinearAttention ||
-            hasDraftModel ||
-            nativeMtp
+        let route = GrammarFusedRoute.choose(GrammarFusedRoute.inputs(
+            request: finalRequest,
+            isVLM: isVLM,
+            hasLinearAttention: hasLinearAttention,
+            hasDraftModel: hasDraftModel,
+            hasNativeMTP: nativeMtp,
+            forceSerialDecode: false))
 
-        if needsSpecialized {
-            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (nativeMtp ? "native-mtp" : (finalRequest.sessionId != nil ? "session" : "grammar"))))
+        if case .continuousBatcher(let reason) = route {
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher (reason=\(reason), model=\(resolvedId))")
             return try await batcher.submit(finalRequest)
         }
 
         // LLM standard path. One sequence stays on the serial loop (Flint
         // packet-16, n-gram verify). Concurrent KVCacheSimple sequences at the
-        // same offset share one model forward.
-        NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(resolvedId))")
+        // same offset share one model forward. A host grammar applies its
+        // mask on that step.
+        if let kind = GrammarFusedRoute.hostKind(of: finalRequest) {
+            NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (grammar=\(kind), model=\(resolvedId))")
+        } else {
+            NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(resolvedId))")
+        }
         return try await fusedScheduler.submit(finalRequest)
     }
 
@@ -327,31 +330,34 @@ public final class InferenceService: @unchecked Sendable {
         let hasLinearAttention = container?.config.hasLinearAttention == true
         let nativeMtp = hasNativeMtp(resolvedId)
 
-        // Session, grammar, VLM, hybrid, native MTP, and draft-model paths use engine directly.
+        // Session, VLM, hybrid, native MTP, and draft-model paths use engine directly.
+        // JSON / schema / regex / GBNF stay on fused.
         let hasDraftModel = finalRequest.draftModel != nil
         let localKind: InferenceKind = isVLM ? .vlm : .llm
-        let needsSpecialized = finalRequest.sessionId != nil ||
-            finalRequest.jsonSchemaDef != nil ||
-            finalRequest.responseFormat == .jsonObject ||
-            finalRequest.regexPattern != nil ||
-            finalRequest.gbnfGrammar != nil ||
-            isVLM ||
-            hasLinearAttention ||
-            hasDraftModel ||
-            nativeMtp
+        let route = GrammarFusedRoute.choose(GrammarFusedRoute.inputs(
+            request: finalRequest,
+            isVLM: isVLM,
+            hasLinearAttention: hasLinearAttention,
+            hasDraftModel: hasDraftModel,
+            hasNativeMTP: nativeMtp,
+            forceSerialDecode: false))
 
         // Wrap any local stream with a log-tracking shim that finalizes the
         // RequestLogEntry on completion (token count + timing + HTTP request id).
-        if needsSpecialized {
-            let reason = isVLM ? "VLM" : (hasLinearAttention ? "hybrid" : (hasDraftModel ? "draft-model" : (nativeMtp ? "native-mtp" : (finalRequest.sessionId != nil ? "session" : "grammar"))))
+        if case .continuousBatcher(let reason) = route {
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher stream (reason=\(reason), model=\(resolvedId))")
             return Self.trackStream(batcher.submitStream(finalRequest), tracker: StreamTracker(model: resolvedId, kind: localKind, metricsStore: engine.metricsStore), request: finalRequest)
         }
 
         // LLM standard path. One sequence stays on the serial loop (Flint
         // packet-16, n-gram verify). Concurrent KVCacheSimple sequences at the
-        // same offset share one model forward.
-        NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler stream (model=\(resolvedId))")
+        // same offset share one model forward. A host grammar applies its
+        // mask on that step.
+        if let kind = GrammarFusedRoute.hostKind(of: finalRequest) {
+            NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler stream (grammar=\(kind), model=\(resolvedId))")
+        } else {
+            NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler stream (model=\(resolvedId))")
+        }
         return Self.trackStream(fusedScheduler.submitStream(finalRequest), tracker: StreamTracker(model: resolvedId, kind: localKind, metricsStore: engine.metricsStore), request: finalRequest)
     }
 

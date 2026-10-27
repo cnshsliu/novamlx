@@ -197,13 +197,16 @@ struct NovaMLXWorker {
 
         do {
             let result: InferenceResult
-            let scheduler = resolveScheduler(request: request, engine: engine)
-            switch scheduler {
-            case .batcher:
-                NovaMLXLog.info("[Worker:\(reqTag)] → ContinuousBatcher")
+            switch resolveScheduler(request: request, engine: engine) {
+            case .continuousBatcher(let reason):
+                NovaMLXLog.info("[Worker:\(reqTag)] → ContinuousBatcher (reason=\(reason))")
                 result = try await batcher.submit(request)
             case .fused:
-                NovaMLXLog.info("[Worker:\(reqTag)] → FusedBatchScheduler")
+                if let kind = GrammarFusedRoute.hostKind(of: request) {
+                    NovaMLXLog.info("[Worker:\(reqTag)] → FusedBatchScheduler (grammar=\(kind))")
+                } else {
+                    NovaMLXLog.info("[Worker:\(reqTag)] → FusedBatchScheduler")
+                }
                 result = try await fusedScheduler.submit(request)
             }
             writer.write(WorkerMessage(type: WorkerMessageType.result, requestId: msg.requestId, result: result))
@@ -232,13 +235,16 @@ struct NovaMLXWorker {
         await engine.applyResourceLimits()
 
         let tokenStream: AsyncThrowingStream<Token, Error>
-        let scheduler = resolveScheduler(request: request, engine: engine)
-        switch scheduler {
-        case .batcher:
-            NovaMLXLog.info("[Worker:\(reqTag)] → ContinuousBatcher stream")
+        switch resolveScheduler(request: request, engine: engine) {
+        case .continuousBatcher(let reason):
+            NovaMLXLog.info("[Worker:\(reqTag)] → ContinuousBatcher stream (reason=\(reason))")
             tokenStream = batcher.submitStream(request)
         case .fused:
-            NovaMLXLog.info("[Worker:\(reqTag)] → FusedBatchScheduler stream")
+            if let kind = GrammarFusedRoute.hostKind(of: request) {
+                NovaMLXLog.info("[Worker:\(reqTag)] → FusedBatchScheduler stream (grammar=\(kind))")
+            } else {
+                NovaMLXLog.info("[Worker:\(reqTag)] → FusedBatchScheduler stream")
+            }
             tokenStream = fusedScheduler.submitStream(request)
         }
 
@@ -294,9 +300,9 @@ struct NovaMLXWorker {
 
     // MARK: - Routing
 
-    private enum Scheduler { case batcher, fused }
-
-    private static func resolveScheduler(request: InferenceRequest, engine: MLXEngine) -> Scheduler {
+    private static func resolveScheduler(
+        request: InferenceRequest, engine: MLXEngine
+    ) -> GrammarFusedRoute.Choice {
         let container = engine.getContainer(for: request.model)
 
         let isVLM = container?.config.modelType == .vlm
@@ -309,18 +315,13 @@ struct NovaMLXWorker {
         // near-tie argmax even when both are greedy step-by-step.
         let forceSerialDecode = request.useNativeMtp == false
 
-        let needsSpecialized = request.sessionId != nil ||
-            request.jsonSchemaDef != nil ||
-            request.responseFormat == .jsonObject ||
-            request.regexPattern != nil ||
-            request.gbnfGrammar != nil ||
-            isVLM ||
-            hasLinearAttention ||
-            hasDraftModel ||
-            nativeMtp ||
-            forceSerialDecode
-
-        return needsSpecialized ? .batcher : .fused
+        return GrammarFusedRoute.choose(GrammarFusedRoute.inputs(
+            request: request,
+            isVLM: isVLM,
+            hasLinearAttention: hasLinearAttention,
+            hasDraftModel: hasDraftModel,
+            hasNativeMTP: nativeMtp,
+            forceSerialDecode: forceSerialDecode))
     }
 }
 

@@ -45,7 +45,7 @@ enum FlintChatDecode {
     /// | `stream` and logprobs | HTTP 400 | HTTP 400 (`Token logprobs require stream=false`) |
     /// | non-stream logprobs | filtered packet | ``singleStep`` (per-step logprobs) |
     /// | batch width > 1 | single session only | ``singleStep`` |
-    /// | JSON / regex / GBNF (`usesGrammar`) | not the flint grammar | ``singleStep`` |
+    /// | JSON / regex / GBNF (`usesGrammar`) | not the flint grammar | ``singleStep`` (host mask, not the device packet) |
     ///
     /// Recommended sampling from `generation_config.json` is temperature 1.0,
     /// top-p 0.95, top-k 20. That row is ``filtered``, including when the
@@ -71,7 +71,8 @@ enum FlintChatDecode {
         var wantsLogprobs: Bool
         var batchWidth: Int
         /// JSON schema, regex, GBNF, or JSON mode. That mask is not the flint
-        /// grammar, so every packet stays off and the serial iterator applies it.
+        /// grammar, so the device packet and the filtered packet stay off.
+        /// Fused decode applies the host mask on the single-step path.
         var usesGrammar: Bool
         /// Official flint structural grammar (`FlintStructuralGrammar`).
         var usesStructuralGrammar: Bool = false

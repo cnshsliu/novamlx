@@ -6,7 +6,7 @@
 
 ## Who it is for
 
-同时有多路生成、或在 VLM / 语法约束 / 会话路径上需要独立队列的人。
+同时有多路生成、或在 VLM / 会话路径上需要独立队列的人。仅语法约束的请求与普通文本一样走 fused。
 
 ## What it does
 
@@ -14,7 +14,7 @@
 |------|------|
 | **默认 batch** | 8 序列（可配） |
 | **抢占** | 内存压力下按优先级驱逐 |
-| **专用队列** | VLM、hybrid-attention、会话、语法引导分别走独立路径 |
+| **专用队列** | VLM、hybrid-attention、会话、draft-model、native MTP 走 `ContinuousBatcher`。仅 JSON / schema / regex / GBNF 的请求留在 fused |
 | **异步流** | 每请求按优先级队列发射 token |
 | **指标** | `BatcherMetrics` 暴露队列深度、抢占率、平均等待 |
 

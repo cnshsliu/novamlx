@@ -1225,6 +1225,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         let cacheRef = tokenMaskBuilderCache
         let modelIdForCache = identifier.id
         Task { await cacheRef.invalidate(modelId: modelIdForCache) }
+        JSONGrammarMaskCache.tables.invalidate(modelId: modelIdForCache)
+        SchemaGrammarMaskCache.tables.invalidate(modelId: modelIdForCache)
+        CharacterGrammarMaskCache.tables.invalidate(modelId: modelIdForCache)
         _ = pool.remove(identifier.id)
         metricsStore.recordModelUnload()
         MLX.Memory.clearCache()
@@ -4324,6 +4327,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder, allEosTokenIds: allEosIds
             )
         }
+        GrammarCompileWarmup.warm(
+            processor: grammarProcessor, modelId: request.model, eos: allEosIds)
 
         let parameters = buildGenerateParameters(request: request, config: container.config, settings: settingsProvider?(request.model))
         let penaltyProcessor = parameters.processor()
@@ -4535,6 +4540,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             tokenizer: tokenizer, sharedBuilder: sharedMaskBuilder, allEosTokenIds: allEosIds
                         )
                     }
+                    GrammarCompileWarmup.warm(
+                        processor: grammarProcessor, modelId: request.model, eos: allEosIds)
 
                     let parameters = engine.buildGenerateParameters(request: request, config: container.config, settings: engine.settingsProvider?(request.model))
                     let penaltyProc = parameters.processor()

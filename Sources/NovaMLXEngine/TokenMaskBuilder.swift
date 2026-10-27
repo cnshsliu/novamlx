@@ -84,8 +84,15 @@ public final class TokenMaskBuilder: @unchecked Sendable {
         return tokenDecodedTexts[tokenId]
     }
 
-    public func buildMask(allowedChars: Set<Character>, eosAllowed: Bool = true) -> MLXArray {
-        precondition(materialized, "TokenMaskBuilder.buildMask called before materialize")
+    /// Host-side allowed-token vector. `buildMask*` wraps this in an `MLXArray`.
+    /// Whitespace-only tokens follow `whitespaceAllowed` (JSON-style masks pass
+    /// `true`; regex passes the pattern's current answer).
+    func allowedTokenMask(
+        allowedChars: Set<Character>,
+        eosAllowed: Bool = true,
+        whitespaceAllowed: Bool = true
+    ) -> [Bool] {
+        precondition(materialized, "TokenMaskBuilder.allowedTokenMask called before materialize")
         var maskValues = [Bool](repeating: false, count: vocabSize)
         for i in 0..<vocabSize {
             if i == eosTokenId {
@@ -93,13 +100,28 @@ public final class TokenMaskBuilder: @unchecked Sendable {
                 continue
             }
             if tokenIsWhitespaceOrEmpty[i] {
-                maskValues[i] = true
+                maskValues[i] = whitespaceAllowed
                 continue
             }
             if let fc = tokenFirstChars[i], allowedChars.contains(fc) {
                 maskValues[i] = true
             }
         }
+        return maskValues
+    }
+
+    func eosOnlyMask() -> [Bool] {
+        precondition(materialized, "TokenMaskBuilder.eosOnlyMask called before materialize")
+        var maskValues = [Bool](repeating: false, count: vocabSize)
+        if let eosId = eosTokenId, eosId >= 0, eosId < vocabSize {
+            maskValues[eosId] = true
+        }
+        return maskValues
+    }
+
+    public func buildMask(allowedChars: Set<Character>, eosAllowed: Bool = true) -> MLXArray {
+        let maskValues = allowedTokenMask(
+            allowedChars: allowedChars, eosAllowed: eosAllowed, whitespaceAllowed: true)
         return MLXArray(maskValues)[.newAxis, 0...]
     }
 
@@ -108,32 +130,15 @@ public final class TokenMaskBuilder: @unchecked Sendable {
         eosAllowed: Bool = true,
         canAcceptWhitespace: () -> Bool
     ) -> MLXArray {
-        precondition(materialized, "TokenMaskBuilder.buildMaskWithWhitespaceCheck called before materialize")
-        let wsAllowed = canAcceptWhitespace()
-        var maskValues = [Bool](repeating: false, count: vocabSize)
-        for i in 0..<vocabSize {
-            if i == eosTokenId {
-                maskValues[i] = eosAllowed
-                continue
-            }
-            if tokenIsWhitespaceOrEmpty[i] {
-                maskValues[i] = wsAllowed
-                continue
-            }
-            if let fc = tokenFirstChars[i], allowedChars.contains(fc) {
-                maskValues[i] = true
-            }
-        }
+        let maskValues = allowedTokenMask(
+            allowedChars: allowedChars,
+            eosAllowed: eosAllowed,
+            whitespaceAllowed: canAcceptWhitespace())
         return MLXArray(maskValues)[.newAxis, 0...]
     }
 
     public func buildEOSMask() -> MLXArray {
-        precondition(materialized, "TokenMaskBuilder.buildEOSMask called before materialize")
-        var maskValues = [Bool](repeating: false, count: vocabSize)
-        if let eosId = eosTokenId, eosId >= 0, eosId < vocabSize {
-            maskValues[eosId] = true
-        }
-        return MLXArray(maskValues)[.newAxis, 0...]
+        MLXArray(eosOnlyMask())[.newAxis, 0...]
     }
 
     /// Apply a `[1, M]` bool mask to `[..., V]` logits, surviving any
