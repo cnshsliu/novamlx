@@ -4,6 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Qwen MTP greedy verify** — companion MTP heads (`qwen3_5_mtp` / `qwen3_8_mtp`) are no longer treated as a chat draft that skips verification. Temperature 0 loads the head with MLXLMCommon `MTPDrafterModelFactory` and checks drafts with `MTPSpeculativeTokenIterator`, so accepted tokens match plain greedy decode. Temperature above 0 stays on serial decode. The Engine `MtpTokenIterator` stub (`MtpTarget` / `MtpDrafter`), which sampled with an ordinary `TokenIterator` while logging MTP, now throws instead of running. DeepSeek's in-graph head still uses those Nova protocols and stays on serial decode until it moves to `MTPDrafterModel`.
+
 ## [1.8.2] - 2026-10-27
 
 **Headline: Flint chat follows official rec (P0–P2), and think-phase stops stay on the filtered packet.** Family `.flint` matches Recursive `rec` through the P0–P2 alignment: every eos id and a new `<think>` after visible text stop the turn (#42), an omitted `thinking_budget` leaves the chain of thought under `max_tokens` (#44), structural grammar allows one `<think>` block (#45), grammar and recommended sampling stay on the filtered resident packet at width 16 (#46), HTTP defaults match `rec` (#47), `enforce_tool_schemas` can constrain tool arguments (#48), and the official chat template, session prefix, seed, and schema-aware tool calls are in place (#49). #50 keeps the grammar stops sampleable inside an open `<think>`, including `<|developer|>` as a checkpoint EOS, so a temperature-0 grammar-on hello finishes, and that default chat stays on the filtered packet. Intro: [Flint](docs/features/flint.md).

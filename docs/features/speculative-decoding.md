@@ -68,12 +68,19 @@ On a Mac, A/B the same greedy request: set `"temperature": 0` both times, once w
 
 DFlash2 and DSpark schedule how many drafted tokens the target model scores. The default is adaptive. `"adaptive_verify": "fixed"` or `NOVAMLX_ADAPTIVE_VERIFY=fixed` restores the previous block. Acceptance stays the greedy prefix plus the target bonus token, and it still requires temperature 0. Companion attach policy is unchanged.
 
+## Qwen MTP (greedy)
+
+A Qwen3.5 / Qwen3.8 companion whose `config.json` is an MTP head (`qwen3_5_mtp`, `qwen3_8_mtp`, or another `*_mtp` type) is not loaded as a second chat model. At temperature 0, generate and stream load that head with MLXLMCommon `MTPDrafterModelFactory` and verify drafts with `MTPSpeculativeTokenIterator`. Acceptance is the target argmax: a matching draft prefix is kept, and the first target token that disagrees is appended. That is the same token sequence as ordinary greedy decode on the same prompt. Temperature above 0 does not run this loop.
+
+The older Engine `MtpTokenIterator` (`MtpTarget` / `MtpDrafter`) did not verify drafts. It is disabled. An in-graph head that still conforms to those Nova protocols (DeepSeek V4) stays on serial decode until it is ported to `MTPDrafterModel`. Those two protocols are not the MLXLMCommon drafter protocol.
+
 ## Limits / notes
 
 - Hybrid-attention (Mamba) targets are not supported.
 - Cross-vocabulary draft models are not supported.
 - Draft-side EOS is filtered so the target model is not cut off early.
-- Adaptive verification applies only to DFlash2 and DSpark. N-gram and ordinary small draft models still use `num_draft_tokens`.
+- Adaptive verification applies only to DFlash2 and DSpark. N-gram, Qwen MTP, and ordinary small draft models still use their own verify width. Qwen MTP is one drafted token per round (`maximumBlockSize` 2).
+- Qwen MTP requires temperature 0. The Nova `MtpTarget` / `MtpDrafter` iterator is disabled and does not report a speedup.
 - When the verify width passes the fast SDPA window, a near-tie argmax can differ from token-by-token decode. That is the existing multi-token verification limit. Fixed mode keeps DSpark inside that window (at most 4 drafts). Adaptive mode crosses it only when confidence is high enough.
 - At low concurrency a shorter verify is not necessarily faster. Use `adaptive_verify: fixed` or raise `NOVAMLX_ADAPTIVE_VERIFY_FIXED_COST` to get a longer block again. The companion is not forced on because of that.
 

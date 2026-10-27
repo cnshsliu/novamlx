@@ -224,8 +224,8 @@ public final class InferenceService: @unchecked Sendable {
         let hasLinearAttention = container?.config.hasLinearAttention == true
         let nativeMtp = hasNativeMtp(resolvedId)
 
-        // Session, grammar, VLM, hybrid, native MTP, and draft-model paths use
-        // engine TokenIterator (compiled decode + MtpTokenIterator).
+        // Session, grammar, VLM, hybrid, native MTP head, and draft-model paths use
+        // engine TokenIterator. Qwen companion MTP uses MLXLMCommon verify.
         let hasDraftModel = finalRequest.draftModel != nil
         let needsSpecialized = finalRequest.sessionId != nil ||
             finalRequest.jsonSchemaDef != nil ||
@@ -770,6 +770,12 @@ public final class InferenceService: @unchecked Sendable {
             guard await downloadAccelerator(candidate) else { return false }
             return dflashCompanionReady(modelId: candidate.acceleratorId)
         }
+        // Qwen MTP heads are MTPDrafterModel checkpoints, not chat models.
+        if candidate.kind == .mtp {
+            if qwenMtpCompanionReady(modelId: candidate.acceleratorId) { return true }
+            guard await downloadAccelerator(candidate) else { return false }
+            return qwenMtpCompanionReady(modelId: candidate.acceleratorId)
+        }
         if isModelLoaded(candidate.acceleratorId) { return true }
         var dir = NovaMLXPaths.directory(forModelId: candidate.acceleratorId)
         if !FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.json").path) {
@@ -844,6 +850,10 @@ public final class InferenceService: @unchecked Sendable {
                 continue
             }
             if candidate.kind == .dflash2, dflashCompanionReady(modelId: candidate.acceleratorId) {
+                continue
+            }
+            if candidate.kind == .mtp, qwenMtpCompanionReady(modelId: candidate.acceleratorId) {
+                QwenMtpDrafterStore.shared.release(modelId: candidate.acceleratorId)
                 continue
             }
             NovaMLXLog.info(
@@ -1042,6 +1052,8 @@ public final class InferenceService: @unchecked Sendable {
         // Same for DFlash2: an on-disk checkpoint with weights is "loaded" so
         // auto-inject can set draft_model without pool-loading it as Qwen3.
         if dflashCompanionReady(modelId: resolvedId) { return true }
+        // Qwen MTP heads are loaded by QwenMtpDrafterStore during generate.
+        if qwenMtpCompanionReady(modelId: resolvedId) { return true }
         // Decision, ASR, TTS and image models stay on the host. In worker mode
         // they are not in workerLoadedModels; treating that as "not loaded"
         // reloaded the 678 MB Laya checkpoint on every request.
