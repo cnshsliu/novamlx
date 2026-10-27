@@ -16,7 +16,9 @@ public final class ModelContainer: @unchecked Sendable {
     public private(set) var mlxContainer: MLXLMCommon.ModelContainer?
     public private(set) var tokenizer: Tokenizer?
     public private(set) var isLoaded: Bool
-    /// In-graph MTP (HyV4 / models that are both MtpTarget and MtpDrafter).
+    /// In-graph MTP head is present (HyV4 / `MtpTarget` + `MtpDrafter`).
+    /// The Nova verify iterator for that head is disabled; decode stays serial
+    /// until the head is ported to MLXLMCommon `MTPDrafterModel`.
     public var hasNativeMtp = false
     /// Compiled single-token decode segments from mlx-swift-lm (0 = general path).
     public var compiledDecodeSegmentCount = 0
@@ -900,7 +902,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         container.compiledDecodeSegmentCount = decodeInfo.value.0
         container.hasNativeMtp = decodeInfo.value.2
         NovaMLXLog.info(
-            "[Engine] decode path \(config.identifier.id): compiledSegments=\(decodeInfo.value.0) nativeMtp=\(decodeInfo.value.2) mtpBlock=\(decodeInfo.value.1)"
+            "[Engine] decode path \(config.identifier.id): compiledSegments=\(decodeInfo.value.0) nativeMtpHead=\(decodeInfo.value.2) mtpBlock=\(decodeInfo.value.1) nativeMtpVerify=disabled"
         )
 
         let model = await mlxContainer.perform { (context: ModelContext) in
@@ -2718,6 +2720,51 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }
             }
         } else if let draftModelId = request.draftModel,
+                  NovaMLXEngine.isMtpDraftConfig(at: NovaMLXPaths.directory(forModelId: draftModelId))
+        {
+            let tag = String(request.id.uuidString.prefix(8))
+            do {
+                if let mtpIterator = try await openQwenMtpIterator(
+                    model: model.value,
+                    draftModelId: draftModelId,
+                    input: effectiveInput,
+                    cache: kvCache,
+                    parameters: parameters,
+                    processor: processor,
+                    numDraftTokens: request.numDraftTokens,
+                    logTag: "GENERATE:\(tag)"
+                ) {
+                    iterator = mtpIterator
+                } else {
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
+            } catch {
+                NovaMLXLog.warning("[GENERATE:\(tag)] Qwen MTP verify failed: \(error.localizedDescription) — serial decode")
+                do {
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                } catch {
+                    NovaMLXLog.error("[GENERATE:\(tag)] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
+                    let freshCache = try model.value.newCache(parameters: parameters)
+                    kvCacheBox.value = freshCache
+                    iterator = try TokenIterator(
+                        input: input, model: model.value,
+                        cache: freshCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
+                    )
+                }
+            }
+        } else if let draftModelId = request.draftModel,
            let draftContainer = getContainer(for: draftModelId),
            let draftMlxContainer = draftContainer.mlxContainer {
             // Speculative decoding with a draft model
@@ -2779,24 +2826,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         processor: processor, sampler: sampler,
                         maxTokens: maxTokens
                     )
-                } else if let target = model.value as? any MtpTarget,
-                   let drafter = draftModel.value as? any MtpDrafter
-                {
-                    var mtpIterator = try MtpTokenIterator(
-                        input: effectiveInput,
-                        target: target,
-                        drafter: drafter,
-                        mainCache: kvCache,
-                        parameters: parameters,
-                        numDraftTokens: numDraft,
-                        processor: processor
+                } else if MtpVerifyRouting.route(
+                    draftIsQwenMtpConfig: false,
+                    temperature: parameters.temperature,
+                    nativeHeadMatched: model.value is any MtpTarget && draftModel.value is any MtpDrafter
+                ) == .nativeStubDisabled {
+                    logNativeMtpStubDisabled(tag: "GENERATE:\(String(request.id.uuidString.prefix(8)))")
+                    iterator = try TokenIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        maxTokens: maxTokens
                     )
-                    let mtpTag = String(request.id.uuidString.prefix(8))
-                    mtpIterator.onSpeculationRound = { proposed, accepted in
-                        NovaMLXLog.info("[MTP:\(mtpTag)] proposed=\(proposed) accepted=\(accepted)")
-                    }
-                    iterator = mtpIterator
-                    NovaMLXLog.info("[GENERATE:\(mtpTag)] MTP draft=\(draftModelId), numDraft=\(numDraft)")
                 } else {
                     let specIterator = try SpeculativeTokenIterator(
                         input: effectiveInput,
@@ -2875,71 +2916,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 // silently bypassed for VLM models. See VLM streaming path for the
                 // mirror fix.
                 let processorBox = ProcessorBox(processor)
-                let hasVision = prefillImage != nil || prefillVideo != nil
                 let mtpBlock = (model.value as? any MtpDrafter)?.mtpBlockSize ?? 0
-                let useNativeMtp = request.useNativeMtp != false
-                    && !hasVision && model.value is any MtpTarget && mtpBlock >= 2
-                if mtpBlock >= 2 && request.useNativeMtp == false {
-                    NovaMLXLog.info("[GENERATE:\(reqTag)] native MTP disabled by setting/request")
-                }
-                let numDraft = request.numDraftTokens ?? max(mtpBlock, 2)
-
-                if useNativeMtp {
-                    let genResult = try await mlxContainer.perform { context in
-                        guard let target = context.model as? any MtpTarget,
-                              let drafter = context.model as? any MtpDrafter
-                        else {
-                            return SendableBox(([Int](), "mtp-cast-failed", 0, 0))
-                        }
-                        let input = LMInput(text: .init(tokens: promptTokensBox.value))
-                        var iterator = try MtpTokenIterator(
-                            input: input,
-                            target: target,
-                            drafter: drafter,
-                            mainCache: cacheBox.value,
-                            parameters: parameters,
-                            numDraftTokens: numDraft,
-                            processor: processorBox.value
-                        )
-                        var generatedIds: [Int] = []
-                        while generatedIds.count < maxTokens, let tokenId = iterator.next() {
-                            if tokenId == unknownTokenId || stopIdsBox.value.contains(tokenId) {
-                                break
-                            }
-                            generatedIds.append(tokenId)
-                        }
-                        let stats =
-                            "mtp proposed=\(iterator.totalProposed) accepted=\(iterator.totalAccepted)"
-                        return SendableBox(
-                            (generatedIds, stats, iterator.totalProposed, iterator.totalAccepted))
+                if mtpBlock >= 2 && model.value is any MtpTarget {
+                    if request.useNativeMtp == false {
+                        NovaMLXLog.info("[GENERATE:\(reqTag)] native MTP disabled by setting/request")
+                    } else if MtpVerifyRouting.route(
+                        draftIsQwenMtpConfig: false,
+                        temperature: parameters.temperature,
+                        nativeHeadMatched: true
+                    ) == .nativeStubDisabled {
+                        logNativeMtpStubDisabled(tag: "GENERATE:\(reqTag)")
                     }
-                    let (generatedIds, logitStats, proposed, accepted) = genResult.value
-                    NovaMLXLog.info(
-                        "[GENERATE:\(reqTag)] native MTP numDraft=\(numDraft) \(logitStats)"
-                    )
-                    let decodedText = mlxTokenizer.decode(tokenIds: generatedIds)
-                    let cleanText = Self.scrubControlTokens(decodedText)
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    let tps = generatedIds.count > 0 ? Double(generatedIds.count) / elapsed : 0
-                    lock.withLock {
-                        totalRequests += 1
-                        totalTokensGenerated += UInt64(generatedIds.count)
-                        totalInferenceTime += elapsed
-                    }
-                    deferredClearCache()
-                    let acceptRate = proposed > 0 ? Double(accepted) / Double(proposed) : 0
-                    NovaMLXLog.info(
-                        "[Prefill:\(reqTag)] VLM-MTP — \(tokenIds.count) prompt, \(generatedIds.count) generated, accept=\(String(format: "%.0f%%", acceptRate * 100))"
-                    )
-                    return InferenceResult(
-                        id: request.id,
-                        model: request.model,
-                        text: cleanText,
-                        tokensPerSecond: tps,
-                        promptTokens: Int(promptTokenCount),
-                        completionTokens: generatedIds.count,
-                        finishReason: generatedIds.count >= maxTokens ? .length : .stop
-                    )
                 }
 
                 let genResult = try await mlxContainer.perform { context in
@@ -3048,32 +3035,22 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 )
             } else {
                 do {
-                    if request.useNativeMtp != false,
-                       let target = model.value as? any MtpTarget,
-                       let drafter = model.value as? any MtpDrafter,
-                       drafter.mtpBlockSize >= 2
-                    {
-                        let numDraft = request.numDraftTokens ?? drafter.mtpBlockSize
-                        let mtpIterator = try MtpTokenIterator(
-                            input: effectiveInput,
-                            target: target,
-                            drafter: drafter,
-                            mainCache: kvCache,
-                            parameters: parameters,
-                            numDraftTokens: numDraft,
-                            processor: processor
-                        )
-                        iterator = mtpIterator
-                        NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] native MTP numDraft=\(numDraft)")
-                    } else {
-                        iterator = try Self.openDecodeIterator(
-                            input: effectiveInput, model: model.value,
-                            cache: kvCache,
-                            processor: processor, sampler: sampler,
-                            parameters: parameters, maxTokens: maxTokens,
-                            request: request,
-                            stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
+                    if MtpVerifyRouting.route(
+                        draftIsQwenMtpConfig: false,
+                        temperature: parameters.temperature,
+                        nativeHeadMatched: request.useNativeMtp != false
+                            && model.value is any MtpTarget
+                            && ((model.value as? any MtpDrafter)?.mtpBlockSize ?? 0) >= 2
+                    ) == .nativeStubDisabled {
+                        logNativeMtpStubDisabled(tag: "GENERATE:\(String(request.id.uuidString.prefix(8)))")
                     }
+                    iterator = try Self.openDecodeIterator(
+                        input: effectiveInput, model: model.value,
+                        cache: kvCache,
+                        processor: processor, sampler: sampler,
+                        parameters: parameters, maxTokens: maxTokens,
+                        request: request,
+                        stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
                 } catch {
                     NovaMLXLog.error("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
                     let freshCache = try model.value.newCache(parameters: parameters)
@@ -3115,6 +3092,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 completionTokens = info.generationTokenCount
                 genStopReason = String(describing: info.stopReason)
                 if case .length = info.stopReason { finishReason = .length }
+                logQwenMtpCompletion(info, tag: String(request.id.uuidString.prefix(8)))
                         NovaMLXLog.debug("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
             case .toolCall(let tc):
                 let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])
@@ -3580,6 +3558,51 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             }
                         }
                     } else if let draftModelId = request.draftModel,
+                              NovaMLXEngine.isMtpDraftConfig(at: NovaMLXPaths.directory(forModelId: draftModelId))
+                    {
+                        let tag = String(request.id.uuidString.prefix(8))
+                        do {
+                            if let mtpIterator = try await openQwenMtpIterator(
+                                model: model.value,
+                                draftModelId: draftModelId,
+                                input: effectiveInput,
+                                cache: kvCache,
+                                parameters: parameters,
+                                processor: processor,
+                                numDraftTokens: request.numDraftTokens,
+                                logTag: "STREAM:\(tag)"
+                            ) {
+                                iterator = mtpIterator
+                            } else {
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
+                        } catch {
+                            NovaMLXLog.warning("[STREAM:\(tag)] Qwen MTP verify failed: \(error.localizedDescription) — serial decode")
+                            do {
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            } catch {
+                                NovaMLXLog.error("[STREAM:\(tag)] TokenIterator failed: \(error.localizedDescription) — falling back to full prefill")
+                                let freshCache = try model.value.newCache(parameters: parameters)
+                                kvCacheBox.value = freshCache
+                                iterator = try TokenIterator(
+                                    input: input, model: model.value,
+                                    cache: freshCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
+                                )
+                            }
+                        }
+                    } else if let draftModelId = request.draftModel,
                        let draftContainer = self.getContainer(for: draftModelId),
                        let draftMlxContainer = draftContainer.mlxContainer {
                         // Speculative decoding with a draft model
@@ -3641,24 +3664,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                     processor: processor, sampler: sampler,
                                     maxTokens: maxTokens
                                 )
-                            } else if let target = model.value as? any MtpTarget,
-                               let drafter = draftModel.value as? any MtpDrafter
-                            {
-                                var mtpIterator = try MtpTokenIterator(
-                                    input: effectiveInput,
-                                    target: target,
-                                    drafter: drafter,
-                                    mainCache: kvCache,
-                                    parameters: parameters,
-                                    numDraftTokens: numDraft,
-                                    processor: processor
+                            } else if MtpVerifyRouting.route(
+                                draftIsQwenMtpConfig: false,
+                                temperature: parameters.temperature,
+                                nativeHeadMatched: model.value is any MtpTarget && draftModel.value is any MtpDrafter
+                            ) == .nativeStubDisabled {
+                                logNativeMtpStubDisabled(tag: "STREAM:\(String(request.id.uuidString.prefix(8)))")
+                                iterator = try TokenIterator(
+                                    input: effectiveInput, model: model.value,
+                                    cache: kvCache,
+                                    processor: processor, sampler: sampler,
+                                    maxTokens: maxTokens
                                 )
-                                let mtpTag = String(request.id.uuidString.prefix(8))
-                                mtpIterator.onSpeculationRound = { proposed, accepted in
-                                    NovaMLXLog.info("[MTP:\(mtpTag)] proposed=\(proposed) accepted=\(accepted)")
-                                }
-                                iterator = mtpIterator
-                                NovaMLXLog.info("[STREAM:\(mtpTag)] MTP draft=\(draftModelId), numDraft=\(numDraft)")
                             } else {
                                 let specIterator = try SpeculativeTokenIterator(
                                     input: effectiveInput,
@@ -3695,36 +3712,22 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                     } else {
                         do {
-                            if request.useNativeMtp != false,
-                               let target = model.value as? any MtpTarget,
-                               let drafter = model.value as? any MtpDrafter,
-                               drafter.mtpBlockSize >= 2
-                            {
-                                let numDraft = request.numDraftTokens ?? drafter.mtpBlockSize
-                                var mtpIterator = try MtpTokenIterator(
-                                    input: effectiveInput,
-                                    target: target,
-                                    drafter: drafter,
-                                    mainCache: kvCache,
-                                    parameters: parameters,
-                                    numDraftTokens: numDraft,
-                                    processor: processor
-                                )
-                                let mtpTag = String(request.id.uuidString.prefix(8))
-                                mtpIterator.onSpeculationRound = { proposed, accepted in
-                                    NovaMLXLog.info("[MTP:\(mtpTag)] proposed=\(proposed) accepted=\(accepted)")
-                                }
-                                iterator = mtpIterator
-                                NovaMLXLog.info("[STREAM:\(mtpTag)] native MTP numDraft=\(numDraft)")
-                            } else {
-                                iterator = try Self.openDecodeIterator(
-                                    input: effectiveInput, model: model.value,
-                                    cache: kvCache,
-                                    processor: processor, sampler: sampler,
-                                    parameters: parameters, maxTokens: maxTokens,
-                                    request: request,
-                                    stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
+                            if MtpVerifyRouting.route(
+                                draftIsQwenMtpConfig: false,
+                                temperature: parameters.temperature,
+                                nativeHeadMatched: request.useNativeMtp != false
+                                    && model.value is any MtpTarget
+                                    && ((model.value as? any MtpDrafter)?.mtpBlockSize ?? 0) >= 2
+                            ) == .nativeStubDisabled {
+                                logNativeMtpStubDisabled(tag: "STREAM:\(String(request.id.uuidString.prefix(8)))")
                             }
+                            iterator = try Self.openDecodeIterator(
+                                input: effectiveInput, model: model.value,
+                                cache: kvCache,
+                                processor: processor, sampler: sampler,
+                                parameters: parameters, maxTokens: maxTokens,
+                                request: request,
+                                stopIds: Self.chatStopIds(modelConfig: modelConfig, container: container))
                         } catch {
                             NovaMLXLog.error("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache iterator failed: \(error.localizedDescription) — falling back to full prefill")
                             let freshCache = try model.value.newCache(parameters: parameters)
@@ -3793,6 +3796,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             completionTokens = info.generationTokenCount
                             infoStopReason = String(describing: info.stopReason)
                             if case .length = info.stopReason { finishReason = .length }
+                            logQwenMtpCompletion(info, tag: reqTag)
                             NovaMLXLog.debug("[STREAM:\(reqTag)] Info: tokens=\(info.generationTokenCount), stopReason=\(infoStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
                         case .toolCall(let tc):
                 let argsData = try? JSONSerialization.data(withJSONObject: tc.function.arguments.mapValues { $0.anyValue }, options: [])

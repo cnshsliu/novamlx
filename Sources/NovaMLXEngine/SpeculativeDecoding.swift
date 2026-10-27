@@ -699,6 +699,11 @@ public protocol MtpTarget: LanguageModel {
 }
 
 /// Drafter head. DeepSeek V4 is both ``MtpTarget`` and ``MtpDrafter``.
+///
+/// These protocols are not MLXLMCommon's ``MTPDrafterModel``. Qwen greedy
+/// verify uses that type and ``MTPSpeculativeTokenIterator``. Porting the
+/// DeepSeek head onto ``MTPDrafterModel`` is a follow-up; until then Engine
+/// must not run ``MtpTokenIterator``.
 public protocol MtpDrafter: AnyObject {
     var mtpBlockSize: Int { get }
     func bindMtp(
@@ -709,18 +714,22 @@ public protocol MtpDrafter: AnyObject {
     func mtpNewCache(parameters: GenerateParameters?) -> [KVCache]
 }
 
-/// MTP iterator. Native block decode falls back to the target's ordinary sampler
-/// so generation still completes when the speculative loop is not engaged.
-public struct MtpTokenIterator: TokenIteratorProtocol {
-    private var inner: TokenIterator
-    public var totalProposed = 0
-    public var totalAccepted = 0
-    public var onSpeculationRound: (@Sendable (Int, Int) -> Void)?
+public enum MtpVerifyError: Error, Sendable, CustomStringConvertible {
+    /// The old iterator sampled with ``TokenIterator`` and reported MTP.
+    case engineStubDisabled
 
-    public var maxTokens: Int? { inner.maxTokens }
-    public var tokenCount: Int { inner.tokenCount }
-    public var promptPrefillTime: TimeInterval { inner.promptPrefillTime }
-    public var state: LMOutput.State? { inner.state }
+    public var description: String {
+        "Nova MtpTokenIterator is disabled. It did not verify drafts. Qwen greedy uses MLXLMCommon.MTPSpeculativeTokenIterator."
+    }
+}
+
+/// Disabled. Constructing it throws ``MtpVerifyError/engineStubDisabled``.
+/// The previous body ignored the drafter and ran ordinary decode.
+public struct MtpTokenIterator: TokenIteratorProtocol {
+    public var maxTokens: Int? { nil }
+    public var tokenCount: Int { 0 }
+    public var promptPrefillTime: TimeInterval { 0 }
+    public var state: LMOutput.State? { nil }
 
     public init(
         input: LMInput,
@@ -731,22 +740,17 @@ public struct MtpTokenIterator: TokenIteratorProtocol {
         numDraftTokens: Int,
         processor: LogitProcessor? = nil
     ) throws {
-        _ = drafter.mtpBlockSize
+        _ = input
+        _ = target
+        _ = drafter
+        _ = mainCache
+        _ = parameters
         _ = numDraftTokens
-        self.inner = try TokenIterator(
-            input: input,
-            model: target,
-            cache: mainCache,
-            processor: processor,
-            sampler: parameters.sampler(),
-            prefill: parameters.prefill,
-            maxTokens: parameters.maxTokens
-        )
+        _ = processor
+        throw MtpVerifyError.engineStubDisabled
     }
 
-    public mutating func next() -> Int? {
-        inner.next()
-    }
+    public mutating func next() -> Int? { nil }
 }
 
 // MARK: - Companion discovery

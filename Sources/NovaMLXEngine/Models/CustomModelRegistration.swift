@@ -42,5 +42,6 @@ enum CustomModelRegistration {
         await LLMTypeRegistry.shared.registerModelType(
             "flint",
             creator: createCustom(FlintConfiguration.self, FlintModel.init))
+        await QwenMtpRegistration.ensure()
     }
 }
