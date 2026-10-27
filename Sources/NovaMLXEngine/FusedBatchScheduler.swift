@@ -460,10 +460,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 totalTokensViaFused: totalTokensViaFused,
                 peakBatchWidth: peakBatchWidth,
                 totalPreemptions: totalPreemptions,
-                peakFusedForwardWidth: peakFusedForwardWidth,
-                totalFusedForwards: totalFusedForwards,
                 specAcceptanceRate: engine.specDecoder.acceptanceRate,
-                specCacheSize: specStats.cacheSize
+                specCacheSize: specStats.cacheSize,
+                peakFusedForwardWidth: peakFusedForwardWidth,
+                totalFusedForwards: totalFusedForwards
             )
         }
     }
@@ -951,7 +951,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                snapTokens.count >= flintSelection.cached,
                let stored = flintKV[request.model]
             {
-                var copies = stored.map { $0.copy() }
+                let copies = stored.map { $0.copy() }
                 let drop = snapTokens.count - flintSelection.cached
                 let trimmed = drop == 0 || copies.allSatisfy { $0.trim(drop) >= drop }
                 if trimmed && flintSelection.cached < allTokens.count {
