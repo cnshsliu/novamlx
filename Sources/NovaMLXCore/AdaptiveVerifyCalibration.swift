@@ -213,7 +213,7 @@ public final class AdaptiveVerifyCalibrator: @unchecked Sendable {
             let shown = after.isEmpty
                 ? "prior"
                 : after.map { String(format: "%.2f", $0) }.joined(separator: ",")
-            log.info(
+            Self.log.info(
                 "Updated temperatures for \(Self.displayKey(pairKey), privacy: .public): \(shown, privacy: .public)"
             )
         }
