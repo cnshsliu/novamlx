@@ -1,4 +1,5 @@
 import Foundation
+import NovaMLXCore
 
 /// Streaming tool-call events. `started` fires once the name is known.
 /// `arguments` pieces concatenate to the `finished` arguments string.
