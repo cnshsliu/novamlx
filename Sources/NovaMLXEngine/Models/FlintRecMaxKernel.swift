@@ -4,13 +4,19 @@ import NovaMLXUtils
 
 // MARK: - M4 Max decode KV / INT4 dot
 
-/// Official `rec` `kernels/m4_max.py`, applied when the device is M4 Max.
+/// Official `rec` `kernels/m4_max.py` KV-load half, applied when the device
+/// is M4 Max.
 ///
-/// `build_decoder` runs this after the shared pipeline, and only for that
-/// chip. It vectorizes the KV-team attention loads (`KVView.load4`) and
-/// points `dot16` at the `dot16_w197_bias23` body. The two forms match on
-/// the unshifted nibble masks (`testInt4NibbleDotMatchesUshortLoop`).
-/// `attention_partial_w204` stays scalar, as in rec.
+/// `build_decoder` runs that pass after the shared pipeline, and only for
+/// that chip. This port vectorizes the KV-team attention loads
+/// (`KVView.load4`). `attention_partial_w204` stays scalar, as in rec.
+///
+/// The same Python pass also points `dot16` at `dot16_w197_bias23`. Those
+/// two forms match on the unshifted nibble masks
+/// (`testInt4NibbleDotMatchesUshortLoop`), and `down_all_w197_bias23` already
+/// calls the wide dot. Replacing every `dot16` does not. Single-token
+/// `forward` still agreed with eager decode, and the resident packet
+/// repeated one id. The parity-clean packet keeps the ushort `dot16`.
 ///
 /// Nova keeps the 76/64/64 resident pool on M4 Max. Official rec still
 /// launches 36 workers there. The pool is the faster measured schedule;
@@ -42,15 +48,13 @@ enum FlintRecMaxKernel {
 
     /// Nil when `header` is not a rendered Flint decode shader this pass knows.
     static func apply(to header: String) -> String? {
-        guard let originalDot = function(header, "dot16"),
-            let wide = function(header, "dot16_w197_bias23")
+        // Presence check only. Do not rename `dot16_w197_bias23` onto `dot16`.
+        guard function(header, "dot16") != nil, function(header, "dot16_w197_bias23") != nil
         else { return nil }
-        let swapped = wide.replacingOccurrences(of: "dot16_w197_bias23(", with: "dot16(")
-        guard let withDot = replacingOnce(header, originalDot, swapped) else { return nil }
         let scalar = "    bfloat16_t operator[](uint i) const { return *address(i); }"
         let load4 = scalar
             + "\n    vec<bfloat16_t,4> load4(uint i) const {return *((const device vec<bfloat16_t,4>*)(address(i)));}"
-        guard let withLoad = replacingOnce(withDot, scalar, load4),
+        guard let withLoad = replacingOnce(header, scalar, load4),
             let path = function(withLoad, "attention_partial_path_w53")
         else { return nil }
         var rewritten = path

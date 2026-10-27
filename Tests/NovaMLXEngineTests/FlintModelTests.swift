@@ -329,11 +329,15 @@ struct FlintModelTests {
             let wide = header.range(of: "inline float dot16_w197_bias23(")
             #expect(dot != nil)
             #expect(wide != nil)
+            // The resident packet disagrees with single-token decode when
+            // `dot16` is replaced by the 2^23 body. Keep the ushort loop.
+            // `down_all_w197_bias23` still calls the wide dot by name.
             if let dot, let wide {
                 let body = header[dot.lowerBound..<wide.lowerBound]
-                #expect(body.contains("0x4b000000u"))
-                #expect(!body.contains("(p[j]&15u)"))
+                #expect(body.contains("(p[j]&15u)"))
+                #expect(!body.contains("0x4b000000u"))
             }
+            #expect(header.contains("a[j]+=dot16_w197_bias23("))
             // The non-team partial stays scalar. rec only rewrites path_w53.
             #expect(header.contains("key[j]=float(key_base[at+j])"))
         }
