@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXLMCommon
 import NovaMLXCore
 import NovaMLXUtils
 
@@ -314,7 +315,9 @@ enum GrammarCompileWarmup {
 final class HostGrammarSession: @unchecked Sendable {
     let kind: HostGrammarKind
     private let grammar: any FusedHostGrammar
-    private let lock = NSLock()
+    /// Same lock as `FusedBatchScheduler`. `NSLock.lock` is unavailable in an
+    /// async context, and the slow-compile task is async.
+    private let lock = NovaMLXLock()
     private var mask: [Bool]?
     private var vocab = 0
     private var slowCompileInFlight = false
@@ -369,18 +372,18 @@ final class HostGrammarSession: @unchecked Sendable {
         let bits = grammar.fusedCompileMask(vocabSize: vocabSize)
         let elapsedMs = Date().timeIntervalSince(started) * 1000
         let hit = grammar.fusedLastCompileWasCacheHit
-        lock.lock()
-        vocab = vocabSize
-        if bits.isEmpty {
-            mask = nil
-            compileFailed = true
-            slowCompileInFlight = false
-        } else {
-            mask = bits
-            compileFailed = false
-            slowCompileInFlight = false
+        lock.withLock {
+            vocab = vocabSize
+            if bits.isEmpty {
+                mask = nil
+                compileFailed = true
+                slowCompileInFlight = false
+            } else {
+                mask = bits
+                compileFailed = false
+                slowCompileInFlight = false
+            }
         }
-        lock.unlock()
         let cache = hit ? "hit" : "miss"
         NovaMLXLog.info(
             "[Grammar] compiled kind=\(kind.rawValue) vocab=\(vocabSize) cache=\(cache) elapsedMs=\(String(format: "%.1f", elapsedMs))")
@@ -388,18 +391,16 @@ final class HostGrammarSession: @unchecked Sendable {
 
     /// Mask for this step, or nil while a compile is in flight or not started.
     func readyMask() -> [Bool]? {
-        lock.lock()
-        defer { lock.unlock() }
-        if slowCompileInFlight { return nil }
-        return mask
+        lock.withLock {
+            if slowCompileInFlight { return nil }
+            return mask
+        }
     }
 
     /// The last compile stored no bits. The sequence must stop. An empty
     /// mask is not "ready": treating it as ready would sample unconstrained.
     func hasFailed() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return compileFailed
+        lock.withLock { compileFailed }
     }
 
     /// Advance the FSM. `true` means the caller must `scheduleSlowCompile`
@@ -407,33 +408,34 @@ final class HostGrammarSession: @unchecked Sendable {
     func note(tokenId: Int, text: String) -> Bool {
         let slow = grammar.fusedConsume(tokenId: tokenId, text: text)
         if !slow, let bits = grammar.fusedCurrentMask(), !bits.isEmpty {
-            lock.lock()
-            mask = bits
-            slowCompileInFlight = false
-            lock.unlock()
+            lock.withLock {
+                mask = bits
+                slowCompileInFlight = false
+            }
             return false
         }
-        lock.lock()
-        mask = nil
-        slowCompileInFlight = true
-        lock.unlock()
+        lock.withLock {
+            mask = nil
+            slowCompileInFlight = true
+        }
         return true
     }
 
     /// Start the next mask compile without waiting. Returns immediately.
     func scheduleSlowCompile() {
-        lock.lock()
-        compileGeneration += 1
-        slowCompileInFlight = true
-        mask = nil
-        let generation = compileGeneration
-        let vocabSize = vocab
-        lock.unlock()
+        let started = lock.withLock { () -> (generation: Int, vocabSize: Int) in
+            compileGeneration += 1
+            slowCompileInFlight = true
+            mask = nil
+            return (compileGeneration, vocab)
+        }
+        let generation = started.generation
+        let vocabSize = started.vocabSize
         guard vocabSize > 0 else {
-            lock.lock()
-            compileFailed = true
-            slowCompileInFlight = false
-            lock.unlock()
+            lock.withLock {
+                compileFailed = true
+                slowCompileInFlight = false
+            }
             NovaMLXLog.error("[Grammar] compile skipped kind=\(kind.rawValue) reason=unknown-vocab")
             return
         }
@@ -442,32 +444,32 @@ final class HostGrammarSession: @unchecked Sendable {
             let bits = grammar.fusedCompileMask(vocabSize: vocabSize)
             let elapsedMs = Date().timeIntervalSince(started) * 1000
             guard let self else { return }
-            self.lock.lock()
-            let installed: Bool
-            let failedEmpty: Bool
-            if self.compileGeneration == generation {
-                if bits.isEmpty {
-                    self.mask = nil
-                    self.compileFailed = true
-                    failedEmpty = true
-                } else {
-                    self.mask = bits
-                    self.compileFailed = false
-                    failedEmpty = false
-                }
-                self.slowCompileInFlight = false
-                installed = !bits.isEmpty
-            } else {
-                installed = false
-                failedEmpty = false
-            }
-            self.lock.unlock()
-            if installed {
+            let outcome = self.installSlowCompile(generation: generation, bits: bits)
+            if outcome.installed {
                 NovaMLXLog.debug(
                     "[Grammar] refreshed kind=\(kind.rawValue) elapsedMs=\(String(format: "%.1f", elapsedMs))")
-            } else if failedEmpty {
+            } else if outcome.failedEmpty {
                 NovaMLXLog.error("[Grammar] compile produced an empty mask kind=\(kind.rawValue)")
             }
+        }
+    }
+
+    /// Synchronous. The detached compile task must not call `NSLock` itself.
+    private func installSlowCompile(generation: Int, bits: [Bool]) -> (installed: Bool, failedEmpty: Bool) {
+        lock.withLock {
+            guard compileGeneration == generation else {
+                return (installed: false, failedEmpty: false)
+            }
+            if bits.isEmpty {
+                mask = nil
+                compileFailed = true
+                slowCompileInFlight = false
+                return (installed: false, failedEmpty: true)
+            }
+            mask = bits
+            compileFailed = false
+            slowCompileInFlight = false
+            return (installed: true, failedEmpty: false)
         }
     }
 
