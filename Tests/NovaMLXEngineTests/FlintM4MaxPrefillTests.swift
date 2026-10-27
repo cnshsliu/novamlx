@@ -57,10 +57,11 @@ struct FlintM4MaxPrefillTests {
     @Test("fused gate+up matches SwitchGLU above the row threshold")
     func testFusedMatchesSwitchGLU() throws {
         let glu = SwitchGLU(inputDims: 64, hiddenDims: 64, numExperts: 4)
-        quantize(model: glu, groupSize: 64, bits: 4, mode: .affine) { layer, group, bits, mode in
-            (layer as? SwitchLinear)?.toQuantized(groupSize: group, bits: bits, mode: mode)
-        }
-        var flat = glu.parameters().flattened()
+        // Default `apply` is `quantizeSingle`. A trailing closure binds to
+        // `filter: (String, Module) -> Bool`, not to `apply`.
+        quantize(model: glu, groupSize: 64, bits: 4, mode: .affine)
+        // `parameters().flattened()` is `[(String, MLXArray)]`.
+        var flat = Dictionary(uniqueKeysWithValues: glu.parameters().flattened())
         let scaleKeys = flat.keys.filter { $0.hasSuffix(".scales") || $0.hasSuffix(".biases") }
         for key in scaleKeys {
             flat[key] = flat[key]?.asType(.bfloat16)
