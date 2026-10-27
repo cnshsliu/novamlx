@@ -1292,6 +1292,18 @@ public struct ServerConfig: Codable, Sendable {
     public let enforceToolSchemas: Bool
     public let autoLoad: AutoLoadConfig
     public let cluster: ClusterSettings?
+    /// Ordered long-term prefix-cache roots. The first mounted, writable
+    /// path wins. Nil leaves the choice to env / `prefix-cache-path` / the
+    /// internal fallback. An absent external volume is not an error.
+    public let prefixCacheRoots: [String]?
+    /// Seconds a long-term prefix block stays on disk. Nil uses env, the
+    /// settings file, or 24 hours.
+    public let prefixCacheTTLSeconds: Double?
+    /// Hot RAM budget in front of the long-term store, in bytes. Nil uses
+    /// env, the settings file, or 256 MiB. `0` keeps the tier off.
+    public let prefixCacheHotBytes: Int?
+    /// Cap on the long-term prefix files, in bytes.
+    public let prefixCacheMaxBytes: UInt64?
 
     public struct ClusterSettings: Codable, Sendable, Equatable {
         public let role: String
@@ -1329,6 +1341,10 @@ public struct ServerConfig: Codable, Sendable {
         case enforceToolSchemas = "enforce_tool_schemas"
         case autoLoad
         case cluster
+        case prefixCacheRoots
+        case prefixCacheTTLSeconds
+        case prefixCacheHotBytes
+        case prefixCacheMaxBytes
     }
 
     public init(
@@ -1349,7 +1365,11 @@ public struct ServerConfig: Codable, Sendable {
         exclusiveAutoUnload: Bool = true,
         enforceToolSchemas: Bool = false,
         autoLoad: AutoLoadConfig = .init(),
-        cluster: ClusterSettings? = nil
+        cluster: ClusterSettings? = nil,
+        prefixCacheRoots: [String]? = nil,
+        prefixCacheTTLSeconds: Double? = nil,
+        prefixCacheHotBytes: Int? = nil,
+        prefixCacheMaxBytes: UInt64? = nil
     ) {
         self.host = host
         self.port = port
@@ -1369,6 +1389,10 @@ public struct ServerConfig: Codable, Sendable {
         self.enforceToolSchemas = enforceToolSchemas
         self.autoLoad = autoLoad
         self.cluster = cluster
+        self.prefixCacheRoots = prefixCacheRoots
+        self.prefixCacheTTLSeconds = prefixCacheTTLSeconds
+        self.prefixCacheHotBytes = prefixCacheHotBytes
+        self.prefixCacheMaxBytes = prefixCacheMaxBytes
     }
 
     public var isTLSEnabled: Bool { tlsCertPath != nil }
@@ -1393,6 +1417,36 @@ public struct ServerConfig: Codable, Sendable {
         enforceToolSchemas = try container.decodeIfPresent(Bool.self, forKey: .enforceToolSchemas) ?? false
         autoLoad = try container.decodeIfPresent(AutoLoadConfig.self, forKey: .autoLoad) ?? .init()
         cluster = try container.decodeIfPresent(ClusterSettings.self, forKey: .cluster)
+        prefixCacheRoots = try container.decodeIfPresent([String].self, forKey: .prefixCacheRoots)
+        prefixCacheTTLSeconds = try container.decodeIfPresent(Double.self, forKey: .prefixCacheTTLSeconds)
+        prefixCacheHotBytes = try container.decodeIfPresent(Int.self, forKey: .prefixCacheHotBytes)
+        prefixCacheMaxBytes = try container.decodeIfPresent(UInt64.self, forKey: .prefixCacheMaxBytes)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(host, forKey: .host)
+        try container.encode(port, forKey: .port)
+        try container.encode(adminPort, forKey: .adminPort)
+        try container.encode(maxConcurrentRequests, forKey: .maxConcurrentRequests)
+        try container.encode(requestTimeout, forKey: .requestTimeout)
+        try container.encodeIfPresent(contextScalingTarget, forKey: .contextScalingTarget)
+        try container.encodeIfPresent(tlsCertPath, forKey: .tlsCertPath)
+        try container.encodeIfPresent(tlsKeyPath, forKey: .tlsKeyPath)
+        try container.encodeIfPresent(tlsKeyPassword, forKey: .tlsKeyPassword)
+        try container.encode(maxRequestSizeMB, forKey: .maxRequestSizeMB)
+        try container.encode(maxProcessMemory, forKey: .maxProcessMemory)
+        try container.encode(maxGpuMemory, forKey: .maxGpuMemory)
+        try container.encode(prefixCacheEnabled, forKey: .prefixCacheEnabled)
+        try container.encode(allowUnlistedDownloads, forKey: .allowUnlistedDownloads)
+        try container.encode(exclusiveAutoUnload, forKey: .exclusiveAutoUnload)
+        try container.encode(enforceToolSchemas, forKey: .enforceToolSchemas)
+        try container.encode(autoLoad, forKey: .autoLoad)
+        try container.encodeIfPresent(cluster, forKey: .cluster)
+        try container.encodeIfPresent(prefixCacheRoots, forKey: .prefixCacheRoots)
+        try container.encodeIfPresent(prefixCacheTTLSeconds, forKey: .prefixCacheTTLSeconds)
+        try container.encodeIfPresent(prefixCacheHotBytes, forKey: .prefixCacheHotBytes)
+        try container.encodeIfPresent(prefixCacheMaxBytes, forKey: .prefixCacheMaxBytes)
     }
 
     public func scaleTokenCount(_ count: Int, modelContextWindow: Int) -> Int {

@@ -18,7 +18,7 @@ This directory is the user-facing documentation, one page per feature.
 | [连续批处理 / Continuous batching](continuous-batching.md) | 并发序列共享 GPU，内存紧时按优先级抢占。 | stable |
 | [推测解码 / Speculative decoding](speculative-decoding.md) | n-gram 或小草稿模型先提议 token，目标模型再接受。 | stable |
 | [TurboQuant KV](turboquant-kv.md) | KV 以 4-bit 仿射量化存放，采样器无感知。 | stable |
-| [KV cache 与前缀共享 / KV cache & prefix share](kv-cache.md) | `~/.nova/cache/` 复用前缀，`session_id` 钉住谱系。 | stable |
+| [KV cache 与前缀共享 / KV cache & prefix share](kv-cache.md) | 可配置目录复用前缀（外置盘不在则回落），`session_id` 钉住谱系。 | stable |
 | [分布式推理 / Distributed inference](distributed-inference.md) | 多台 Apple Silicon 上做流水线并行，失败则回到本机。 | stable |
 
 <a id="multi-modal"></a>
