@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXNN
 import NovaMLXPrefixCache
 import Testing
 
@@ -345,7 +346,7 @@ struct FlintModelTests {
         #expect(!FlintRecMaxKernel.header(launch: .max, deviceName: "").contains("load4"))
     }
 
-    @Test("sanitize moves a router expert bias onto the MoE block")
+    @Test("sanitize moves a router expert bias and fills a missing one with zeros")
     func testSanitizeExpertBias() throws {
         let config = try JSONDecoder.json5().decode(
             FlintConfiguration.self, from: Data(Self.configJSON().utf8))
@@ -357,11 +358,48 @@ struct FlintModelTests {
         #expect(out["model.layers.2.mlp.gate.expert_bias"] == nil)
         let moved = try #require(out["model.layers.2.mlp.expert_bias"])
         #expect(moved.shape == [256])
+        #expect(moved.dtype == .float32)
+        eval(moved)
+        #expect(moved.sum().item(Float.self) == 256)
+        // A sibling MoE layer with no checkpoint bias gets zeros. Dense
+        // mlp_only layers do not.
+        let filled = try #require(out["model.layers.3.mlp.expert_bias"])
+        #expect(filled.shape == [config.numExperts])
+        #expect(filled.dtype == .float32)
+        eval(filled)
+        #expect(filled.sum().item(Float.self) == 0)
+        #expect(out["model.layers.0.mlp.expert_bias"] == nil)
+        #expect(out["model.layers.1.mlp.expert_bias"] == nil)
+
+        let kept = model.sanitize(weights: [
+            "model.layers.2.mlp.expert_bias": bias
+        ])
+        let block = try #require(kept["model.layers.2.mlp.expert_bias"])
+        eval(block)
+        #expect(block.sum().item(Float.self) == 256)
+
         let dense = model.sanitize(weights: [
             "model.layers.0.mlp.gate.expert_bias": bias
         ])
         #expect(dense["model.layers.0.mlp.gate.expert_bias"] != nil)
         #expect(dense["model.layers.0.mlp.expert_bias"] == nil)
+
+        let moe = FlintSparseMoeBlock(config)
+        try moe.updateMissing(
+            parameter: "expert_bias",
+            verify: [.allModelKeysSet],
+            path: ["model", "layers", "2", "mlp", "expert_bias"],
+            modulePath: ["FlintSparseMoeBlock"])
+        eval(moe.expertBias)
+        #expect(moe.expertBias.shape == [config.numExperts])
+        #expect(moe.expertBias.sum().item(Float.self) == 0)
+        #expect(throws: UpdateError.self) {
+            try moe.updateMissing(
+                parameter: "weight",
+                verify: [.allModelKeysSet],
+                path: ["weight"],
+                modulePath: ["FlintSparseMoeBlock"])
+        }
     }
 
     /// The shader is back on the ushort loop. This checks the 2^23 form

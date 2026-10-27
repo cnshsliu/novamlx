@@ -305,7 +305,8 @@ class FlintSparseMoeBlock: Module {
     @ModuleInfo(key: "switch_mlp") var switchMLP: SwitchGLU
     @ModuleInfo(key: "shared_expert") var sharedExpert: FlintMLP
     /// Added to sigmoid scores before the top-k. Not a weight. Official
-    /// flint-int4 leaves this at zero (`router_expert_bias` false).
+    /// flint-int4 sets `router_expert_bias` false and omits the tensor.
+    /// The zero from `init` is the default; `updateMissing` keeps it.
     @ParameterInfo(key: "expert_bias") var expertBias: MLXArray
 
     init(_ args: FlintConfiguration) {
@@ -321,6 +322,16 @@ class FlintSparseMoeBlock: Module {
             hiddenDimensions: args.sharedExpertIntermediateSize
         )
         _expertBias.wrappedValue = MLXArray.zeros([args.numExperts], dtype: .float32)
+    }
+
+    /// Official flint-int4 has no `mlp.expert_bias`. Keep the zero from
+    /// `init` instead of failing `update` with `keyNotFound`.
+    override func updateMissing(
+        parameter: String, verify: VerifyUpdate, path: [String], modulePath: [String]
+    ) throws {
+        if parameter == "expert_bias" { return }
+        try super.updateMissing(
+            parameter: parameter, verify: verify, path: path, modulePath: modulePath)
     }
 
     /// Fused sigmoid top-k (`FlintExpertRouting`) plus the ungated shared
@@ -1140,10 +1151,17 @@ public class FlintModel: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
                 w["\(prefix).switch_mlp.\(n).weight"] = MLX.stacked(toJoin)
             }
             // rec stores this on the router. The block owns it so the fused
-            // kernel and the megakernel packer see one tensor.
+            // kernel and the megakernel packer see one tensor. A present
+            // gate bias wins over a block key. Official flint-int4 omits
+            // both (`router_expert_bias` false); rec's sanitize then inserts
+            // zeros, and so does this one.
             let biasKey = "\(prefix).gate.expert_bias"
+            let blockKey = "\(prefix).expert_bias"
             if let bias = w.removeValue(forKey: biasKey) {
-                w["\(prefix).expert_bias"] = bias
+                w[blockKey] = bias
+            }
+            if w[blockKey] == nil {
+                w[blockKey] = MLXArray.zeros([configuration.numExperts], dtype: .float32)
             }
         }
 
