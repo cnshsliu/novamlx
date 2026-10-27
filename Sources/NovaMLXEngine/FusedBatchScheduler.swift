@@ -88,6 +88,21 @@ public final class FinishGuard: @unchecked Sendable {
     }
 }
 
+/// Fires a queued continuation exactly once. Queue cancel and the admit task
+/// both hold the request; the loser must not resume it again.
+final class ResumeOnce: @unchecked Sendable {
+    private var _lock = os_unfair_lock()
+    private var _fired = false
+
+    func tryFire() -> Bool {
+        os_unfair_lock_lock(&_lock)
+        defer { os_unfair_lock_unlock(&_lock) }
+        if _fired { return false }
+        _fired = true
+        return true
+    }
+}
+
 // MARK: - Active Stream Sequence
 
 struct ActiveStreamSequence: @unchecked Sendable {
@@ -329,6 +344,7 @@ struct FusedQueuedStreamRequest: @unchecked Sendable {
     let enqueuedAt: Date
     let priority: RequestPriority
     let continuation: AsyncThrowingStream<Token, Error>.Continuation
+    let resumeGate = ResumeOnce()
 }
 
 struct FusedQueuedGenerateRequest: @unchecked Sendable {
@@ -336,13 +352,23 @@ struct FusedQueuedGenerateRequest: @unchecked Sendable {
     let enqueuedAt: Date
     let priority: RequestPriority
     let continuation: CheckedContinuation<InferenceResult, Error>
+    let resumeGate = ResumeOnce()
 }
 
 // MARK: - FusedBatchScheduler
 
-/// Production scheduler that fuses multiple active sequences into shared GPU forward passes.
-/// Each decode step stacks all sequences' last tokens, runs ONE model forward pass, then
-/// samples and yields tokens per-sequence independently.
+/// Production scheduler for concurrent generations.
+///
+/// One active sequence keeps the per-sequence loop: Flint's resident packet
+/// (width 16), n-gram speculative verify, and the structural-grammar filter.
+/// Two or more sequences share one model forward when every layer is
+/// `KVCacheSimple` and the KV offsets match (`DecodeFusePlanner`). Each row
+/// is sampled with that sequence's own sampler, penalties, and grammar mask.
+/// Other stacks (sliding window, Flint rec proxy, unequal lengths) stay on
+/// the per-sequence loop so RoPE and attention masks are unchanged.
+///
+/// JSON / regex / GBNF requests never enter this scheduler. Native MTP and
+/// draft-model verify stay on the engine iterator.
 ///
 /// Phase 1: Memory-aware admission via `MemoryBudgetTracker`.
 /// Phase 2: Fused batch decode with streaming.
@@ -368,7 +394,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
     private var totalDecodeSteps: UInt64 = 0
     private var totalTokensViaFused: UInt64 = 0
     private var peakBatchWidth: Int = 0
+    /// Sequences inside one shared `model()` call. 1 means the step was serial.
+    private var peakFusedForwardWidth: Int = 0
+    private var totalFusedForwards: UInt64 = 0
     private var totalPreemptions: UInt64 = 0
+    /// Requests aborted before their continuation was exclusively owned.
+    private var cancelledRequestIds: Set<UUID> = []
     private var lastDecodeStepTime: Date = Date()
     private var lastDecodeStepTokens: UInt64 = 0
     /// Token-level Flint prefix (`prefix.py`). Not the block-hash SSD cache.
@@ -430,7 +461,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 peakBatchWidth: peakBatchWidth,
                 totalPreemptions: totalPreemptions,
                 specAcceptanceRate: engine.specDecoder.acceptanceRate,
-                specCacheSize: specStats.cacheSize
+                specCacheSize: specStats.cacheSize,
+                peakFusedForwardWidth: peakFusedForwardWidth,
+                totalFusedForwards: totalFusedForwards
             )
         }
     }
@@ -477,11 +510,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let seq = try await self.prefillSequence(request: request, continuation: continuation)
                     promptTokensBox.value = seq.promptTokenCount
                     if !seq.isFinished {
-                        self.lock.withLock {
-                            if self.activeByModel[modelId] == nil { self.activeByModel[modelId] = [] }
-                            self.activeByModel[modelId]?.append(seq)
+                        if await self.adoptIfNotCancelled(seq, modelId: modelId) {
+                            self.scheduleRunLoop()
                         }
-                        self.scheduleRunLoop()
                     } else {
                         // EOS on first token — release budget immediately
                         self.lock.withLock {
@@ -563,12 +594,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     // Prefill and add to active sequences
                     let seq = try await self.prefillSequence(request: request, continuation: continuation)
                     if !seq.isFinished {
-                        self.lock.withLock {
-                            if self.activeByModel[modelId] == nil { self.activeByModel[modelId] = [] }
-                            self.activeByModel[modelId]?.append(seq)
+                        if await self.adoptIfNotCancelled(seq, modelId: modelId) {
+                            self.scheduleRunLoop()
+                            NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(modelId), active=\(self.activeRequestCount))")
                         }
-                        self.scheduleRunLoop()
-                        NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(modelId), active=\(self.activeRequestCount))")
                     } else {
                         // EOS on first token — release budget
                         self.lock.withLock {
@@ -599,13 +628,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
+                    if self.isCancelled(request.id) {
+                        continuation.finish(throwing: CancellationError())
+                        await self.rollbackAdmission(modelId: modelId, sequenceId: request.id)
+                        return
+                    }
                     let seq = try await self.prefillSequence(request: request, continuation: continuation)
                     if !seq.isFinished {
-                        self.lock.withLock {
-                            if self.activeByModel[modelId] == nil { self.activeByModel[modelId] = [] }
-                            self.activeByModel[modelId]?.append(seq)
+                        if await self.adoptIfNotCancelled(seq, modelId: modelId) {
+                            self.scheduleRunLoop()
                         }
-                        self.scheduleRunLoop()
                     } else {
                         self.lock.withLock {
                             self.activeModelCounts[modelId] = max(0, (self.activeModelCounts[modelId] ?? 1) - 1)
@@ -919,7 +951,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                snapTokens.count >= flintSelection.cached,
                let stored = flintKV[request.model]
             {
-                var copies = stored.map { $0.copy() }
+                let copies = stored.map { $0.copy() }
                 let drop = snapTokens.count - flintSelection.cached
                 let trimmed = drop == 0 || copies.allSatisfy { $0.trim(drop) >= drop }
                 if trimmed && flintSelection.cached < allTokens.count {
@@ -1611,6 +1643,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
 
         for item in sortedGenerate {
+            if isCancelled(item.request.id) {
+                if item.resumeGate.tryFire() {
+                    item.continuation.resume(throwing: CancellationError())
+                }
+                continue
+            }
             let canStart = await canAdmitAndReserve(item.request)
             if canStart {
                 admittedGenerate.append(item)
@@ -1630,7 +1668,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 remainingGenerate.append(item)
             }
         }
-        lock.withLock { generateQueue = remainingGenerate }
+        lock.withLock {
+            generateQueue = remainingGenerate.filter { !cancelledRequestIds.contains($0.request.id) }
+        }
 
         for item in admittedGenerate {
             let modelId = item.request.model
@@ -1640,7 +1680,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             Task {
                 var resumed = false
                 defer {
-                    if !resumed {
+                    if !resumed && item.resumeGate.tryFire() {
                         item.continuation.resume(throwing: CancellationError())
                     }
                 }
@@ -1657,7 +1697,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let promptTokens = lock.withLock {
                         activeByModel[modelId]?.first?.promptTokenCount ?? 0
                     }
-                    assert(!resumed, "BUG: double-resume of generate continuation for \(item.request.id)")
+                    guard item.resumeGate.tryFire() else { return }
                     resumed = true
                     item.continuation.resume(returning: InferenceResult(
                         id: item.request.id, model: modelId, text: text,
@@ -1666,7 +1706,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         tokenLogprobs: logprobTokens.isEmpty ? nil : logprobTokens
                     ))
                 } catch {
-                    assert(!resumed, "BUG: double-resume (throwing) of generate continuation for \(item.request.id)")
+                    guard item.resumeGate.tryFire() else { return }
                     resumed = true
                     item.continuation.resume(throwing: error)
                 }
@@ -1685,6 +1725,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         )
 
         for item in sortedStream {
+            if isCancelled(item.request.id) {
+                if item.resumeGate.tryFire() {
+                    item.continuation.finish(throwing: CancellationError())
+                }
+                continue
+            }
             let canStart = await canAdmitAndReserve(item.request)
             if canStart {
                 admittedStream.append(item)
@@ -1703,28 +1749,37 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 remainingStream.append(item)
             }
         }
-        lock.withLock { streamQueue = remainingStream }
+        lock.withLock {
+            streamQueue = remainingStream.filter { !cancelledRequestIds.contains($0.request.id) }
+        }
 
         for item in admittedStream {
             let modelId = item.request.model
             // Budget already reserved atomically by canAdmitAndReserve()
+            if isCancelled(item.request.id) {
+                if item.resumeGate.tryFire() {
+                    item.continuation.finish(throwing: CancellationError())
+                }
+                await rollbackAdmission(modelId: modelId, sequenceId: item.request.id)
+                continue
+            }
 
             do {
                 let seq = try await prefillSequence(request: item.request, continuation: item.continuation)
                 if !seq.isFinished {
-                    lock.withLock {
-                        if activeByModel[modelId] == nil { activeByModel[modelId] = [] }
-                        activeByModel[modelId]?.append(seq)
-                    }
+                    _ = await adoptIfNotCancelled(seq, modelId: modelId)
                 } else {
                     lock.withLock {
                         activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                        cancelledRequestIds.remove(item.request.id)
                     }
                     await self.budgetTracker.release(sequenceId: item.request.id)
                 }
             } catch {
                 // SAFE: pre-prefill error path, continuation is exclusively owned
-                item.continuation.finish(throwing: error)
+                if item.resumeGate.tryFire() {
+                    item.continuation.finish(throwing: error)
+                }
                 NovaMLXLog.error("[Fused:\(item.request.id.uuidString.prefix(8))] admitQueued prefill error — model=\(modelId): \(error) — \(type(of: error))")
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
@@ -1733,6 +1788,213 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 await self.budgetTracker.release(sequenceId: item.request.id)
             }
         }
+    }
+
+    // MARK: - Admission helpers
+
+    private func isCancelled(_ id: UUID) -> Bool {
+        lock.withLock { cancelledRequestIds.contains(id) }
+    }
+
+    /// Drop a reserved slot after cancel or a failed adopt. The decode step
+    /// does not own this sequence.
+    private func rollbackAdmission(modelId: String, sequenceId: UUID) async {
+        lock.withLock {
+            activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+            cancelledRequestIds.remove(sequenceId)
+        }
+        await budgetTracker.release(sequenceId: sequenceId)
+        NovaMLXLog.debug("[BudgetRelease] seq=\(sequenceId.uuidString.prefix(8)) model=\(modelId) path=cancel")
+    }
+
+    /// Publish a prefilled sequence, or finish it when `abort` won the race.
+    /// Returns true when the sequence is now in the decode set.
+    private func adoptIfNotCancelled(_ seq: ActiveStreamSequence, modelId: String) async -> Bool {
+        let adopted = lock.withLock { () -> Bool in
+            if cancelledRequestIds.contains(seq.id) { return false }
+            if activeByModel[modelId] == nil { activeByModel[modelId] = [] }
+            activeByModel[modelId]?.append(seq)
+            return true
+        }
+        if adopted { return true }
+        if seq.safeFinish(throwing: CancellationError()) {
+            await rollbackAdmission(modelId: modelId, sequenceId: seq.id)
+        }
+        return false
+    }
+
+    // MARK: - Shared forward
+
+    /// One `model()` call for an equal-offset `KVCacheSimple` cohort.
+    /// Sampling, frequency penalty, and the Flint logit filter run per row
+    /// inside `perform`, matching the single-token path. Returns nil only
+    /// when the forward did not run, so the caller can fall back to serial
+    /// decode without advancing KV twice.
+    private func fusedCohortResults(
+        sequences: [ActiveStreamSequence],
+        mlxContainer: MLXLMCommon.ModelContainer,
+        container: ModelContainer
+    ) async -> [SpecDecodeResult]? {
+        let batchSize = sequences.count
+        guard batchSize >= 2 else { return nil }
+        guard let layerCount = sequences.first?.caches.count, layerCount > 0 else { return nil }
+        guard sequences.allSatisfy({ $0.caches.count == layerCount }) else { return nil }
+
+        let isFlint = container.identifier.family == .flint
+        struct RowCtx: @unchecked Sendable {
+            let sampler: CompiledSampler
+            let recentIds: [Int]
+            let freqPen: Float
+            let wantLogprobs: Bool
+            let logprobTopK: Int
+            let grammar: FlintStructuralGrammar?
+            let presenceSeen: Set<Int>
+            let presencePenalty: Float
+            let temperature: Float
+            let topK: Int
+            let applyFlintFilter: Bool
+        }
+        let rows: [RowCtx] = sequences.map { seq in
+            RowCtx(
+                sampler: seq.sampler,
+                recentIds: seq.recentTokenIds,
+                freqPen: seq.frequencyPenalty,
+                wantLogprobs: seq.request.includeLogprobs,
+                logprobTopK: seq.request.topLogprobsCount ?? 0,
+                grammar: seq.flintGrammar,
+                presenceSeen: seq.flintPresenceSeen,
+                presencePenalty: seq.flintPresencePenalty,
+                temperature: Float(seq.request.temperature ?? container.config.temperature),
+                topK: seq.request.topK ?? container.config.topK,
+                applyFlintFilter: isFlint
+            )
+        }
+
+        var fusedCaches: [KVCache] = []
+        fusedCaches.reserveCapacity(layerCount)
+        for layerIdx in 0..<layerCount {
+            let fused = FusedBatchKVCache(maxBatchSize: batchSize)
+            for seq in sequences {
+                guard let simple = seq.caches[layerIdx] as? KVCacheSimple else { return nil }
+                _ = fused.addSequence(id: seq.id, prefillCache: simple)
+            }
+            guard fused.activeCount == batchSize else { return nil }
+            fusedCaches.append(fused)
+        }
+
+        let stackedTokens = stacked(
+            sequences.map { MLXArray(Int32($0.lastTokenId)) },
+            axis: 0
+        ).reshaped(batchSize, 1)
+
+        let box = await mlxContainer.perform(nonSendable: (stackedTokens, fusedCaches, rows, sequences)) { context, values in
+            let (tokens, caches, rowCtxs, seqs) = values
+            let rawLogits = context.model(tokens, cache: caches)
+            eval(rawLogits)
+            // The wrapper's `state` is empty. Evaluate the simple caches the
+            // sequences keep, which `update` just grew.
+            for seq in seqs {
+                eval(seq.caches)
+            }
+            var hits: [FusedDecodeHit] = []
+            hits.reserveCapacity(rowCtxs.count)
+            for (i, row) in rowCtxs.enumerated() {
+                var lastLogits = rawLogits[i][0..., -1, 0...]
+                if row.freqPen > 0, !row.recentIds.isEmpty {
+                    let vocabSize = lastLogits.dim(-1)
+                    let ids = MLXArray(row.recentIds.map { Int32($0) })
+                    let ones = MLXArray.ones([row.recentIds.count], type: Float32.self)
+                    let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
+                        .at[ids].add(ones)
+                    lastLogits = lastLogits - (histogram * row.freqPen).reshaped(1, -1)
+                }
+                if row.applyFlintFilter {
+                    lastLogits = FlintChatDecode.filterLogits(
+                        lastLogits,
+                        grammar: row.grammar,
+                        presenceSeen: row.presenceSeen,
+                        presencePenalty: row.presencePenalty,
+                        temperature: row.temperature,
+                        topK: row.topK)
+                }
+                let sampled = row.sampler.sample(logits: lastLogits)
+                eval(sampled)
+                let sampledId = sampled.item(Int.self)
+                let raw: RawLogprobData? = row.wantLogprobs
+                    ? FusedBatchScheduler.computeRawLogprobs(
+                        from: lastLogits, sampledTokenId: sampledId, topK: row.logprobTopK)
+                    : nil
+                hits.append(.single(sampledId, raw))
+            }
+            return SendableBox(hits)
+        }
+
+        // The forward already wrote KV. Always return one result per sequence
+        // so the serial loop does not decode these rows again.
+        var results: [SpecDecodeResult] = []
+        results.reserveCapacity(sequences.count)
+        for (index, seq) in sequences.enumerated() {
+            let tokenId: Int
+            let raw: RawLogprobData?
+            if index < box.value.count, case .single(let id, let logprobs) = box.value[index] {
+                tokenId = id
+                raw = logprobs
+            } else {
+                NovaMLXLog.error("[Fused] cohort row \(index) missing a sample; repeating the input token")
+                tokenId = seq.lastTokenId
+                raw = nil
+            }
+            let decoded = raw.map { Self.resolveLogprobs($0, tokenizer: container.tokenizer) }
+            results.append(SpecDecodeResult(
+                acceptedTokens: [tokenId],
+                draftAccepted: 0,
+                draftProposed: 0,
+                sequenceId: seq.id,
+                logprobs: decoded,
+                fromResidentPacket: false
+            ))
+        }
+        return results
+    }
+
+    /// Shared forwards for this step, keyed by sequence id. Missing ids stay
+    /// on the serial loop.
+    private func precomputedFusedResults(
+        active: [ActiveStreamSequence],
+        mlxContainer: MLXLMCommon.ModelContainer,
+        container: ModelContainer,
+        modelId: String
+    ) async -> [UUID: SpecDecodeResult] {
+        guard active.count >= 2 else { return [:] }
+        let lanes = DecodeFusePlanner.lanes(
+            cacheOffsets: active.map { DecodeFusePlanner.cacheOffset(of: $0.caches) })
+        var fusedById: [UUID: SpecDecodeResult] = [:]
+        for lane in lanes {
+            guard case .cohort(let offset) = lane.kind else { continue }
+            let group = lane.indices.map { active[$0] }
+            guard let results = await fusedCohortResults(
+                sequences: group, mlxContainer: mlxContainer, container: container),
+                results.count == group.count
+            else { continue }
+            for (seq, result) in zip(group, results) {
+                fusedById[seq.id] = result
+            }
+            let width = group.count
+            lock.withLock {
+                let firstForward = totalFusedForwards == 0
+                totalFusedForwards += 1
+                if width > peakFusedForwardWidth {
+                    peakFusedForwardWidth = width
+                    NovaMLXLog.info(
+                        "[Fused] peak shared forward width=\(width) offset=\(offset) model=\(modelId)")
+                } else if firstForward {
+                    NovaMLXLog.info(
+                        "[Fused] shared forward width=\(width) offset=\(offset) model=\(modelId)")
+                }
+            }
+            NovaMLXLog.debug("[Fused] shared forward width=\(width) offset=\(offset) model=\(modelId)")
+        }
+        return fusedById
     }
 
     // MARK: - Fused Decode Step
@@ -1790,9 +2052,19 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             let specDecoder = engine.specDecoder
             var specResults: [SpecDecodeResult] = []
             var firstDecodeStart: [UUID: Date] = [:]
+            for seq in active where seq.decodeWindowStart == nil {
+                firstDecodeStart[seq.id] = Date()
+            }
+            // Width 1 stays in the loop below so Flint's packet-16 launch and
+            // n-gram verify are untouched. Wider steps share one forward per
+            // equal-offset KVCacheSimple cohort.
+            let fusedById = await precomputedFusedResults(
+                active: active, mlxContainer: mlxContainer, container: container, modelId: modelId)
+
             for seq in active {
-                if seq.decodeWindowStart == nil {
-                    firstDecodeStart[seq.id] = Date()
+                if let ready = fusedById[seq.id] {
+                    specResults.append(ready)
+                    continue
                 }
                 // Logprobs require per-step logits — bypass spec decoding when requested
                 // so every accepted token has logprob data (avoids silent gaps in the API).
@@ -2432,6 +2704,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 NovaMLXLog.debug("[BudgetRelease] seq=\(seq.id.uuidString.prefix(8)) model=\(modelId) path=decodeStep")
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                    cancelledRequestIds.remove(seq.id)
                     assert((activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow for \(modelId)")
                 }
                 let elapsed = Date().timeIntervalSince(seq.startTime)
@@ -2502,39 +2775,47 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
     public func abort(requestId: UUID) {
         let tag = requestId.uuidString.prefix(8)
-        var wasInQueue = false
-        var wasActive = false
+        var streamCancels: [FusedQueuedStreamRequest] = []
+        var generateCancels: [FusedQueuedGenerateRequest] = []
+        var ownedActiveFinish = false
         var activeModel: String?
         lock.withLock {
-            let sqBefore = streamQueue.count
+            cancelledRequestIds.insert(requestId)
+            streamCancels = streamQueue.filter { $0.request.id == requestId }
             streamQueue.removeAll { $0.request.id == requestId }
-            wasInQueue = wasInQueue || streamQueue.count < sqBefore
-
-            let gqBefore = generateQueue.count
+            generateCancels = generateQueue.filter { $0.request.id == requestId }
             generateQueue.removeAll { $0.request.id == requestId }
-            wasInQueue = wasInQueue || generateQueue.count < gqBefore
 
             for (modelId, var sequences) in activeByModel {
                 if let idx = sequences.firstIndex(where: { $0.id == requestId }) {
                     sequences[idx].isFinished = true
-                    sequences[idx].safeFinish()
+                    ownedActiveFinish = sequences[idx].safeFinish()
                     sequences.remove(at: idx)
                     activeByModel[modelId] = sequences
-                    wasActive = true
                     activeModel = modelId
+                    if ownedActiveFinish {
+                        activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                        cancelledRequestIds.remove(requestId)
+                    }
                 }
             }
         }
 
-        if wasActive {
-            // NOTE: abort() does not release budgetTracker or decrement activeModelCounts.
-            // The decode step's _finishedByDecodeStep guard will skip cleanup for this
-            // sequence (since safeFinish() already returned true from this path).
-            // Budget is reclaimed when the decode step runs and sees the sequence is gone.
-            NovaMLXLog.debug("[Abort:\(tag)] active sequence aborted (model=\(activeModel ?? "?")), budget release deferred to decode step")
+        for item in streamCancels where item.resumeGate.tryFire() {
+            item.continuation.finish(throwing: CancellationError())
         }
-        if !wasInQueue && !wasActive {
-            NovaMLXLog.debug("[Abort:\(tag)] request not found in any queue or active set")
+        for item in generateCancels where item.resumeGate.tryFire() {
+            item.continuation.resume(throwing: CancellationError())
+        }
+
+        if ownedActiveFinish {
+            let seqId = requestId
+            Task { await self.budgetTracker.release(sequenceId: seqId) }
+            NovaMLXLog.debug("[Abort:\(tag)] active sequence aborted (model=\(activeModel ?? "?")), budget released")
+        } else if streamCancels.isEmpty && generateCancels.isEmpty {
+            NovaMLXLog.debug("[Abort:\(tag)] cancel recorded; request was not queued or active")
+        } else {
+            NovaMLXLog.debug("[Abort:\(tag)] queued request cancelled")
         }
 
         engine.abort(requestId: requestId)
@@ -2548,10 +2829,15 @@ public struct FusedSchedulerMetrics: Sendable {
     public let queueDepth: Int
     public let totalDecodeSteps: UInt64
     public let totalTokensViaFused: UInt64
+    /// Concurrent sequences seen in one step, including ones decoded serially.
     public let peakBatchWidth: Int
     public let totalPreemptions: UInt64
     public let specAcceptanceRate: Double
     public let specCacheSize: Int
+    /// Largest number of sequences that shared a single `model()` call.
+    public let peakFusedForwardWidth: Int
+    /// How many `model()` calls had width >= 2.
+    public let totalFusedForwards: UInt64
 
     public init(
         activeSequences: Int = 0,
@@ -2561,7 +2847,9 @@ public struct FusedSchedulerMetrics: Sendable {
         peakBatchWidth: Int = 0,
         totalPreemptions: UInt64 = 0,
         specAcceptanceRate: Double = 0,
-        specCacheSize: Int = 0
+        specCacheSize: Int = 0,
+        peakFusedForwardWidth: Int = 0,
+        totalFusedForwards: UInt64 = 0
     ) {
         self.activeSequences = activeSequences
         self.queueDepth = queueDepth
@@ -2571,5 +2859,7 @@ public struct FusedSchedulerMetrics: Sendable {
         self.totalPreemptions = totalPreemptions
         self.specAcceptanceRate = specAcceptanceRate
         self.specCacheSize = specCacheSize
+        self.peakFusedForwardWidth = peakFusedForwardWidth
+        self.totalFusedForwards = totalFusedForwards
     }
 }

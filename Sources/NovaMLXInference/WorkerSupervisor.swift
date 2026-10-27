@@ -9,6 +9,10 @@ public struct WorkerMemoryStats: Sendable {
     public let utilization: Double
     public let evictions: UInt64
     public let cpuUsage: Double
+    public var fusedActiveSequences: Int = 0
+    public var fusedPeakBatchWidth: Int = 0
+    public var fusedPeakForwardWidth: Int = 0
+    public var fusedForwardCount: UInt64 = 0
 }
 
 public final class WorkerSupervisor: @unchecked Sendable {
@@ -409,7 +413,11 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 hardLimitBytes: msg.memoryHardLimitBytes ?? 0,
                 utilization: msg.memoryUtilization ?? 0,
                 evictions: msg.memoryEvictions ?? 0,
-                cpuUsage: msg.cpuUsage ?? 0
+                cpuUsage: msg.cpuUsage ?? 0,
+                fusedActiveSequences: msg.fusedActiveSequences ?? 0,
+                fusedPeakBatchWidth: msg.fusedPeakBatchWidth ?? 0,
+                fusedPeakForwardWidth: msg.fusedPeakForwardWidth ?? 0,
+                fusedForwardCount: msg.fusedForwardCount ?? 0
             )
             lock.unlock()
             return

@@ -2388,6 +2388,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let sessionMetrics = inference.engine.metrics
                 let persistentMetrics = inference.engine.metricsStore.metrics
                 let batchMetrics = inference.engine.batchScheduler.metrics
+                let productionFused = inference.fusedSchedulerMetrics
 
                 var memoryEnforcerInfo: [String: Any] = ["enabled": false]
                 if let enforcer = inference.engine.memoryEnforcer {
@@ -2452,6 +2453,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         "totalTokensViaFused": batchMetrics.totalTokensViaFused,
                         "peakBatchWidth": batchMetrics.peakBatchWidth,
                         "totalBatches": batchMetrics.totalBatches,
+                        "peakFusedForwardWidth": batchMetrics.peakFusedForwardWidth,
+                        "totalFusedForwards": batchMetrics.totalFusedForwards,
+                    ],
+                    "fusedScheduler": [
+                        "activeSequences": productionFused.activeSequences,
+                        "queueDepth": productionFused.queueDepth,
+                        "totalDecodeSteps": productionFused.totalDecodeSteps,
+                        "totalTokensViaFused": productionFused.totalTokensViaFused,
+                        "peakBatchWidth": productionFused.peakBatchWidth,
+                        "peakFusedForwardWidth": productionFused.peakFusedForwardWidth,
+                        "totalFusedForwards": productionFused.totalFusedForwards,
+                        "totalPreemptions": productionFused.totalPreemptions,
                     ],
                     "memoryEnforcer": memoryEnforcerInfo,
                 ]

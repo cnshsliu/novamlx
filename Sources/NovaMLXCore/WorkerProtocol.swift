@@ -175,6 +175,11 @@ public struct WorkerMessage: Codable, Sendable {
     public let loadPhase: String?
     public let hasLinearAttention: Bool?
     public let hasNativeMtp: Bool?
+    /// Production fused scheduler, reported with memory stats from the worker.
+    public let fusedActiveSequences: Int?
+    public let fusedPeakBatchWidth: Int?
+    public let fusedPeakForwardWidth: Int?
+    public let fusedForwardCount: UInt64?
 
     public init(
         type: String,
@@ -197,7 +202,11 @@ public struct WorkerMessage: Codable, Sendable {
         cpuUsage: Double? = nil,
         loadPhase: String? = nil,
         hasLinearAttention: Bool? = nil,
-        hasNativeMtp: Bool? = nil
+        hasNativeMtp: Bool? = nil,
+        fusedActiveSequences: Int? = nil,
+        fusedPeakBatchWidth: Int? = nil,
+        fusedPeakForwardWidth: Int? = nil,
+        fusedForwardCount: UInt64? = nil
     ) {
         self.type = type
         self.modelId = modelId
@@ -220,6 +229,10 @@ public struct WorkerMessage: Codable, Sendable {
         self.loadPhase = loadPhase
         self.hasLinearAttention = hasLinearAttention
         self.hasNativeMtp = hasNativeMtp
+        self.fusedActiveSequences = fusedActiveSequences
+        self.fusedPeakBatchWidth = fusedPeakBatchWidth
+        self.fusedPeakForwardWidth = fusedPeakForwardWidth
+        self.fusedForwardCount = fusedForwardCount
     }
 }
 

@@ -146,6 +146,68 @@ func createBatchedMask(batchSize: Int, n: Int, offsets: [Int], maxLen: Int) -> M
     return stacked(masks, axis: 0)
 }
 
+// MARK: - Cohort planner
+
+/// Which active sequences may share one model forward.
+///
+/// A cohort is two or more sequences whose KV stacks are plain `KVCacheSimple`
+/// and whose offsets match. MLX RoPE reads `cache.offset` as one scalar, so
+/// mixing lengths in one launch would score the shorter row at the wrong
+/// position. Sliding-window caches, Flint rec proxies, and a lone sequence
+/// stay serial: the single-sequence loop is the Flint packet-16 path and the
+/// n-gram verify path.
+enum DecodeFusePlanner {
+    enum Kind: Equatable, Sendable {
+        case serial
+        case cohort(offset: Int)
+    }
+
+    struct Lane: Equatable, Sendable {
+        var kind: Kind
+        var indices: [Int]
+    }
+
+    /// `cacheOffsets[i] == nil` means sequence `i` cannot share a forward.
+    /// One sequence is always a serial lane, even when its offset is known.
+    static func lanes(cacheOffsets: [Int?]) -> [Lane] {
+        guard cacheOffsets.count >= 2 else {
+            return cacheOffsets.indices.map { Lane(kind: .serial, indices: [$0]) }
+        }
+
+        var serial: [Int] = []
+        var groups: [Int: [Int]] = [:]
+        for (index, offset) in cacheOffsets.enumerated() {
+            guard let offset else {
+                serial.append(index)
+                continue
+            }
+            groups[offset, default: []].append(index)
+        }
+
+        var cohorts: [Lane] = []
+        for (offset, indices) in groups.sorted(by: { $0.key < $1.key }) {
+            if indices.count >= 2 {
+                cohorts.append(Lane(kind: .cohort(offset: offset), indices: indices))
+            } else {
+                serial.append(contentsOf: indices)
+            }
+        }
+        let serialLanes = serial.sorted().map { Lane(kind: .serial, indices: [$0]) }
+        return cohorts + serialLanes
+    }
+
+    /// Shared KV offset, or nil when this stack must decode alone.
+    /// Every layer has to be `KVCacheSimple` at the same offset. Rotating
+    /// (sliding-window) caches and `FlintRecCacheProxy` return nil.
+    static func cacheOffset(of caches: [KVCache]) -> Int? {
+        guard !caches.isEmpty else { return nil }
+        guard caches.allSatisfy({ $0 is KVCacheSimple }) else { return nil }
+        let first = caches[0].offset
+        guard caches.allSatisfy({ $0.offset == first }) else { return nil }
+        return first
+    }
+}
+
 public final class FusedBatchDecoder: @unchecked Sendable {
     public struct SequenceHandle: Sendable {
         public let id: UUID

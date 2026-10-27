@@ -61,6 +61,7 @@ struct NovaMLXWorker {
                     if let enforcer = engine.memoryEnforcer {
                         let status = await enforcer.status
                         let cpu = SystemMonitor.shared.currentStats()
+                        let fused = fusedScheduler.metrics
                         writer.write(WorkerMessage(
                             type: WorkerMessageType.memoryStats,
                             memoryCurrentBytes: status.currentBytes,
@@ -68,7 +69,11 @@ struct NovaMLXWorker {
                             memoryHardLimitBytes: status.hardLimitBytes,
                             memoryUtilization: status.utilization,
                             memoryEvictions: status.totalEvictions,
-                            cpuUsage: cpu.cpuUsage
+                            cpuUsage: cpu.cpuUsage,
+                            fusedActiveSequences: fused.activeSequences,
+                            fusedPeakBatchWidth: fused.peakBatchWidth,
+                            fusedPeakForwardWidth: fused.peakFusedForwardWidth,
+                            fusedForwardCount: fused.totalFusedForwards
                         ))
                     }
                 }

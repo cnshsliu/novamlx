@@ -243,7 +243,9 @@ public final class InferenceService: @unchecked Sendable {
             return try await batcher.submit(finalRequest)
         }
 
-        // LLM standard path: fused batch scheduler (shared GPU forward passes)
+        // LLM standard path. One sequence stays on the serial loop (Flint
+        // packet-16, n-gram verify). Concurrent KVCacheSimple sequences at the
+        // same offset share one model forward.
         NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(resolvedId))")
         return try await fusedScheduler.submit(finalRequest)
     }
@@ -346,7 +348,9 @@ public final class InferenceService: @unchecked Sendable {
             return Self.trackStream(batcher.submitStream(finalRequest), tracker: StreamTracker(model: resolvedId, kind: localKind, metricsStore: engine.metricsStore), request: finalRequest)
         }
 
-        // LLM standard path: fused batch scheduler (shared GPU forward passes)
+        // LLM standard path. One sequence stays on the serial loop (Flint
+        // packet-16, n-gram verify). Concurrent KVCacheSimple sequences at the
+        // same offset share one model forward.
         NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler stream (model=\(resolvedId))")
         return Self.trackStream(fusedScheduler.submitStream(finalRequest), tracker: StreamTracker(model: resolvedId, kind: localKind, metricsStore: engine.metricsStore), request: finalRequest)
     }
@@ -1277,7 +1281,22 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     public var fusedSchedulerMetrics: FusedSchedulerMetrics {
-        fusedScheduler.metrics
+        let local = fusedScheduler.metrics
+        // The menu-bar app decodes in the worker. Host counters stay at zero;
+        // the worker copies its scheduler into the 5s memory-stats message.
+        guard workerMode, let reported = worker?.latestMemoryStats else { return local }
+        return FusedSchedulerMetrics(
+            activeSequences: reported.fusedActiveSequences,
+            queueDepth: local.queueDepth,
+            totalDecodeSteps: local.totalDecodeSteps,
+            totalTokensViaFused: local.totalTokensViaFused,
+            peakBatchWidth: reported.fusedPeakBatchWidth,
+            totalPreemptions: local.totalPreemptions,
+            specAcceptanceRate: local.specAcceptanceRate,
+            specCacheSize: local.specCacheSize,
+            peakFusedForwardWidth: reported.fusedPeakForwardWidth,
+            totalFusedForwards: reported.fusedForwardCount
+        )
     }
 
     public func resolveModelId(_ input: String) -> String {
