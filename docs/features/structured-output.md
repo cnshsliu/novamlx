@@ -18,7 +18,7 @@
 | **GBNF 语法** | `response_format: {type: "gbnf", gbnf: "..."}` | llama.cpp 语法格式 |
 | **Choice / Enum** | 通过 schema 的 `enum` | 枚举单选约束 |
 
-语法引导生成在连续批处理里走专用队列。见 [连续批处理](continuous-batching.md)。
+JSON、JSON schema、正则和 GBNF 留在 `FusedBatchScheduler`。掩码在采样前按行施加；词表扫描在解码步之外编译并缓存，未就绪的序列跳过这一步，掩码落地后再加入。会话、VLM、hybrid、draft-model 和 native MTP 仍走 `ContinuousBatcher`。见 [连续批处理](continuous-batching.md)。
 
 ## How to try
 

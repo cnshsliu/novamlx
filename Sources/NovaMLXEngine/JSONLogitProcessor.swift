@@ -138,6 +138,12 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     private let eosTokenIds: Set<Int>
     private var vocabSize: Int
     private var precomputedMasks: [MaskKey: MLXArray]
+    /// Same table as `precomputedMasks`, kept as host bits so the fused step
+    /// can apply a mask without reading an MLX array back to the CPU.
+    private var boolMasks: [MaskKey: [Bool]] = [:]
+    private var scopeModelId: String?
+    private var scopeEosKey: String?
+    var fusedLastCompileWasCacheHit: Bool = false
     private var firstToken = true
     private let maskBuilder: TokenMaskBuilder
 
@@ -190,30 +196,32 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     public func process(logits: MLXArray) -> MLXArray {
         // Lazy materialization: the first time we see logits we know the
         // authoritative vocab dim (ground truth, regardless of what
-        // tokenizer/config claim).
-        if vocabSize == 0 {
-            let dim = logits.shape[logits.shape.count - 1]
-            maskBuilder.materialize(vocabSize: dim)
-            vocabSize = maskBuilder.vocabSize
-            precomputeMasks()
+        // tokenizer/config claim). A warm compile fills the table first, so
+        // this lookup does not scan the vocabulary again.
+        let dim = logits.shape[logits.shape.count - 1]
+        if vocabSize == 0 || boolMasks.isEmpty || dim > vocabSize {
+            ensureTable(vocabSize: max(dim, vocabSize))
         }
-        let currentState = firstToken ? JSONState.expectValue : state
-        let key = MaskKey(
-            state: currentState,
-            parentFrame: currentParentFrame(),
-            isKeyString: currentState == .inString ? stringIsKey : false
-        )
+        let key = currentMaskKey()
         if let mask = precomputedMasks[key] {
             return TokenMaskBuilder.applyMask(mask, to: logits)
         }
         // Fall back to the topLevel mask if the (state, parent) combination is
         // unreachable in practice — preserves prior behavior rather than
         // returning unmasked logits, which would let arbitrary tokens through.
-        if let mask = precomputedMasks[MaskKey(state: currentState, parentFrame: .topLevel,
+        if let mask = precomputedMasks[MaskKey(state: key.state, parentFrame: .topLevel,
                                                isKeyString: key.isKeyString)] {
             return TokenMaskBuilder.applyMask(mask, to: logits)
         }
         return logits
+    }
+
+    private func currentMaskKey() -> MaskKey {
+        let currentState = firstToken ? JSONState.expectValue : state
+        return MaskKey(
+            state: currentState,
+            parentFrame: currentParentFrame(),
+            isKeyString: currentState == .inString ? stringIsKey : false)
     }
 
     /// `parentFrame` derived from the top of `depthStack`. At init or after
@@ -224,11 +232,11 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     }
 
     public func didSample(token: MLXArray) {
-        firstToken = false
         let tokenId = token.item(Int.self)
-        if eosTokenIds.contains(tokenId) { return }
+        _ = fusedConsume(tokenId: tokenId, text: tokenizer.decode([tokenId]))
+    }
 
-        let text = tokenizer.decode([tokenId])
+    private func advance(text: String) {
 
         // Walk the runtime FSM through every char of the sampled token. With
         // strict-mask precomputation, every step should succeed — but defend
@@ -516,7 +524,9 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
                         maskValues[i] = true
                     }
                 }
-                precomputedMasks[MaskKey(state: s, parentFrame: pf, isKeyString: isKey)] = MLXArray(maskValues)[.newAxis, 0...]
+                let key = MaskKey(state: s, parentFrame: pf, isKeyString: isKey)
+                boolMasks[key] = maskValues
+                precomputedMasks[key] = MLXArray(maskValues)[.newAxis, 0...]
                 }
             }
         }
@@ -611,6 +621,43 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
     /// map.
     var precomputedMasksForTesting: [MaskKey: MLXArray] { precomputedMasks }
 
+    private func tableCacheKey(vocab: Int) -> String? {
+        guard let scopeModelId, let scopeEosKey else { return nil }
+        return "json|\(scopeModelId)|\(scopeEosKey)|\(vocab)"
+    }
+
+    /// Fill the mask table once per `(model, eos, vocab)`. Later requests copy
+    /// the cached bits instead of scanning the vocabulary again.
+    private func ensureTable(vocabSize requested: Int) {
+        let size = max(requested, 0)
+        guard size > 0 else { return }
+        maskBuilder.materialize(vocabSize: size)
+        let actual = maskBuilder.vocabSize
+        guard actual > 0 else { return }
+        if actual != vocabSize {
+            boolMasks = [:]
+            precomputedMasks = [:]
+            vocabSize = actual
+        }
+        if !boolMasks.isEmpty { return }
+        if let modelId = scopeModelId {
+            GrammarVocabHint.shared.note(modelId: modelId, vocab: actual)
+        }
+        let modelId = scopeModelId ?? ""
+        if let key = tableCacheKey(vocab: actual) {
+            let (stored, hit) = JSONGrammarMaskCache.tables.value(for: key, modelId: modelId) {
+                self.precomputeMasks()
+                return JSONGrammarMaskCache.Stored(bools: self.boolMasks, mlx: self.precomputedMasks)
+            }
+            boolMasks = stored.bools
+            precomputedMasks = stored.mlx
+            fusedLastCompileWasCacheHit = hit
+            return
+        }
+        precomputeMasks()
+        fusedLastCompileWasCacheHit = false
+    }
+
     /// Drive a single FSM transition. Returns the next-state tuple or nil if
     /// the character is a grammar violation.
     static func stepForTesting(
@@ -621,5 +668,41 @@ public final class JSONLogitProcessor: LogitProcessor, @unchecked Sendable {
                              escapeNext: escapeNext, stringIsKey: stringIsKey)
         guard let next = step(ctx, char) else { return nil }
         return (next.state, next.depthStack, next.escapeNext, next.stringIsKey)
+    }
+}
+
+enum JSONGrammarMaskCache {
+    struct Stored {
+        var bools: [JSONLogitProcessor.MaskKey: [Bool]]
+        var mlx: [JSONLogitProcessor.MaskKey: MLXArray]
+    }
+
+    static let tables = GrammarMaskTable<Stored>()
+}
+
+extension JSONLogitProcessor: FusedHostGrammar {
+    func fusedSetScope(modelId: String, eosKey: String) {
+        scopeModelId = modelId
+        scopeEosKey = eosKey
+    }
+
+    func fusedCompileMask(vocabSize: Int) -> [Bool] {
+        ensureTable(vocabSize: vocabSize)
+        return fusedCurrentMask() ?? []
+    }
+
+    func fusedConsume(tokenId: Int, text: String) -> Bool {
+        firstToken = false
+        if eosTokenIds.contains(tokenId) { return false }
+        advance(text: text)
+        // Every reachable state is in the table built by `ensureTable`.
+        return false
+    }
+
+    func fusedCurrentMask() -> [Bool]? {
+        let key = currentMaskKey()
+        if let bits = boolMasks[key] { return bits }
+        return boolMasks[MaskKey(
+            state: key.state, parentFrame: .topLevel, isKeyString: key.isKeyString)]
     }
 }

@@ -12,9 +12,16 @@ public final class RegexLogitProcessor: LogitProcessor, @unchecked Sendable {
     private var generatedText: String = ""
     private var firstToken = true
     private var done = false
+    private var scopeModelId: String?
+    private var scopeEosKey: String?
+    private var cachedKey: String?
+    private var cachedBits: [Bool]?
+    var fusedLastCompileWasCacheHit: Bool = false
+    private let patternText: String
 
     public init(pattern: String, tokenizer: NovaMLXEngine.Tokenizer) throws {
         self.regex = try NSRegularExpression(pattern: pattern, options: [])
+        self.patternText = pattern
         self.tokenizer = tokenizer
         self.eosTokenId = tokenizer.eosTokenId
         self.maskBuilder = TokenMaskBuilder(tokenizer: tokenizer)
@@ -22,6 +29,7 @@ public final class RegexLogitProcessor: LogitProcessor, @unchecked Sendable {
 
     public init(regex: NSRegularExpression, tokenizer: NovaMLXEngine.Tokenizer) {
         self.regex = regex
+        self.patternText = regex.pattern
         self.tokenizer = tokenizer
         self.eosTokenId = tokenizer.eosTokenId
         self.maskBuilder = TokenMaskBuilder(tokenizer: tokenizer)
@@ -30,6 +38,7 @@ public final class RegexLogitProcessor: LogitProcessor, @unchecked Sendable {
     /// Caller-supplied builder for cache reuse.
     init(pattern: String, tokenizer: NovaMLXEngine.Tokenizer, sharedBuilder: TokenMaskBuilder) throws {
         self.regex = try NSRegularExpression(pattern: pattern, options: [])
+        self.patternText = pattern
         self.tokenizer = tokenizer
         self.eosTokenId = tokenizer.eosTokenId
         self.maskBuilder = sharedBuilder
@@ -38,33 +47,57 @@ public final class RegexLogitProcessor: LogitProcessor, @unchecked Sendable {
     public func prompt(_ prompt: MLXArray) {}
 
     public func process(logits: MLXArray) -> MLXArray {
-        // Lazy materialize from authoritative logits dim on first call.
-        if maskBuilder.vocabSize == 0 {
-            maskBuilder.materialize(vocabSize: logits.shape[logits.shape.count - 1])
+        let dim = logits.shape[logits.shape.count - 1]
+        if maskBuilder.vocabSize == 0 || dim > maskBuilder.vocabSize {
+            maskBuilder.materialize(vocabSize: dim)
         }
-        if done {
-            return forceEOS(logits: logits)
-        }
-
-        let allowed = computeAllowedChars()
-        let mask = maskBuilder.buildMaskWithWhitespaceCheck(
-            allowedChars: allowed,
-            canAcceptWhitespace: { [weak self] in self?.canAcceptWhitespace() ?? false }
-        )
-        return TokenMaskBuilder.applyMask(mask, to: logits)
+        let bits = bitsForCurrentState(vocabSize: maskBuilder.vocabSize)
+        return TokenMaskBuilder.applyMask(MLXArray(bits)[.newAxis, 0...], to: logits)
     }
 
     public func didSample(token: MLXArray) {
+        _ = fusedConsume(tokenId: token.item(Int.self), text: tokenizer.decode([token.item(Int.self)]))
+    }
+
+    private func bitsForCurrentState(vocabSize: Int) -> [Bool] {
+        let key = cacheKey(vocabSize: vocabSize)
+        if cachedKey == key, let cachedBits { return cachedBits }
+        let modelId = scopeModelId ?? ""
+        let (bits, hit) = CharacterGrammarMaskCache.tables.value(for: key, modelId: modelId) {
+            self.scanMask(vocabSize: vocabSize)
+        }
+        cachedKey = key
+        cachedBits = bits
+        fusedLastCompileWasCacheHit = hit
+        return bits
+    }
+
+    private func scanMask(vocabSize: Int) -> [Bool] {
+        guard vocabSize > 0 else { return [] }
+        if maskBuilder.vocabSize < vocabSize {
+            maskBuilder.materialize(vocabSize: vocabSize)
+        }
+        if done {
+            return maskBuilder.eosOnlyMask()
+        }
+        return maskBuilder.allowedTokenMask(
+            allowedChars: computeAllowedChars(),
+            eosAllowed: true,
+            whitespaceAllowed: canAcceptWhitespace())
+    }
+
+    private func cacheKey(vocabSize: Int) -> String {
+        "regex|\(scopeModelId ?? "")|\(scopeEosKey ?? "")|\(vocabSize)|\(done)|\(patternText)|\(generatedText)"
+    }
+
+    private func advance(tokenId: Int, text: String) {
         firstToken = false
-        let tokenId = token.item(Int.self)
+        cachedKey = nil
+        cachedBits = nil
         if tokenId == eosTokenId { done = true; return }
-
-        let text = tokenizer.decode([tokenId])
         generatedText += text
-
         let fullRange = NSRange(generatedText.startIndex..., in: generatedText)
         let matches = regex.matches(in: generatedText, options: [], range: fullRange)
-
         if let match = matches.first {
             let matchedRange = match.range
             let matchedLength = matchedRange.location + matchedRange.length
@@ -76,11 +109,6 @@ public final class RegexLogitProcessor: LogitProcessor, @unchecked Sendable {
                 }
             }
         }
-    }
-
-    private func forceEOS(logits: MLXArray) -> MLXArray {
-        let mask = maskBuilder.buildEOSMask()
-        return TokenMaskBuilder.applyMask(mask, to: logits)
     }
 
     private func computeAllowedChars() -> Set<Character> {
@@ -144,4 +172,35 @@ public final class RegexLogitProcessor: LogitProcessor, @unchecked Sendable {
         }
         return false
     }
+}
+
+extension RegexLogitProcessor: FusedHostGrammar {
+    func fusedSetScope(modelId: String, eosKey: String) {
+        scopeModelId = modelId
+        scopeEosKey = eosKey
+    }
+
+    func fusedCompileMask(vocabSize: Int) -> [Bool] {
+        if maskBuilder.vocabSize < vocabSize {
+            maskBuilder.materialize(vocabSize: vocabSize)
+        }
+        let width = maskBuilder.vocabSize > 0 ? maskBuilder.vocabSize : vocabSize
+        return bitsForCurrentState(vocabSize: width)
+    }
+
+    func fusedConsume(tokenId: Int, text: String) -> Bool {
+        advance(tokenId: tokenId, text: text)
+        let vocab = maskBuilder.vocabSize
+        guard vocab > 0 else { return true }
+        let key = cacheKey(vocabSize: vocab)
+        if let bits = CharacterGrammarMaskCache.tables.peek(key), !bits.isEmpty {
+            cachedKey = key
+            cachedBits = bits
+            fusedLastCompileWasCacheHit = true
+            return false
+        }
+        return true
+    }
+
+    func fusedCurrentMask() -> [Bool]? { cachedBits }
 }

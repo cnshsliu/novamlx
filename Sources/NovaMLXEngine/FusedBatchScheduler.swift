@@ -303,6 +303,9 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// Empty when `flintPresencePenalty` is 0.
     var flintPresenceSeen: Set<Int> = []
     var flintPresencePenalty: Float = 0
+    /// JSON schema, JSON object, regex, or GBNF. Nil for unconstrained text
+    /// and for Flint structural grammar (`flintGrammar` is that mask).
+    var hostGrammar: HostGrammarSession? = nil
 
     /// Yield a token to the stream IFF the sequence has not been finished
     /// by any concurrent path. Silent no-op if already finished.
@@ -367,8 +370,11 @@ struct FusedQueuedGenerateRequest: @unchecked Sendable {
 /// Other stacks (sliding window, Flint rec proxy, unequal lengths) stay on
 /// the per-sequence loop so RoPE and attention masks are unchanged.
 ///
-/// JSON / regex / GBNF requests never enter this scheduler. Native MTP and
-/// draft-model verify stay on the engine iterator.
+/// JSON schema, JSON object, regex, and GBNF stay here. Their mask is
+/// compiled before the sequence joins the decode set and applied per row.
+/// A state whose mask is not cached yet skips the step and rejoins when the
+/// compile finishes, so that work does not run inside the decode loop.
+/// Native MTP and draft-model verify stay on the engine iterator.
 ///
 /// Phase 1: Memory-aware admission via `MemoryBudgetTracker`.
 /// Phase 2: Fused batch decode with streaming.
@@ -507,7 +513,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let stream = AsyncThrowingStream<Token, Error> { continuation in
             Task {
                 do {
-                    let seq = try await self.prefillSequence(request: request, continuation: continuation)
+                    let seq = try await self.openSequence(request: request, continuation: continuation)
                     promptTokensBox.value = seq.promptTokenCount
                     if !seq.isFinished {
                         if await self.adoptIfNotCancelled(seq, modelId: modelId) {
@@ -591,12 +597,15 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         return
                     }
 
-                    // Prefill and add to active sequences
-                    let seq = try await self.prefillSequence(request: request, continuation: continuation)
+                    // Compile a host grammar before prefill, off this scheduler's
+                    // decode loop. Then prefill and add to active sequences.
+                    let seq = try await self.openSequence(request: request, continuation: continuation)
                     if !seq.isFinished {
                         if await self.adoptIfNotCancelled(seq, modelId: modelId) {
                             self.scheduleRunLoop()
-                            NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(modelId), active=\(self.activeRequestCount))")
+                            let grammarNote = GrammarFusedRoute.hostKind(of: request)
+                                .map { " grammar=\($0)" } ?? ""
+                            NovaMLXLog.info("[Route:\(reqTag)] → FusedBatchScheduler (model=\(modelId)\(grammarNote), active=\(self.activeRequestCount))")
                         }
                     } else {
                         // EOS on first token — release budget
@@ -633,7 +642,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         await self.rollbackAdmission(modelId: modelId, sequenceId: request.id)
                         return
                     }
-                    let seq = try await self.prefillSequence(request: request, continuation: continuation)
+                    let seq = try await self.openSequence(request: request, continuation: continuation)
                     if !seq.isFinished {
                         if await self.adoptIfNotCancelled(seq, modelId: modelId) {
                             self.scheduleRunLoop()
@@ -877,9 +886,139 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         state.flintExtractor = FlintToolCallExtractor(tools: request.tools, identity: identity)
     }
 
-    private func prefillSequence(
+    /// Compile a host grammar on this task, then prefill. Callers are the
+    /// submit tasks and a detached admit task, not `fusedDecodeStep`.
+    private func openSequence(
         request: InferenceRequest,
         continuation: AsyncThrowingStream<Token, Error>.Continuation
+    ) async throws -> ActiveStreamSequence {
+        let hostGrammar = try await prepareHostGrammar(for: request)
+        return try await prefillSequence(
+            request: request, continuation: continuation, hostGrammar: hostGrammar)
+    }
+
+    private func prepareHostGrammar(for request: InferenceRequest) async throws -> HostGrammarSession? {
+        guard GrammarFusedRoute.hostKind(of: request) != nil else { return nil }
+        guard let container = engine.getContainer(for: request.model),
+              let tokenizer = container.tokenizer,
+              let mlxContainer = container.mlxContainer else { return nil }
+        let builder = await engine.tokenMaskBuilderCache.builder(
+            for: request.model, tokenizer: tokenizer)
+        let modelConfig = await mlxContainer.configuration
+        var eos: Set<Int> = []
+        if let eosId = tokenizer.eosTokenId { eos.insert(eosId) }
+        eos.formUnion(MLXEngine.defensiveEosTokenIds(for: modelConfig, container: container))
+        let session = try HostGrammarSession(
+            request: request, tokenizer: tokenizer, eos: eos, builder: builder, modelId: request.model)
+        if let vocab = GrammarVocabHint.shared.size(for: request.model), vocab > 0 {
+            session.compileNow(vocabSize: vocab)
+        } else {
+            NovaMLXLog.info(
+                "[Grammar] compile deferred until prefill logits kind=\(session.kind.rawValue) model=\(request.model)")
+        }
+        return session
+    }
+
+    private func armHostGrammar(
+        _ grammar: HostGrammarSession?,
+        on seq: inout ActiveStreamSequence,
+        tokenId: Int,
+        rawText: String,
+        finished: Bool
+    ) {
+        seq.hostGrammar = grammar
+        guard let grammar, !finished, tokenId >= 0 else { return }
+        if grammar.note(tokenId: tokenId, text: rawText) {
+            grammar.scheduleSlowCompile()
+        }
+    }
+
+    /// Host mask is missing or shorter than the logits. Compile outside
+    /// `perform`, then sample the stashed row. `-1` stays the NaN failure.
+    private static let grammarCompileSentinel = -2
+
+    /// Apply a ready host mask, or stash the row when compile must see the
+    /// real logits width. Returns nil for the sentinel path.
+    private static func preparePrefillLogits(
+        _ logits: MLXArray,
+        hostMask: [Bool]?,
+        hasHostGrammar: Bool,
+        stash: MutableSendableBox<MLXArray?>,
+        vocabBox: MutableSendableBox<Int>
+    ) -> MLXArray? {
+        let dim = logits.dim(-1)
+        vocabBox.value = dim
+        guard hasHostGrammar else { return logits }
+        if let hostMask, hostMask.count >= dim {
+            return HostGrammarMask.apply(hostMask, to: logits)
+        }
+        eval(logits)
+        stash.value = logits
+        return nil
+    }
+
+    /// Record the logits width, and when prefill returned the sentinel,
+    /// compile on this task and sample the stashed row. The model forward
+    /// already ran; this second `perform` does not call `model()`.
+    private func resolvePrefillSample(
+        tokenId: Int,
+        logprobs: RawLogprobData?,
+        stash: MutableSendableBox<MLXArray?>,
+        vocabBox: MutableSendableBox<Int>,
+        hostGrammar: HostGrammarSession?,
+        mlxContainer: MLXLMCommon.ModelContainer,
+        sampler: CompiledSampler,
+        request: InferenceRequest,
+        applyFlint: Bool,
+        flintGrammar: FlintStructuralGrammar?,
+        temperature: Float,
+        topK: Int
+    ) async throws -> (Int, RawLogprobData?) {
+        let dim = vocabBox.value
+        if dim > 0 {
+            GrammarVocabHint.shared.note(modelId: request.model, vocab: dim)
+        }
+        guard tokenId == Self.grammarCompileSentinel else { return (tokenId, logprobs) }
+        guard let hostGrammar, dim > 0 else {
+            throw NovaMLXError.inferenceFailed(
+                "Grammar compile was requested without a vocabulary width")
+        }
+        hostGrammar.compileNow(vocabSize: dim)
+        guard hostGrammar.readyMask() != nil else {
+            throw NovaMLXError.inferenceFailed("Grammar compile produced an empty mask")
+        }
+        let box = await mlxContainer.perform { _ in
+            guard var logits = stash.value else {
+                return SendableBox((-1, nil as RawLogprobData?))
+            }
+            if let mask = hostGrammar.readyMask() {
+                logits = HostGrammarMask.apply(mask, to: logits)
+            }
+            if applyFlint {
+                logits = FlintChatDecode.filterLogits(
+                    logits,
+                    grammar: flintGrammar,
+                    presenceSeen: [],
+                    presencePenalty: 0,
+                    temperature: temperature,
+                    topK: topK)
+            }
+            let sampled = sampler.sample(logits: logits)
+            eval(sampled)
+            let sampledId = sampled.item(Int.self)
+            let raw: RawLogprobData? = request.includeLogprobs
+                ? Self.computeRawLogprobs(
+                    from: logits, sampledTokenId: sampledId, topK: request.topLogprobsCount ?? 0)
+                : nil
+            return SendableBox((sampledId, raw))
+        }
+        return box.value
+    }
+
+    private func prefillSequence(
+        request: InferenceRequest,
+        continuation: AsyncThrowingStream<Token, Error>.Continuation,
+        hostGrammar: HostGrammarSession?
     ) async throws -> ActiveStreamSequence {
         guard let container = engine.getContainer(for: request.model),
               let mlxContainer = container.mlxContainer else {
@@ -967,7 +1106,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         cachedTokenCount: flintSelection.cached,
                         allTokens: allTokens,
                         promptTokenCount: Int(promptTokenCount),
-                        maxTokens: maxTokens)
+                        maxTokens: maxTokens,
+                        hostGrammar: hostGrammar)
                     flintTrial.commit(tokens: allTokens)
                     flintPrefixes[request.model] = flintTrial
                     flintKVTokens[request.model] = allTokens
@@ -1006,7 +1146,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     cachedTokenCount: prefixResult.cachedTokenCount,
                     allTokens: allTokens,
                     promptTokenCount: promptTokenCount,
-                    maxTokens: maxTokens
+                    maxTokens: maxTokens,
+                    hostGrammar: hostGrammar
                 )
             } else {
                 NovaMLXLog.warning("FusedScheduler: prefix cache HIT but shapes incompatible — falling back to full prefill (restored=\(restoredCaches.count) layers, expected=\(freshCaches.count))")
@@ -1042,6 +1183,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             topK: request.topK ?? container.config.topK,
             minP: request.minP ?? container.config.minP
         )
+        let preparedMask = hostGrammar?.readyMask()
+        let prefillLogitStash = MutableSendableBox<MLXArray?>(nil)
+        let prefillVocabBox = MutableSendableBox<Int>(0)
+        let hasHostGrammar = hostGrammar != nil
 
         // Frequency penalty — per-model default from generation_config.json + family defaults
         let freqPenaltyValue = request.frequencyPenalty ?? container.config.frequencyPenalty
@@ -1093,6 +1238,19 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit)) — sequence too long or model unstable")
                 return SendableBox((-1, "NaN/Inf", nil as RawLogprobData?))
             }
+            guard let masked = Self.preparePrefillLogits(
+                logitsToSample,
+                hostMask: preparedMask,
+                hasHostGrammar: hasHostGrammar,
+                stash: prefillLogitStash,
+                vocabBox: prefillVocabBox)
+            else {
+                return SendableBox((
+                    Self.grammarCompileSentinel,
+                    "deferred-grammar vocab=\(prefillVocabBox.value)",
+                    nil as RawLogprobData?))
+            }
+            logitsToSample = masked
             if applyFlintSampleFilter {
                 // Same mask as the filtered packet: grammar, then top-k when
                 // temperature is not 0. Presence has no generated tokens yet.
@@ -1116,7 +1274,29 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             cachesBox.value = caches
             return SendableBox((sampledId, stats, rawLogprobs))
         }
-        let (firstTokenId, logitStats, prefillLogprobs) = prefillResultBox.value
+        let prefillSample = prefillResultBox.value
+        var firstTokenId = prefillSample.0
+        let logitStats = prefillSample.1
+        var prefillLogprobs = prefillSample.2
+        if firstTokenId == Self.grammarCompileSentinel {
+            let resolved = try await resolvePrefillSample(
+                tokenId: firstTokenId,
+                logprobs: prefillLogprobs,
+                stash: prefillLogitStash,
+                vocabBox: prefillVocabBox,
+                hostGrammar: hostGrammar,
+                mlxContainer: mlxContainer,
+                sampler: sampler,
+                request: request,
+                applyFlint: applyFlintSampleFilter,
+                flintGrammar: flintGrammarSeed,
+                temperature: flintPrefillTemperature,
+                topK: flintPrefillTopK)
+            firstTokenId = resolved.0
+            prefillLogprobs = resolved.1
+        } else if prefillVocabBox.value > 0 {
+            GrammarVocabHint.shared.note(modelId: request.model, vocab: prefillVocabBox.value)
+        }
         let caches = cachesBox.value ?? []
         let firstTokenText: String
         var initialAccumulatedIds: [Int] = []
@@ -1233,6 +1413,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         if seq.flintPresencePenalty != 0, firstTokenId >= 0 {
             seq.flintPresenceSeen.insert(firstTokenId)
         }
+        let grammarText = container.tokenizer?.decode([firstTokenId]) ?? firstTokenText
+        armHostGrammar(
+            hostGrammar, on: &seq, tokenId: firstTokenId,
+            rawText: grammarText, finished: isFinished)
         return seq
     }
 
@@ -1249,7 +1433,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         cachedTokenCount: Int,
         allTokens: [Int],
         promptTokenCount: Int,
-        maxTokens: Int
+        maxTokens: Int,
+        hostGrammar: HostGrammarSession?
     ) async throws -> ActiveStreamSequence {
         // Run forward pass inside perform — model() must be called within
         // SerialAccessContainer to ensure correct MLX lazy evaluation context.
@@ -1266,6 +1451,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let applyFlintSampleFilter = container.identifier.family == .flint
         let flintPrefillTemperature = Float(request.temperature ?? container.config.temperature)
         let flintPrefillTopK = request.topK ?? container.config.topK
+        let preparedMask = hostGrammar?.readyMask()
+        let prefillLogitStash = MutableSendableBox<MLXArray?>(nil)
+        let prefillVocabBox = MutableSendableBox<Int>(0)
+        let hasHostGrammar = hostGrammar != nil
         let reqTag = request.id.uuidString.prefix(8)
         let remainingArray = MLXArray(remainingTokenIds.map { Int32($0) })
         let firstTokenIdBox = await mlxContainer.perform(nonSendable: (remainingArray, restoredCaches)) { context, values in
@@ -1282,6 +1471,16 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 NovaMLXLog.error("[Prefill:\(reqTag)] Remaining prefill logits contain NaN/Inf (max=\(maxLogit), min=\(minLogit))")
                 return SendableBox((-1, nil as RawLogprobData?))
             }
+            guard let masked = Self.preparePrefillLogits(
+                logitsToSample,
+                hostMask: preparedMask,
+                hasHostGrammar: hasHostGrammar,
+                stash: prefillLogitStash,
+                vocabBox: prefillVocabBox)
+            else {
+                return SendableBox((Self.grammarCompileSentinel, nil as RawLogprobData?))
+            }
+            logitsToSample = masked
             if applyFlintSampleFilter {
                 logitsToSample = FlintChatDecode.filterLogits(
                     logitsToSample,
@@ -1301,7 +1500,28 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
             return SendableBox((sampledId, rawLogprobs))
         }
-        let (firstTokenId, prefixRawLogprobs) = firstTokenIdBox.value
+        let prefixSample = firstTokenIdBox.value
+        var firstTokenId = prefixSample.0
+        var prefixRawLogprobs = prefixSample.1
+        if firstTokenId == Self.grammarCompileSentinel {
+            let resolved = try await resolvePrefillSample(
+                tokenId: firstTokenId,
+                logprobs: prefixRawLogprobs,
+                stash: prefillLogitStash,
+                vocabBox: prefillVocabBox,
+                hostGrammar: hostGrammar,
+                mlxContainer: mlxContainer,
+                sampler: sampler,
+                request: request,
+                applyFlint: applyFlintSampleFilter,
+                flintGrammar: flintGrammarSeed,
+                temperature: flintPrefillTemperature,
+                topK: flintPrefillTopK)
+            firstTokenId = resolved.0
+            prefixRawLogprobs = resolved.1
+        } else if prefillVocabBox.value > 0 {
+            GrammarVocabHint.shared.note(modelId: request.model, vocab: prefillVocabBox.value)
+        }
 
         guard firstTokenId >= 0 else {
             throw NovaMLXError.inferenceFailed(
@@ -1392,6 +1612,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         if seq.flintPresencePenalty != 0, firstTokenId >= 0 {
             seq.flintPresenceSeen.insert(firstTokenId)
         }
+        let grammarText = container.tokenizer?.decode([firstTokenId]) ?? firstTokenText
+        armHostGrammar(
+            hostGrammar, on: &seq, tokenId: firstTokenId,
+            rawText: grammarText, finished: finishFirst)
         return seq
     }
 
@@ -1754,39 +1978,57 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         }
 
         for item in admittedStream {
-            let modelId = item.request.model
-            // Budget already reserved atomically by canAdmitAndReserve()
-            if isCancelled(item.request.id) {
-                if item.resumeGate.tryFire() {
-                    item.continuation.finish(throwing: CancellationError())
-                }
-                await rollbackAdmission(modelId: modelId, sequenceId: item.request.id)
-                continue
+            // Grammar compile and the prefill that follows it stay off this
+            // loop. The slot is already reserved. Other sequences keep decoding.
+            if GrammarFusedRoute.hostKind(of: item.request) != nil {
+                Task { await self.prefillAdmittedStream(item) }
+            } else {
+                await prefillAdmittedStream(item)
             }
+        }
+    }
 
-            do {
-                let seq = try await prefillSequence(request: item.request, continuation: item.continuation)
-                if !seq.isFinished {
-                    _ = await adoptIfNotCancelled(seq, modelId: modelId)
-                } else {
-                    lock.withLock {
-                        activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
-                        cancelledRequestIds.remove(item.request.id)
-                    }
-                    await self.budgetTracker.release(sequenceId: item.request.id)
+    /// Prefill one admitted stream. Grammar admits call this from a detached
+    /// task so `compileNow` does not stall `runLoop`.
+    private func prefillAdmittedStream(_ item: FusedQueuedStreamRequest) async {
+        let modelId = item.request.model
+        // Budget already reserved atomically by canAdmitAndReserve()
+        if isCancelled(item.request.id) {
+            if item.resumeGate.tryFire() {
+                item.continuation.finish(throwing: CancellationError())
+            }
+            await rollbackAdmission(modelId: modelId, sequenceId: item.request.id)
+            return
+        }
+
+        do {
+            let seq = try await openSequence(request: item.request, continuation: item.continuation)
+            if !seq.isFinished {
+                // The run loop may already have exited: this prefill was
+                // detached so grammar compile would not block it, and the
+                // queue entry is gone. Start the loop again once the
+                // sequence is in the decode set.
+                if await adoptIfNotCancelled(seq, modelId: modelId) {
+                    scheduleRunLoop()
                 }
-            } catch {
-                // SAFE: pre-prefill error path, continuation is exclusively owned
-                if item.resumeGate.tryFire() {
-                    item.continuation.finish(throwing: error)
-                }
-                NovaMLXLog.error("[Fused:\(item.request.id.uuidString.prefix(8))] admitQueued prefill error — model=\(modelId): \(error) — \(type(of: error))")
+            } else {
                 lock.withLock {
                     activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
-                    assert((activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in admitQueued error path")
+                    cancelledRequestIds.remove(item.request.id)
                 }
                 await self.budgetTracker.release(sequenceId: item.request.id)
             }
+        } catch {
+            // SAFE: pre-prefill error path, continuation is exclusively owned
+            if item.resumeGate.tryFire() {
+                item.continuation.finish(throwing: error)
+            }
+            NovaMLXLog.error("[Fused:\(item.request.id.uuidString.prefix(8))] admitQueued prefill error — model=\(modelId): \(error) — \(type(of: error))")
+            lock.withLock {
+                activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                assert((activeModelCounts[modelId] ?? 0) >= 0, "BUG: activeModelCounts underflow in admitQueued error path")
+            }
+            await self.budgetTracker.release(sequenceId: item.request.id)
         }
     }
 
@@ -1853,6 +2095,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             let temperature: Float
             let topK: Int
             let applyFlintFilter: Bool
+            let hostMask: [Bool]?
         }
         let rows: [RowCtx] = sequences.map { seq in
             RowCtx(
@@ -1866,7 +2109,8 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 presencePenalty: seq.flintPresencePenalty,
                 temperature: Float(seq.request.temperature ?? container.config.temperature),
                 topK: seq.request.topK ?? container.config.topK,
-                applyFlintFilter: isFlint
+                applyFlintFilter: isFlint,
+                hostMask: seq.hostGrammar?.readyMask()
             )
         }
 
@@ -1907,6 +2151,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
                         .at[ids].add(ones)
                     lastLogits = lastLogits - (histogram * row.freqPen).reshaped(1, -1)
+                }
+                if let mask = row.hostMask {
+                    lastLogits = HostGrammarMask.apply(mask, to: lastLogits)
                 }
                 if row.applyFlintFilter {
                     lastLogits = FlintChatDecode.filterLogits(
@@ -2011,7 +2258,44 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 lock.withLock { activeByModel[modelId] = [] }
                 continue
             }
-            NovaMLXLog.debug("[DecodeStep:\(stepNum)] entering model=\(modelId) active=\(active.count)")
+            // A host grammar whose next mask is still compiling stays out of
+            // this forward and rejoins when `readyMask()` returns. Counting
+            // it in `batchWidth` would knock a lone Flint sequence off
+            // packet-16.
+            var failedGrammar: [ActiveStreamSequence] = []
+            var decoding: [ActiveStreamSequence] = []
+            decoding.reserveCapacity(active.count)
+            for seq in active {
+                guard let grammar = seq.hostGrammar else {
+                    decoding.append(seq)
+                    continue
+                }
+                if grammar.hasFailed() {
+                    failedGrammar.append(seq)
+                    continue
+                }
+                if grammar.readyMask() != nil {
+                    decoding.append(seq)
+                }
+            }
+            for var seq in failedGrammar {
+                if seq.safeFinish(throwing: NovaMLXError.inferenceFailed(
+                    "Grammar compile produced an empty mask")) {
+                    seq._finishedByDecodeStep = true
+                    await budgetTracker.release(sequenceId: seq.id)
+                    lock.withLock {
+                        activeByModel[modelId]?.removeAll { $0.id == seq.id }
+                        activeModelCounts[modelId] = max(0, (activeModelCounts[modelId] ?? 1) - 1)
+                        cancelledRequestIds.remove(seq.id)
+                    }
+                }
+            }
+            if decoding.isEmpty {
+                anyActive = true
+                try? await Task.sleep(nanoseconds: 2_000_000)
+                continue
+            }
+            NovaMLXLog.debug("[DecodeStep:\(stepNum)] entering model=\(modelId) active=\(active.count) decoding=\(decoding.count)")
 
             guard let container = engine.getContainer(for: modelId),
                   let mlxContainer = container.mlxContainer else {
@@ -2059,9 +2343,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             // n-gram verify are untouched. Wider steps share one forward per
             // equal-offset KVCacheSimple cohort.
             let fusedById = await precomputedFusedResults(
-                active: active, mlxContainer: mlxContainer, container: container, modelId: modelId)
+                active: decoding, mlxContainer: mlxContainer, container: container, modelId: modelId)
 
-            for seq in active {
+            for seq in decoding {
                 if let ready = fusedById[seq.id] {
                     specResults.append(ready)
                     continue
@@ -2071,9 +2355,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 let wantLogprobs = seq.request.includeLogprobs
                 // Flint structural grammar rewrites logits every step. Drafts
                 // are unmasked, so they stay off while the grammar is installed.
-                // A filtered resident packet also replaces drafts: n-gram verify
-                // is argmax, and it does not see the grammar or top-p mask.
+                // A host JSON / schema / regex / GBNF mask is the same: n-gram
+                // drafts would be sampled without it. A filtered resident packet
+                // also replaces drafts: n-gram verify is argmax, and it does not
+                // see the grammar or top-p mask.
                 let grammarOn = seq.flintGrammar != nil
+                let hostGrammarOn = seq.hostGrammar != nil
                 let isFlint = container.identifier.family == .flint
                 let flintStopIds: Set<Int> = isFlint
                     ? FlintChatDecode.generationFinishStopIds(
@@ -2099,21 +2386,21 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             repetitionPenalty: flintRepetition,
                             presencePenalty: flintPresence,
                             wantsLogprobs: wantLogprobs,
-                            batchWidth: active.count,
-                            // Fused decode does not apply JSON / regex / GBNF.
-                            // Greedy with that constraint keeps the device packet,
-                            // matching the path from before the filtered packet.
-                            usesGrammar: false,
+                            batchWidth: decoding.count,
+                            // Host JSON / schema / regex / GBNF masks are applied
+                            // on the single-step path below. The device packet
+                            // and the filtered Flint packet stay off.
+                            usesGrammar: hostGrammarOn,
                             usesStructuralGrammar: grammarOn))
                     : .singleStep
                 if isFlint, flintRouteLogged.insert(seq.id).inserted {
                     NovaMLXLog.info(
-                        "[Flint] resident route \(flintRoute) grammar=\(grammarOn) temp=\(flintTemperature) topP=\(flintTopP) topK=\(flintTopK) minP=\(flintMinP) freq=\(freqPenForRoute) rep=\(flintRepetition) presence=\(flintPresence) logprobs=\(wantLogprobs) batch=\(active.count)")
+                        "[Flint] resident route \(flintRoute) grammar=\(grammarOn) hostGrammar=\(hostGrammarOn) temp=\(flintTemperature) topP=\(flintTopP) topK=\(flintTopK) minP=\(flintMinP) freq=\(freqPenForRoute) rep=\(flintRepetition) presence=\(flintPresence) logprobs=\(wantLogprobs) batch=\(decoding.count)")
                 }
                 // Greedy must stay step-by-step: batch verify KV vs stepwise can
                 // flip near-tie argmax (max |Δ|~0.5), breaking lossless compares.
                 let draftTokens = (
-                    wantLogprobs || grammarOn || flintRoute != .singleStep
+                    wantLogprobs || grammarOn || hostGrammarOn || flintRoute != .singleStep
                         || seq.sampler.isGreedy || !specDecoder.shouldSpeculate()
                 )
                     ? []
@@ -2134,6 +2421,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let freqPen = freqPenForRoute
                     let logprobTopK = seq.request.topLogprobsCount ?? 0
                     let grammarSeed = seq.flintGrammar
+                    let hostMask = seq.hostGrammar?.readyMask()
                     let presenceSeed = seq.flintPresenceSeen
                     let packetCount = min(
                         FlintRecResident.width, max(1, seq.maxTokens - seq.completionTokens))
@@ -2223,6 +2511,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             let histogram = MLXArray.zeros([vocabSize], type: Float32.self)
                                 .at[ids].add(ones)
                             lastLogits = lastLogits - (histogram * freqPen).reshaped(1, -1)
+                        }
+                        if let hostMask {
+                            lastLogits = HostGrammarMask.apply(hostMask, to: lastLogits)
                         }
                         if isFlint {
                             lastLogits = FlintChatDecode.filterLogits(
@@ -2342,10 +2633,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             // Apply spec decode results: yield accepted tokens per sequence.
             // Adaptive gate bookkeeping (one outcome per step, not per token).
             specDecoder.recordStepOutcome()
+            let resultsById = Dictionary(
+                uniqueKeysWithValues: specResults.map { ($0.sequenceId, $0) })
             var updatedActive = active
             for (i, var seq) in updatedActive.enumerated() {
-                guard i < specResults.count else { break }
-                let result = specResults[i]
+                // A sequence waiting on grammar compile has no result. Leave
+                // its struct unchanged so the next step can rejoin it.
+                guard let result = resultsById[seq.id] else { continue }
                 let isFlint = container.identifier.family == .flint
                 let flintStopIds: Set<Int> = isFlint
                     ? FlintChatDecode.generationFinishStopIds(
@@ -2596,6 +2890,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             generatedText: seq.generatedText, completionTokenCount: seq.completionTokens
                         ) == true {
                             hitControlToken = true
+                        }
+                    }
+
+                    if !(isEOS || atMax || hitStop || hitControlToken || hitThinkReentry || hitGrammarReject),
+                       let grammar = seq.hostGrammar {
+                        let piece = container.tokenizer?.decode([tokenId]) ?? decoded
+                        if grammar.note(tokenId: tokenId, text: piece) {
+                            grammar.scheduleSlowCompile()
                         }
                     }
 

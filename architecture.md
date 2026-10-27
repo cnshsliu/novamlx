@@ -527,7 +527,7 @@ The macOS application entry point. Initializes the entire system:
 
 Inference worker subprocess. Reads JSON commands from stdin, dispatches to MLX engine, writes JSON responses to stdout. Provides crash isolation: if inference crashes, only the worker dies, not the main app.
 
-- Routes VLM/hybrid/grammar requests to `ContinuousBatcher`, others to `FusedBatchScheduler`
+- Routes VLM, hybrid, session, draft-model, and native MTP requests to `ContinuousBatcher`. JSON, schema, regex, and GBNF stay on `FusedBatchScheduler`
 - Reports memory/CPU stats to parent every 5 seconds
 - Auto-cleans MLX cache between requests
 
