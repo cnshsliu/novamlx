@@ -11,9 +11,17 @@ import NovaMLXUtils
 /// per-row kernel.
 ///
 /// `MLXFast` has no grid barrier, so the launch is 32 resident threadgroups
-/// and a ticket barrier. That is small enough for M4 Max to keep them all
-/// scheduled. The flag is `NOVA_UOCR_MEGA=1` and defaults off. The row-stack
-/// fuse stays the product path.
+/// and a ticket barrier. That grid is the speed limit. Each qmv tile is 8
+/// rows, so 32 groups cover 256 rows at once; a 1280-row GEMV takes five
+/// serial passes. MLX `qmv` launches one threadgroup per 8 rows (160 groups
+/// for 1280) and does not rendezvous. A MoE layer in this kernel also takes
+/// 29 device barriers, and RoPE, RMSNorm, and the expert mix run on one
+/// thread while the other groups wait. MacMaxPro `949285d` matched the fuse
+/// invoice and measured about 19.9 / 29.4 tok/s against a fuse of about
+/// 56.7 / 59.2. Raising the group count to fill the GPU makes the ticket
+/// barrier wait on groups that are not resident. Fewer groups make each GEMV
+/// longer. This launch stays available behind `NOVA_UOCR_MEGA=1` and defaults
+/// off. The row-stack fuse stays the product path.
 ///
 /// Metal gives a kernel 31 buffer arguments (indices 0...30). Binding each
 /// quant plane on its own used 46 inputs and 6 outputs, and the JIT rejected
