@@ -41,6 +41,10 @@ enum UnlimitedOCRDecodeFuse {
     /// GEMM launches for one decode token. `fused` stacks QKV, router QK, each
     /// gate+up, and the MoE score rows onto the shared gate+up matmul.
     /// Output projection, expert down, and `lm_head` stay one launch each.
+    ///
+    /// Folding down into the gate+up kernel would change `experts`, `shared`,
+    /// and `dense` from two launches to one (`swigluDownLaunchCount`). That
+    /// kernel is not shipped: see `swigluDownRepeatsGateUp`.
     static func gemmBudget(layers: Int, denseLayers: Int, fused: Bool) -> GemmBudget {
         let moe = max(0, layers - denseLayers)
         let qkv = fused ? layers : layers * 3
@@ -57,6 +61,23 @@ enum UnlimitedOCRDecodeFuse {
             dense: dense,
             routerScore: fused ? 0 : moe,
             lmHead: 1)
+    }
+
+    /// GEMM launches if each MLP's stacked gate+up and its down were one kernel.
+    /// Released config: 83 − (11 + 11 + 1) = 60. Not a shipped path.
+    static func swigluDownLaunchCount(layers: Int, denseLayers: Int) -> Int {
+        let fused = gemmBudget(layers: layers, denseLayers: denseLayers, fused: true)
+        let moe = max(0, layers - denseLayers)
+        return fused.total - moe - moe - denseLayers
+    }
+
+    /// Down is parallel over its output rows. An 8-row group that also builds
+    /// `silu(gate)*up` has to read every gate and up row. Those groups do not
+    /// share the vector unless they rendezvous or each re-reads the weights.
+    /// `hidden / rowsPerGroup` is that repeat count (160 for 1280 / 8).
+    static func swigluDownRepeatsGateUp(hidden: Int, rowsPerGroup: Int = 8) -> Int {
+        guard hidden > 0, rowsPerGroup > 0 else { return 0 }
+        return (hidden + rowsPerGroup - 1) / rowsPerGroup
     }
 
     static func allowsFuse(_ raw: String?) -> Bool {

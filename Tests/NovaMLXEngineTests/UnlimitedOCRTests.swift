@@ -161,6 +161,11 @@ struct UnlimitedOCRTests {
         #expect(fused.experts == 22)
         #expect(fused.attentionOut == separate.attentionOut)
         #expect(fused.lmHead == 1)
+        #expect(UnlimitedOCRDecodeFuse.swigluDownLaunchCount(layers: 12, denseLayers: 1) == 60)
+        #expect(
+            UnlimitedOCRDecodeFuse.gemmBudget(layers: 12, denseLayers: 1, fused: true).total
+                - UnlimitedOCRDecodeFuse.swigluDownLaunchCount(layers: 12, denseLayers: 1) == 23)
+        #expect(UnlimitedOCRDecodeFuse.swigluDownRepeatsGateUp(hidden: 1280) == 160)
         #expect(UnlimitedOCRDashParams().attendedKeys == 512)
 
         let x: [Float] = [1, 2]

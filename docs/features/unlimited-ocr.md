@@ -147,9 +147,13 @@ QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV �
 
 产品路径仍是解码融合，M4 Max 上大约 **57–59** tok/s（暖机会话；`a3cde09` 第一轮融合是 **59.5**）。`NOVA_UOCR_MEGA` 保持关闭。`949285d` 的一次发射加 ticket barrier 发票是对的，STREAM **19.9 / 29.4**，大约比融合慢 **57%**，不再当速度路径。
 
-80–100 还没有。下一档如果要做，不在这个收尾里：要么是适合 MMA / tile 的量化 GEMV，去掉发射延迟，同时不要整图栅栏；要么是对这条视觉循环安全的投机，而不是把 DFlash / DSpark 套进图像解码。这两条现在都不实现。
+80–100 还没有。把 gate+up、`silu`、down 收成一次发射，账面上是 83 次 GEMM 降到 60（11 层 MoE 的专家和共享各少一次，1 层稠密少一次，共 −23）。这一刀没有落地。down 的每一行都要用整段 `silu(gate)*up`。MLX 的 qmv 按输出行并行，1280 行是 160 个 8 行组。这些组要不用栅栏交换中间向量，就得各自把 gate 和 up 再读一遍（160 倍权重流量）；要么改成按中间维并行再用原子加总到 1280 个输出上，和 MLX 的 down qmv 抢同一块带宽。32 组的 ticket barrier 已经量过，大约慢 57%。`a3cde09` 只去掉 silu 那一次读回，STREAM 落在噪声里。所以不再做无栅栏的 silu/O 收尾，也不做这版 SwiGLU→down 核。
 
-DFlash / DSpark 仍然接不上这个 VLM。Shapeless compile 不回到热路径。
+产品路径仍是解码融合，M4 Max 上大约 **57–59** tok/s。`NOVA_UOCR_MEGA` 保持关闭。`NOVA_UOCR_EPILOGUE` 保持关闭。
+
+下一档不在融合计数里。要动 80–100，得让这些 M=1 的 int4 GEMV 本身更快（针对 K=1280 的 qmv，仍然是每 8 行一组、组间不用栅栏），或者减少专家权重的字节。M=1 喂不满 16×32 MMA。DFlash / DSpark 仍然接不上这条视觉循环。这两条现在都不实现。
+
+Shapeless compile 不回到热路径。
 
 ## Related
 
