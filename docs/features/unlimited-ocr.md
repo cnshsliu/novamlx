@@ -47,7 +47,7 @@ MoE 走 Nova 现有的 `SwitchGLU`（排序后的专家 GEMM，和 Flint 同一�
 
 提示词与官方一致。单页 `document parsing.`，多页 `Multi page parsing.`。处理器会在每页前放 `<PAGE>`（id 128827），图像占位是 `<image>`（id 128815）。特征顺序跟 `modeling_unlimitedocr.py`：局部切块，然后全局视图，然后 view separator。base 视图（1024）是 273 个图像 token。
 
-PDF 路径：把 `.pdf` 交给图像输入时，按 `NOVA_UOCR_PDF_DPI`（缺省 150）渲成页图。上游示例常用 300 DPI。
+PDF 路径：把 `.pdf` 交给图像输入时，按 `NOVA_UOCR_PDF_DPI`（缺省 150）渲成页图。上游示例常用 300 DPI。`NOVA_UOCR_PDF_MAX_PAGES` 缺省 128，`0` 表示不限制。超过上限会直接失败，避免把整本 PDF 渲进内存。生成结束后会释放页图和这次的 KV，再清一次 MLX 缓存，这样下一个请求和 `/health` 不会卡在上一份大缓存上。
 
 ## How to try
 

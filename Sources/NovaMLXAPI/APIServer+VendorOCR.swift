@@ -218,22 +218,38 @@ extension NovaMLXAPIServer {
         {
             pixelSize = VendorOCRImages.pixelSize(of: data)
         }
-        let lines = UnlimitedOCRMarkup.parse(result.text, imagePixelSize: pixelSize)
-        var response = vendorOCRResponse(VendorOCRResponses.success(
-            vendor: route.vendor,
-            lines: lines,
-            logID: logID,
-            requestID: requestID,
-            imageSize: pixelSize
-        ))
+        // Parse and JSON-encode off this task. `generate` resumes on the
+        // worker stdout reader; doing this inline stalls that reader, and
+        // doing it on the NIO loop stalls /health for the whole encode.
+        let ocrText = result.text
+        let imageSize = pixelSize
+        let vendor = route.vendor
+        let promptTokens = result.promptTokens
+        let completionTokens = result.completionTokens
+        let bodyData = await Task.detached(priority: .userInitiated) {
+            let lines = UnlimitedOCRMarkup.parse(ocrText, imagePixelSize: imageSize)
+            let payload = VendorOCRResponses.success(
+                vendor: vendor,
+                lines: lines,
+                logID: logID,
+                requestID: requestID,
+                imageSize: imageSize
+            )
+            return VendorOCRResponses.encode(payload)
+        }.value
+        var response = Response(
+            status: .ok,
+            headers: [.contentType: "application/json"],
+            body: .init(byteBuffer: ByteBuffer(data: bodyData))
+        )
         if case .justLoaded(let ms) = outcome {
             response.headers[.init("X-Model-Cold-Load")!] = "true"
             response.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
         }
         Self.recordTokenUsage(
             request: request,
-            promptTokens: result.promptTokens,
-            completionTokens: result.completionTokens,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
             model: parsed.modelID,
             endpoint: request.uri.path
         )

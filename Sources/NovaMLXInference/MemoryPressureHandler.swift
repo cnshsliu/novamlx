@@ -1,5 +1,4 @@
 import Foundation
-import MLX
 import NovaMLXCore
 import NovaMLXUtils
 import NovaMLXEngine
@@ -73,7 +72,7 @@ public final class MemoryPressureHandler: @unchecked Sendable {
     private func periodicCheck() {
         checkTTLExpirations()
 
-        let activeBytes = UInt64(MLX.Memory.activeMemory)
+        let activeBytes = MLXMemoryGate.activeBytes()
         let activeMB = activeBytes / 1_048_576
         let totalRAM = UInt64(ProcessInfo.processInfo.physicalMemory / 1_048_576)
         let usagePercent = totalRAM > 0 ? Double(activeMB) / Double(totalRAM) * 100 : 0
@@ -124,7 +123,7 @@ public final class MemoryPressureHandler: @unchecked Sendable {
         }
 
         if toEvict > 0 {
-            MLX.Memory.clearCache()
+            MLXMemoryGate.clearCache()
         }
     }
 }

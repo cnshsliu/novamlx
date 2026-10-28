@@ -484,6 +484,106 @@ final class VendorOCRTests: XCTestCase {
         XCTAssertEqual(parsed.modelID, "mlx-community/Unlimited-OCR-8bit")
     }
 
+    // MARK: - Layout labels and packaging
+
+    func testStripsLayoutLabelPrefixesFromVendorWords() {
+        let markup = """
+        header[90, 59, 200, 80 ] Invoice title
+        header[[10, 20, 40, 50]]
+        Second line
+        text[1, 2, 3, 4] Keep me
+        item[1, 2] stays
+        <|det|>[[1, 2, 30, 40]]<|/det|>header[9, 9, 12, 12] Det wins
+        """
+        let lines = UnlimitedOCRMarkup.parse(markup)
+        XCTAssertEqual(lines.map(\.text), [
+            "Invoice title",
+            "Second line",
+            "Keep me",
+            "item[1, 2] stays",
+            "Det wins",
+        ])
+        XCTAssertEqual(lines[0].left, 90)
+        XCTAssertEqual(lines[0].top, 59)
+        XCTAssertEqual(lines[0].width, 110)
+        XCTAssertEqual(lines[0].height, 21)
+        XCTAssertEqual(lines[1].left, 10)
+        XCTAssertEqual(lines[1].top, 20)
+        XCTAssertEqual(lines[1].width, 30)
+        XCTAssertEqual(lines[1].height, 30)
+        XCTAssertEqual(lines[4].left, 1)
+        XCTAssertEqual(lines[4].top, 2)
+        XCTAssertEqual(lines[4].width, 29)
+        XCTAssertFalse(lines.contains { $0.text.contains("header[") || $0.text.contains("text[") })
+
+        for vendor in [VendorOCRVendor.baidu, .aliyun, .tencent] {
+            let payload = VendorOCRResponses.success(
+                vendor: vendor,
+                lines: lines,
+                logID: 1,
+                requestID: "r",
+                imageSize: nil,
+                limits: .unlimited
+            )
+            let raw = String(data: VendorOCRResponses.encode(payload), encoding: .utf8) ?? ""
+            XCTAssertFalse(raw.contains("header["), vendor.rawValue)
+            XCTAssertFalse(raw.contains("text["), vendor.rawValue)
+            XCTAssertTrue(raw.contains("Invoice title"), vendor.rawValue)
+            XCTAssertTrue(raw.contains("item[1, 2] stays"), vendor.rawValue)
+        }
+    }
+
+    func testResponsePackagingTruncatesAndStaysValid() {
+        let lines = (0..<50).map { index in
+            UnlimitedOCRLine(text: String(repeating: "word\(index) ", count: 30))
+        }
+        let capped = VendorOCRResponses.success(
+            vendor: .baidu,
+            lines: lines,
+            logID: 9,
+            requestID: "r",
+            imageSize: nil,
+            limits: VendorOCRLimits(maxLines: 3, maxResponseBytes: .max)
+        )
+        let json = try? object(capped)
+        XCTAssertEqual(json?["words_result_num"] as? Int, 3)
+        XCTAssertEqual((json?["words_result"] as? [Any])?.count, 3)
+        XCTAssertEqual((json?["words_result"] as? [[String: Any]])?[0]["words"] as? String, lines[0].text)
+
+        let tight = VendorOCRResponses.success(
+            vendor: .baidu,
+            lines: lines,
+            logID: 9,
+            requestID: "r",
+            imageSize: nil,
+            limits: VendorOCRLimits(maxLines: 50, maxResponseBytes: 500)
+        )
+        let tightData = VendorOCRResponses.encode(tight)
+        XCTAssertLessThanOrEqual(tightData.count, 500)
+        let tightJSON = try? JSONSerialization.jsonObject(with: tightData) as? [String: Any]
+        let count = tightJSON?["words_result_num"] as? Int
+        XCTAssertEqual(count, (tightJSON?["words_result"] as? [Any])?.count)
+        XCTAssertGreaterThan(count ?? 0, 0)
+
+        let huge = [UnlimitedOCRLine(text: String(repeating: "A", count: 20_000))]
+        let one = VendorOCRResponses.success(
+            vendor: .tencent,
+            lines: huge,
+            logID: 1,
+            requestID: "r",
+            imageSize: nil,
+            limits: VendorOCRLimits(maxLines: 10, maxResponseBytes: 800)
+        )
+        let oneData = VendorOCRResponses.encode(one)
+        XCTAssertLessThanOrEqual(oneData.count, 800)
+        let response = try? JSONSerialization.jsonObject(with: oneData) as? [String: Any]
+        let detections = (response?["Response"] as? [String: Any])?["TextDetections"] as? [[String: Any]]
+        let detected = detections?.first?["DetectedText"] as? String ?? ""
+        XCTAssertFalse(detected.isEmpty)
+        XCTAssertLessThan(detected.count, 20_000)
+        XCTAssertEqual((response?["Response"] as? [String: Any])?["RequestId"] as? String, "r")
+    }
+
     // MARK: - Helpers
 
     private func object(_ payload: VendorOCRPayload) throws -> [String: Any] {

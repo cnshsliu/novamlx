@@ -338,15 +338,29 @@ struct NovaMLXWorker {
 final class LineWriter: @unchecked Sendable {
     private let lock = NSLock()
 
+    /// Writes the whole JSON line. A short `write` used to drop the tail, so
+    /// the host waited forever for a newline that never arrived. The lock
+    /// keeps memory-stats lines from interleaving; the host reader is a
+    /// blocking thread and drains the pipe while this write waits.
     func write(_ message: WorkerMessage) {
-        guard let data = try? JSONEncoder().encode(message),
-              let line = String(data: data, encoding: .utf8) else { return }
-        var output = line
-        output.append("\n")
+        guard var data = try? JSONEncoder().encode(message) else { return }
+        data.append(0x0A)
         lock.lock()
-        output.withUTF8 { buf in
-            _ = Darwin.write(STDOUT_FILENO, buf.baseAddress, buf.count)
+        defer { lock.unlock() }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            let bytes = raw.count
+            while offset < bytes {
+                let wrote = Darwin.write(STDOUT_FILENO, base.advanced(by: offset), bytes - offset)
+                if wrote > 0 {
+                    offset += wrote
+                } else if wrote < 0 && errno == EINTR {
+                    continue
+                } else {
+                    return
+                }
+            }
         }
-        lock.unlock()
     }
 }

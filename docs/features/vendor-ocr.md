@@ -10,7 +10,7 @@
 
 ## What it does
 
-一条引擎路径，三套薄适配。图片（base64、http(s) URL、`data:` URL、multipart 文件，或路径以 `.pdf` 结尾的 PDF）进同一个 VLM 请求：user 文本固定为 `document parsing.`，模型默认 `baidu/Unlimited-OCR-2`。多页时处理器自己会把提示改成 `Multi page parsing.`。模型吐出的 `<|det|>`、`<|ref|>`、`<table>`、`<PAGE>` 被拆成文字行和框，再装进各厂商的成功 JSON。
+一条引擎路径，三套薄适配。图片（base64、http(s) URL、`data:` URL、multipart 文件，或路径以 `.pdf` 结尾的 PDF）进同一个 VLM 请求：user 文本固定为 `document parsing.`，模型默认 `baidu/Unlimited-OCR-2`。多页时处理器自己会把提示改成 `Multi page parsing.`。模型吐出的 `<|det|>`、`<|ref|>`、`<table>`、`<PAGE>`，以及 Unlimited-OCR-2 的 `header[90, 59, …]` / `label[[x1, y1, x2, y2]]` 版面标记，被拆成文字行和框。词条里只留页面文字。再装进各厂商的成功 JSON。
 
 `accurate` 与 `basic`、`RecognizeAdvanced` 与 `RecognizeGeneral`、`GeneralAccurateOCR` 与 `GeneralBasicOCR` 走同一次识别。路径只为了让旧客户端能换 host。
 
@@ -141,6 +141,8 @@ curl -s http://127.0.0.1:6590/rest/2.0/ocr/v1/general \
 - 远程 URL 的框留在模型的 0…1000 网格里。字节随请求上来时才换成像素。
 - PDF 的 base64 会落成临时文件，识别结束后删除。URL 必须以 `.pdf` 结尾才会走已有的 PDF 渲染，这和聊天接口一致。
 - 采样与聊天 OCR 优化器相同：Unlimited OCR 缺省 temperature 0、`max_tokens` 8192。
+- 多页 PDF 在生成结束后会先丢掉本页图像和 KV，再把结果写回。HTTP 会返回，`/health` 不会停在打包上。词条很多时成功体仍是各厂商原来的形状，只是可能被截成前缀：`NOVA_VENDOR_OCR_MAX_LINES`（缺省 20000）和 `NOVA_VENDOR_OCR_MAX_RESPONSE_BYTES`（缺省 8 MiB）。设成 `0` 表示不限制。`words_result_num`、`prism_wnum` 与实际数组长度一致。
+- 单个 PDF 的页数上限是 `NOVA_UOCR_PDF_MAX_PAGES`（缺省 128，100 页在限额内）。`0` 表示不限制。超出限额会返回该厂商的失败体，而不是把每一页都渲进内存。
 
 ## Related
 

@@ -1,5 +1,6 @@
 import Foundation
 import NovaMLXCore
+import NovaMLXUtils
 
 // MARK: - Catalog
 //
@@ -216,34 +217,36 @@ enum UnlimitedOCRMarkup {
         let matches = detMatches(in: normalized)
         var lines: [UnlimitedOCRLine] = []
         if matches.isEmpty {
-            lines = visibleLines(normalized).map { UnlimitedOCRLine(text: $0) }
+            lines = visiblePieces(normalized).map { line(from: $0, det: nil) }
             return applyingImageSize(lines, image: imagePixelSize)
         }
         if let first = matches.first, first.range.lowerBound > normalized.startIndex {
             let preamble = String(normalized[..<first.range.lowerBound])
-            lines.append(contentsOf: visibleLines(preamble).map { UnlimitedOCRLine(text: $0) })
+            lines.append(contentsOf: visiblePieces(preamble).map { line(from: $0, det: nil) })
         }
         for (index, match) in matches.enumerated() {
             let textStart = match.range.upperBound
             let textEnd = index + 1 < matches.count ? matches[index + 1].range.lowerBound : normalized.endIndex
             let raw = String(normalized[textStart..<textEnd])
-            let box = box(from: numbers(in: match.inner))
-            for line in visibleLines(raw) {
-                if let box {
-                    lines.append(UnlimitedOCRLine(
-                        text: line,
-                        left: box.left,
-                        top: box.top,
-                        width: box.width,
-                        height: box.height,
-                        polygon: box.polygon
-                    ))
-                } else {
-                    lines.append(UnlimitedOCRLine(text: line))
-                }
+            let det = box(from: numbers(in: match.inner))
+            for piece in visiblePieces(raw) {
+                lines.append(line(from: piece, det: det))
             }
         }
         return applyingImageSize(lines, image: imagePixelSize)
+    }
+
+    private static func line(from piece: VisiblePiece, det: OCRBox?) -> UnlimitedOCRLine {
+        let chosen = det ?? piece.box
+        guard let chosen else { return UnlimitedOCRLine(text: piece.text) }
+        return UnlimitedOCRLine(
+            text: piece.text,
+            left: chosen.left,
+            top: chosen.top,
+            width: chosen.width,
+            height: chosen.height,
+            polygon: chosen.polygon
+        )
     }
 
     // MARK: det tags
@@ -287,9 +290,11 @@ enum UnlimitedOCRMarkup {
         return values
     }
 
+    private typealias OCRBox = (left: Int, top: Int, width: Int, height: Int, polygon: [UnlimitedOCRPoint])
+
     private static func box(
         from values: [Double]
-    ) -> (left: Int, top: Int, width: Int, height: Int, polygon: [UnlimitedOCRPoint])? {
+    ) -> OCRBox? {
         let ints = values.map { Int($0.rounded()) }
         let points: [UnlimitedOCRPoint]
         if ints.count == 4 {
@@ -358,16 +363,86 @@ enum UnlimitedOCRMarkup {
 
     // MARK: visible text
 
-    private static func visibleLines(_ raw: String) -> [String] {
+    private struct VisiblePiece {
+        var text: String
+        var box: OCRBox?
+    }
+
+    /// Unlimited-OCR-2 also emits `header[90, 59, 200, 80]` (and
+    /// `header[[90, 59, 200, 80]]` when the det brackets survive decode).
+    /// That is a layout tag, not page text. A tag on its own line applies
+    /// to the next non-empty line. `<|det|>` still wins when both exist.
+    private static func visiblePieces(_ raw: String) -> [VisiblePiece] {
         var text = removingRefs(raw)
         text = text.replacingOccurrences(of: "<PAGE>", with: "\n")
         text = flatteningTables(text)
         text = strippingTags(text)
         text = decodingEntities(text)
-        return text
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { cleanLine(String($0)) }
-            .filter { !$0.isEmpty }
+        var pieces: [VisiblePiece] = []
+        var carried: OCRBox?
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            var rest = String(rawLine)
+            var lineBox: OCRBox?
+            while let prefix = layoutPrefix(in: rest) {
+                rest = prefix.rest
+                if let box = prefix.box { lineBox = box }
+                if rest.isEmpty { break }
+            }
+            let cleaned = cleanLine(rest)
+            if cleaned.isEmpty {
+                if let lineBox { carried = lineBox }
+                continue
+            }
+            pieces.append(VisiblePiece(text: cleaned, box: lineBox ?? carried))
+            carried = nil
+        }
+        return pieces
+    }
+
+    private struct LayoutPrefix {
+        var rest: String
+        var box: OCRBox?
+    }
+
+    /// Leading `label[n, n, n, n]` / `label[[n, ...]]`. Fewer than four
+    /// numbers is left alone (`item[1, 2]` is text). The scan is linear so
+    /// a long OCR line cannot backtrack.
+    private static func layoutPrefix(in line: String) -> LayoutPrefix? {
+        let scalars = line.unicodeScalars
+        var index = scalars.startIndex
+        while index < scalars.endIndex, CharacterSet.whitespaces.contains(scalars[index]) {
+            index = scalars.index(after: index)
+        }
+        let labelStart = index
+        guard index < scalars.endIndex, CharacterSet.letters.contains(scalars[index]) else { return nil }
+        index = scalars.index(after: index)
+        let labelChars = CharacterSet.letters
+            .union(.decimalDigits)
+            .union(CharacterSet(charactersIn: "_-"))
+        while index < scalars.endIndex, labelChars.contains(scalars[index]) {
+            index = scalars.index(after: index)
+        }
+        guard index > labelStart, index < scalars.endIndex, scalars[index] == "[" else { return nil }
+        index = scalars.index(after: index)
+        if index < scalars.endIndex, scalars[index] == "[" {
+            index = scalars.index(after: index)
+        }
+        let numberStart = index
+        while index < scalars.endIndex, scalars[index] != "]" {
+            index = scalars.index(after: index)
+        }
+        guard index < scalars.endIndex else { return nil }
+        let numberText = String(scalars[numberStart..<index])
+        index = scalars.index(after: index)
+        if index < scalars.endIndex, scalars[index] == "]" {
+            index = scalars.index(after: index)
+        }
+        let values = numbers(in: numberText)
+        guard values.count >= 4 else { return nil }
+        while index < scalars.endIndex, CharacterSet.whitespaces.contains(scalars[index]) {
+            index = scalars.index(after: index)
+        }
+        return LayoutPrefix(rest: String(scalars[index...]), box: box(from: values))
     }
 
     /// `<|ref|>title<|/ref|>` is a label, not the words on the page.
@@ -462,6 +537,30 @@ struct VendorOCRPayload {
     var body: [String: Any]
 }
 
+/// Caps for the vendor JSON body. `0` in either env var means no limit.
+/// A 100-page decode still fits the defaults; the cap exists so packaging
+/// cannot allocate without bound on the request task.
+struct VendorOCRLimits: Equatable, Sendable {
+    var maxLines: Int
+    var maxResponseBytes: Int
+
+    static let unlimited = VendorOCRLimits(maxLines: .max, maxResponseBytes: .max)
+
+    static var current: VendorOCRLimits {
+        VendorOCRLimits(
+            maxLines: envInt("NOVA_VENDOR_OCR_MAX_LINES", default: 20_000),
+            maxResponseBytes: envInt("NOVA_VENDOR_OCR_MAX_RESPONSE_BYTES", default: 8 * 1024 * 1024)
+        )
+    }
+
+    private static func envInt(_ key: String, default defaultValue: Int) -> Int {
+        let raw = ProcessInfo.processInfo.environment[key] ?? ""
+        if raw.isEmpty { return defaultValue }
+        if raw == "0" { return .max }
+        return Int(raw) ?? defaultValue
+    }
+}
+
 enum VendorOCRResponses {
     static func makeLogID() -> Int {
         Int.random(in: 100_000_000_000...999_999_999_999)
@@ -472,18 +571,115 @@ enum VendorOCRResponses {
         lines: [UnlimitedOCRLine],
         logID: Int,
         requestID: String,
-        imageSize: OCRPixelSize?
+        imageSize: OCRPixelSize?,
+        limits: VendorOCRLimits = .current
     ) -> VendorOCRPayload {
+        let fitted = fitting(lines, vendor: vendor, logID: logID, requestID: requestID, imageSize: imageSize, limits: limits)
+        if fitted.count != min(lines.count, limits.maxLines) {
+            NovaMLXLog.warning("[VendorOCR] response capped from \(lines.count) lines to \(fitted.count) (maxLines=\(limits.maxLines) maxBytes=\(limits.maxResponseBytes))")
+        }
         let body: [String: Any]
         switch vendor {
         case .baidu:
-            body = baiduSuccess(lines: lines, logID: logID)
+            body = baiduSuccess(lines: fitted, logID: logID)
         case .aliyun:
-            body = aliyunSuccess(lines: lines, requestID: requestID, imageSize: imageSize)
+            body = aliyunSuccess(lines: fitted, requestID: requestID, imageSize: imageSize)
         case .tencent:
-            body = tencentSuccess(lines: lines, requestID: requestID)
+            body = tencentSuccess(lines: fitted, requestID: requestID)
         }
         return VendorOCRPayload(status: 200, body: body)
+    }
+
+    /// Prefix of `lines` whose vendor JSON fits both caps. A single oversized
+    /// line is shortened. The returned array is what `words_result_num` counts.
+    static func fitting(
+        _ lines: [UnlimitedOCRLine],
+        vendor: VendorOCRVendor,
+        logID: Int,
+        requestID: String,
+        imageSize: OCRPixelSize?,
+        limits: VendorOCRLimits
+    ) -> [UnlimitedOCRLine] {
+        if limits.maxLines == .max && limits.maxResponseBytes == .max { return lines }
+        let budget = min(lines.count, limits.maxLines)
+        guard budget > 0, limits.maxResponseBytes > 0 else { return [] }
+        if limits.maxResponseBytes == .max {
+            return Array(lines.prefix(budget))
+        }
+        func payload(_ count: Int) -> Int {
+            encode(successBody(
+                vendor: vendor,
+                lines: Array(lines.prefix(count)),
+                logID: logID,
+                requestID: requestID,
+                imageSize: imageSize
+            )).count
+        }
+        if payload(budget) <= limits.maxResponseBytes {
+            return Array(lines.prefix(budget))
+        }
+        var low = 1
+        var high = budget - 1
+        var best = 0
+        while low <= high {
+            let mid = low + (high - low) / 2
+            if payload(mid) <= limits.maxResponseBytes {
+                best = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        if best > 0 { return Array(lines.prefix(best)) }
+        var only = lines[0]
+        var text = only.text
+        if text.utf8.count > limits.maxResponseBytes {
+            let cap = min(text.count, 4_096)
+            text = String(text.prefix(cap))
+        }
+        while !text.isEmpty {
+            only.text = text
+            if payloadCount([only], vendor: vendor, logID: logID, requestID: requestID, imageSize: imageSize) <= limits.maxResponseBytes {
+                return [only]
+            }
+            let next = text.count / 2
+            if next < 16 { break }
+            text = String(text.prefix(next))
+        }
+        return []
+    }
+
+    private static func payloadCount(
+        _ lines: [UnlimitedOCRLine],
+        vendor: VendorOCRVendor,
+        logID: Int,
+        requestID: String,
+        imageSize: OCRPixelSize?
+    ) -> Int {
+        encode(successBody(
+            vendor: vendor,
+            lines: lines,
+            logID: logID,
+            requestID: requestID,
+            imageSize: imageSize
+        )).count
+    }
+
+    private static func successBody(
+        vendor: VendorOCRVendor,
+        lines: [UnlimitedOCRLine],
+        logID: Int,
+        requestID: String,
+        imageSize: OCRPixelSize?
+    ) -> [String: Any] {
+        switch vendor {
+        case .baidu:
+            return baiduSuccess(lines: lines, logID: logID)
+        case .aliyun:
+            return aliyunSuccess(lines: lines, requestID: requestID, imageSize: imageSize)
+        case .tencent:
+            return tencentSuccess(lines: lines, requestID: requestID)
+        }
     }
 
     static func failure(
