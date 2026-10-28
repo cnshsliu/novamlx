@@ -23,7 +23,10 @@ final class UnlimitedOCRDenseMLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        down(compiledSiluProduct(gate(x), up(x)))
+        if let fused = UnlimitedOCRDecodeFuse.project(gate, up, x) {
+            return down(compiledSiluProduct(fused.0, fused.1))
+        }
+        return down(compiledSiluProduct(gate(x), up(x)))
     }
 }
 
@@ -56,7 +59,9 @@ final class UnlimitedOCRMoE: Module {
         let (inds, chosen) = singleRow
             ? UnlimitedOCRExpertTopK.selectRow(scores, experts: expertsCount, k: topK)
             : UnlimitedOCRExpertTopK.chain(scores, k: topK)
-        let mixed = weightedExpertSum(experts(x, inds), (chosen * scale).asType(x.dtype))
+        let projected = UnlimitedOCRDecodeFuse.projectExperts(
+            experts, x, inds, assignments: topK) ?? experts(x, inds)
+        let mixed = weightedExpertSum(projected, (chosen * scale).asType(x.dtype))
         return mixed + shared(x)
     }
 }
@@ -161,9 +166,10 @@ final class UnlimitedOCRRingAttention: Module {
         let mask = cache.makeMask(n: n, windowSize: nil, returnArray: false)
         let positions = MLXArray(Int32(cache.offset)..<Int32(cache.offset + n))
         let angles = rope.linear(positions: positions, dtype: x.dtype)
-        var q = qProj(x).reshaped(b, n, heads, dim).transposed(0, 2, 1, 3)
-        var k = kProj(x).reshaped(b, n, heads, dim).transposed(0, 2, 1, 3)
-        let v = vProj(x).reshaped(b, n, heads, dim).transposed(0, 2, 1, 3)
+        let qkv = UnlimitedOCRDecodeFuse.project(qProj, kProj, vProj, x)
+        var q = (qkv?.0 ?? qProj(x)).reshaped(b, n, heads, dim).transposed(0, 2, 1, 3)
+        var k = (qkv?.1 ?? kProj(x)).reshaped(b, n, heads, dim).transposed(0, 2, 1, 3)
+        let v = (qkv?.2 ?? vProj(x)).reshaped(b, n, heads, dim).transposed(0, 2, 1, 3)
         q = UnlimitedOCRDashMath.applyRope(q, cos: angles.0, sin: angles.1)
         k = UnlimitedOCRDashMath.applyRope(k, cos: angles.0, sin: angles.1)
         let (keys, values) = cache.update(keys: k, values: v)

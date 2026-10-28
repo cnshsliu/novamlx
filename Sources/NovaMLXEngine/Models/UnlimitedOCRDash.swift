@@ -844,8 +844,9 @@ final class UnlimitedOCRDashRouter: Module {
 
     func indexQK(_ x: MLXArray, cos: MLXArray, sin: MLXArray) -> (MLXArray, MLXArray) {
         let hidden = UnlimitedOCRDashMath.finite(x)
-        var q = qNorm(qProj(hidden)).expandedDimensions(axis: 1)
-        var k = kNorm(kProj(hidden)).expandedDimensions(axis: 1)
+        let qk = UnlimitedOCRDecodeFuse.project(qProj, kProj, hidden)
+        var q = qNorm(qk?.0 ?? qProj(hidden)).expandedDimensions(axis: 1)
+        var k = kNorm(qk?.1 ?? kProj(hidden)).expandedDimensions(axis: 1)
         q = UnlimitedOCRDashMath.applyRope(q, cos: cos, sin: sin)
         k = UnlimitedOCRDashMath.applyRope(k, cos: cos, sin: sin)
         return (
@@ -891,9 +892,10 @@ final class UnlimitedOCRDashAttention: Module {
         let batch = x.dim(0)
         let length = x.dim(1)
         precondition(batch == 1, "Unlimited OCR DASH attends one sequence.")
-        var q = qProj(x).reshaped(batch, length, heads, headDim).transposed(0, 2, 1, 3)
-        var k = kProj(x).reshaped(batch, length, heads, headDim).transposed(0, 2, 1, 3)
-        let v = vProj(x).reshaped(batch, length, heads, headDim).transposed(0, 2, 1, 3)
+        let qkv = UnlimitedOCRDecodeFuse.project(qProj, kProj, vProj, x)
+        var q = (qkv?.0 ?? qProj(x)).reshaped(batch, length, heads, headDim).transposed(0, 2, 1, 3)
+        var k = (qkv?.1 ?? kProj(x)).reshaped(batch, length, heads, headDim).transposed(0, 2, 1, 3)
+        let v = (qkv?.2 ?? vProj(x)).reshaped(batch, length, heads, headDim).transposed(0, 2, 1, 3)
         q = UnlimitedOCRDashMath.applyRope(q, cos: ctx.cos, sin: ctx.sin)
         k = UnlimitedOCRDashMath.applyRope(k, cos: ctx.cos, sin: ctx.sin)
         let (keys, values) = cache.update(keys: k, values: v)

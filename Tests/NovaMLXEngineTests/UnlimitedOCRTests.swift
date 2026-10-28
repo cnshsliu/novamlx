@@ -148,6 +148,40 @@ struct UnlimitedOCRTests {
         #expect(prior[0] > prior[1] && prior[1] > prior[2])
         #expect(UnlimitedOCRDashMath.entmax15([]).isEmpty)
     }
+
+    @Test("Seq-1 decode fuse stacks GEMM rows and keeps 512 keys")
+    func decodeFuseBudget() {
+        let separate = UnlimitedOCRDecodeFuse.gemmBudget(layers: 12, denseLayers: 1, fused: false)
+        let fused = UnlimitedOCRDecodeFuse.gemmBudget(layers: 12, denseLayers: 1, fused: true)
+        #expect(separate.total == 153)
+        #expect(fused.total == 94)
+        #expect(fused.qkv == 12)
+        #expect(fused.experts == 22)
+        #expect(fused.attentionOut == separate.attentionOut)
+        #expect(fused.lmHead == 1)
+        #expect(UnlimitedOCRDashParams().attendedKeys == 512)
+
+        let x: [Float] = [1, 2]
+        let gate = [[Float(3), 4], [Float(5), 0]]
+        let up = [[Float(0), 1]]
+        let split = UnlimitedOCRDecodeFuse.referenceConcatDots(x, gate)
+            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, up)
+        let stacked = UnlimitedOCRDecodeFuse.referenceConcatDots(x, gate + up)
+        #expect(split == stacked)
+
+        #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 160, groups: 20)?.bits == 4)
+        #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 160, groups: 20)?.group == 64)
+        #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 320, groups: 20)?.bits == 8)
+        #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 320, groups: 20)?.group == 64)
+        #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 3, groups: 5) == nil)
+        #expect(UnlimitedOCRDecodeFuse.allowsFuse(nil))
+        #expect(!UnlimitedOCRDecodeFuse.allowsFuse("0"))
+        #expect(UnlimitedOCRDecodeFuse.allowsFuse("on"))
+
+        #expect(
+            UnlimitedOCRDecodeFuse.expertRowShape(x: [1, 1, 1280], indices: [1, 1, 6], hidden: 1280)
+                == [1, 1, 6, 1280])
+    }
 }
 
 private let ocr2JSON = """
