@@ -114,6 +114,28 @@ struct UnlimitedOCRTests {
         let eosKept = UnlimitedOCRGeneration.bannedNextTokens([9, 1, 9], eos: [1], ngram: 2, window: 128)
         #expect(eosKept.isEmpty)
     }
+
+    @Test("Fused DASH plan keeps the 512-key layout and the best remote block")
+    func dashPlanReference() {
+        let spec = UnlimitedOCRDashPlan.Spec(
+            block: 2, localBlocks: 1, local: 2, topM: 3, topK: 2,
+            indexDim: 2, indexScale: 1, floor: 0.0001, sigma: 1)
+        #expect(spec.attended == 6)
+        let plan = UnlimitedOCRDashPlan.reference(
+            query: [1, 0],
+            summaries: [[3, 0], [1, 0], [0, 1], [10, 0]],
+            candidates: [1, 1, 1, 0],
+            position: 20,
+            spec: spec)
+        #expect(plan.indices.count == spec.attended)
+        #expect(plan.mask.count == spec.attended)
+        #expect(plan.indices.prefix(4) == [0, 1, 2, 3])
+        #expect(plan.indices.suffix(2) == [19, 20])
+        #expect(plan.mask[4] == 0)
+        #expect(plan.mask[5] == 0)
+        #expect(plan.mask[0].isFinite)
+        #expect(plan.indices.allSatisfy { $0 >= 0 && $0 <= 20 })
+    }
 }
 
 private let ocr2JSON = """

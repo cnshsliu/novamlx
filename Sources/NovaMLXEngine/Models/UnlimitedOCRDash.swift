@@ -691,6 +691,9 @@ struct UnlimitedOCRDashContext {
     /// Width of `candidates`. Kept on the host so decode does not read a shape.
     var candidateCount: Int
     var position: MLXArray?
+    /// Decode block eligibility as uint32, one value per summary row.
+    /// Built once per token and reused by every layer's plan kernel.
+    var candidateBits: MLXArray?
 }
 
 func unlimitedOCRContext(
@@ -764,10 +767,12 @@ func unlimitedOCRContext(
     } else {
         candidates = (MLXArray.zeros([1, cap], dtype: .int32) + 1) .== MLXArray(Int32(1))
     }
-    return UnlimitedOCRDashContext(
+    var context = UnlimitedOCRDashContext(
         cos: angles.0, sin: angles.1, offset: offset, length: length,
         decode: true, candidates: candidates, candidateCount: cap,
         position: MLXArray(Int32(offset)))
+    context.candidateBits = candidates.asType(.uint32).reshaped([cap])
+    return context
 }
 
 // MARK: - Router and attention
@@ -872,10 +877,26 @@ final class UnlimitedOCRDashAttention: Module {
         if ctx.decode {
             let cap = ctx.candidateCount
             let summaries = cache.summaryRows(capacity: cap, dim: router.headCls.dim(0))
-            let (idx, mask) = UnlimitedOCRDashMath.decodePlan(
-                query: idxQ, summaries: summaries, candidates: ctx.candidates!,
-                position: ctx.position!, indexScale: indexScale, floor: floor, params: params,
-                cap: cap, indexDim: params.indexDim)
+            let idx: MLXArray
+            let mask: MLXArray
+            if UnlimitedOCRDashPlan.supports(params, cap: cap), let bits = ctx.candidateBits,
+                let position = ctx.position
+            {
+                (idx, mask) = UnlimitedOCRDashPlan.evaluate(
+                    query: idxQ.reshaped([params.indexDim]),
+                    summaries: summaries,
+                    candidates: bits,
+                    position: position,
+                    indexScale: indexScale,
+                    floor: floor,
+                    params: params,
+                    cap: cap)
+            } else {
+                (idx, mask) = UnlimitedOCRDashMath.decodePlan(
+                    query: idxQ, summaries: summaries, candidates: ctx.candidates!,
+                    position: ctx.position!, indexScale: indexScale, floor: floor, params: params,
+                    cap: cap, indexDim: params.indexDim)
+            }
             // Slab length is the allocation, fixed until the next growth.
             // The compiled gather is keyed by that length and uses the
             // constant 512-wide mask. No shapeless trace, no `-1` slice.

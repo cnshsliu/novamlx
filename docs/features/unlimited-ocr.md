@@ -29,7 +29,7 @@ OCR-2 没有 mlx-community 量化包。Nova 直接读官方 safetensors（`model
 - 12 个远端块 × 32 token，块由每层 `dash_router`（1.5-entmax，top-16 里再取 12）选出，并带 log-prior 偏置
 - 128 token 的局部窗（4 × 32），偏置为 0
 
-合计 **512** 个 key。`take` 和 SDPA、以及块计划，按**具体形状**各编译一次（slab 长度、summary 行数），不再每个 token 重搭。不用 shapeless，切片也不用 `-1`：那两种写法会在第二个 token 上让 Slice 推不出形状。单 token 的专家选择仍是一个 Metal top-k（升序，和 `argPartition` 同一组专家）；prefill 仍走原来的多行链。没有「页数一长就退回全注意力」的路径。
+合计 **512** 个 key。解码时每一层的块计划是**一个**静态形状的 Metal 核（单线程，和 `UnlimitedOCRDashPlan.reference` 同一套循环）：点积、top-m、1.5-entmax、局部窗下标一次写完。输出长度固定为 `topK * block + local`（发布配置 512）。cap 超过 1024 或形状不在这个合同里时，退回按具体形状编译的原计划，不用 shapeless，也不用 `-1` 切片。Gather 和 SDPA 仍按 slab 长度编译。单 token 的专家选择仍是一个 Metal top-k。Prefill 仍走多行的原计划。没有「页数一长就退回全注意力」的路径。
 
 语言栈是 4-bit。选中的专家走 `SwitchGLU` 的 `gatherQuantizedMM`（top-6），不是把 64 个专家整层展开。把单 token 的 MoE / 稠密 MLP 再编译一次，Mac 上测出来和只编译 DASH 一样，所以那层编译已去掉。
 
@@ -82,12 +82,9 @@ MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill �
 | `9d762ef`，DASH 按具体形状编译 | **53.3–56.5** |
 | `5047946`，再编译 MoE / 稠密 MLP | **55.0–55.4**（相对上一行没有增益） |
 
-当前这条栈停在大约 **55 tok/s**。再编译一层图不会再涨。这不是「把 2–3GB 权重每步读一遍」的带宽墙：选中的 6 个 4-bit 专家加上注意力和 `lm_head`，在 M4 Max 的带宽上是亚毫秒级。剩下的时间是 12 层 DASH 计划仍要发射的一串小核（排序、1.5-entmax、逐元素），再加上 batch=1 的量化 GEMM 启动。Shapeless 编译能少掉搭图，但第二个 token 会因 Slice 推不出形状而中断，不能再用。
+`9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。那不是整包权重的带宽墙。当时每层仍在发射一串 DASH 小核。
 
-要明显超过大约 55、朝 80–100 以上走，得换结构，而不是再包一层 `compile`：
-
-- 把解码用的 DASH 块计划收成**一个**静态形状的 Metal 核，而不是一串已编译但仍逐个发射的算子。
-- 或者给这路 VLM 接投机解码。现有的 DFlash / DSpark 钩子是文本模型的，没有套在 Unlimited OCR 上。
+这一版把那串计划收成每层一个 Metal 核。Mac 上要重测的是：多 token 发票仍然完整、没有 Slice 崩溃，以及 `[STREAM] VLM` 的 decode tok/s 是否明显高于 53–56。这里不写新的 tok/s。若仍停在大约 55，下一档才是投机解码；DFlash / DSpark 目前只接文本模型。
 
 gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH + 64 专家。
 
