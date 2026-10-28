@@ -204,6 +204,7 @@ struct UnlimitedOCRTests {
         #expect(UnlimitedOCRLayerKernel.launchThreads == 32 * 64)
         #expect(UnlimitedOCRLayerKernel.groups == 32)
         #expect(UnlimitedOCRLayerKernel.bindingFitsMetalLimit())
+        #expect(UnlimitedOCRLayerKernel.metalBarrierCompilesOnMLX())
         #expect(UnlimitedOCRLayerKernel.boundBufferCount == 21)
         #expect(UnlimitedOCRLayerKernel.boundBufferCount <= UnlimitedOCRLayerKernel.metalBufferLimit)
         #expect(UnlimitedOCRLayerKernel.inputNames.count == 15)

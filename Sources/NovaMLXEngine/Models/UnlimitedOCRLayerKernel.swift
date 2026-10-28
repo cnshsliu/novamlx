@@ -67,6 +67,24 @@ enum UnlimitedOCRLayerKernel {
         base + id * rows * packed
     }
 
+    /// True when the grid barrier uses MLX's device fence, not the one-argument
+    /// fence or a lambda that drops the device address space.
+    static func metalBarrierCompilesOnMLX() -> Bool {
+        let fence =
+            "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)"
+        let barrier = qmvHeader
+        let body = layerSource(bits: 4)
+        guard barrier.contains(fence),
+            body.contains("uocr_barrier(counter, epoch, \(groups), lid)"),
+            !barrier.contains("atomic_thread_fence(mem_flags::mem_device);"),
+            !barrier.contains("memory_order_acquire"),
+            !barrier.contains("memory_order_acq_rel"),
+            !barrier.contains("memory_order_release"),
+            !body.contains("auto bar")
+        else { return false }
+        return true
+    }
+
     /// Host check for the launch shape. True when every binding is in 0...30 and
     /// the alias block covers the last `info` slot.
     static func bindingFitsMetalLimit() -> Bool {
@@ -540,22 +558,26 @@ enum UnlimitedOCRLayerKernel {
             }
         }
 
+        // MLX prepends mlx/backend/metal/kernels/utils.h. The one-argument
+        // atomic_thread_fence and acquire/release orders do not bind a device
+        // address space there. This is the same device fence as Flint sync_all.
         METAL_FUNC void uocr_barrier(device atomic_uint* counter, device atomic_uint* epoch,
             uint groups, uint lid) {
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+            threadgroup_barrier(mem_flags::mem_device);
             if (lid == 0) {
-                atomic_thread_fence(mem_flags::mem_device);
-                uint seen = atomic_load_explicit(epoch, memory_order_acquire);
-                uint ticket = atomic_fetch_add_explicit(counter, 1u, memory_order_acq_rel);
+                uint seen = atomic_load_explicit(epoch, memory_order_relaxed);
+                uint ticket = atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
                 if (ticket + 1u == groups) {
                     atomic_store_explicit(counter, 0u, memory_order_relaxed);
-                    atomic_store_explicit(epoch, seen + 1u, memory_order_release);
+                    atomic_store_explicit(epoch, seen + 1u, memory_order_relaxed);
                 } else {
-                    while (atomic_load_explicit(epoch, memory_order_acquire) == seen) {
+                    while (atomic_load_explicit(epoch, memory_order_relaxed) == seen) {
                     }
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
+            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
         }
         """
 
@@ -582,12 +604,11 @@ enum UnlimitedOCRLayerKernel {
             uint lid = thread_position_in_threadgroup.x;
             device atomic_uint* counter = (device atomic_uint*)sync;
             device atomic_uint* epoch = counter + 1;
-            auto bar = [&]() { uocr_barrier(counter, epoch, \(groups), lid); };
 
             uocr_qmv_all<bfloat16_t, BITS>(qw, qs, qb, xn, work, (int)H, (int)H, gid, simd_gid, simd_lid);
             uocr_qmv_all<bfloat16_t, BITS>(kw, ks, kb, xn, kNew, (int)H, (int)H, gid, simd_gid, simd_lid);
             uocr_qmv_all<bfloat16_t, BITS>(vw, vs, vb, xn, vNew, (int)H, (int)H, gid, simd_gid, simd_lid);
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             if (gid == 0 && lid == 0) {
                 for (uint i = 0; i < H; ++i) {
                     uint d = i % DIM;
@@ -601,7 +622,7 @@ enum UnlimitedOCRLayerKernel {
                     kNew[i] = static_cast<bfloat16_t>(k0 * c + kRot * s);
                 }
             }
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             if (gid < HEADS) {
                 threadgroup float scores[512];
                 threadgroup float probs[512];
@@ -639,10 +660,10 @@ enum UnlimitedOCRLayerKernel {
                     work[H + gid * DIM + d] = static_cast<bfloat16_t>(acc);
                 }
             }
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             // Attention output. Q in work[0:H] is finished; O reads the heads at work+H.
             uocr_qmv_all<bfloat16_t, BITS>(ow, os, ob, work + H, y, (int)H, (int)H, gid, simd_gid, simd_lid);
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             if (gid == 0 && lid == 0) {
                 float sq = 0.0f;
                 for (uint i = 0; i < H; ++i) {
@@ -655,12 +676,12 @@ enum UnlimitedOCRLayerKernel {
                     work[i] = static_cast<bfloat16_t>(float(y[i]) * inv * float(postw[i]));
                 }
             }
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
 
             device bfloat16_t* mix = work + 2 * H + TOPK * EINTER;
             if (TOPK > 0) {
                 uocr_qmv_all<bfloat16_t, BITS>(scw, scs, scb, work, work + H, (int)H, 64, gid, simd_gid, simd_lid);
-                bar();
+                uocr_barrier(counter, epoch, \(groups), lid);
                 if (gid == 0 && lid == 0) {
                     float prob[64];
                     float m = float(work[H]);
@@ -684,7 +705,7 @@ enum UnlimitedOCRLayerKernel {
                         wts[e] = bv;
                     }
                 }
-                bar();
+                uocr_barrier(counter, epoch, \(groups), lid);
                 for (uint e = 0; e < TOPK; ++e) {
                     uint id = ids[e];
                     device bfloat16_t* prod = work + 2 * H + e * EINTER;
@@ -696,14 +717,14 @@ enum UnlimitedOCRLayerKernel {
                         eus + id * (size_t)EINTER * (H / 64u),
                         eub + id * (size_t)EINTER * (H / 64u),
                         work, prod, (int)H, (int)EINTER, gid, simd_gid, simd_lid);
-                    bar();
+                    uocr_barrier(counter, epoch, \(groups), lid);
                     device bfloat16_t* down = work + H;
                     uocr_qmv_all<bfloat16_t, BITS>(
                         edw + id * (size_t)H * (EINTER / PACK),
                         eds + id * (size_t)H * (EINTER / 64u),
                         edb + id * (size_t)H * (EINTER / 64u),
                         prod, down, (int)EINTER, (int)H, gid, simd_gid, simd_lid);
-                    bar();
+                    uocr_barrier(counter, epoch, \(groups), lid);
                     if (gid == 0 && lid == 0) {
                         float wt = wts[e];
                         for (uint i = 0; i < H; ++i) {
@@ -711,7 +732,7 @@ enum UnlimitedOCRLayerKernel {
                             mix[i] = static_cast<bfloat16_t>(acc);
                         }
                     }
-                    bar();
+                    uocr_barrier(counter, epoch, \(groups), lid);
                 }
             }
             if (TOPK > 0 && gid == 0 && lid == 0) {
@@ -719,19 +740,19 @@ enum UnlimitedOCRLayerKernel {
                     y[i] = static_cast<bfloat16_t>(float(y[i]) + float(mix[i]));
                 }
             }
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             device bfloat16_t* sprod = work + 2 * H;
             uocr_swiglu_all<bfloat16_t, BITS>(sgw, sgs, sgb, suw, sus, sub, work, sprod, (int)H, (int)SINTER, gid, simd_gid, simd_lid);
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             device bfloat16_t* sdown = work + H;
             uocr_qmv_all<bfloat16_t, BITS>(sdw, sds, sdb, sprod, sdown, (int)SINTER, (int)H, gid, simd_gid, simd_lid);
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             if (gid == 0 && lid == 0) {
                 for (uint i = 0; i < H; ++i) {
                     y[i] = static_cast<bfloat16_t>(float(y[i]) + float(sdown[i]));
                 }
             }
-            bar();
+            uocr_barrier(counter, epoch, \(groups), lid);
             """
     }
 }
