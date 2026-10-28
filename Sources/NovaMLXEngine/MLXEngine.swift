@@ -468,20 +468,29 @@ public final class ModelContainer: @unchecked Sendable {
 
 /// Incremental text for the image VLM stream. One yielded token per id,
 /// so `completion_tokens` matches the engine's generated-id count.
+///
+/// Uses `decode(tokenIds:)`, which this mlx-swift-lm tokenizer already has.
+/// `StreamingDetokenizer` is not on that checkout.
 final class VLMStreamDetokenizer: @unchecked Sendable {
-    private var detokenizer: any MLXLMCommon.StreamingDetokenizer
+    private let decode: ([Int]) -> String
+    private var ids: [Int] = []
+    private var shown = ""
 
-    init(_ tokenizer: any MLXLMCommon.Tokenizer) {
-        detokenizer = tokenizer.makeStreamingDetokenizer()
+    init(decode: @escaping ([Int]) -> String) {
+        self.decode = decode
     }
 
     func push(_ token: Int) -> String {
-        detokenizer.append(token: token)
-        var text = ""
-        while let piece = detokenizer.next() {
-            text += piece
+        ids.append(token)
+        let full = decode(ids)
+        let delta: String
+        if full.hasPrefix(shown) {
+            delta = String(full.dropFirst(shown.count))
+        } else {
+            delta = full
         }
-        return text
+        shown = full
+        return delta
     }
 }
 
@@ -3424,7 +3433,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let videoBox = SendableBox<LMInput.ProcessedVideo?>(prefillVideo)
                         let promptTokensBox = SendableBox<MLXArray>(prefillTextTokens)
                         let layoutOCR = model.value is UnlimitedOCR
-                        let detokenizer = VLMStreamDetokenizer(mlxTokenizer)
+                        let detokenizer = VLMStreamDetokenizer { ids in
+                            mlxTokenizer.decode(tokenIds: ids)
+                        }
 
                         var completionTokens = 0
                         var finishReason: FinishReason = .stop

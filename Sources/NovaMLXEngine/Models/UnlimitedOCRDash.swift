@@ -99,16 +99,24 @@ final class UnlimitedOCRDashRuntime {
 
 /// Slab-backed KV. Appends land in spare capacity so a decode step does not
 /// copy the whole document. `step` is the growth quantum.
-final class UnlimitedOCRKVBuffer: BaseKVCache {
+///
+/// Conforms to ``KVCache`` directly. ``BaseKVCache`` is not subclassable from
+/// this module: its initializer is internal.
+class UnlimitedOCRKVBuffer: KVCache {
     var keys: MLXArray?
     var values: MLXArray?
     var step = 1024
+    var offset: Int = 0
 
-    override func innerState() -> [MLXArray] {
+    init() {}
+
+    var maxSize: Int? { nil }
+
+    func innerState() -> [MLXArray] {
         [keys, values].compactMap { $0 }
     }
 
-    override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+    func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let previous = offset
         let grew = self.keys == nil || previous + keys.dim(2) > self.keys!.dim(2)
         if grew {
@@ -142,7 +150,7 @@ final class UnlimitedOCRKVBuffer: BaseKVCache {
         )
     }
 
-    override func copy() -> any KVCache {
+    func copy() -> any KVCache {
         let cache = UnlimitedOCRKVBuffer()
         cache.step = step
         let saved = state
@@ -150,7 +158,30 @@ final class UnlimitedOCRKVBuffer: BaseKVCache {
         return cache
     }
 
-    override var state: [MLXArray] {
+    var isTrimmable: Bool { false }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int { 0 }
+
+    var metaState: [String] {
+        get { [String(offset), String(step)] }
+        set {
+            if newValue.count >= 1, let value = Int(newValue[0]) { offset = value }
+            if newValue.count >= 2, let value = Int(newValue[1]), value > 0 { step = value }
+        }
+    }
+
+    func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if n == 1 { return .none }
+        if returnArray || (windowSize != nil && n > windowSize!) {
+            return .array(createCausalMask(n: n, offset: offset, windowSize: windowSize))
+        }
+        return .causal
+    }
+
+    var state: [MLXArray] {
         get {
             guard let keys, let values else { return [] }
             if offset == keys.dim(2) { return [keys, values] }
@@ -800,7 +831,7 @@ final class UnlimitedOCRDashAttention: Module {
         if summaries.dim(0) < blocks {
             scores = padded(
                 scores,
-                widths: [0, [0, blocks - summaries.dim(0)]],
+                widths: [IntOrPair(0), IntOrPair((0, blocks - summaries.dim(0)))],
                 value: MLXArray(UnlimitedOCRDashMath.scoreNegative))
         }
         return scores

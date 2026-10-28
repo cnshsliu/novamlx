@@ -119,7 +119,11 @@ enum UnlimitedOCRWindows {
         let padW = (window - w % window) % window
         var y = x
         if padH > 0 || padW > 0 {
-            y = padded(y, widths: [0, [0, padH], [0, padW], 0])
+            y = padded(
+                y,
+                widths: [
+                    IntOrPair(0), IntOrPair((0, padH)), IntOrPair((0, padW)), IntOrPair(0),
+                ])
         }
         let hp = h + padH
         let wp = w + padW
@@ -171,19 +175,21 @@ final class UnlimitedOCRSAM: Module, UnaryLayer {
         let down = config.samDownsample
         let neckWidth = config.samNeck
         _neck.wrappedValue = Sequential(layers: [
-            Conv2d(inputChannels: config.samWidth, outputChannels: neckWidth, kernelSize: 1, bias: false),
+            Conv2d(
+                inputChannels: config.samWidth, outputChannels: neckWidth,
+                kernelSize: IntOrPair(1), bias: false),
             LayerNorm(dimensions: neckWidth, eps: 1e-6),
             Conv2d(
                 inputChannels: neckWidth, outputChannels: neckWidth,
-                kernelSize: 3, padding: 1, bias: false),
+                kernelSize: IntOrPair(3), stride: 1, padding: IntOrPair(1), bias: false),
             LayerNorm(dimensions: neckWidth, eps: 1e-6),
         ])
         _net2.wrappedValue = Conv2d(
             inputChannels: config.samNeck, outputChannels: down[0],
-            kernelSize: 3, stride: 2, padding: 1, bias: false)
+            kernelSize: IntOrPair(3), stride: 2, padding: IntOrPair(1), bias: false)
         _net3.wrappedValue = Conv2d(
             inputChannels: down[0], outputChannels: down.count > 1 ? down[1] : 1024,
-            kernelSize: 3, stride: 2, padding: 1, bias: false)
+            kernelSize: IntOrPair(3), stride: 2, padding: IntOrPair(1), bias: false)
         super.init()
     }
 
@@ -210,7 +216,7 @@ final class UnlimitedOCRConv: Module {
     init(input: Int, output: Int, kernel: Int, stride: Int, bias: Bool, name: String) {
         _proj.wrappedValue = Conv2d(
             inputChannels: input, outputChannels: output,
-            kernelSize: kernel, stride: stride, bias: bias)
+            kernelSize: IntOrPair(kernel), stride: stride, bias: bias)
         super.init()
         _ = name
     }

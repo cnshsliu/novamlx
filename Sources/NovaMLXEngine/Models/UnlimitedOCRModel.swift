@@ -442,7 +442,7 @@ final class UnlimitedOCRClipEmbed: Module {
         _classEmbedding.wrappedValue = MLXArray.zeros([hidden])
         _patch.wrappedValue = Conv2d(
             inputChannels: 3, outputChannels: hidden,
-            kernelSize: config.clipPatch, stride: config.clipPatch, bias: false)
+            kernelSize: IntOrPair(config.clipPatch), stride: config.clipPatch, bias: false)
         _position.wrappedValue = Embedding(embeddingCount: grid * grid + 1, dimensions: hidden)
         super.init()
     }
@@ -700,9 +700,12 @@ public struct UnlimitedOCRProcessor: UserInputProcessor {
     static func collect(_ images: [UserInput.Image]) throws -> [CIImage] {
         var result: [CIImage] = []
         for image in images {
-            if case .url(let url) = image.source, url.pathExtension.lowercased() == "pdf" {
+            // `UserInput.Image` is an enum on this mlx-swift-lm. It has no
+            // `.source` property.
+            switch image {
+            case .url(let url) where url.pathExtension.lowercased() == "pdf":
                 result.append(contentsOf: try renderPDF(url))
-            } else {
+            default:
                 result.append(try image.asCIImage())
             }
         }
