@@ -38,6 +38,14 @@ enum UnlimitedOCRLayerKernel {
 
     static var boundBufferCount: Int { inputNames.count + outputNames.count }
 
+    /// MLX `metal_kernel` passes an input with `size < metalConstantLimit` as
+    /// `constant`. A constant pointer cannot be cast to `device atomic_uint*`.
+    static let metalConstantLimit = 8
+
+    /// Ticket counter and epoch. Length stays at or above `metalConstantLimit`
+    /// so `sync` is a device buffer, the same address space Flint `sync_all` casts.
+    static let syncLength = 8
+
     /// `info` layout: 10 scalars, then weight offsets, scale offsets (post last), bias offsets.
     static let infoScalars = 10
     static let weightPlaneNames = ["q", "k", "v", "o", "score", "eg", "eu", "ed", "sg", "su", "sd"]
@@ -185,7 +193,7 @@ enum UnlimitedOCRLayerKernel {
         let info = MLXArray(words)
         let coeff = MLXArray([attention.scale, normOutEps])
         let position = ctx.position ?? MLXArray(Int32(0))
-        let sync = MLXArray.zeros([2], dtype: .uint32)
+        let sync = MLXArray.zeros([syncLength], dtype: .uint32)
         let siluRows = max(weights.expertInter * max(weights.assignments, 1), weights.sharedInter)
         let scratch = hidden * 3 + siluRows
         let y = kernel(
@@ -602,6 +610,8 @@ enum UnlimitedOCRLayerKernel {
             uint simd_gid = simdgroup_index_in_threadgroup;
             uint simd_lid = thread_index_in_simdgroup;
             uint lid = thread_position_in_threadgroup.x;
+            // Eight or more elements: MLX binds this as const device uint32_t*.
+            // Two elements were constant, and that cast to device atomic_uint* is illegal.
             device atomic_uint* counter = (device atomic_uint*)sync;
             device atomic_uint* epoch = counter + 1;
 

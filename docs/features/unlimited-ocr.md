@@ -97,6 +97,9 @@ MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill �
 | `a07192a`，`NOVA_UOCR_DECODE_FUSE=0` | **55.9 / 54.3** |
 | `a07192a`，叠放默认打开 | **58.1 / 59.4** |
 | `a07192a`，`NOVA_UOCR_MEGA=1` | 没有 tok/s（21 个 buffer 已绑上；Metal JIT 在 `utils.h` 的 `atomic_thread_fence` 地址空间失败，发票为空） |
+| `3e41fe8`，`NOVA_UOCR_DECODE_FUSE=0` | **55.9 / 53.6** |
+| `3e41fe8`，叠放默认打开 | **55.7 / 50.4** |
+| `3e41fe8`，`NOVA_UOCR_MEGA=1` | 没有 tok/s（栅栏参数个数已过；`sync` 只有 2 个元素，MLX 把它放进 `constant`，不能转成 `device atomic_uint*`。约 14 秒崩溃，不是挂住） |
 
 `9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。`68c478b` 的单线程块计划是 **53.9 / 54.5**，已从热路径拿掉。把相同输入的 GEMM 叠到一起仍然有用：`0693994` 打开是 **57.4 / 58.9**，关掉是 **55.6 / 55.1**。`9946de8` 再把打分并进共享 gate+up（94 次降到 83 次），打开是 **57.9 / 60.8**，关掉是 **54.4 / 56.2**。相对 r14 的融合只多 **+0.5 / +1.9** tok/s，和噪声贴在一起，不能算再赢了一截。默认仍打开，因为它仍然快过对照。同一向量上的 GEMM 拼接到此为止。实测天花板大约是 **58–61 tok/s**（融合）对对照大约 **54–56**。热路径仍是按形状编译的计划和 512-key gather。
 
@@ -127,7 +130,7 @@ QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV �
 
 标量核在 `e9eb6f2` 上发票是对的，STREAM **25.7 / 25.8**，大约比融合慢 57%。那个核不再走解码。`NOVA_UOCR_MEGA=1` 现在是另一条：**每一层一次发射**，32 个 threadgroup，点积用 MLX 的 `qdot`（和 `quantizedMatmul` 同一套 int4/int8），1280 维激活留在这张图里走完 QKV、RoPE、512-key SDPA、O、第二个 RMSNorm 和 SwiGLU。组与组之间用 ticket barrier，所以 32 组必须同时在芯上；M4 Max 挂住的话就把开关关掉。默认仍然关闭。融合仍是产品路径。
 
-`bceb292` 在 Mac 上编不过：`Quant` 没有 `bits`。本地补上那一行之后，日志打出 one-launch，然后 Metal JIT 失败，`buffer(46…51)` 超出 0–30。那一版把每张量化表各绑一个 buffer，46 个输入加 6 个输出。这一版把 11 张 uint32 权重收成 `weights`，12 张 bf16 scale（最后一张是 post-norm 权重）收成 `scales`，11 张 bf16 bias 收成 `biases`。每张表的元素偏移写在 `info` 里。绑定是 15 个输入加 6 个输出，下标 0–20。第一次解码把这三块 `eval` 出来，之后按层复用，不按 token 再拷。qdot 和 32 组保持不变。`a07192a` 能编过、能加载，21 个 buffer 不再越界。`NOVA_UOCR_MEGA=1` 的 Metal JIT 仍失败：ticket barrier 用了单参数 `atomic_thread_fence(mem_flags::mem_device)`，以及 acquire/release 原子操作，还用 lambda 抓住 `device atomic_uint*`。MLX 会在核前面拼上 `mlx/backend/metal/kernels/utils.h`，这个写法绑不上 device 地址空间。栅栏改成和 Flint `sync_all` 一样的三参数 device fence：`atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)`，计数用 relaxed 的 `atomic_uint`，不再用 lambda。21 个 buffer 和 `Quant.bits` 不动。没有新的 tok/s。Mac 要重测的是 `NOVA_UOCR_MEGA=1` 的发票表格是否仍和融合一致，以及 STREAM 两次相对融合（不设 `NOVA_UOCR_DECODE_FUSE`）和对照（`NOVA_UOCR_DECODE_FUSE=0`）。
+`bceb292` 在 Mac 上编不过：`Quant` 没有 `bits`。本地补上那一行之后，日志打出 one-launch，然后 Metal JIT 失败，`buffer(46…51)` 超出 0–30。那一版把每张量化表各绑一个 buffer，46 个输入加 6 个输出。这一版把 11 张 uint32 权重收成 `weights`，12 张 bf16 scale（最后一张是 post-norm 权重）收成 `scales`，11 张 bf16 bias 收成 `biases`。每张表的元素偏移写在 `info` 里。绑定是 15 个输入加 6 个输出，下标 0–20。第一次解码把这三块 `eval` 出来，之后按层复用，不按 token 再拷。qdot 和 32 组保持不变。`a07192a` 能编过、能加载，21 个 buffer 不再越界。`NOVA_UOCR_MEGA=1` 的 Metal JIT 仍失败：ticket barrier 用了单参数 `atomic_thread_fence(mem_flags::mem_device)`，以及 acquire/release 原子操作，还用 lambda 抓住 `device atomic_uint*`。MLX 会在核前面拼上 `mlx/backend/metal/kernels/utils.h`，这个写法绑不上 device 地址空间。栅栏改成和 Flint `sync_all` 一样的三参数 device fence：`atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)`，计数用 relaxed 的 `atomic_uint`，不再用 lambda。`3e41fe8` 上这个写法能编过栅栏参数，但 `sync` 只有 2 个元素。MLX 的 `metal_kernel` 把元素个数小于 8 的输入放进 `constant` 地址空间，`constant uint32_t*` 不能转成 `device atomic_uint*`。现在 `sync` 是 8 个 uint32 的零，绑成 device buffer，再按 Flint 那样转成 `device atomic_uint*`（计数在 `[0]`，纪元在 `[1]`）。仍是原来的 21 个 buffer。没有新的 tok/s。Mac 要重测的是 `NOVA_UOCR_MEGA=1` 的发票表格是否仍和融合一致，以及 STREAM 两次相对融合（不设 `NOVA_UOCR_DECODE_FUSE`）和对照（`NOVA_UOCR_DECODE_FUSE=0`）。
 
 80–100 如果这一枪还不够，剩下的就是把 DASH 计划也收进同一次发射，或者换能喂满 16×32 MMA 的量化。DFlash / DSpark 仍然接不上这个 VLM。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。Shapeless compile 不回到热路径。
 
