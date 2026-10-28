@@ -317,6 +317,11 @@ final class UnlimitedOCRText: Module {
     }
 
     func hidden(_ embeds: MLXArray, cache: [any KVCache], tokens: MLXArray?) -> MLXArray {
+        // One eval per token already submits this whole forward. A Flint-style
+        // `compile` of the body is not used: KV writes are Swift slices
+        // `previous..<offset` that change every token, and the page cursor plus
+        // block summaries mutate beside the graph. Compile would not remove the
+        // GPU GEMVs. Shapeless compile stays out.
         if dash {
             if cache[0].offset == 0 { runtime.start(promptIDs) }
             let ctx = unlimitedOCRContext(

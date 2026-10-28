@@ -151,7 +151,13 @@ QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV �
 
 产品路径仍是解码融合，M4 Max 上大约 **57–59** tok/s。`NOVA_UOCR_MEGA` 保持关闭。`NOVA_UOCR_EPILOGUE` 保持关闭。
 
-下一档不在融合计数里。要动 80–100，得让这些 M=1 的 int4 GEMV 本身更快（针对 K=1280 的 qmv，仍然是每 8 行一组、组间不用栅栏），或者减少专家权重的字节。M=1 喂不满 16×32 MMA。DFlash / DSpark 仍然接不上这条视觉循环。这两条现在都不实现。
+下一档不在融合计数里，也不在把整段 seq=1 解码收成一次 `mlx.compile`。Flint 的 megadecode 能编，是因为 KV 用固定长度的右对齐缓冲，每步都是同一种 `concat`。OCR-2 的 KV 写入是 Swift 切片 `previous..<offset`，每个 token 的边界都变；页游标和块摘要还在图外面改。就算编成一张静态图，GPU 上仍是大约 83 次 GEMV，宿主少付的是组图，不是这些核。以前把 MoE / 稠密 MLP 放进 `mlx.compile` 量过，大约 55 tok/s，没有增益，已经拿掉。Shapeless compile 不回到热路径。
+
+因此在不改模型（不加 VLM 自己的投机、不减少专家字节）的前提下，M4 Max 上这条 MoE + 视觉 OCR-2 的解码天花板就是融合的大约 **57–59** tok/s。剩下三档，现在都不实现：
+
+1. 比 MLX `qmv` 更快的 M=1 int4 GEMV，针对这些 K，仍然每 8 行一组、组间没有栅栏。独立的组不能共享一块 threadgroup 激活缓存；激活已经在设备内存里，二级缓存会接住重复读取。没有一条期望能打过 MLX `qmv` 的具体核。
+2. 更少的专家字节，或更密的量化，但要先过质量门。
+3. 这条视觉循环自己的投机。DFlash / DSpark 套不上：图像解码不进文本迭代器，DASH 是单 query，页游标不会随 KV 回滚。
 
 Shapeless compile 不回到热路径。
 
