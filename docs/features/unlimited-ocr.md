@@ -114,7 +114,7 @@ gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH +
 - **SwiGLU**：每个选中的专家、以及共享 / 稠密 MLP，在一个 threadgroup 里做 int4 或 int8 的 gate、up、`silu(gate) * up`，再做 down。中间激活留在 threadgroup 里。
 - **512-key SDPA + O**：按 DASH 下标收集 512 个 key，做 softmax，再做输出投影的 int4/int8 点积。块计划仍是按具体形状编译的那条，不是单线程计划核。
 
-QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV 和 SDPA 中间，所以没有把 QKV 再写进这个核。默认**关**，因为还没有 Mac 上的 tok/s。`NOVA_UOCR_MEGA=1` 打开。打不开的权重退回行拼接。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。发布配置上，打开之后 MLX GEMM 还剩 36 次（QKV、router QK、打分、`lm_head`），另加 23 个 SwiGLU 核和 12 个 SDPA+O 核。这里不写新的 tok/s。
+QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV 和 SDPA 中间，所以没有把 QKV 再写进这个核。默认**关**，因为还没有 Mac 上的 tok/s。`NOVA_UOCR_MEGA=1` 打开。`f1c6920` 在 Mac 上编 Metal 失败：bf16 输出不能直接收 `float`（`0.0f` 和 `uocr_dot_f`）。写入改为 `static_cast<bfloat16_t>`。打不开的权重退回行拼接。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。发布配置上，打开之后 MLX GEMM 还剩 36 次（QKV、router QK、打分、`lm_head`），另加 23 个 SwiGLU 核和 12 个 SDPA+O 核。这里不写新的 tok/s。
 
 还没做、也还没有 tok/s 的是：把 QKV 和 RoPE 收进同一个层核，给这个 VLM 写能回滚页游标的投机解码，以及换一套量化。Shapeless compile 不回到热路径。
 

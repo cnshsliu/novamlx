@@ -192,6 +192,7 @@ struct UnlimitedOCRTests {
 
     @Test("Seq-1 megakernel matches the affine SwiGLU and 512-key softmax")
     func megaDecodeReference() {
+        #expect(UnlimitedOCRMegaDecode.metalOutputsUseExplicitCasts())
         #expect(!UnlimitedOCRMegaDecode.allows(nil))
         #expect(!UnlimitedOCRMegaDecode.allows("0"))
         #expect(UnlimitedOCRMegaDecode.allows("1"))

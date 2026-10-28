@@ -34,6 +34,22 @@ enum UnlimitedOCRMegaDecode {
             attendKernels: layers)
     }
 
+    /// Every store into the bf16 output uses `uocr_bf` (`static_cast<bfloat16_t>`).
+    static func metalOutputsUseExplicitCasts() -> Bool {
+        let swiglu = swigluSource(inter: 64, hidden: 64, k: 64, bits: 4, threads: 64)
+        let attend = attendSource(heads: 1, dim: 64, width: 128, bits: 4, k: 64)
+        return explicitBFloatStores(swiglu) && explicitBFloatStores(attend)
+            && metalHeader.contains("static_cast<bfloat16_t>")
+    }
+
+    private static func explicitBFloatStores(_ source: String) -> Bool {
+        source.split(separator: "\n").allSatisfy { line in
+            let text = line.trimmingCharacters(in: .whitespaces)
+            guard text.contains("y[") && text.contains("=") else { return true }
+            return text.contains("uocr_bf(")
+        }
+    }
+
     static func allows(_ raw: String?) -> Bool {
         switch raw?.lowercased() {
         case "1", "on", "true", "yes":
@@ -325,6 +341,8 @@ enum UnlimitedOCRMegaDecode {
             return acc;
         }
 
+        inline bfloat16_t uocr_bf(float v) { return static_cast<bfloat16_t>(v); }
+
         inline float uocr_dot_f(const device uint* row, const device bfloat16_t* scales,
             const device bfloat16_t* biases, threadgroup float* x,
             uint groups, uint bits) {
@@ -380,7 +398,7 @@ enum UnlimitedOCRMegaDecode {
             int expert = indices[slot];
             threadgroup float act[\(inter)];
             if (expert < 0) {
-                for (uint n = t; n < HIDDEN; n += THREADS) y[slot * HIDDEN + n] = 0.0f;
+                for (uint n = t; n < HIDDEN; n += THREADS) y[slot * HIDDEN + n] = uocr_bf(0.0f);
                 return;
             }
             for (uint n = t; n < INTER; n += THREADS) {
@@ -393,7 +411,7 @@ enum UnlimitedOCRMegaDecode {
             threadgroup_barrier(mem_flags::mem_threadgroup);
             for (uint n = t; n < HIDDEN; n += THREADS) {
                 size_t row = size_t(expert) * HIDDEN + n;
-                y[slot * HIDDEN + n] = uocr_dot_f(dw + row * DSTRIDE, ds + row * DK, db + row * DK, act, DK, BITS);
+                y[slot * HIDDEN + n] = uocr_bf(uocr_dot_f(dw + row * DSTRIDE, ds + row * DK, db + row * DK, act, DK, BITS));
             }
             """
     }
@@ -454,7 +472,7 @@ enum UnlimitedOCRMegaDecode {
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
             for (uint n = t; n < HEADS * DIM; n += 128u) {
-                y[n] = uocr_dot_f(ow + n * (GK * (BITS == 4u ? 8u : 16u)), os + n * GK, ob + n * GK, attn, GK, BITS);
+                y[n] = uocr_bf(uocr_dot_f(ow + n * (GK * (BITS == 4u ? 8u : 16u)), os + n * GK, ob + n * GK, attn, GK, BITS));
             }
             """
     }
