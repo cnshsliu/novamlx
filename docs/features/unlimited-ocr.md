@@ -29,7 +29,7 @@ OCR-2 没有 mlx-community 量化包。Nova 直接读官方 safetensors（`model
 - 12 个远端块 × 32 token，块由每层 `dash_router`（1.5-entmax，top-16 里再取 12）选出，并带 log-prior 偏置
 - 128 token 的局部窗（4 × 32），偏置为 0
 
-合计 **512** 个 key。解码时每一层的块计划是**一个**静态形状的 Metal 核（单线程，和 `UnlimitedOCRDashPlan.reference` 同一套循环）：点积、top-m、1.5-entmax、局部窗下标一次写完。输出长度固定为 `topK * block + local`（发布配置 512）。cap 超过 1024 或形状不在这个合同里时，退回按具体形状编译的原计划，不用 shapeless，也不用 `-1` 切片。Gather 和 SDPA 仍按 slab 长度编译。单 token 的专家选择仍是一个 Metal top-k。Prefill 仍走多行的原计划。没有「页数一长就退回全注意力」的路径。
+合计 **512** 个 key。解码时每一层的块计划按具体的 summary 宽度编译一次（`UnlimitedOCRDashMath.decodePlan`），Gather 和 SDPA 按 slab 长度编译。输出长度固定为 `topK * block + local`（发布配置 512）。不用 shapeless，也不用 `-1` 切片。单 token 的专家选择仍是一个 Metal top-k。Prefill 仍走多行的原计划。没有「页数一长就退回全注意力」的路径。主机上的 `UnlimitedOCRDashPlan.reference` 锁住同一套 1.5-entmax。
 
 语言栈是 4-bit。选中的专家走 `SwitchGLU` 的 `gatherQuantizedMM`（top-6），不是把 64 个专家整层展开。把单 token 的 MoE / 稠密 MLP 再编译一次，Mac 上测出来和只编译 DASH 一样，所以那层编译已去掉。
 
@@ -79,12 +79,15 @@ MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill �
 | 尖端 | 解码 |
 |------|------|
 | `9e49ee3` / `52a1f2a`，DASH 即时求值 | 约 39–45 |
-| `9d762ef`，DASH 按具体形状编译 | **53.3–56.5** |
-| `5047946`，再编译 MoE / 稠密 MLP | **55.0–55.4**（相对上一行没有增益） |
+| `9d762ef` / `c8e1942`，DASH 按具体形状编译 | **53.3–56.5** |
+| `5047946`，再编译 MoE / 稠密 MLP | **55.0–55.4**（没有增益，已去掉） |
+| `68c478b`，每层一个 Metal 块计划 | **53.9 / 54.5**（相对 53–56 没有增益，已从热路径拿掉） |
 
-`9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。那不是整包权重的带宽墙。当时每层仍在发射一串 DASH 小核。
+`9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。`68c478b` 把块计划收成每层一个单线程 Metal 核，Release、加载和多 token 发票都通过，也没有 Slice 崩溃，但 STREAM 仍是 **53.9 / 54.5**。块计划不是那约 18 ms 的大头。热路径回到按形状编译的计划和 gather。
 
-这一版把那串计划收成每层一个 Metal 核。Mac 上要重测的是：多 token 发票仍然完整、没有 Slice 崩溃，以及 `[STREAM] VLM` 的 decode tok/s 是否明显高于 53–56。这里不写新的 tok/s。若仍停在大约 55，下一档才是投机解码；DFlash / DSpark 目前只接文本模型。
+DFlash / DSpark 不能套到这条 VLM 上。图像解码在 `mlxContainer.perform` 里自己循环，不进文本迭代器；那个迭代器的 prefill 只嵌入文本 token，会丢掉已经写进 KV 的视觉特征。DASH 的解码上下文是单 query（一个位置、一组 512 key）。多枚草稿要每个位置自己的 RoPE、块计划和 gather。`UnlimitedOCRDashCache.trim` 不做任何事，页游标和块摘要也不会随 KV 的 `state` 回滚，拒绝草稿会写坏下一枚 token 的页位置。树里的草稿名单只有 Qwen3.8 DFlash2 和 DeepSeek-V4.1 DSpark，隐层和词表对不上 OCR-2（1280 / 129280）。这一版不接投机解码，也不再把 MoE / 稠密 MLP 放进 `mlx.compile`。
+
+再往上提速需要两条里的一条，而且都还没有 Mac 上的 tok/s：能回滚的多 query DASH 验证（仍是每 query 512 key）加上一个隐层 1280 的草稿，或者把单 token 的量化 GEMM 和注意力收成一个层核。不在这里记一个新的 tok/s。
 
 gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH + 64 专家。
 

@@ -139,7 +139,7 @@ struct UnlimitedOCRTests {
         #expect(abs(plan.mask[2] + 1.316958) < 0.0005)
         #expect(abs(plan.mask[0] + plan.mask[2]) < 0.0005)
         #expect(plan.indices.allSatisfy { $0 >= 0 && $0 <= 20 })
-        // Host 1.5-entmax. The Metal plan inlines the same shift, tau, and square.
+        // Host 1.5-entmax. The shaped GPU plan uses the same shift, tau, and square.
         let prior = UnlimitedOCRDashMath.entmax15([1, 0.5, 0])
         #expect(prior.count == 3)
         #expect(abs(prior[0] - 0.624197) < 0.0002)
