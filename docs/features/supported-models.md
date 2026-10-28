@@ -6,7 +6,7 @@
 
 "Supported" means an id in [Exact weights](#exact-weights). That id is the same string as `nova download <id>`. A repo with a similar name and a different id may fail to load.
 
-This page matches the in-app catalog. Data date 2026-10-26. `verified` entries have been tested; `preview` is in the catalog and is not marked verified. `unsupported` is listed at the end, and NovaMLX will not download or load it.
+This page matches the in-app catalog. Data date 2026-10-28. `verified` entries have been tested; `preview` is in the catalog and is not marked verified. `unsupported` is listed at the end, and NovaMLX will not download or load it.
 
 ## Download
 
@@ -58,6 +58,9 @@ Each id below is one repository.
 
 | Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
 |------|-----------|--------------|--------|----------------|----------|--------------|
+| Unlimited OCR 2 | `baidu/Unlimited-OCR-2` | ~6.6 GiB (BF16) | preview | 24 GB | `nova download baidu/Unlimited-OCR-2` | [Hugging Face](https://huggingface.co/baidu/Unlimited-OCR-2) |
+| Unlimited OCR 8-bit | `mlx-community/Unlimited-OCR-8bit` | ~3.66 GiB (8-bit) | preview | 16 GB | `nova download mlx-community/Unlimited-OCR-8bit` | [Hugging Face](https://huggingface.co/mlx-community/Unlimited-OCR-8bit) |
+| Unlimited OCR 4-bit | `mlx-community/Unlimited-OCR-4bit` | ~2.28 GiB (4-bit) | preview | 16 GB | `nova download mlx-community/Unlimited-OCR-4bit` | [Hugging Face](https://huggingface.co/mlx-community/Unlimited-OCR-4bit) |
 | DeepSeek-V4.1-Flash | `mlx-community/DeepSeek-V4.1-Flash-MLX-2bit` | ~239 GB (2-bit) | verified | 128 GB | `nova download mlx-community/DeepSeek-V4.1-Flash-MLX-2bit` | [Hugging Face](https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-MLX-2bit) |
 | Qwythos-27B-v1 | `Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX` | ~15.2 GB (MXFP4) | verified | 24 GB | `nova download Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX` | [Hugging Face](https://huggingface.co/Shiftedx/Qwythos-27B-v1-MXFP4-Vision-MLX) |
 | Qwen3.8-Flash-Next Uncensored | `orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX` | ~163 GB (4-bit) | preview | 128 GB | `nova download orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX` | [Hugging Face](https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored-MLX) |
@@ -144,4 +147,4 @@ Ids with status `unsupported` stay in the catalog so they can be recognized. Nov
 
 - `mzbac/flux1.schnell.4bit.mlx` — Not supported. Quantized FLUX.1 schnell crashes in VAE decode on NovaMLX. Use FLUX.2 Klein instead.
 
-Tables are generated from [`catalog/models.json`](../../catalog/models.json) (`updatedAt` 2026-10-26). Regenerate with `python3 Scripts/generate-supported-models-doc.py`.
+Tables are generated from [`catalog/models.json`](../../catalog/models.json) (`updatedAt` 2026-10-28). Regenerate with `python3 Scripts/generate-supported-models-doc.py`.

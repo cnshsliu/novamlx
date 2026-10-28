@@ -323,7 +323,8 @@ struct E2ETests {
         return id.contains("-vl") || id.contains("_vl") || id.contains("vision") ||
                id.contains("llava") || id.contains("pixtral") || id.contains("internvl") ||
                id.contains("minicpmv") || id.contains("paligemma") || id.contains("idefics") ||
-               id.contains("mllama") || id.contains("florence2") || id.contains("molmo")
+               id.contains("mllama") || id.contains("florence2") || id.contains("molmo") ||
+               id.contains("unlimited-ocr") || id.contains("unlimited_ocr")
     }
 
     /// Load each model once, run ALL test closures against it, then unload.
