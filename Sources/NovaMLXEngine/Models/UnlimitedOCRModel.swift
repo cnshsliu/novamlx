@@ -303,13 +303,21 @@ public final class UnlimitedOCR: Module, VLMModel, KVCacheDimensionProvider {
         return .logits(LMOutput(logits: language.logits(hidden[0..., (-1)..., 0...])))
     }
 
+    /// Decode step used by ContinuousBatcher and the VLM loops.
+    /// The `LMInput.Text` overload is not what that path calls. The default
+    /// `callAsFunction(_:cache:)` in `LanguageModel` traps.
+    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        let tokens = inputs.ndim == 1 ? inputs.expandedDimensions(axis: 0) : inputs
+        let caches = cache ?? language.makeCache()
+        let embeds = language.model.embedTokens(tokens)
+        let hidden = language.hidden(embeds, cache: caches, tokens: tokens)
+        return language.logits(hidden)
+    }
+
     public func callAsFunction(
         _ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
-        let tokens = input.tokens.ndim == 1 ? input.tokens.expandedDimensions(axis: 0) : input.tokens
-        let embeds = language.model.embedTokens(tokens)
-        let hidden = language.hidden(embeds, cache: cache ?? language.makeCache(), tokens: tokens)
-        return LMOutput(logits: language.logits(hidden))
+        LMOutput(logits: self(input.tokens, cache: cache))
     }
 
     private func mergedEmbeddings(tokens: MLXArray, input: LMInput) throws -> MLXArray {
