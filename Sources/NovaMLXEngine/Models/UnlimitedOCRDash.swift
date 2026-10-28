@@ -902,7 +902,8 @@ final class UnlimitedOCRDashAttention: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, _ ctx: UnlimitedOCRDashContext, _ cache: UnlimitedOCRDashCache
+        _ x: MLXArray, _ ctx: UnlimitedOCRDashContext, _ cache: UnlimitedOCRDashCache,
+        residual: MLXArray? = nil
     ) -> MLXArray {
         let batch = x.dim(0)
         let length = x.dim(1)
@@ -937,7 +938,17 @@ final class UnlimitedOCRDashAttention: Module {
         } else {
             out = prefill(q, keys: keys, values: values, query: idxQ, ctx: ctx, cache: cache)
         }
-        return oProj(out.transposed(0, 2, 1, 3).reshaped(batch, length, -1))
+        let attended = out.transposed(0, 2, 1, 3).reshaped(batch, length, -1)
+        if let residual,
+            let fused = UnlimitedOCRQMVEpilogue.residual(oProj, attended, skip: residual)
+        {
+            return fused
+        }
+        let projected = oProj(attended)
+        if let residual {
+            return residual + projected
+        }
+        return projected
     }
 
     /// Selected blocks carry their log-prior bias. The local window is unbiased.

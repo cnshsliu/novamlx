@@ -23,6 +23,9 @@ final class UnlimitedOCRDenseMLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
+        if let fused = UnlimitedOCRQMVEpilogue.mlp(x, gate: gate, up: up, down: down) {
+            return fused
+        }
         if let fused = UnlimitedOCRDecodeFuse.project(gate, up, x) {
             return down(compiledSiluProduct(fused.0, fused.1))
         }
@@ -55,6 +58,9 @@ final class UnlimitedOCRMoE: Module {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let singleRow = x.dim(0) == 1 && x.dim(1) == 1
+        if singleRow, let epilogue = epilogueStep(x) {
+            return epilogue
+        }
         // Score, shared gate, and shared up read the same vector. One matmul
         // is the same rows as three. Expert down still sees silu(gate) * up.
         if singleRow,
@@ -76,6 +82,23 @@ final class UnlimitedOCRMoE: Module {
             experts, x, inds, assignments: topK) ?? experts(x, inds)
         let mixed = weightedExpertSum(projected, (chosen * scale).asType(x.dtype))
         return mixed + shared(x)
+    }
+
+    /// Score stays its own matmul. Gate and up for the shared MLP and the
+    /// selected experts write `silu(gate) * up` in the qmv group.
+    private func epilogueStep(_ x: MLXArray) -> MLXArray? {
+        guard UnlimitedOCRQMVEpilogue.enabled else { return nil }
+        let scores = softmax(gate(x).asType(.float32), axis: -1, precise: true)
+        let (inds, chosen) = UnlimitedOCRExpertTopK.selectRow(
+            scores, experts: expertsCount, k: topK)
+        guard let projected = UnlimitedOCRDecodeFuse.projectExperts(
+            experts, x, inds, assignments: topK)
+        else { return nil }
+        guard let sharedOut = UnlimitedOCRQMVEpilogue.mlp(
+            x, gate: shared.gate, up: shared.up, down: shared.down)
+        else { return nil }
+        let mixed = weightedExpertSum(projected, (chosen * scale).asType(x.dtype))
+        return mixed + sharedOut
     }
 }
 
@@ -223,11 +246,12 @@ final class UnlimitedOCRDashBlock: Module {
         {
             return fused
         }
-        let y = x + attention(inputNorm(x), ctx, cache)
+        let y = attention(inputNorm(x), ctx, cache, residual: UnlimitedOCRQMVEpilogue.enabled ? x : nil)
+        let hidden = UnlimitedOCRQMVEpilogue.enabled ? y : x + y
         if let dense = mlp as? UnlimitedOCRDenseMLP {
-            return y + dense(postNorm(y))
+            return hidden + dense(postNorm(hidden))
         }
-        return y + (mlp as! UnlimitedOCRMoE)(postNorm(y))
+        return hidden + (mlp as! UnlimitedOCRMoE)(postNorm(hidden))
     }
 }
 

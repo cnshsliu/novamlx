@@ -147,7 +147,14 @@ enum UnlimitedOCRDecodeFuse {
     ) -> MLXArray? {
         // One token picks top-6. `SwitchGLU` sorts only at 64 assignments or
         // more; this path does not, and it does not read `indices.size`.
-        guard enabled, isSingleToken(x), assignments > 0, assignments < 64 else { return nil }
+        guard isSingleToken(x), assignments > 0, assignments < 64 else { return nil }
+        if let activated = UnlimitedOCRQMVEpilogue.expertActivation(glu, x, indices) {
+            guard let pair = Cache.shared.experts(glu) else { return nil }
+            let down = gather(activated, pair.down, indices)
+            note()
+            return MLX.squeezed(down, axis: -2)
+        }
+        guard enabled else { return nil }
         guard let pair = Cache.shared.experts(glu) else { return nil }
         let expanded = MLX.expandedDimensions(x, axes: [-2, -3])
         let both = gather(expanded, pair.gateUp, indices)

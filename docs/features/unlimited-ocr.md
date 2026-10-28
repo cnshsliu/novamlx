@@ -140,7 +140,9 @@ QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV �
 
 一次发射把 32 个 threadgroup 用 ticket barrier 拴在一起，所以它们必须同时在芯上。qmv 每组一次写 8 行，32 组一轮只有 256 行；1280 行的 GEMV 要串行 5 轮。MLX 的 `qmv` 是每 8 行一个 threadgroup（1280 行就是 160 组），组与组不用会合。MoE 层里这个核还有 29 次 device barrier（QKV、RoPE、SDPA、O、RMSNorm、打分、top-6，每个专家的 swiglu / down / 加权各一次，再加上共享 swiglu、down 和残差）。RoPE、RMSNorm 和专家加权在一个线程上跑，其余组在栅栏上等。把组数加到 160 会让栅栏等那些没排上的组；把组数再减少，每一轮 GEMV 更长。两条都不该再拿去和融合比速度。`NOVA_UOCR_MEGA` 保持关闭。融合仍是产品路径。
 
-下一刀不在这张栅栏图里。同一向量的 GEMM 拼接已经到头。解码每 token 的 int4 流量是百 MB 这一量级，M4 Max 的内存带宽是每秒几百 GB，所以 60 tok/s 不是带宽顶，是小 GEMV 的发射延迟。还值得做的是：在 MLX 那种「每 8 行一个 threadgroup、组间不用栅栏」的 qmv 上，把 `silu(gate) * up` 写进 gate+up 那一次的收尾，省掉单独的 silu 读回。O 的残差可以按行加，但 RMSNorm 要整段 1280 的平方和，塞不进同一次 qmv。DASH 计划收进这次发射、以及把组数加大，都不会打过融合。DFlash / DSpark 仍然接不上这个 VLM。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。Shapeless compile 不回到热路径。Mac 不必为了这一版再跑 `NOVA_UOCR_MEGA=1` 的 STREAM。
+下一刀已经落在融合路径旁边，默认关。`NOVA_UOCR_EPILOGUE=1` 用 MLX 那种每 8 行一个 threadgroup 的 qmv，在算出 gate 和 up 的同一组里写下 `silu(gate) * up`，不再把这两路激活读回来做 `compiledSiluProduct`。组与组之间没有 ticket barrier。O 投影同一风格加上残差（先把点积收成 bf16，再加跳连）。RMSNorm 仍要整段 1280 的平方和，没有塞进去。`NOVA_UOCR_MEGA` 仍关。融合仍是不设变量时的产品路径。这一版不写 tok/s。Mac 要对照的是同一构建上的发票，以及 STREAM 两次：`NOVA_UOCR_DECODE_FUSE=0`，两个变量都不设，以及 `NOVA_UOCR_EPILOGUE=1`（不要同时开 `NOVA_UOCR_MEGA`）。
+
+DFlash / DSpark 仍然接不上这个 VLM。Shapeless compile 不回到热路径。
 
 ## Related
 
