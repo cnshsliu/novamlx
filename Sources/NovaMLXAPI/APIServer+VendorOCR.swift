@@ -3,6 +3,7 @@ import HTTPTypes
 import Hummingbird
 import NIOCore
 import NovaMLXCore
+import NovaMLXEngine
 import NovaMLXInference
 import NovaMLXUtils
 
