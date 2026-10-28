@@ -65,7 +65,7 @@ final class UnlimitedOCRMoE: Module {
 /// `argPartition` + `takeAlong`. Prefill and any wider row keep that chain.
 enum UnlimitedOCRExpertTopK {
     private static let lock = NSLock()
-    private static var kernels: [Int: MLXFast.MLXFastKernel] = [:]
+    private nonisolated(unsafe) static var kernels: [Int: MLXFast.MLXFastKernel] = [:]
 
     static func selectRow(_ scores: MLXArray, experts: Int, k: Int) -> (MLXArray, MLXArray) {
         guard experts <= 1024, k > 0, k <= experts, scores.dtype == .float32,
