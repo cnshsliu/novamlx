@@ -17,6 +17,11 @@ import NovaMLXUtils
 /// multiply, and down reads that result. This is not an `mlx.compile` of the
 /// MoE and not the one-thread DASH plan kernel. The 512-key gather stays.
 /// `NOVA_UOCR_DECODE_FUSE=0` keeps every call separate.
+/// Same-vector stacking stops here. MacMaxPro `9946de8` (83 GEMMs) was
+/// 57.9 / 60.8 tok/s versus 54.4 / 56.2 with the fuse off, and only
+/// +0.5 / +1.9 versus the 94-GEMM fuse. Further row stacks are not a
+/// measured win. A silu-then-down kernel is a different int4 GEMM, not
+/// another concat.
 enum UnlimitedOCRDecodeFuse {
     struct GemmBudget: Equatable {
         var qkv: Int
