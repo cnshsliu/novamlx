@@ -193,6 +193,12 @@ struct UnlimitedOCRTests {
     @Test("Seq-1 megakernel matches the affine SwiGLU and 512-key softmax")
     func megaDecodeReference() {
         #expect(UnlimitedOCRMegaDecode.metalOutputsUseExplicitCasts())
+        // r17 wrote one thread into a 128-wide group, so expert rows 1...5
+        // and the SDPA vector stayed uninitialized (BOS spam).
+        #expect(UnlimitedOCRMegaDecode.totalThreads(groups: 6, threads: 128) == 768)
+        #expect(UnlimitedOCRMegaDecode.threadgroupCount(totalThreads: 768, threads: 128) == 6)
+        #expect(UnlimitedOCRMegaDecode.threadgroupCount(totalThreads: 6, threads: 128) == 0)
+        #expect(UnlimitedOCRMegaDecode.threadgroupCount(totalThreads: 128, threads: 128) == 1)
         #expect(!UnlimitedOCRMegaDecode.allows(nil))
         #expect(!UnlimitedOCRMegaDecode.allows("0"))
         #expect(UnlimitedOCRMegaDecode.allows("1"))

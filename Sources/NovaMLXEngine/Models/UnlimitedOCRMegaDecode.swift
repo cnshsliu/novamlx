@@ -24,6 +24,19 @@ enum UnlimitedOCRMegaDecode {
         var attendKernels: Int
     }
 
+    /// `MLXFast` `grid` is the total thread count. `threadgroup_position_in_grid`
+    /// is `grid / threadGroup`. A grid of `(assignments, 1, 1)` with a
+    /// 128-wide group launches one thread, so five of the six expert rows
+    /// and almost all of the SDPA output stay uninitialized.
+    static func totalThreads(groups: Int, threads: Int) -> Int {
+        groups * threads
+    }
+
+    static func threadgroupCount(totalThreads: Int, threads: Int) -> Int {
+        guard threads > 0 else { return 0 }
+        return totalThreads / threads
+    }
+
     /// Launches once the megakernel is on, for the released 12-layer stack.
     /// QKV, router QK, the score linear, and `lm_head` stay MLX GEMMs.
     static func budget(layers: Int, denseLayers: Int) -> Budget {
@@ -179,7 +192,7 @@ enum UnlimitedOCRMegaDecode {
                 planes.down.weight, planes.down.scales, planes.down.biases,
                 indices.reshaped([assignments]).asType(.int32),
             ],
-            grid: (assignments, 1, 1),
+            grid: (totalThreads(groups: assignments, threads: kernel.threads), 1, 1),
             threadGroup: (kernel.threads, 1, 1),
             outputShapes: [[assignments, hidden]],
             outputDTypes: [.bfloat16])[0]
@@ -200,7 +213,7 @@ enum UnlimitedOCRMegaDecode {
                 planes.down.weight, planes.down.scales, planes.down.biases,
                 MLXArray([Int32(0)]),
             ],
-            grid: (1, 1, 1),
+            grid: (totalThreads(groups: 1, threads: kernel.threads), 1, 1),
             threadGroup: (kernel.threads, 1, 1),
             outputShapes: [[1, hidden]],
             outputDTypes: [.bfloat16])[0]
@@ -229,7 +242,7 @@ enum UnlimitedOCRMegaDecode {
                 MLXArray([UInt32(slab)]),
                 MLXArray([scale]),
             ],
-            grid: (1, 1, 1),
+            grid: (totalThreads(groups: 1, threads: 128), 1, 1),
             threadGroup: (128, 1, 1),
             outputShapes: [[1, 1, heads * dim]],
             outputDTypes: [.bfloat16])[0]
