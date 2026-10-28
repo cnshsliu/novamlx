@@ -44,6 +44,7 @@ This directory is the user-facing documentation, one page per feature.
 | 功能 / Feature | 一句话 / Pitch | 状态 |
 |----------------|----------------|------|
 | [API 兼容 / API compatibility](api-compatibility.md) | OpenAI、Anthropic、Responses 共用一个引擎。 | stable |
+| [厂商 OCR / Vendor OCR](vendor-ocr.md) | 百度、阿里云、腾讯云通用 OCR 的请求形状，背后仍是 Unlimited OCR。聊天接口不变。 | preview |
 | [OpenAI 兼容 / OpenAI-compatible](api-compatibility.md#openai) | 聊天、补全、嵌入、音频、图像、视频与重排。 | stable |
 | [Anthropic 兼容 / Anthropic-compatible](api-compatibility.md#anthropic) | `/v1/messages` 与 token 计数，需要 `anthropic-version`。 | stable |
 | [Responses API](api-compatibility.md#responses) | Codex 形态的 `/v1/responses`，含 `previous_response_id`。 | stable |
