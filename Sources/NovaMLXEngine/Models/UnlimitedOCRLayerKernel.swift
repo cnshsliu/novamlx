@@ -186,7 +186,7 @@ enum UnlimitedOCRLayerKernel {
     /// The kernel snapshots each pair. The left-to-right form is absent.
     static func ropeKernelUsesOriginalHalves() -> Bool {
         let body = layerSource(bits: 4)
-        return body.contains("float q1 = float(work[base + d + half])")
+        return body.contains("float q1 = float(work[base + d + halfDim])")
             && body.contains("q1 * c1 + q0 * s1")
             && !body.contains("work[i - DIM / 2u]")
             && !body.contains("kNew[i - DIM / 2u]")
@@ -657,22 +657,23 @@ enum UnlimitedOCRLayerKernel {
             uocr_qmv_all<bfloat16_t, BITS>(vw, vs, vb, xn, vNew, (int)H, (int)H, gid, simd_gid, simd_lid);
             uocr_barrier(counter, epoch, \(groups), lid);
             if (gid == 0 && lid == 0) {
-                uint half = DIM / 2u;
+                // Pair width along the head. Metal reserves the name of the 16-bit float.
+                uint halfDim = DIM / 2u;
                 for (uint h = 0; h < HEADS; ++h) {
                     uint base = h * DIM;
-                    for (uint d = 0; d < half; ++d) {
+                    for (uint d = 0; d < halfDim; ++d) {
                         float q0 = float(work[base + d]);
-                        float q1 = float(work[base + d + half]);
+                        float q1 = float(work[base + d + halfDim]);
                         float k0 = float(kNew[base + d]);
-                        float k1 = float(kNew[base + d + half]);
+                        float k1 = float(kNew[base + d + halfDim]);
                         float c0 = float(cosv[d]);
                         float s0 = float(sinv[d]);
-                        float c1 = float(cosv[d + half]);
-                        float s1 = float(sinv[d + half]);
+                        float c1 = float(cosv[d + halfDim]);
+                        float s1 = float(sinv[d + halfDim]);
                         work[base + d] = static_cast<bfloat16_t>(q0 * c0 + (-q1) * s0);
-                        work[base + d + half] = static_cast<bfloat16_t>(q1 * c1 + q0 * s1);
+                        work[base + d + halfDim] = static_cast<bfloat16_t>(q1 * c1 + q0 * s1);
                         kNew[base + d] = static_cast<bfloat16_t>(k0 * c0 + (-k1) * s0);
-                        kNew[base + d + half] = static_cast<bfloat16_t>(k1 * c1 + k0 * s1);
+                        kNew[base + d + halfDim] = static_cast<bfloat16_t>(k1 * c1 + k0 * s1);
                     }
                 }
             }
