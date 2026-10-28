@@ -1,12 +1,12 @@
 # GLM-5.3-Flash (text)
 
-**Pitch:** Run GLM-5.3-Flash as a local text model on Apple Silicon. 128 GB loads the hybrid 2-bit checkpoint. 256 GB is the gate for 4-bit.
+**Pitch:** Text-only GLM-5.3-Flash on Apple Silicon. A 128 GB Mac can load the hybrid 2-bit pack and cannot decode it without swap. 4-bit needs 256 GB to load.
 
-在 Apple Silicon 上把目录里的 GLM-5.3-Flash MLX 量化当本地文本模型加载和对话。`model_type` 为 `glm5_next`（文本配置 `glm5_next_text`）。目录状态是 preview。
+在 Apple Silicon 上按文本 LLM 加载 GLM-5.3-Flash。`model_type` 为 `glm5_next`（文本配置 `glm5_next_text`）。目录状态是 preview，128 GB 上的解码还不能当作成品。
 
 ## Who it is for
 
-已经在 Mac 上用 NovaMLX 跑本地模型，并希望加载 GLM-5.3-Flash 文本量化的人。统一内存大约 128 GB 时用 TensorFold 混合 2-bit。统一内存大约 256 GB 时才用 mlx-community 4-bit。需要看图或看视频时，这次发布不适用。
+已经在 Mac 上用 NovaMLX 跑本地模型，并希望加载 GLM-5.3-Flash 文本量化的人。mlx-community 4-bit 要大约 256 GB 统一内存才能加载。TensorFold 混合 2-bit 在 128 GB 上能加载，解码时权重加激活放不进剩余内存。需要看图或看视频时，这次发布不适用。
 
 ## What it does
 
@@ -14,10 +14,10 @@ NovaMLX 按文本 LLM 加载两条量化。架构是混合层：多数层为 lin
 
 | 仓库 | 磁盘（目录标注） | 统一内存 | 索引 `metadata.total_size` | 给谁 |
 |------|------------------|----------|----------------------------|------|
-| `TensorFold/GLM-5.3-Flash-MLX-2bit-MTP` | ~111 GB | 128 GB | 111,317,859,192 | MacMaxPro 128 GB 的目录选择 |
-| `mlx-community/GLM-5.3-Flash-4bit` | ~204 GB | **256 GB** | 203,992,076,296 | 128 GB 机器加载不了 |
+| `TensorFold/GLM-5.3-Flash-MLX-2bit-MTP` | ~111 GB | 128 GB 能加载 | 111,317,859,192 | 128 GB 上解码会换页，没有可用的 `GLM-CHAT` |
+| `mlx-community/GLM-5.3-Flash-4bit` | ~204 GB | **256 GB** 才能加载 | 203,992,076,296 | 128 GB 机器加载不了 |
 
-两条都标了 `thinking` 与 `tools`。`nova download` 使用上表的完整 `org/repo`。4-bit 这一行的名字里写了 256 GB，避免和 128 GB 的 2-bit 混用。
+两条都标了 `thinking` 与 `tools`。`nova download` 使用上表的完整 `org/repo`。4-bit 这一行的名字里写了 256 GB。2-bit 的 128 GB 是加载门，不是解码能留在内存里的承诺。
 
 `mlx-swift-lm` 现有的 `glm4` / `glm4_moe` 读不了 `glm5_next`。文本实现在 `Sources/NovaMLXEngine/Models/Glm5NextModel.swift`，并注册到 `LLMTypeRegistry` 的 `glm5_next` 与 `glm5_next_text`。用户侧仍是：下载、加载、当文本模型对话。
 
@@ -38,13 +38,21 @@ NovaMLX 按文本 LLM 加载两条量化。架构是混合层：多数层为 lin
 
 Z.ai 的 GLM-5.3-Flash 文章（https://z.ai/blog/glm-5.3-flash）**没有**公布 Apple Silicon 的 tok/s。文中点名的本地框架是 SGLang、vLLM、TokenSpeed。不要把任何 Mac 数字说成官方成绩。
 
-要追的社区参照是 oMLX，M4 Max 128 GB，模型名 `GLM-5.3-Flash-oQ2e-mtp`，4K 上下文下大约 **38.5 TG tok/s**：https://omlx.ai/benchmarks/performance/0g84suc9 。这是社区天花板，不是 Z.ai 的数字。那次测量用了 fused decode kernel 和 MTP。NovaMLX 这条线是普通解码，日志里的 `promptTokens` 会写明这次提示有多长。
+要追的社区参照是 oMLX，M4 Max 128 GB，模型名 `GLM-5.3-Flash-oQ2e-mtp`，4K 上下文下大约 **38.5 TG tok/s**：https://omlx.ai/benchmarks/performance/0g84suc9 。这是社区天花板，不是 Z.ai 的数字。那次测量用了 fused decode kernel 和 MTP，而且是另一份量化。NovaMLX 这条线是普通解码。在 128 GB 上，这份 TensorFold 2-bit MTP 包的解码被内存余量挡住，追不到那个 38.5。
 
-短对话或 `./build.sh test --filter Glm5SpeedTests` 会打印：
+`GLM-CHAT` 的公式是 `decodeTokens / wallDecodeSeconds`，预填充不在窗口里。MacMaxPro 对 `c8b7875` 的测量没有打出有效的 `GLM-CHAT` tok/s，所以这里不写 NovaMLX 的速度。
 
-`GLM-CHAT: <tok/s> (… prefill excluded …)`
+### MacMaxPro，`c8b7875`，TensorFold 2-bit MTP
 
-公式是 `decodeTokens / wallDecodeSeconds`，预填充不在窗口里。没有在这台机器上跑出的数字之前，文档不写 NovaMLX 的 tok/s。
+2026-10-28，MacMaxPro（128 GB）跑了 PR #61 的 `c8b7875`，权重是 `/Volumes/Samsung768/Models` 上的 `TensorFold/GLM-5.3-Flash-MLX-2bit-MTP`。
+
+- 加载成功。峰值大约 101–112 GB。
+- 没有有效的 `GLM-CHAT` tok/s。
+- IOAccelerator 换页大约 50–86 GB。
+- 进程停在 `mlx_eval` / Metal Event。
+- Release 的 `nova chat` 崩溃：`There is no Stream(gpu, 26)`。
+
+128 GB 的 Mac 留不住这份 2-bit MTP 包做解码：权重大约 111 GB，加载峰值已经到 101–112 GB，解码还要再占统一内存，于是换页。oMLX 大约 38.5 的追逐卡在这份包的内存余量上。这次结果不能当合并条件。
 
 这次解码路径上做了两件不改数值定义的事：单 token 解码不再在每个 KDA 步里 `eval`，而是每 8 层评估一次隐藏状态；路由专家在行数达到 64 时排序，和 DeepSeek 的 SwitchGLU 一样。稠密 `scaledDotProductAttention` 不适用于这条 sparse MLA：每个 query 取自己的 latent，吸收式解码留在 kv-lora 里。检查点里的 MTP（`mtp.*` 以及 `layers.{num_hidden_layers}`）会丢掉。安全的推测接受需要 KDA 状态回滚和短块验证；没有这两步就采用 draft，可能留下目标模型不会留下的 token。
 
@@ -52,14 +60,14 @@ Z.ai 的 GLM-5.3-Flash 文章（https://z.ai/blog/glm-5.3-flash）**没有**公�
 
 需要已运行的 NovaMLX（Apple Silicon）。推理 API 默认端口 6590。不要下载 zai-org 的 FP8 或 BF16。
 
-128 GB（混合 2-bit）。权重若已在 Samsung 盘上，把该目录放进模型根，或让下面的测试直接读它：
+128 GB 上的混合 2-bit 可以加载。MacMaxPro 在 `c8b7875` 上加载成功之后，解码换页，没有 `GLM-CHAT` 数字。权重若已在 Samsung 盘上，路径是 `/Volumes/Samsung768/Models/TensorFold/GLM-5.3-Flash-MLX-2bit-MTP`。下面的命令是复现那次测量，不是一条已通过的速度验收：
 
 ```bash
 nova load TensorFold/GLM-5.3-Flash-MLX-2bit-MTP
 nova chat TensorFold/GLM-5.3-Flash-MLX-2bit-MTP
 ```
 
-日志里找 `GLM-CHAT`。同一条线也会在非流式生成结束时打出。
+只有解码在换页之外跑完，日志里才会有 `GLM-CHAT`。`c8b7875` 的 Release 对话没有走到那一行。
 
 只跑测速、不经过 HTTP：
 
@@ -94,9 +102,9 @@ curl http://127.0.0.1:6590/v1/chat/completions \
   -d '{"model":"TensorFold/GLM-5.3-Flash-MLX-2bit-MTP","messages":[{"role":"user","content":"用三句话说明什么是混合专家模型。"}]}'
 ```
 
-内存不足时，加载应直接失败并说明检查点大小和 256 GB / 128 GB 建议。
+内存门在权重超过机器统一内存时拒绝加载，并说明 256 GB / 128 GB。128 GB 上的 2-bit 能通过这道门，然后在解码时换页。
 
-把打出的 `GLM-CHAT` 和 38.5 比。38.5 是 oMLX 在 4K、带 MTP 的社区 TG 数字。Z.ai 没有公布 Mac tok/s。
+有有效 `GLM-CHAT` 之后，才能把它和 38.5 比。38.5 是 oMLX 在 4K、带 MTP 的社区 TG 数字。Z.ai 没有公布 Mac tok/s。`c8b7875` 没有这个数字。
 
 ## Limits / notes
 
@@ -105,8 +113,9 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 - 专家权重不会按 TIE 从 SSD 流式读取。
 - 上下文上限是 32,768 token，不是检查点标注的 1,048,576。
 - 混合 2-bit 压缩很重，长代码和细致推理不如 4-bit 稳。它是独立仓库，不是 orcarouter 多量化仓库里的 2bit-lite 子目录。
-- 4-bit 约 204 GB，目录最低内存是 256 GB。
-- 目录状态是 preview。这次改动没有在云端 VM 上跑真实权重；Mac 上的 `GLM-CHAT` 才是测速结果。
+- 4-bit 约 204 GB，目录最低内存是 256 GB。128 GB 加载不了它。
+- 混合 2-bit 在 MacMaxPro 128 GB 上能加载（`c8b7875` 峰值大约 101–112 GB），解码时 IOAccelerator 换页大约 50–86 GB，没有有效 `GLM-CHAT`。Release 对话崩溃信息是 `There is no Stream(gpu, 26)`。
+- 目录状态是 preview。`c8b7875` 不是合并就绪。
 
 ## Related
 
