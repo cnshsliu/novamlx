@@ -466,6 +466,25 @@ public final class ModelContainer: @unchecked Sendable {
     }
 }
 
+/// Incremental text for the image VLM stream. One yielded token per id,
+/// so `completion_tokens` matches the engine's generated-id count.
+final class VLMStreamDetokenizer: @unchecked Sendable {
+    private var detokenizer: any MLXLMCommon.StreamingDetokenizer
+
+    init(_ tokenizer: any MLXLMCommon.Tokenizer) {
+        detokenizer = tokenizer.makeStreamingDetokenizer()
+    }
+
+    func push(_ token: Int) -> String {
+        detokenizer.append(token: token)
+        var text = ""
+        while let piece = detokenizer.next() {
+            text += piece
+        }
+        return text
+    }
+}
+
 public struct Tokenizer: Sendable {
     public let encode: @Sendable (String) -> [Int]
     public let decode: @Sendable ([Int]) -> String
@@ -662,6 +681,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             // Last resort: chat_template.json (rare).
             if fm.fileExists(atPath: jsonPath.path) {
                 NovaMLXLog.info("[ChatTemplate] \(modelId): using chat_template.json (no tokenizer_config.json template)")
+                return
+            }
+            // Unlimited OCR's processor builds the prompt itself. The official
+            // pack often ships no jinja; an identity template keeps load quiet
+            // and lets a chat request reach that processor.
+            if UnlimitedOCRGeneration.preservesLayoutTags(modelId: modelId, architecture: architecture) {
+                let identity = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+                injectTemplate(identity, into: modelDir, modelId: modelId)
                 return
             }
             // No usable template anywhere. Do NOT inject a guessed fallback.
@@ -1868,6 +1895,22 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             processor: processor, sampler: sampler, maxTokens: maxTokens)
     }
 
+    /// Drop n-gram completions without touching the step when nothing repeats.
+    static func banRepeatedNGrams(_ logits: MLXArray, generated: [Int], eos: Set<Int>) -> MLXArray {
+        let banned = UnlimitedOCRGeneration.bannedNextTokens(generated, eos: eos)
+        guard !banned.isEmpty else { return logits }
+        let vocab = logits.dim(-1)
+        var keep = [Bool](repeating: true, count: vocab)
+        for id in banned where id >= 0 && id < vocab {
+            keep[id] = false
+        }
+        var shape = [Int](repeating: 1, count: max(logits.ndim - 1, 0))
+        shape.append(vocab)
+        let allowed = MLXArray(keep).reshaped(shape)
+        let blocked = MLXArray(-Float.infinity).asType(logits.dtype)
+        return MLX.where(allowed, logits, blocked)
+    }
+
     static func chatStopIds(modelConfig: ModelConfiguration, container: ModelContainer) -> [Int] {
         var ids = defensiveEosTokenIds(for: modelConfig, container: container)
         if let eos = container.tokenizer?.eosTokenId {
@@ -2004,6 +2047,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Prefer container's processor-refined control tokens (which exclude
         // structural tokens like <|channel> for channel-thinking models).
         // Fall back to the static extraction if container isn't available.
+        if UnlimitedOCRGeneration.preservesLayoutTags(modelId: modelId) {
+            // Tokenizer specials include `<table>`, `<tr>`, `<|det|>`, and
+            // `<PAGE>`. Treating them as turn stops ends the page at the
+            // first row. Real EOS ids still halt the sampler, and the
+            // n-gram ban below stops a repeat from running out max_tokens.
+            // Skipping the string scan also avoids a host decode every step.
+            return nil
+        }
         let patterns = (container?.controlTokens ?? Self.controlTokensForModel(modelId: modelId))
             .filter { !SharedControlTokenLogic.isThinkingStopPattern($0) }
         guard !patterns.isEmpty else { return nil }
@@ -2962,6 +3013,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 }()
                 let stopIdsBox = SetBox(stopTokenIds)
                 let unknownTokenId = mlxTokenizer.unknownTokenId
+                let layoutOCR = model.value is UnlimitedOCR
 
                 // Box the LMInput image/video payload for @Sendable closure capture.
                 // LMInput itself is not Sendable, but MLXArray and THW are, so we extract
@@ -3042,7 +3094,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     var generatedIds: [Int] = []
                     let tid = currentToken.item(Int.self)
                     NovaMLXLog.info("[VLM] firstToken=\(tid) promptTokens=\(tokenIds.count)")
-                    if tid == unknownTokenId || stopIdsBox.value.contains(tid) {
+                    let unknownStops = !layoutOCR && tid == unknownTokenId
+                    if unknownStops || stopIdsBox.value.contains(tid) {
                         NovaMLXLog.warning("[VLM] first token \(tid) is stop token — returning empty (promptTokens=\(tokenIds.count))")
                         return SendableBox(([Int](), stats, caches as [KVCache]))
                     }
@@ -3055,12 +3108,17 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let stepLogits = modelObj(stepInput, cache: caches)
                         eval(stepLogits)
                         let rawStep = stepLogits[0..., -1, 0...]
-                        let processedLogits = processorBox.value?.process(logits: rawStep) ?? rawStep
+                        var processedLogits = processorBox.value?.process(logits: rawStep) ?? rawStep
+                        if layoutOCR {
+                            processedLogits = Self.banRepeatedNGrams(
+                                processedLogits, generated: generatedIds, eos: stopIdsBox.value)
+                        }
                         let sampled = samplerBox.value.sample(logits: processedLogits)
                         eval(sampled)
                         processorBox.value?.didSample(token: sampled)
                         let tokenId = sampled.item(Int.self)
-                        if tokenId == unknownTokenId || stopIdsBox.value.contains(tokenId) {
+                        let unknownStops = !layoutOCR && tokenId == unknownTokenId
+                        if unknownStops || stopIdsBox.value.contains(tokenId) {
                             if count < 3 {
                                 NovaMLXLog.warning("[VLM] early stop at token=\(tokenId) after \(count) steps (promptTokens=\(tokenIds.count))")
                             }
@@ -3080,7 +3138,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                 // Decode generated tokens to text
                 let decodedText = mlxTokenizer.decode(tokenIds: generatedIds)
-                let cleanText = Self.scrubControlTokens(decodedText)
+                let cleanText = layoutOCR ? decodedText : Self.scrubControlTokens(decodedText)
 
                 let elapsed = Date().timeIntervalSince(startTime)
                 let tps = generatedIds.count > 0 ? Double(generatedIds.count) / elapsed : 0
@@ -3365,9 +3423,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let imageBox = SendableBox<LMInput.ProcessedImage?>(prefillImage)
                         let videoBox = SendableBox<LMInput.ProcessedVideo?>(prefillVideo)
                         let promptTokensBox = SendableBox<MLXArray>(prefillTextTokens)
-
-                        // Yield role chunk immediately
-                        continuation.yield(Token(id: 0, text: ""))
+                        let layoutOCR = model.value is UnlimitedOCR
+                        let detokenizer = VLMStreamDetokenizer(mlxTokenizer)
 
                         var completionTokens = 0
                         var finishReason: FinishReason = .stop
@@ -3375,6 +3432,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let genResult = try await mlxContainer.perform { context in
                             let modelObj = context.model
                             let caches = cacheBox.value!
+                            let begun = Date()
 
                             // Prefill — VLM MUST use model.prepare() so image features are merged.
                             let inputTokens = MLXArray(tokenIds.map { Int32($0) }).reshaped(1, tokenIds.count)
@@ -3391,70 +3449,75 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             case .tokens(let remainingText):
                                 logits = modelObj(remainingText.tokens.reshaped(1, remainingText.tokens.size), cache: caches)
                             }
-                            eval(logits)
-                            eval(caches)
 
                             processorBox.value?.prompt(inputTokens)
 
-                            // Sample first token
-                            let rawFirst = logits[0..., -1, 0...]
-                            let logitsToSample = processorBox.value?.process(logits: rawFirst) ?? rawFirst
-                            var currentToken = samplerBox.value.sample(logits: logitsToSample)
-                            eval(currentToken)
-                            processorBox.value?.didSample(token: currentToken)
-
+                            // One host sync per sampled id. `eval` of the full
+                            // vocabulary plus a second eval of the token was
+                            // three round-trips per step.
+                            var currentToken: MLXArray = logits
                             var generatedIds: [Int] = []
-                            let tid = currentToken.item(Int.self)
-                            if tid == unknownTokenId || stopTokenIds.contains(tid) {
-                                NovaMLXLog.warning("[VLM-Stream] first token \(tid) is stop token — returning empty (promptTokens=\(tokenIds.count))")
-                                return SendableBox((generatedIds, caches as [KVCache]))
+                            func sample(_ raw: MLXArray, generated: [Int]) -> Int {
+                                var ready = processorBox.value?.process(logits: raw) ?? raw
+                                if layoutOCR {
+                                    ready = Self.banRepeatedNGrams(
+                                        ready, generated: generated, eos: stopTokenIds)
+                                }
+                                let sampled = samplerBox.value.sample(logits: ready)
+                                let tokenId = sampled.item(Int.self)
+                                processorBox.value?.didSample(token: sampled)
+                                currentToken = sampled
+                                return tokenId
                             }
-                            generatedIds.append(tid)
+                            func emit(_ tokenId: Int) {
+                                generatedIds.append(tokenId)
+                                let text = detokenizer.push(tokenId)
+                                continuation.yield(Token(id: tokenId, text: text))
+                            }
 
-                            // Decode loop
+                            let tid = sample(logits[0..., -1, 0...], generated: generatedIds)
+                            eval(caches)
+                            Memory.clearCache()
+                            let prefillSec = Date().timeIntervalSince(begun)
+                            let decodeBegan = Date()
+                            let unknownStops = !layoutOCR && tid == unknownTokenId
+                            if unknownStops || stopTokenIds.contains(tid) {
+                                NovaMLXLog.warning("[VLM-Stream] first token \(tid) is stop token — returning empty (promptTokens=\(tokenIds.count))")
+                                return SendableBox((generatedIds, caches as [KVCache], prefillSec, 0.0))
+                            }
+                            emit(tid)
+
                             var count = 1
                             while count < maxTokens {
                                 if Task.isCancelled { break }
-                                let stepInput = currentToken.reshaped(1, 1)
-                                let stepLogits = modelObj(stepInput, cache: caches)
-                                eval(stepLogits)
-                                let rawStep = stepLogits[0..., -1, 0...]
-                                let processedLogits = processorBox.value?.process(logits: rawStep) ?? rawStep
-                                let sampled = samplerBox.value.sample(logits: processedLogits)
-                                eval(sampled)
-                                processorBox.value?.didSample(token: sampled)
-                                let tokenId = sampled.item(Int.self)
-                                if tokenId == unknownTokenId || stopTokenIds.contains(tokenId) {
+                                let stepLogits = modelObj(currentToken.reshaped(1, 1), cache: caches)
+                                let tokenId = sample(stepLogits[0..., -1, 0...], generated: generatedIds)
+                                let stepUnknown = !layoutOCR && tokenId == unknownTokenId
+                                if stepUnknown || stopTokenIds.contains(tokenId) {
                                     if count < 3 {
                                         NovaMLXLog.warning("[VLM-Stream] early stop at token=\(tokenId) after \(count) steps (promptTokens=\(tokenIds.count))")
                                     }
                                     break
                                 }
-                                generatedIds.append(tokenId)
-                                currentToken = sampled
+                                emit(tokenId)
                                 count += 1
+                                if count % 64 == 0 { Memory.clearCache() }
                             }
 
-                            return SendableBox((generatedIds, caches as [KVCache]))
+                            let decodeSec = Date().timeIntervalSince(decodeBegan)
+                            return SendableBox((generatedIds, caches as [KVCache], prefillSec, decodeSec))
                         }
 
-                        let (generatedIds, finalCaches) = genResult.value
+                        let (generatedIds, finalCaches, prefillSec, decodeSec) = genResult.value
                         cacheBox.value = finalCaches
                         completionTokens = generatedIds.count
-
-                        // Stream generated tokens as text chunks
-                        let fullText = mlxTokenizer.decode(tokenIds: generatedIds)
-                        let cleanText = Self.scrubControlTokens(fullText)
-                        if !cleanText.isEmpty {
-                            continuation.yield(Token(id: 0, text: cleanText))
-                        }
 
                         if completionTokens >= maxTokens { finishReason = .length }
 
                         let elapsed = Date().timeIntervalSince(startTime)
-                        let tps = completionTokens > 0 ? Double(completionTokens) / elapsed : 0
+                        let decodeTps = decodeSec > 0 ? Double(max(completionTokens - 1, 0)) / decodeSec : 0
 
-                        NovaMLXLog.info("[STREAM:\(reqTag)] VLM: tokens=\(completionTokens), stopReason=\(finishReason), tps=\(String(format: "%.1f", tps))")
+                        NovaMLXLog.info("[STREAM:\(reqTag)] VLM: tokens=\(completionTokens), stopReason=\(finishReason), prefill=\(String(format: "%.2f", prefillSec))s decode=\(String(format: "%.1f", decodeTps)) tok/s")
 
                         self.lock.withLock {
                             self.totalRequests += 1
@@ -3466,7 +3529,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         RequestLogStore.shared.finish(
                             request: request, model: request.model,
                             kind: .vlm,
-                            tps: tps, promptTokens: Int(promptTokenCount),
+                            tps: decodeTps, promptTokens: Int(promptTokenCount),
                             completionTokens: completionTokens, durationMs: elapsed * 1000,
                             finishReason: finishReason.rawValue)
 

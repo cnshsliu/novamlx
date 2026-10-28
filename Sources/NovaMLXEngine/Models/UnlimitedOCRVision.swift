@@ -145,11 +145,14 @@ enum UnlimitedOCRWindows {
     }
 }
 
-final class UnlimitedOCRSAM: Module {
+final class UnlimitedOCRSAM: Module, UnaryLayer {
     @ModuleInfo(key: "patch_embed") var patch: UnlimitedOCRConv
     @ParameterInfo(key: "pos_embed") var position: MLXArray
     let blocks: [UnlimitedOCRSAMBlock]
-    @ModuleInfo(key: "neck") var neck: UnlimitedOCRSAMNeck
+    /// HF / mlx-vlm store the neck as a list: `neck.0` … `neck.3`.
+    /// `Sequential` keeps that order and is a unary `callAsFunction(MLXArray)`.
+    /// Sanitize moves those keys to `neck.layers.*`.
+    @ModuleInfo(key: "neck") var neck: Sequential
     @ModuleInfo(key: "net_2") var net2: Conv2d
     @ModuleInfo(key: "net_3") var net3: Conv2d
 
@@ -166,7 +169,15 @@ final class UnlimitedOCRSAM: Module {
                 window: global ? 0 : config.samWindow, input: side)
         }
         let down = config.samDownsample
-        _neck.wrappedValue = UnlimitedOCRSAMNeck(input: config.samWidth, hidden: config.samNeck)
+        let neckWidth = config.samNeck
+        _neck.wrappedValue = Sequential(layers: [
+            Conv2d(inputChannels: config.samWidth, outputChannels: neckWidth, kernelSize: 1, bias: false),
+            LayerNorm(dimensions: neckWidth, eps: 1e-6),
+            Conv2d(
+                inputChannels: neckWidth, outputChannels: neckWidth,
+                kernelSize: 3, padding: 1, bias: false),
+            LayerNorm(dimensions: neckWidth, eps: 1e-6),
+        ])
         _net2.wrappedValue = Conv2d(
             inputChannels: config.samNeck, outputChannels: down[0],
             kernelSize: 3, stride: 2, padding: 1, bias: false)
@@ -190,28 +201,6 @@ final class UnlimitedOCRSAM: Module {
         hidden = neck(hidden)
         hidden = net2(hidden)
         return net3(hidden)
-    }
-}
-
-/// `neck.0` conv, `neck.1` norm, `neck.2` conv, `neck.3` norm.
-final class UnlimitedOCRSAMNeck: Module {
-    @ModuleInfo(key: "0") var conv1: Conv2d
-    @ModuleInfo(key: "1") var norm1: LayerNorm
-    @ModuleInfo(key: "2") var conv2: Conv2d
-    @ModuleInfo(key: "3") var norm2: LayerNorm
-
-    init(input: Int, hidden: Int) {
-        _conv1.wrappedValue = Conv2d(
-            inputChannels: input, outputChannels: hidden, kernelSize: 1, bias: false)
-        _norm1.wrappedValue = LayerNorm(dimensions: hidden, eps: 1e-6)
-        _conv2.wrappedValue = Conv2d(
-            inputChannels: hidden, outputChannels: hidden, kernelSize: 3, padding: 1, bias: false)
-        _norm2.wrappedValue = LayerNorm(dimensions: hidden, eps: 1e-6)
-        super.init()
-    }
-
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        norm2(conv2(norm1(conv1(x))))
     }
 }
 

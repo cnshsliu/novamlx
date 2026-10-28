@@ -20,6 +20,9 @@ final class UnlimitedOCRDashRuntime {
     var markers: MLXArray?
     var prefillCount: MLXArray?
     var pageCount = 1
+    private var blockTableCap = 0
+    private var blockTableMin: MLXArray?
+    private var blockTableMax: MLXArray?
 
     init(_ config: UnlimitedOCRConfiguration) {
         params = config.dash
@@ -60,7 +63,27 @@ final class UnlimitedOCRDashRuntime {
         copy.markers = markers
         copy.prefillCount = prefillCount
         copy.pageCount = pageCount
+        copy.blockTableCap = blockTableCap
+        copy.blockTableMin = blockTableMin
+        copy.blockTableMax = blockTableMax
         return copy
+    }
+
+    /// Prompt block bounds, padded to the decode capacity. Built once per
+    /// capacity so a decode step does not upload a new table per layer.
+    func blockTables(cap: Int) -> (MLXArray, MLXArray)? {
+        guard let pages else { return nil }
+        if blockTableCap == cap, let blockTableMin, let blockTableMax {
+            return (blockTableMin, blockTableMax)
+        }
+        let filled = min(cap, pages.decodeBlockMin.count)
+        let pad = Array(repeating: Int32(-1), count: cap - filled)
+        let lower = MLXArray(pages.decodeBlockMin.prefix(filled).map(Int32.init) + pad)
+        let upper = MLXArray(pages.decodeBlockMax.prefix(filled).map(Int32.init) + pad)
+        blockTableCap = cap
+        blockTableMin = lower
+        blockTableMax = upper
+        return (lower, upper)
     }
 
     private static func bare(
@@ -96,11 +119,15 @@ final class UnlimitedOCRKVBuffer: BaseKVCache {
                 [batches, heads, slabs * step, keys.dim(3)], dtype: keys.dtype)
             let extraV = MLXArray.zeros(
                 [batches, heads, slabs * step, values.dim(3)], dtype: values.dtype)
-            if let currentK = self.keys, let currentV = self.values, previous > 0 {
-                self.keys = concatenated(
-                    [currentK[.ellipsis, ..<previous, 0...], extraK], axis: 2)
-                self.values = concatenated(
-                    [currentV[.ellipsis, ..<previous, 0...], extraV], axis: 2)
+            if var currentK = self.keys, var currentV = self.values {
+                // Drop unused slab padding before concatenating. A multiple of
+                // `step` is already tight, matching `KVCacheSimple`.
+                if previous % step != 0 {
+                    currentK = currentK[.ellipsis, ..<previous, 0...]
+                    currentV = currentV[.ellipsis, ..<previous, 0...]
+                }
+                self.keys = concatenated([currentK, extraK], axis: 2)
+                self.values = concatenated([currentV, extraV], axis: 2)
             } else {
                 self.keys = extraK
                 self.values = extraV
@@ -113,6 +140,14 @@ final class UnlimitedOCRKVBuffer: BaseKVCache {
             self.keys![.ellipsis, ..<offset, 0...],
             self.values![.ellipsis, ..<offset, 0...]
         )
+    }
+
+    override func copy() -> any KVCache {
+        let cache = UnlimitedOCRKVBuffer()
+        cache.step = step
+        let saved = state
+        if !saved.isEmpty { cache.state = saved.map { $0[.ellipsis] } }
+        return cache
     }
 
     override var state: [MLXArray] {
@@ -365,7 +400,7 @@ enum UnlimitedOCRDashMath {
         scores = MLX.clip(
             scores, min: MLXArray(-activationClamp), max: MLXArray(activationClamp))
         let remote = MLXArray(Int32(0)..<Int32(cap))
-            .<= (position / MLXArray(Int32(block)) - Int32(params.localBlocks))
+            .<= (position.floorDivide(MLXArray(Int32(block))) - Int32(params.localBlocks))
         var selected = remote.expandedDimensions(axis: 0) .&& candidates
         let any = selected.sum(axis: -1, keepDims: true) .> MLXArray(Int32(0))
         selected = which(any, selected, remote.expandedDimensions(axis: 0))
@@ -441,7 +476,7 @@ final class UnlimitedOCRRope {
         var page = page
         if params.ropePageMod > 0 {
             let mod = MLXArray(Int32(params.ropePageMod))
-            page = page - (page / mod) * mod
+            page = page - page.floorDivide(mod) * mod
         }
         let angles = concatenated(
             [
@@ -556,16 +591,21 @@ func unlimitedOCRContext(
     if params.imageOnly, let pages = runtime.pages {
         let qp = (runtime.markers ?? MLXArray(Int32(0))) - 1 - Int32(pages.promptPages)
         let query = which(qp .>= MLXArray(Int32(0)), qp, MLXArray(Int32(-1)))
-        let n0 = min(cap, pages.decodeBlockMin.count)
-        var allow = [Int32](repeating: 0, count: cap)
-        // The page test itself stays on device; the block table is prompt-fixed.
-        let bmin = MLXArray(pages.decodeBlockMin.map(Int32.init) + Array(repeating: Int32(-1), count: cap - n0))
-        let bmax = MLXArray(pages.decodeBlockMax.map(Int32.init) + Array(repeating: Int32(-1), count: cap - n0))
+        // The page test stays on device. The block table is prompt-fixed.
+        let bmin: MLXArray
+        let bmax: MLXArray
+        if let tables = runtime.blockTables(cap: cap) {
+            bmin = tables.0
+            bmax = tables.1
+        } else {
+            let missing = MLXArray(Array(repeating: Int32(-1), count: cap))
+            bmin = missing
+            bmax = missing
+        }
         let same = (bmin .>= MLXArray(Int32(0))) .&& (bmin .<= query) .&& (bmax .>= query)
             .&& (query .>= MLXArray(Int32(0)))
         let open = logicalNot(same.sum() .> MLXArray(Int32(0))) .|| (query .< MLXArray(Int32(0)))
         candidates = (same .|| open).expandedDimensions(axis: 0)
-        _ = allow
     } else {
         candidates = (MLXArray.zeros([1, cap], dtype: .int32) + 1) .== MLXArray(Int32(1))
     }
@@ -679,8 +719,13 @@ final class UnlimitedOCRDashAttention: Module {
             let (idx, mask) = UnlimitedOCRDashMath.decodePlan(
                 query: idxQ, summaries: summaries, candidates: ctx.candidates!,
                 position: ctx.position!, indexScale: indexScale, floor: floor, params: params)
-            let gatheredK = keys.take(idx, axis: 2)
-            let gatheredV = values.take(idx, axis: 2)
+            // Gather from the slab, not the trimmed prefix. The trimmed length
+            // changes every token and retraces SDPA; the slab is stable until
+            // the next growth step. Indices are clamped to the live position.
+            let sourceK = cache.keys ?? keys
+            let sourceV = cache.values ?? values
+            let gatheredK = sourceK.take(idx, axis: 2)
+            let gatheredV = sourceV.take(idx, axis: 2)
             let additive = mask.asType(q.dtype).reshaped(1, 1, 1, mask.dim(0))
             out = MLXFast.scaledDotProductAttention(
                 queries: q, keys: gatheredK, values: gatheredV,
@@ -708,7 +753,7 @@ final class UnlimitedOCRDashAttention: Module {
         }
         let (topi, bias, valid) = route(scores, candidates: cand)
         let keyPos = MLXArray(Int32(0)..<Int32(total))
-        let keyBlock = keyPos / MLXArray(Int32(params.blockSize))
+        let keyBlock = keyPos.floorDivide(MLXArray(Int32(params.blockSize)))
         var blockBias = MLXArray.zeros([length, blocks], dtype: .float32) + (-Float.infinity)
         blockBias = putAlong(
             blockBias, topi,
@@ -748,7 +793,7 @@ final class UnlimitedOCRDashAttention: Module {
             scores,
             min: MLXArray(-UnlimitedOCRDashMath.activationClamp),
             max: MLXArray(UnlimitedOCRDashMath.activationClamp))
-        let queryBlock = positions.expandedDimensions(axis: 1) / MLXArray(Int32(params.blockSize))
+        let queryBlock = positions.expandedDimensions(axis: 1).floorDivide(MLXArray(Int32(params.blockSize)))
         let keep = MLXArray(Int32(0)..<Int32(summaries.dim(0))).expandedDimensions(axis: 0)
             .<= (queryBlock - Int32(params.localBlocks))
         scores = which(keep, scores, MLXArray(UnlimitedOCRDashMath.scoreNegative))

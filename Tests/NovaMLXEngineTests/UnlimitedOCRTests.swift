@@ -86,10 +86,33 @@ struct UnlimitedOCRTests {
         #expect(
             UnlimitedOCRProcessor.composePrompt("document parsing.", images: 3, pageLayout: true)
                 == "<PAGE><image><PAGE><image><PAGE><image>Multi page parsing.")
+        #expect(
+            UnlimitedOCRSupport.remapSAMNeck("sam_model.neck.0.weight")
+                == "sam_model.neck.layers.0.weight")
+        #expect(
+            UnlimitedOCRSupport.remapSAMNeck("sam_model.neck.layers.2.weight")
+                == "sam_model.neck.layers.2.weight")
         #expect(UnlimitedOCRSupport.cropGrid(width: 400, height: 400, maxCrops: 16) == (1, 1))
         let wide = UnlimitedOCRSupport.cropGrid(width: 2000, height: 800, maxCrops: 16)
         #expect(wide.0 >= wide.1)
         #expect(wide.0 * wide.1 <= 16)
+    }
+
+    @Test("Layout tags are not stop tokens, and a repeated n-gram is banned")
+    func stopsAndRepeat() {
+        #expect(UnlimitedOCRGeneration.preservesLayoutTags(modelId: "baidu/Unlimited-OCR-2"))
+        #expect(UnlimitedOCRGeneration.isTurnSeparator("<|im_end|>"))
+        #expect(!UnlimitedOCRGeneration.isTurnSeparator("<table>"))
+        #expect(!UnlimitedOCRGeneration.isTurnSeparator("<tr>"))
+        #expect(!UnlimitedOCRGeneration.isTurnSeparator("<|det|>"))
+        #expect(!UnlimitedOCRGeneration.isTurnSeparator("<PAGE>"))
+        let kept = UnlimitedOCRGeneration.stopPatterns(keeping: ["<table>", "<|im_end|>", "<|det|>"])
+        #expect(kept == ["<|im_end|>"])
+
+        let banned = UnlimitedOCRGeneration.bannedNextTokens([1, 2, 3, 1, 2], eos: [1], ngram: 3, window: 128)
+        #expect(banned == [3])
+        let eosKept = UnlimitedOCRGeneration.bannedNextTokens([9, 1, 9], eos: [1], ngram: 2, window: 128)
+        #expect(eosKept.isEmpty)
     }
 }
 

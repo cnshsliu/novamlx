@@ -356,7 +356,28 @@ public final class UnlimitedOCR: Module, VLMModel, KVCacheDimensionProvider {
         return concatenated([packGlobal(globalFeatures), viewSeparator.reshaped(1, -1)], axis: 0)
     }
 
+    /// One tile at a time. A 900×1200 page is a global view plus a crop grid;
+    /// fusing every SAM/CLIP tower into the language prefill holds the whole
+    /// activation graph until the first token and can sit for minutes.
     private func project(_ images: MLXArray) -> MLXArray {
+        let count = images.dim(0)
+        if count <= 1 {
+            let features = encodeTile(images)
+            eval(features)
+            return features
+        }
+        var parts: [MLXArray] = []
+        parts.reserveCapacity(count)
+        for index in 0..<count {
+            let features = encodeTile(images[index..<(index + 1)])
+            eval(features)
+            parts.append(features)
+            Memory.clearCache()
+        }
+        return concatenated(parts, axis: 0)
+    }
+
+    private func encodeTile(_ images: MLXArray) -> MLXArray {
         let sam = sam(images)
         let clip = vision.clip(images, patches: sam)
         let joined = concatenated([clip[0..., 1..., 0...], sam.reshaped(sam.dim(0), -1, sam.dim(-1))], axis: -1)
@@ -462,7 +483,8 @@ enum UnlimitedOCRCheckpoint {
     ) -> [String: MLXArray] {
         var mapped: [String: MLXArray] = [:]
         for (key, value) in weights {
-            guard let name = UnlimitedOCRSupport.renameWeight(key) else { continue }
+            guard var name = UnlimitedOCRSupport.renameWeight(key) else { continue }
+            name = UnlimitedOCRSupport.remapSAMNeck(name)
             mapped[name] = transposeConv(name, value)
         }
         stackExperts(&mapped, layers: config.hiddenLayers, experts: config.routedExperts)
@@ -472,6 +494,8 @@ enum UnlimitedOCRCheckpoint {
     private static func transposeConv(_ key: String, _ value: MLXArray) -> MLXArray {
         let conv = key.hasSuffix("patch_embed.proj.weight")
             || key.hasSuffix("patch_embedding.weight")
+            || key.hasSuffix("neck.layers.0.weight")
+            || key.hasSuffix("neck.layers.2.weight")
             || key.hasSuffix("neck.0.weight")
             || key.hasSuffix("neck.2.weight")
             || key.hasSuffix("net_2.weight")

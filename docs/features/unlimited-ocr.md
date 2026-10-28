@@ -29,7 +29,7 @@ OCR-2 没有 mlx-community 量化包。Nova 直接读官方 safetensors（`model
 - 12 个远端块 × 32 token，块由每层 `dash_router`（1.5-entmax，top-16 里再取 12）选出，并带 log-prior 偏置
 - 128 token 的局部窗（4 × 32），偏置为 0
 
-合计 **512** 个 key。实现是 `take` 出这 512 个 key/value，再交给 MLX 的 fused SDPA。没有「页数一长就退回全注意力」的路径。选块和 RoPE 的页坐标留在设备上，解码一步里不对每个采样 token 做 host 同步。
+合计 **512** 个 key。实现是从定长 slab 上 `take` 这 512 个 key/value（slab 长度按步长增长，避免每步重编译 SDPA），再交给 MLX 的 fused SDPA。没有「页数一长就退回全注意力」的路径。块表在 prefill 之后留在设备上。解码一步只在读出采样 id 时同步一次。
 
 MoE 走 Nova 现有的 `SwitchGLU`（排序后的专家 GEMM，和 Flint 同一条原语）。未量化的语言线性和专家在加载后做 affine 分组量化，组大小 64：
 
@@ -66,13 +66,14 @@ curl http://127.0.0.1:6590/v1/chat/completions \
   -d "{\"model\":\"baidu/Unlimited-OCR-2\",\"temperature\":0,\"max_tokens\":8192,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"document parsing.\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,$IMG\"}}]}]}"
 ```
 
-多页把多张图按顺序放进同一条 user 消息，或传一个 PDF 文件 URL。输出里常见 `<|det|>…<|/det|>` 和 `<PAGE>`。
+多页把多张图按顺序放进同一条 user 消息，或传一个 PDF 文件 URL。输出里常见 `<table>`、`<|det|>…<|/det|>` 和 `<PAGE>`。这些版面标记不会被当成停止符，也不会从流式文本里剥掉。停止只看 EOS。重复的 35-gram（窗口 1024）会被禁掉，避免表格行死循环把 `max_tokens` 吃满。流式接口按生成的 token id 计数，`completion_tokens` 与引擎日志里的 tokens 一致。
 
 要对齐 BF16 语言栈再测：`NOVA_UOCR_BITS=0`。
 
 ## Limits / notes
 
-- 这一版没有 Mac 端到端计时。不要把别的栈上的 tok/s 当成 Nova 的数字。测的时候看解码 tok/s（prefill 除外）和多页墙钟，对照本机的 mlx-vlm gen-1，以及官方 CUDA OCR-2 在可比页数上的延迟。
+- 不要把别的栈上的 tok/s 当成 Nova 的数字。`[STREAM] VLM` 现在分开打 prefill 秒数和 decode tok/s（第一枚 token 之后）。对照本机的 mlx-vlm gen-1，以及官方 CUDA OCR-2 在可比页数上的延迟。
+- 视觉塔按 tile 求值并清中间激活。一张很高的收据不会把全部 SAM/CLIP 图和语言 prefill 焊成一张图再挂住。
 - 解码的注意力工作集是 512 key。KV 仍按已见 token 线性保存，因为当前页的图像块可能被选中。工作集不随页数变宽；缓存占用会变。
 - Prefill 仍按块（最多 2048 个 query）对整段 prompt 建稀疏加性 mask，所以首 token 时间随页数涨。这是 prefill，不是解码退回全注意力。
 - 只支持 batch 1。DASH 缓存不参与 prompt-cache 回放。

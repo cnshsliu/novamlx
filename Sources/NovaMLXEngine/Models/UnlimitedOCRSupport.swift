@@ -105,9 +105,17 @@ enum UnlimitedOCRSupport {
             ("lm_head", "language_model.lm_head"),
         ]
         for (from, to) in pairs where key == from || key.hasPrefix(from + ".") {
-            return to + key.dropFirst(from.count)
+            return String(to + key.dropFirst(from.count))
         }
         return key
+    }
+
+    /// `Sequential` stores the SAM neck at `neck.layers.0`, not `neck.0`.
+    static func remapSAMNeck(_ key: String) -> String {
+        guard let range = key.range(of: ".neck.") ?? key.range(of: "neck.") else { return key }
+        let tail = key[range.upperBound...]
+        if tail.hasPrefix("layers.") { return key }
+        return String(key[..<range.upperBound]) + "layers." + tail
     }
 
     /// True for language linears. Paths are either rooted at `language_model`
@@ -120,6 +128,61 @@ enum UnlimitedOCRSupport {
         if path.contains("image_newline") || path.contains("view_separator") { return false }
         return path.contains("language_model") || path.hasPrefix("model.") || path == "lm_head"
             || path.hasPrefix("lm_head.")
+    }
+}
+
+/// Host-side generation policy for Unlimited OCR. Layout tags are the
+/// document, not a turn boundary. A repeated 35-gram inside the window is
+/// banned so a table loop cannot run out the token budget.
+public enum UnlimitedOCRGeneration {
+    public static let repeatNGram = 35
+    public static let repeatWindow = 1024
+
+    public static func preservesLayoutTags(modelId: String, architecture: String? = nil) -> Bool {
+        let id = modelId.lowercased()
+        if id.contains("unlimited-ocr") || id.contains("unlimited_ocr") { return true }
+        let arch = architecture?.lowercased() ?? ""
+        return arch.contains("unlimitedocr") || arch.contains("unlimited_ocr")
+            || arch.contains("unlimited-ocr")
+    }
+
+    /// Chat turn boundaries. `<table>`, `<tr>`, `<|det|>`, `<PAGE>` stay in the output.
+    public static func isTurnSeparator(_ pattern: String) -> Bool {
+        switch pattern {
+        case "<|im_start|>", "<|im_end|>", "<|endofassistant|>",
+            "<|User|>", "<|Assistant|>", "<｜User｜>", "<｜Assistant｜>",
+            "<｜end▁of▁sentence｜>", "<|end_of_sentence|>":
+            return true
+        default:
+            return pattern.contains("end▁of▁sentence") || pattern.contains("end_of_sentence")
+        }
+    }
+
+    public static func stopPatterns(keeping patterns: [String]) -> [String] {
+        patterns.filter(isTurnSeparator)
+    }
+
+    /// Token ids that would complete a repeated n-gram. EOS ids are left sampleable.
+    public static func bannedNextTokens(
+        _ tokens: [Int], eos: Set<Int> = [], ngram: Int = repeatNGram, window: Int = repeatWindow
+    ) -> [Int] {
+        guard ngram > 1, tokens.count >= ngram - 1 else { return [] }
+        let prefixLength = ngram - 1
+        let start = max(0, tokens.count - window)
+        let prefix = tokens[(tokens.count - prefixLength)...]
+        var banned: [Int] = []
+        var index = start
+        let last = tokens.count - prefixLength
+        while index < last {
+            if tokens[index..<(index + prefixLength)].elementsEqual(prefix) {
+                let next = tokens[index + prefixLength]
+                if !eos.contains(next), !banned.contains(next) {
+                    banned.append(next)
+                }
+            }
+            index += 1
+        }
+        return banned
     }
 }
 
