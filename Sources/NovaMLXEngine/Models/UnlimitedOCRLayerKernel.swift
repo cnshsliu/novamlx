@@ -213,32 +213,34 @@ enum UnlimitedOCRLayerKernel {
         var weightOffsets: [Int]
         var scaleOffsets: [Int]
         var biasOffsets: [Int]
+    }
 
-        static func make(_ weights: Weights) -> PackedPlanes? {
-            let quants = [
-                weights.q, weights.k, weights.v, weights.o, weights.score,
-                weights.eg, weights.eu, weights.ed, weights.sg, weights.su, weights.sd,
-            ]
-            guard quants.count == weightPlaneNames.count else { return nil }
-            let weightFlat = quants.map { $0.weight.reshaped([$0.weight.size]) }
-            let scaleFlat =
-                quants.map { $0.scales.reshaped([$0.scales.size]) }
-                + [weights.post.reshaped([weights.post.size])]
-            let biasFlat = quants.map { $0.biases.reshaped([$0.biases.size]) }
-            guard scaleFlat.count == scalePlaneNames.count, biasFlat.count == biasPlaneNames.count
-            else { return nil }
-            let weightOffsets = planeOffsets(weightFlat.map(\.size))
-            let scaleOffsets = planeOffsets(scaleFlat.map(\.size))
-            let biasOffsets = planeOffsets(biasFlat.map(\.size))
-            let w = concatenated(weightFlat, axis: 0)
-            let s = concatenated(scaleFlat, axis: 0)
-            let b = concatenated(biasFlat, axis: 0)
-            // Realized once. A lazy concat would copy every token.
-            MLX.eval(w, s, b)
-            return PackedPlanes(
-                weights: w, scales: s, biases: b,
-                weightOffsets: weightOffsets, scaleOffsets: scaleOffsets, biasOffsets: biasOffsets)
-        }
+    /// `Weights` is private, so this stays a private method of the enclosing type.
+    /// A `fileprivate` method on `PackedPlanes` cannot take `Weights`.
+    private static func make(_ weights: Weights) -> PackedPlanes? {
+        let quants = [
+            weights.q, weights.k, weights.v, weights.o, weights.score,
+            weights.eg, weights.eu, weights.ed, weights.sg, weights.su, weights.sd,
+        ]
+        guard quants.count == weightPlaneNames.count else { return nil }
+        let weightFlat = quants.map { $0.weight.reshaped([$0.weight.size]) }
+        let scaleFlat =
+            quants.map { $0.scales.reshaped([$0.scales.size]) }
+            + [weights.post.reshaped([weights.post.size])]
+        let biasFlat = quants.map { $0.biases.reshaped([$0.biases.size]) }
+        guard scaleFlat.count == scalePlaneNames.count, biasFlat.count == biasPlaneNames.count
+        else { return nil }
+        let weightOffsets = planeOffsets(weightFlat.map(\.size))
+        let scaleOffsets = planeOffsets(scaleFlat.map(\.size))
+        let biasOffsets = planeOffsets(biasFlat.map(\.size))
+        let w = concatenated(weightFlat, axis: 0)
+        let s = concatenated(scaleFlat, axis: 0)
+        let b = concatenated(biasFlat, axis: 0)
+        // Realized once. A lazy concat would copy every token.
+        MLX.eval(w, s, b)
+        return PackedPlanes(
+            weights: w, scales: s, biases: b,
+            weightOffsets: weightOffsets, scaleOffsets: scaleOffsets, biasOffsets: biasOffsets)
     }
 
     private static let planeLock = NSLock()
@@ -250,7 +252,7 @@ enum UnlimitedOCRLayerKernel {
             return plane
         }
         planeLock.unlock()
-        guard let built = PackedPlanes.make(weights) else { return nil }
+        guard let built = make(weights) else { return nil }
         planeLock.lock()
         if cache.plane == nil { cache.plane = built }
         let stored = cache.plane
