@@ -1,5 +1,6 @@
 import Foundation
 import NovaMLXCore
+import NovaMLXUtils
 
 /// `GLM-CHAT` tok/s = `decodeTokens / wallDecodeSeconds`.
 ///
@@ -11,11 +12,11 @@ import NovaMLXCore
 /// That run uses fused decode kernels and MTP. This line is plain NovaMLX
 /// decode on whatever prompt was just run.
 enum Glm5ChatDecode {
-    /// One-token forwards call `MLX.eval` on the hidden state every this many
-    /// layers. oMLX evaluates on a stride so a resident checkpoint does not
-    /// keep the whole decode graph lazy, and it does not sync inside every
-    /// KDA step.
-    static let decodeEvalStride = 8
+    /// Prefill and decode call `MLX.eval` on the hidden state every this many
+    /// layers. Stride 1 avoids Metal GPU Timeout on a full 45-layer MoE graph.
+    /// oMLX evaluates on a stride so a resident checkpoint does not keep the
+    /// whole graph lazy, and it does not sync inside every KDA step.
+    static let decodeEvalStride = 1
 
     /// oMLX public benchmark `0g84suc9`. Not a Z.ai figure.
     static let communityCeilingTokPerSecond = 38.5

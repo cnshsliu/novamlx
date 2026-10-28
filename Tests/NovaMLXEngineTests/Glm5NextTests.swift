@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import MLX
+import MLXLLM
 import MLXLMCommon
 @testable import NovaMLXEngine
 
@@ -162,7 +163,7 @@ struct Glm5NextTests {
             decodeTokens: 0, seconds: 1, promptTokens: 4, mtp: .absent) == nil)
         #expect(Glm5ChatDecode.line(
             decodeTokens: 4, seconds: 0, promptTokens: 4, mtp: .absent) == nil)
-        #expect(Glm5ChatDecode.decodeEvalStride == 8)
+        #expect(Glm5ChatDecode.decodeEvalStride == 1)
     }
 }
 

@@ -21,10 +21,11 @@ import NovaMLXUtils
 // - Checkpoint MTP is not a drafter here. A safe accept needs KDA state
 //   rollback and a short-block verifier. Without those, a draft can be kept
 //   when the target would have rejected it.
-// - One-token decode does not `eval` inside every KDA step. The graph is
-//   evaluated every `Glm5ChatDecode.decodeEvalStride` layers. Prefill still
-//   evaluates inside the recurrent loop. Routed experts sort at 64 rows,
-//   matching DeepSeek SwitchGLU.
+// - Decode (and prefill) do not `eval` inside every KDA step. The graph is
+//   evaluated every `Glm5ChatDecode.decodeEvalStride` layers (stride 1 to
+//   avoid Metal timeout on the full MoE graph). Prefill KDA still evaluates
+//   inside the recurrent loop when length > 1. Routed experts sort at 64
+//   rows, matching DeepSeek SwitchGLU.
 
 // MARK: - Memory
 
@@ -1148,11 +1149,13 @@ final class Glm5TextModel: Module {
         var hidden = embedTokens(inputs)
         hidden = MLX.repeated(
             MLX.expandedDimensions(hidden, axis: 2), count: config.hcMult, axis: 2)
-        let decoding = inputs.dim(1) == 1
         var topk: MLXArray?
         for (index, layer) in layers.enumerated() {
             (hidden, topk) = layer(hidden, cache: cache?[index], previousTopk: topk)
-            if decoding, (index + 1) % Glm5ChatDecode.decodeEvalStride == 0 {
+            // Prefill also strides eval: a full 45-layer MoE graph in one
+            // command buffer hits Metal GPU Timeout on M4 Max Debug (and
+            // can on Release). Decode already used decodeEvalStride.
+            if (index + 1) % Glm5ChatDecode.decodeEvalStride == 0 {
                 MLX.eval(hidden)
             }
         }
