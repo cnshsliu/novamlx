@@ -106,6 +106,9 @@ MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill �
 | `949285d`，`NOVA_UOCR_DECODE_FUSE=0` | **54.2 / 54.7** |
 | `949285d`，叠放默认打开 | **56.7 / 59.2** |
 | `949285d`，`NOVA_UOCR_MEGA=1` | **19.9 / 29.4**（发票与融合一致，大约 **−57%**） |
+| `a3cde09`，`NOVA_UOCR_DECODE_FUSE=0` | **56.1 / 54.5** |
+| `a3cde09`，叠放默认打开 | **59.5 / 50.4**（同一次会话里融合在大约 50–60 之间摆，第二轮偏冷） |
+| `a3cde09`，`NOVA_UOCR_EPILOGUE=1` | **54.7 / 56.5**（发票与融合一致；均值大约 **55.6** 对融合大约 **55.0**，落在噪声里） |
 
 `9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。`68c478b` 的单线程块计划是 **53.9 / 54.5**，已从热路径拿掉。把相同输入的 GEMM 叠到一起仍然有用：`0693994` 打开是 **57.4 / 58.9**，关掉是 **55.6 / 55.1**。`9946de8` 再把打分并进共享 gate+up（94 次降到 83 次），打开是 **57.9 / 60.8**，关掉是 **54.4 / 56.2**。相对 r14 的融合只多 **+0.5 / +1.9** tok/s，和噪声贴在一起，不能算再赢了一截。默认仍打开，因为它仍然快过对照。同一向量上的 GEMM 拼接到此为止。实测天花板大约是 **58–61 tok/s**（融合）对对照大约 **54–56**。热路径仍是按形状编译的计划和 512-key gather。
 
@@ -140,7 +143,11 @@ QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV �
 
 一次发射把 32 个 threadgroup 用 ticket barrier 拴在一起，所以它们必须同时在芯上。qmv 每组一次写 8 行，32 组一轮只有 256 行；1280 行的 GEMV 要串行 5 轮。MLX 的 `qmv` 是每 8 行一个 threadgroup（1280 行就是 160 组），组与组不用会合。MoE 层里这个核还有 29 次 device barrier（QKV、RoPE、SDPA、O、RMSNorm、打分、top-6，每个专家的 swiglu / down / 加权各一次，再加上共享 swiglu、down 和残差）。RoPE、RMSNorm 和专家加权在一个线程上跑，其余组在栅栏上等。把组数加到 160 会让栅栏等那些没排上的组；把组数再减少，每一轮 GEMV 更长。两条都不该再拿去和融合比速度。`NOVA_UOCR_MEGA` 保持关闭。融合仍是产品路径。
 
-下一刀已经落在融合路径旁边，默认关。`NOVA_UOCR_EPILOGUE=1` 用 MLX 那种每 8 行一个 threadgroup 的 qmv，在算出 gate 和 up 的同一组里写下 `silu(gate) * up`，不再把这两路激活读回来做 `compiledSiluProduct`。组与组之间没有 ticket barrier。O 投影同一风格加上残差（先把点积收成 bf16，再加跳连）。RMSNorm 仍要整段 1280 的平方和，没有塞进去。`NOVA_UOCR_MEGA` 仍关。融合仍是不设变量时的产品路径。这一版不写 tok/s。Mac 要对照的是同一构建上的发票，以及 STREAM 两次：`NOVA_UOCR_DECODE_FUSE=0`，两个变量都不设，以及 `NOVA_UOCR_EPILOGUE=1`（不要同时开 `NOVA_UOCR_MEGA`）。
+下一刀已经量过，默认仍然关。`a3cde09` 上 `NOVA_UOCR_EPILOGUE=1` 打出了 arming 日志（8 行 threadgroup 里写 `silu(gate)*up`，没有栅栏）。发票三次都过：对照、融合、收尾，都是 `INVOICE`，`n_tr=5`，`TOTAL=1176.50`，685 字。STREAM 是对照 **56.1 / 54.5**，融合 **59.5 / 50.4**，收尾 **54.7 / 56.5**。融合自己在这次会话里从大约 60 摆到大约 50，是冷 JIT。收尾均值大约 **55.6**，融合均值大约 **55.0**，没有拉开。`NOVA_UOCR_EPILOGUE` 保持默认关闭。没有再追一版无栅栏的 silu / O 收尾，除非以后有低方差的 A/B，并且稳定高于融合一截。
+
+产品路径仍是解码融合，M4 Max 上大约 **57–59** tok/s（暖机会话；`a3cde09` 第一轮融合是 **59.5**）。`NOVA_UOCR_MEGA` 保持关闭。`949285d` 的一次发射加 ticket barrier 发票是对的，STREAM **19.9 / 29.4**，大约比融合慢 **57%**，不再当速度路径。
+
+80–100 还没有。下一档如果要做，不在这个收尾里：要么是适合 MMA / tile 的量化 GEMV，去掉发射延迟，同时不要整图栅栏；要么是对这条视觉循环安全的投机，而不是把 DFlash / DSpark 套进图像解码。这两条现在都不实现。
 
 DFlash / DSpark 仍然接不上这个 VLM。Shapeless compile 不回到热路径。
 
