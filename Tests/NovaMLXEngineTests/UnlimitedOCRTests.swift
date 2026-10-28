@@ -229,6 +229,16 @@ struct UnlimitedOCRTests {
         #expect(rope.count == 4)
         #expect(abs(rope[0] - (1 * 1 + (-3) * 0)) < 0.0001)
         #expect(abs(rope[2] - (3 * 1 + 1 * 0)) < 0.0001)
+        let spun = [Float(1), 2, 3, 4]
+        let cos = [Float(0), 1, 0, 1]
+        let sin = [Float(1), 0, 1, 0]
+        let paired = UnlimitedOCRLayerKernel.applyRope(spun, cos: cos, sin: sin)
+        let spec = UnlimitedOCRLayerKernel.referenceRope(spun, cos: cos, sin: sin)
+        #expect(paired == spec)
+        #expect(UnlimitedOCRLayerKernel.ropeLeftToRight(spun, cos: cos, sin: sin) != spec)
+        #expect(abs(spec[0] - (-3)) < 0.0001)
+        #expect(abs(spec[2] - 1) < 0.0001)
+        #expect(UnlimitedOCRLayerKernel.ropeKernelUsesOriginalHalves())
         #expect(!UnlimitedOCRMegaDecode.allows(nil))
         #expect(!UnlimitedOCRMegaDecode.allows("0"))
         #expect(UnlimitedOCRMegaDecode.allows("1"))

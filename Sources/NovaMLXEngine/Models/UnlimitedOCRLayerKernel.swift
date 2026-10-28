@@ -148,12 +148,48 @@ enum UnlimitedOCRLayerKernel {
     static var launchThreads: Int { groups * threads }
 
     /// Half-split RoPE. `rot[d] = -x[d+half]` for the first half and `x[d-half]` after.
+    /// Both halves are read from the original vector. A left-to-right store reads the
+    /// first half after it has already been replaced, and the second half is wrong.
     static func referenceRope(_ x: [Float], cos: [Float], sin: [Float]) -> [Float] {
         let half = x.count / 2
         return (0..<x.count).map { d in
             let rot = d < half ? -x[d + half] : x[d - half]
             return x[d] * cos[d] + rot * sin[d]
         }
+    }
+
+    /// Same rotation, written as pairs. This is what the Metal loop has to do:
+    /// snapshot `x[d]` and `x[d+half]` before storing either.
+    static func applyRope(_ x: [Float], cos: [Float], sin: [Float]) -> [Float] {
+        let half = x.count / 2
+        var y = x
+        for d in 0..<half {
+            let x0 = x[d]
+            let x1 = x[d + half]
+            y[d] = x0 * cos[d] + (-x1) * sin[d]
+            y[d + half] = x1 * cos[d + half] + x0 * sin[d + half]
+        }
+        return y
+    }
+
+    /// Left-to-right in-place scan. The second half consumes the stored first half.
+    static func ropeLeftToRight(_ x: [Float], cos: [Float], sin: [Float]) -> [Float] {
+        var y = x
+        let half = x.count / 2
+        for d in 0..<y.count {
+            let rot = d < half ? -y[d + half] : y[d - half]
+            y[d] = y[d] * cos[d] + rot * sin[d]
+        }
+        return y
+    }
+
+    /// The kernel snapshots each pair. The left-to-right form is absent.
+    static func ropeKernelUsesOriginalHalves() -> Bool {
+        let body = layerSource(bits: 4)
+        return body.contains("float q1 = float(work[base + d + half])")
+            && body.contains("q1 * c1 + q0 * s1")
+            && !body.contains("work[i - DIM / 2u]")
+            && !body.contains("kNew[i - DIM / 2u]")
     }
 
     static func step(
@@ -306,7 +342,8 @@ enum UnlimitedOCRLayerKernel {
             guard let q = quant(attention.qProj), let k = quant(attention.kProj),
                 let v = quant(attention.vProj), let o = quant(attention.oProj),
                 q.bits == k.bits, q.bits == v.bits, q.bits == o.bits,
-                q.k == k.k, q.k == v.k, o.k == q.rows, q.rows == attention.heads * attention.headDim
+                q.k == k.k, q.k == v.k, o.k == q.rows, q.rows == attention.heads * attention.headDim,
+                k.rows == q.rows, v.rows == q.rows
             else { return nil }
             let postFlat = dictionary(normOut.parameters().flattened())
             guard let post = postFlat["weight"], post.dim(0) == q.k else { return nil }
@@ -620,16 +657,23 @@ enum UnlimitedOCRLayerKernel {
             uocr_qmv_all<bfloat16_t, BITS>(vw, vs, vb, xn, vNew, (int)H, (int)H, gid, simd_gid, simd_lid);
             uocr_barrier(counter, epoch, \(groups), lid);
             if (gid == 0 && lid == 0) {
-                for (uint i = 0; i < H; ++i) {
-                    uint d = i % DIM;
-                    float q0 = float(work[i]);
-                    float k0 = float(kNew[i]);
-                    float c = float(cosv[d]);
-                    float s = float(sinv[d]);
-                    float qRot = d < DIM / 2u ? -float(work[i + DIM / 2u]) : float(work[i - DIM / 2u]);
-                    float kRot = d < DIM / 2u ? -float(kNew[i + DIM / 2u]) : float(kNew[i - DIM / 2u]);
-                    work[i] = static_cast<bfloat16_t>(q0 * c + qRot * s);
-                    kNew[i] = static_cast<bfloat16_t>(k0 * c + kRot * s);
+                uint half = DIM / 2u;
+                for (uint h = 0; h < HEADS; ++h) {
+                    uint base = h * DIM;
+                    for (uint d = 0; d < half; ++d) {
+                        float q0 = float(work[base + d]);
+                        float q1 = float(work[base + d + half]);
+                        float k0 = float(kNew[base + d]);
+                        float k1 = float(kNew[base + d + half]);
+                        float c0 = float(cosv[d]);
+                        float s0 = float(sinv[d]);
+                        float c1 = float(cosv[d + half]);
+                        float s1 = float(sinv[d + half]);
+                        work[base + d] = static_cast<bfloat16_t>(q0 * c0 + (-q1) * s0);
+                        work[base + d + half] = static_cast<bfloat16_t>(q1 * c1 + q0 * s1);
+                        kNew[base + d] = static_cast<bfloat16_t>(k0 * c0 + (-k1) * s0);
+                        kNew[base + d + half] = static_cast<bfloat16_t>(k1 * c1 + k0 * s1);
+                    }
                 }
             }
             uocr_barrier(counter, epoch, \(groups), lid);
