@@ -29,7 +29,7 @@ OCR-2 没有 mlx-community 量化包。Nova 直接读官方 safetensors（`model
 - 12 个远端块 × 32 token，块由每层 `dash_router`（1.5-entmax，top-16 里再取 12）选出，并带 log-prior 偏置
 - 128 token 的局部窗（4 × 32），偏置为 0
 
-合计 **512** 个 key。实现是从定长 slab 上 `take` 这 512 个 key/value（slab 长度按步长增长），再交给 MLX 的 SDPA。`take` 和 SDPA 合成一次编译，块计划也按形状编译，所以一层不会在每个 token 上重搭这两段图。单 token 的专家选择是一个 Metal top-k（升序，和 `argPartition` 同一组专家）；prefill 仍走原来的多行链。没有「页数一长就退回全注意力」的路径。
+合计 **512** 个 key。实现是从定长 slab 上 `take` 这 512 个 key/value，再交给 MLX 的 SDPA。这两步保持即时求值：把它们放进 shapeless `compile` 时，Slice 推不出输出形状，第二个 token 会中断。单 token 的专家选择仍是一个 Metal top-k（升序，和 `argPartition` 同一组专家）；prefill 仍走原来的多行链。没有「页数一长就退回全注意力」的路径。
 
 语言栈是 4-bit。解码要读 MoE 专家和 DASH 路由，工作集大约是加载后的 2–3GB。在 M 系列的内存带宽上，这是每步几毫秒量级的上限，不是 gen-1 那种更瘦的环注意力在短票上的几百 tok/s。gen-1 的数字不能当成 OCR-2 的目标分数。这里不记录新的 tok/s。
 
