@@ -91,6 +91,9 @@ MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill �
 | `e9eb6f2`，`NOVA_UOCR_DECODE_FUSE=0` | **55.8 / 53.9** |
 | `e9eb6f2`，叠放默认打开 | **61.0 / 59.8** |
 | `e9eb6f2`，`NOVA_UOCR_MEGA=1` | **25.7 / 25.8**（发票与融合一致，大约 **−57%**） |
+| `bceb292`，`NOVA_UOCR_DECODE_FUSE=0` | **55.6 / 53.7** |
+| `bceb292`，叠放默认打开 | **59.5 / 59.6** |
+| `bceb292`，`NOVA_UOCR_MEGA=1` | 没有 tok/s（先是 `Quant` 缺少 `bits`；补一行后 Metal 拒绝 `buffer(46…51)`，下标只允许 0–30，worker signal 5） |
 
 `9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。`68c478b` 的单线程块计划是 **53.9 / 54.5**，已从热路径拿掉。把相同输入的 GEMM 叠到一起仍然有用：`0693994` 打开是 **57.4 / 58.9**，关掉是 **55.6 / 55.1**。`9946de8` 再把打分并进共享 gate+up（94 次降到 83 次），打开是 **57.9 / 60.8**，关掉是 **54.4 / 56.2**。相对 r14 的融合只多 **+0.5 / +1.9** tok/s，和噪声贴在一起，不能算再赢了一截。默认仍打开，因为它仍然快过对照。同一向量上的 GEMM 拼接到此为止。实测天花板大约是 **58–61 tok/s**（融合）对对照大约 **54–56**。热路径仍是按形状编译的计划和 512-key gather。
 
@@ -119,7 +122,9 @@ gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH +
 
 QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV 和 SDPA 中间，所以没有把 QKV 再写进这个核。默认**关**，因为还没有 Mac 上的 tok/s。`NOVA_UOCR_MEGA=1` 打开。`f1c6920` 在 Mac 上编 Metal 失败：bf16 输出不能直接收 `float`。写入改为 `static_cast<bfloat16_t>`。`578f468` 能编过，但发票是 BOS 重复：`grid` 是总线程数，核却把它当成 threadgroup 个数。`e9eb6f2` 把 `grid` 改成 `组数 × 组宽` 之后，发票表格和融合路径一致，没有 BOS 重复。STREAM 是 **25.7 / 25.8**，融合是 **61.0 / 59.8**，对照是 **55.8 / 53.9**。Megakernel 大约慢 **57%**。`NOVA_UOCR_MEGA` 保持默认关闭。这不是速度胜利。
 
-标量核在 `e9eb6f2` 上发票是对的，STREAM **25.7 / 25.8**，大约比融合慢 57%。那个核不再走解码。`NOVA_UOCR_MEGA=1` 现在是另一条：**每一层一次发射**，32 个 threadgroup，点积用 MLX 的 `qdot`（和 `quantizedMatmul` 同一套 int4/int8），1280 维激活留在这张图里走完 QKV、RoPE、512-key SDPA、O、第二个 RMSNorm 和 SwiGLU。组与组之间用 ticket barrier，所以 32 组必须同时在芯上；M4 Max 挂住的话就把开关关掉。默认仍然关闭。融合仍是产品路径。这一步不写 tok/s。Mac 要重测的是发票表格是否仍和融合一致，以及 STREAM 是否高于大约 60。
+标量核在 `e9eb6f2` 上发票是对的，STREAM **25.7 / 25.8**，大约比融合慢 57%。那个核不再走解码。`NOVA_UOCR_MEGA=1` 现在是另一条：**每一层一次发射**，32 个 threadgroup，点积用 MLX 的 `qdot`（和 `quantizedMatmul` 同一套 int4/int8），1280 维激活留在这张图里走完 QKV、RoPE、512-key SDPA、O、第二个 RMSNorm 和 SwiGLU。组与组之间用 ticket barrier，所以 32 组必须同时在芯上；M4 Max 挂住的话就把开关关掉。默认仍然关闭。融合仍是产品路径。
+
+`bceb292` 在 Mac 上编不过：`Quant` 没有 `bits`。本地补上那一行之后，日志打出 one-launch，然后 Metal JIT 失败，`buffer(46…51)` 超出 0–30。那一版把每张量化表各绑一个 buffer，46 个输入加 6 个输出。这一版把 11 张 uint32 权重收成 `weights`，12 张 bf16 scale（最后一张是 post-norm 权重）收成 `scales`，11 张 bf16 bias 收成 `biases`。每张表的元素偏移写在 `info` 里。绑定是 15 个输入加 6 个输出，下标 0–20。第一次解码把这三块 `eval` 出来，之后按层复用，不按 token 再拷。qdot 和 32 组保持不变。没有新的 tok/s。Mac 要重测的是 `NOVA_UOCR_MEGA=1` 的发票表格是否仍和融合一致，以及 STREAM 两次相对融合（不设 `NOVA_UOCR_DECODE_FUSE`）和对照（`NOVA_UOCR_DECODE_FUSE=0`）。
 
 80–100 如果这一枪还不够，剩下的就是把 DASH 计划也收进同一次发射，或者换能喂满 16×32 MMA 的量化。DFlash / DSpark 仍然接不上这个 VLM。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。Shapeless compile 不回到热路径。
 

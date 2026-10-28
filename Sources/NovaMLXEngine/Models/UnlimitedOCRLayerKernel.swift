@@ -14,9 +14,99 @@ import NovaMLXUtils
 /// and a ticket barrier. That is small enough for M4 Max to keep them all
 /// scheduled. The flag is `NOVA_UOCR_MEGA=1` and defaults off. The row-stack
 /// fuse stays the product path.
+///
+/// Metal gives a kernel 31 buffer arguments (indices 0...30). Binding each
+/// quant plane on its own used 46 inputs and 6 outputs, and the JIT rejected
+/// `buffer(46...51)`. The uint32 weights, the bf16 scales (post-norm weight
+/// included), and the bf16 biases are each one buffer. `info` holds the
+/// element offset of every plane. The copy is evaluated once per block and
+/// reused. The 32-group launch stays.
 enum UnlimitedOCRLayerKernel {
     static let groups = 32
     static let threads = 64
+
+    /// Metal function buffer arguments are indices 0 ... `metalBufferLimit - 1`.
+    static let metalBufferLimit = 31
+
+    static let inputNames = [
+        "x", "xn", "cosv", "sinv",
+        "weights", "scales", "biases",
+        "idx", "attnBias", "position", "info", "coeff", "sync",
+        "cacheK", "cacheV",
+    ]
+    static let outputNames = ["y", "kNew", "vNew", "work", "wts", "ids"]
+
+    static var boundBufferCount: Int { inputNames.count + outputNames.count }
+
+    /// `info` layout: 10 scalars, then weight offsets, scale offsets (post last), bias offsets.
+    static let infoScalars = 10
+    static let weightPlaneNames = ["q", "k", "v", "o", "score", "eg", "eu", "ed", "sg", "su", "sd"]
+    static let scalePlaneNames = weightPlaneNames + ["post"]
+    static let biasPlaneNames = weightPlaneNames
+    static let weightPointers = ["qw", "kw", "vw", "ow", "scw", "egw", "euw", "edw", "sgw", "suw", "sdw"]
+    static let scalePointers = [
+        "qs", "ks", "vs", "os", "scs", "egs", "eus", "eds", "sgs", "sus", "sds", "postw",
+    ]
+    static let biasPointers = ["qb", "kb", "vb", "ob", "scb", "egb", "eub", "edb", "sgb", "sub", "sdb"]
+
+    /// Prefix sums. `counts[i]` elements of plane `i` start at the returned offset.
+    static func planeOffsets(_ counts: [Int]) -> [Int] {
+        var offsets: [Int] = []
+        offsets.reserveCapacity(counts.count)
+        var cursor = 0
+        for count in counts {
+            offsets.append(cursor)
+            cursor += count
+        }
+        return offsets
+    }
+
+    /// Element of expert `id` inside a packed plane whose plane starts at `base`.
+    /// Matches `pointer + id * rows * (K / pack)`.
+    static func expertElement(base: Int, id: Int, rows: Int, packed: Int) -> Int {
+        base + id * rows * packed
+    }
+
+    /// Host check for the launch shape. True when every binding is in 0...30 and
+    /// the alias block covers the last `info` slot.
+    static func bindingFitsMetalLimit() -> Bool {
+        guard boundBufferCount <= metalBufferLimit,
+            weightPointers.count == weightPlaneNames.count,
+            scalePointers.count == scalePlaneNames.count,
+            biasPointers.count == biasPlaneNames.count
+        else { return false }
+        let infoCount = infoScalars + weightPointers.count + scalePointers.count + biasPointers.count
+        let lines = packedAliases().split(separator: "\n")
+        guard lines.count == infoCount - infoScalars else { return false }
+        return lines.contains { $0.contains("info[\(infoCount - 1)]") }
+    }
+
+    /// Device pointers the kernel takes from the three packed buffers.
+    static func packedAliases() -> String {
+        var lines: [String] = []
+        for (offset, name) in weightPointers.enumerated() {
+            lines.append(
+                "const device uint32_t* \(name) = weights + size_t(info[\(infoScalars + offset)]);")
+        }
+        let scaleBase = infoScalars + weightPointers.count
+        for (offset, name) in scalePointers.enumerated() {
+            lines.append(
+                "const device bfloat16_t* \(name) = scales + size_t(info[\(scaleBase + offset)]);")
+        }
+        let biasBase = scaleBase + scalePointers.count
+        for (offset, name) in biasPointers.enumerated() {
+            lines.append(
+                "const device bfloat16_t* \(name) = biases + size_t(info[\(biasBase + offset)]);")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Holds the packed planes for one block. Not an `MLXArray`, so `parameters()` skips it.
+    /// `planeLock` guards `plane`.
+    final class PlaneCache: @unchecked Sendable {
+        fileprivate var plane: PackedPlanes?
+        init() {}
+    }
 
     static func allows(_ raw: String?) -> Bool {
         switch raw?.lowercased() {
@@ -47,7 +137,8 @@ enum UnlimitedOCRLayerKernel {
         normOut: RMSNorm,
         mlp: Module,
         ctx: UnlimitedOCRDashContext,
-        cache: UnlimitedOCRDashCache
+        cache: UnlimitedOCRDashCache,
+        planes: PlaneCache
     ) -> MLXArray? {
         guard enabled, x.dtype == .bfloat16, ctx.decode, ctx.cos.size == attention.headDim,
             ctx.sin.size == attention.headDim
@@ -58,13 +149,22 @@ enum UnlimitedOCRLayerKernel {
         guard let weights = Weights.load(attention: attention, normOut: normOut, mlp: mlp) else {
             return nil
         }
-        guard let kernel = kernel(weights) else { return nil }
+        guard let kernel = kernel(weights), let plane = packed(planes, weights) else { return nil }
         let hidden = weights.hidden
         let heads = attention.heads
         let dim = attention.headDim
         let width = attention.params.attendedKeys
-        let info = MLXArray(weights.info(heads: heads, dim: dim, width: width, slab: cache.keys?.dim(2) ?? 0)
-            .map { UInt32($0) })
+        let header = weights.info(
+            heads: heads, dim: dim, width: width, slab: cache.keys?.dim(2) ?? 0)
+        guard header.count == infoScalars else { return nil }
+        var words: [UInt32] = []
+        words.reserveCapacity(
+            infoScalars + weightPointers.count + scalePointers.count + biasPointers.count)
+        for value in header + plane.weightOffsets + plane.scaleOffsets + plane.biasOffsets {
+            guard let word = UInt32(exactly: value) else { return nil }
+            words.append(word)
+        }
+        let info = MLXArray(words)
         let coeff = MLXArray([attention.scale, normOutEps])
         let position = ctx.position ?? MLXArray(Int32(0))
         let sync = MLXArray.zeros([2], dtype: .uint32)
@@ -74,18 +174,7 @@ enum UnlimitedOCRLayerKernel {
             [
                 x.reshaped([hidden]), xn.reshaped([hidden]),
                 ctx.cos.reshaped([dim]), ctx.sin.reshaped([dim]),
-                weights.q.weight, weights.q.scales, weights.q.biases,
-                weights.k.weight, weights.k.scales, weights.k.biases,
-                weights.v.weight, weights.v.scales, weights.v.biases,
-                weights.o.weight, weights.o.scales, weights.o.biases,
-                weights.post.reshaped([hidden]),
-                weights.score.weight, weights.score.scales, weights.score.biases,
-                weights.eg.weight, weights.eg.scales, weights.eg.biases,
-                weights.eu.weight, weights.eu.scales, weights.eu.biases,
-                weights.ed.weight, weights.ed.scales, weights.ed.biases,
-                weights.sg.weight, weights.sg.scales, weights.sg.biases,
-                weights.su.weight, weights.su.scales, weights.su.biases,
-                weights.sd.weight, weights.sd.scales, weights.sd.biases,
+                plane.weights, plane.scales, plane.biases,
                 idx.asType(.int32), mask.asType(.float32),
                 position.reshaped([1]).asType(.int32),
                 info, coeff, sync,
@@ -114,6 +203,59 @@ enum UnlimitedOCRLayerKernel {
         var rows: Int
         var k: Int
         var experts: Int
+        var bits: Int
+    }
+
+    fileprivate struct PackedPlanes {
+        var weights: MLXArray
+        var scales: MLXArray
+        var biases: MLXArray
+        var weightOffsets: [Int]
+        var scaleOffsets: [Int]
+        var biasOffsets: [Int]
+
+        static func make(_ weights: Weights) -> PackedPlanes? {
+            let quants = [
+                weights.q, weights.k, weights.v, weights.o, weights.score,
+                weights.eg, weights.eu, weights.ed, weights.sg, weights.su, weights.sd,
+            ]
+            guard quants.count == weightPlaneNames.count else { return nil }
+            let weightFlat = quants.map { $0.weight.reshaped([$0.weight.size]) }
+            let scaleFlat =
+                quants.map { $0.scales.reshaped([$0.scales.size]) }
+                + [weights.post.reshaped([weights.post.size])]
+            let biasFlat = quants.map { $0.biases.reshaped([$0.biases.size]) }
+            guard scaleFlat.count == scalePlaneNames.count, biasFlat.count == biasPlaneNames.count
+            else { return nil }
+            let weightOffsets = planeOffsets(weightFlat.map(\.size))
+            let scaleOffsets = planeOffsets(scaleFlat.map(\.size))
+            let biasOffsets = planeOffsets(biasFlat.map(\.size))
+            let w = concatenated(weightFlat, axis: 0)
+            let s = concatenated(scaleFlat, axis: 0)
+            let b = concatenated(biasFlat, axis: 0)
+            // Realized once. A lazy concat would copy every token.
+            MLX.eval(w, s, b)
+            return PackedPlanes(
+                weights: w, scales: s, biases: b,
+                weightOffsets: weightOffsets, scaleOffsets: scaleOffsets, biasOffsets: biasOffsets)
+        }
+    }
+
+    private static let planeLock = NSLock()
+
+    private static func packed(_ cache: PlaneCache, _ weights: Weights) -> PackedPlanes? {
+        planeLock.lock()
+        if let plane = cache.plane {
+            planeLock.unlock()
+            return plane
+        }
+        planeLock.unlock()
+        guard let built = PackedPlanes.make(weights) else { return nil }
+        planeLock.lock()
+        if cache.plane == nil { cache.plane = built }
+        let stored = cache.plane
+        planeLock.unlock()
+        return stored
     }
 
     private struct Weights {
@@ -211,19 +353,17 @@ enum UnlimitedOCRLayerKernel {
             return cached
         }
         lock.unlock()
+        precondition(
+            boundBufferCount <= metalBufferLimit
+                && weightPointers.count == weightPlaneNames.count
+                && scalePointers.count == scalePlaneNames.count
+                && biasPointers.count == biasPlaneNames.count,
+            "Unlimited OCR layer kernel bound \(boundBufferCount) buffers; Metal allows \(metalBufferLimit)."
+        )
         let built = MLXFast.metalKernel(
             name: "uocr_layer_\(weights.bits)",
-            inputNames: [
-                "x", "xn", "cosv", "sinv",
-                "qw", "qs", "qb", "kw", "ks", "kb", "vw", "vs", "vb", "ow", "os", "ob",
-                "postw",
-                "scw", "scs", "scb",
-                "egw", "egs", "egb", "euw", "eus", "eub", "edw", "eds", "edb",
-                "sgw", "sgs", "sgb", "suw", "sus", "sub", "sdw", "sds", "sdb",
-                "idx", "attnBias", "position", "info", "coeff", "sync",
-                "cacheK", "cacheV",
-            ],
-            outputNames: ["y", "kNew", "vNew", "work", "wts", "ids"],
+            inputNames: inputNames,
+            outputNames: outputNames,
             source: layerSource(bits: weights.bits),
             header: FlintM4MaxPrefillSteel.header + qmvHeader,
             ensureRowContiguous: true)
@@ -241,7 +381,7 @@ enum UnlimitedOCRLayerKernel {
         lock.unlock()
         guard first else { return }
         NovaMLXLog.info(
-            "[UnlimitedOCR] one-launch layer kernel (qdot qmv, \(groups) groups). Fuse stays the default."
+            "[UnlimitedOCR] one-launch layer kernel (qdot qmv, \(groups) groups, \(boundBufferCount) buffers). Fuse stays the default."
         )
     }
 
@@ -418,7 +558,9 @@ enum UnlimitedOCRLayerKernel {
         """
 
     private static func layerSource(bits: Int) -> String {
-        """
+        packedAliases()
+            + """
+
             constexpr int BITS = \(bits);
             const uint H = info[0];
             const uint HEADS = info[1];

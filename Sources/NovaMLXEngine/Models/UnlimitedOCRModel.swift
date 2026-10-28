@@ -197,6 +197,8 @@ final class UnlimitedOCRDashBlock: Module {
     @ModuleInfo(key: "self_attn") var attention: UnlimitedOCRDashAttention
     @ModuleInfo(key: "post_attention_layernorm") var postNorm: RMSNorm
     @ModuleInfo(key: "mlp") var mlp: Module
+    /// Packed quant planes for the one-launch kernel. Lifetime follows this block.
+    let oneLaunchPlanes = UnlimitedOCRLayerKernel.PlaneCache()
 
     init(_ config: UnlimitedOCRConfiguration, layer: Int) {
         _inputNorm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -217,7 +219,7 @@ final class UnlimitedOCRDashBlock: Module {
         if x.dim(0) == 1, x.dim(1) == 1,
             let fused = UnlimitedOCRLayerKernel.step(
                 x: x, normIn: inputNorm, attention: attention, normOut: postNorm,
-                mlp: mlp, ctx: ctx, cache: cache)
+                mlp: mlp, ctx: ctx, cache: cache, planes: oneLaunchPlanes)
         {
             return fused
         }
