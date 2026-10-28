@@ -886,6 +886,21 @@ final class UnlimitedOCRDashAttention: Module {
         super.init()
     }
 
+    /// Router plan for one decode step. Does not project QKV or write attention KV.
+    func gatherPlan(
+        _ x: MLXArray, _ ctx: UnlimitedOCRDashContext, _ cache: UnlimitedOCRDashCache
+    ) -> (MLXArray, MLXArray)? {
+        guard ctx.decode, ctx.position != nil, ctx.candidates != nil else { return nil }
+        let (idxQ, idxK) = router.indexQK(x, cos: ctx.cos, sin: ctx.sin)
+        cache.addIndexKeys(idxK, head: router.headCls)
+        let cap = ctx.candidateCount
+        let summaries = cache.summaryRows(capacity: cap, dim: router.headCls.dim(0))
+        return UnlimitedOCRDashMath.decodePlan(
+            query: idxQ, summaries: summaries, candidates: ctx.candidates!,
+            position: ctx.position!, indexScale: indexScale, floor: floor, params: params,
+            cap: cap, indexDim: params.indexDim)
+    }
+
     func callAsFunction(
         _ x: MLXArray, _ ctx: UnlimitedOCRDashContext, _ cache: UnlimitedOCRDashCache
     ) -> MLXArray {
@@ -916,13 +931,6 @@ final class UnlimitedOCRDashAttention: Module {
             // constant 512-wide mask. No shapeless trace, no `-1` slice.
             let sourceK = cache.keys ?? keys
             let sourceV = cache.values ?? values
-            if let fused = UnlimitedOCRMegaDecode.attend(
-                q: q, keys: sourceK, values: sourceV, index: idx, mask: mask,
-                scale: scale, output: oProj, heads: heads, dim: headDim,
-                width: params.attendedKeys)
-            {
-                return fused
-            }
             out = UnlimitedOCRCompiledDecode.attend(
                 q: q, keys: sourceK, values: sourceV, index: idx, mask: mask,
                 scale: scale, slab: sourceK.dim(2), width: params.attendedKeys)

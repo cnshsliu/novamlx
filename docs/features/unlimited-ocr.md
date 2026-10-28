@@ -119,9 +119,9 @@ gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH +
 
 QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV 和 SDPA 中间，所以没有把 QKV 再写进这个核。默认**关**，因为还没有 Mac 上的 tok/s。`NOVA_UOCR_MEGA=1` 打开。`f1c6920` 在 Mac 上编 Metal 失败：bf16 输出不能直接收 `float`。写入改为 `static_cast<bfloat16_t>`。`578f468` 能编过，但发票是 BOS 重复：`grid` 是总线程数，核却把它当成 threadgroup 个数。`e9eb6f2` 把 `grid` 改成 `组数 × 组宽` 之后，发票表格和融合路径一致，没有 BOS 重复。STREAM 是 **25.7 / 25.8**，融合是 **61.0 / 59.8**，对照是 **55.8 / 53.9**。Megakernel 大约慢 **57%**。`NOVA_UOCR_MEGA` 保持默认关闭。这不是速度胜利。
 
-慢在核的形状，不在 launch 个数。每个输出行用一个线程做标量 int4 点积，128 宽的组盖住 top-6 和 512 个 key。MLX 的 `quantizedMatmul` / `gatherQuantizedMM` 已经是这条 M=1、M=6 的 qmv。把 silu 和 down 焊在一起省下的是几 KB 的中间激活，权重还是要整行读。Flint 的 steel `BlockMMA`（tile 16×32）在行数低于 `4 × 专家数`（这里是 256）时不用，因为半空的 tile 比 `SwitchGLU` 慢。解码只有 1 行或 6 行，再铺一次同样的标量循环预期追不上融合。所以不再为这个核请 Mac 重测。
+标量核在 `e9eb6f2` 上发票是对的，STREAM **25.7 / 25.8**，大约比融合慢 57%。那个核不再走解码。`NOVA_UOCR_MEGA=1` 现在是另一条：**每一层一次发射**，32 个 threadgroup，点积用 MLX 的 `qdot`（和 `quantizedMatmul` 同一套 int4/int8），1280 维激活留在这张图里走完 QKV、RoPE、512-key SDPA、O、第二个 RMSNorm 和 SwiGLU。组与组之间用 ticket barrier，所以 32 组必须同时在芯上；M4 Max 挂住的话就把开关关掉。默认仍然关闭。融合仍是产品路径。这一步不写 tok/s。Mac 要重测的是发票表格是否仍和融合一致，以及 STREAM 是否高于大约 60。
 
-要到 80–100，得是每一层**一次**发射，把 1280 维激活留在 threadgroup 里走完 int4 QKV、RoPE、KV 写回、512-key SDPA 和 SwiGLU，或者换一套能喂满 MMA tile 的量化核。页游标可回滚的投机解码仍然是另一条路，DFlash / DSpark 接不上这个 VLM。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。Shapeless compile 不回到热路径。
+80–100 如果这一枪还不够，剩下的就是把 DASH 计划也收进同一次发射，或者换能喂满 16×32 MMA 的量化。DFlash / DSpark 仍然接不上这个 VLM。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。Shapeless compile 不回到热路径。
 
 ## Related
 

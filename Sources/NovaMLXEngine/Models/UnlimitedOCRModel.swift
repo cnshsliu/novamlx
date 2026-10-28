@@ -23,9 +23,6 @@ final class UnlimitedOCRDenseMLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        if let fused = UnlimitedOCRMegaDecode.mlp(self, x) {
-            return fused
-        }
         if let fused = UnlimitedOCRDecodeFuse.project(gate, up, x) {
             return down(compiledSiluProduct(fused.0, fused.1))
         }
@@ -58,17 +55,6 @@ final class UnlimitedOCRMoE: Module {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let singleRow = x.dim(0) == 1 && x.dim(1) == 1
-        if singleRow, UnlimitedOCRMegaDecode.enabled {
-            let scores = softmax(gate(x).asType(.float32), axis: -1, precise: true)
-            let (inds, chosen) = UnlimitedOCRExpertTopK.selectRow(
-                scores, experts: expertsCount, k: topK)
-            if let mixed = UnlimitedOCRMegaDecode.experts(
-                experts, x, inds, chosen, scale: scale),
-                let sharedOut = UnlimitedOCRMegaDecode.mlp(shared, x)
-            {
-                return mixed + sharedOut
-            }
-        }
         // Score, shared gate, and shared up read the same vector. One matmul
         // is the same rows as three. Expert down still sees silu(gate) * up.
         if singleRow,
@@ -228,6 +214,13 @@ final class UnlimitedOCRDashBlock: Module {
     func callAsFunction(
         _ x: MLXArray, _ ctx: UnlimitedOCRDashContext, _ cache: UnlimitedOCRDashCache
     ) -> MLXArray {
+        if x.dim(0) == 1, x.dim(1) == 1,
+            let fused = UnlimitedOCRLayerKernel.step(
+                x: x, normIn: inputNorm, attention: attention, normOut: postNorm,
+                mlp: mlp, ctx: ctx, cache: cache)
+        {
+            return fused
+        }
         let y = x + attention(inputNorm(x), ctx, cache)
         if let dense = mlp as? UnlimitedOCRDenseMLP {
             return y + dense(postNorm(y))
