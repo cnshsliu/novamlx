@@ -54,8 +54,21 @@ final class UnlimitedOCRMoE: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let scores = softmax(gate(x).asType(.float32), axis: -1, precise: true)
         let singleRow = x.dim(0) == 1 && x.dim(1) == 1
+        // Score, shared gate, and shared up read the same vector. One matmul
+        // is the same rows as three. Expert down still sees silu(gate) * up.
+        if singleRow,
+            let stacked = UnlimitedOCRDecodeFuse.project(gate, shared.gate, shared.up, x)
+        {
+            let scores = softmax(stacked.0.asType(.float32), axis: -1, precise: true)
+            let (inds, chosen) = UnlimitedOCRExpertTopK.selectRow(
+                scores, experts: expertsCount, k: topK)
+            let projected = UnlimitedOCRDecodeFuse.projectExperts(
+                experts, x, inds, assignments: topK) ?? experts(x, inds)
+            let mixed = weightedExpertSum(projected, (chosen * scale).asType(x.dtype))
+            return mixed + shared.down(compiledSiluProduct(stacked.1, stacked.2))
+        }
+        let scores = softmax(gate(x).asType(.float32), axis: -1, precise: true)
         let (inds, chosen) = singleRow
             ? UnlimitedOCRExpertTopK.selectRow(scores, experts: expertsCount, k: topK)
             : UnlimitedOCRExpertTopK.chain(scores, k: topK)

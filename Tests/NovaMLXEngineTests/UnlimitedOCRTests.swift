@@ -154,7 +154,9 @@ struct UnlimitedOCRTests {
         let separate = UnlimitedOCRDecodeFuse.gemmBudget(layers: 12, denseLayers: 1, fused: false)
         let fused = UnlimitedOCRDecodeFuse.gemmBudget(layers: 12, denseLayers: 1, fused: true)
         #expect(separate.total == 153)
-        #expect(fused.total == 94)
+        #expect(separate.routerScore == 11)
+        #expect(fused.total == 83)
+        #expect(fused.routerScore == 0)
         #expect(fused.qkv == 12)
         #expect(fused.experts == 22)
         #expect(fused.attentionOut == separate.attentionOut)
@@ -168,6 +170,11 @@ struct UnlimitedOCRTests {
             + UnlimitedOCRDecodeFuse.referenceConcatDots(x, up)
         let stacked = UnlimitedOCRDecodeFuse.referenceConcatDots(x, gate + up)
         #expect(split == stacked)
+        let score = [[Float(1), 0]]
+        let three = UnlimitedOCRDecodeFuse.referenceConcatDots(x, score)
+            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, gate)
+            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, up)
+        #expect(three == UnlimitedOCRDecodeFuse.referenceConcatDots(x, score + gate + up))
 
         #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 160, groups: 20)?.bits == 4)
         #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 160, groups: 20)?.group == 64)

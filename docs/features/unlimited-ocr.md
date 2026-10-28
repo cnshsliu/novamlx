@@ -31,7 +31,7 @@ OCR-2 没有 mlx-community 量化包。Nova 直接读官方 safetensors（`model
 
 合计 **512** 个 key。解码时每一层的块计划按具体的 summary 宽度编译一次（`UnlimitedOCRDashMath.decodePlan`），Gather 和 SDPA 按 slab 长度编译。输出长度固定为 `topK * block + local`（发布配置 512）。不用 shapeless，也不用 `-1` 切片。单 token 的专家选择仍是一个 Metal top-k。Prefill 仍走多行的原计划。没有「页数一长就退回全注意力」的路径。主机上的 `UnlimitedOCRDashPlan.reference` 锁住同一套 1.5-entmax。
 
-单 token 解码把同一套乘加叠成更少的 GEMM：Q/K/V 一次，`dash_router` 的 Q/K 一次，专家和共享 MLP 的 gate+up 各一次（`quantizedMatmul` 或 `gatherQuantizedMM`，量化行按输出维拼接，数值与分开算相同）。专家 gate+up 的拼接权重会再留一份。O 投影、专家 down、打分线性层和 `lm_head` 仍各是一次。块计划不是那个单线程 Metal 核。`NOVA_UOCR_DECODE_FUSE=0` 回到拆开的调用。发布配置上 GEMM 次数从 153 降到 94。这里不写 tok/s。
+单 token 解码把同一套乘加叠成更少的 GEMM：Q/K/V 一次，`dash_router` 的 Q/K 一次，专家 gate+up 一次（`gatherQuantizedMM`）。打分线性层和共享 MLP 的 gate+up 读的是同一个向量，所以打分行拼在那一次 `quantizedMatmul` 上，不再单独发射。量化行按输出维拼接，乘积与分开算相同。`compiledSiluProduct` 仍是 silu 乘 up；专家 down 的输入是这个乘积，O 投影和 `lm_head` 的输入也各不相同，所以这三处已经是一次 GEMM，再拼接会改掉乘积。块计划不是那个单线程 Metal 核。`NOVA_UOCR_DECODE_FUSE=0` 回到拆开的调用。发布配置上 GEMM 次数从 153 降到 83。专家 gate+up 的拼接权重会再留一份。
 
 语言栈是 4-bit。选中的专家走 `SwitchGLU` 的 `gatherQuantizedMM`（top-6），不是把 64 个专家整层展开。把单 token 的 MoE / 稠密 MLP 再编译一次，Mac 上测出来和只编译 DASH 一样，所以那层编译已去掉。
 
@@ -84,14 +84,16 @@ MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill �
 | `9d762ef` / `c8e1942`，DASH 按具体形状编译 | **53.3–56.5** |
 | `5047946`，再编译 MoE / 稠密 MLP | **55.0–55.4**（没有增益，已去掉） |
 | `68c478b`，每层一个 Metal 块计划 | **53.9 / 54.5**（相对 53–56 没有增益，已从热路径拿掉） |
+| `0693994`，同一构建，`NOVA_UOCR_DECODE_FUSE=0` | **55.6 / 55.1** |
+| `0693994`，GEMM 叠放默认打开 | **57.4 / 58.9**（约 **+2.8** tok/s，约 +5%） |
 
-`9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。`68c478b` 把块计划收成每层一个单线程 Metal 核，Release、加载和多 token 发票都通过，也没有 Slice 崩溃，但 STREAM 仍是 **53.9 / 54.5**。块计划不是那约 18 ms 的大头。热路径仍是按形状编译的计划和 512-key gather。在这之上，单 token 把 QKV、router Q/K 和 gate+up 叠成一次 GEMM（见上）。这次还没有 Mac 上的 tok/s。
+`9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。`68c478b` 的单线程块计划是 **53.9 / 54.5**，已从热路径拿掉。`0693994` 把 QKV、router Q/K 和 gate+up 叠成更少的 GEMM（94 对 153）。同一构建上融合打开是 **57.4 / 58.9**，关掉是 **55.6 / 55.1**。默认保持打开。离 80–100 仍远。热路径仍是按形状编译的计划和 512-key gather。
 
 DFlash / DSpark 不能套到这条 VLM 上。图像解码在 `mlxContainer.perform` 里自己循环，不进文本迭代器；那个迭代器的 prefill 只嵌入文本 token，会丢掉已经写进 KV 的视觉特征。DASH 的解码上下文是单 query（一个位置、一组 512 key）。多枚草稿要每个位置自己的 RoPE、块计划和 gather。`UnlimitedOCRDashCache.trim` 不做任何事，页游标和块摘要也不会随 KV 的 `state` 回滚，拒绝草稿会写坏下一枚 token 的页位置。树里的草稿名单只有 Qwen3.8 DFlash2 和 DeepSeek-V4.1 DSpark，隐层和词表对不上 OCR-2（1280 / 129280）。这一版不接投机解码，也不再把 MoE / 稠密 MLP 放进 `mlx.compile`。
 
-再往上提速，剩下的是 O 投影、专家 down、打分 GEMM 和 `lm_head`，以及 512-key 的 SDPA。把这些和 gate/up/SiLU 收成每层一个核，才是下一次结构改动。多 query 的 DASH 验证仍然不做。不在这里记一个新的 tok/s。
+打分 GEMM 已经并进共享 gate+up。O 投影、专家 down 和 `lm_head` 各吃一个不同的向量，本身就只发射一次；把它们再并进 gate+up 会改乘积。SiLU 走现成的 `compiledSiluProduct`。下一次若还要减核，得是一个真正的层核，而不是再拼一次相同的 K。多 query 的 DASH 验证仍然不做。这一步不记新的 tok/s。
 
-同一构建上的 A/B：发票多 token 要完整、没有 Slice 崩溃，并且 `[STREAM] VLM` 的 decode tok/s 跑两次。对照是 `NOVA_UOCR_DECODE_FUSE=0`（拆开的 GEMM，约 53–56）。打开融合是不设这个变量。只比较这两次，不要把融合核的 tok/s 写进文档，除非 Mac 量到了。
+同一构建上的 A/B：发票多 token 要完整、没有 Slice 崩溃，并且 `[STREAM] VLM` 的 decode tok/s 跑两次。对照是 `NOVA_UOCR_DECODE_FUSE=0`。融合是不设这个变量。日志里的 GEMM 次数，拆开是 153，叠放是 83。
 
 gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH + 64 专家。
 

@@ -6,17 +6,17 @@ import NovaMLXUtils
 
 /// Seq=1 decode GEMM fuse for Unlimited OCR.
 ///
-/// One token was a long chain of tiny matrix multiplies: Q, K, and V; the
-/// DASH router Q and K; expert gate and up; and the dense / shared gate and up.
-/// Each pair or triple shares K, so stacking the output rows and calling
-/// `quantizedMatmul` or `gatherQuantizedMM` once is the same product as the
-/// separate calls. Affine rows stay byte-identical: quantization is per output
-/// row, and the stacked weight is those rows concatenated.
+/// One token was a long chain of tiny matrix multiplies. Rows that share K
+/// are stacked: Q, K, and V; the DASH router Q and K; expert gate and up; and
+/// the MoE score linear on the same matmul as the shared gate and up. Affine
+/// rows stay byte-identical because quantization is per output row.
 ///
-/// This is not an `mlx.compile` of the MoE, and it is not the one-thread DASH
-/// plan kernel. The 512-key gather, SDPA, block plan, expert down projection,
-/// attention output projection, and `lm_head` stay on their existing kernels.
-/// `NOVA_UOCR_DECODE_FUSE=0` keeps every one of those separate calls.
+/// Expert down, the attention output projection, and `lm_head` each already
+/// consume a different vector, so stacking them would change the product.
+/// Gate and up already share one GEMM; `compiledSiluProduct` is the silu
+/// multiply, and down reads that result. This is not an `mlx.compile` of the
+/// MoE and not the one-thread DASH plan kernel. The 512-key gather stays.
+/// `NOVA_UOCR_DECODE_FUSE=0` keeps every call separate.
 enum UnlimitedOCRDecodeFuse {
     struct GemmBudget: Equatable {
         var qkv: Int
@@ -33,9 +33,9 @@ enum UnlimitedOCRDecodeFuse {
         }
     }
 
-    /// GEMM launches for one decode token. `fused` stacks QKV, router QK, and
-    /// each gate+up. Output projection, expert down, the score linear, and
-    /// `lm_head` stay one launch each.
+    /// GEMM launches for one decode token. `fused` stacks QKV, router QK, each
+    /// gate+up, and the MoE score rows onto the shared gate+up matmul.
+    /// Output projection, expert down, and `lm_head` stay one launch each.
     static func gemmBudget(layers: Int, denseLayers: Int, fused: Bool) -> GemmBudget {
         let moe = max(0, layers - denseLayers)
         let qkv = fused ? layers : layers * 3
@@ -50,7 +50,7 @@ enum UnlimitedOCRDecodeFuse {
             experts: experts,
             shared: shared,
             dense: dense,
-            routerScore: moe,
+            routerScore: fused ? 0 : moe,
             lmHead: 1)
     }
 
@@ -355,7 +355,7 @@ enum UnlimitedOCRDecodeFuse {
             let budget = UnlimitedOCRDecodeFuse.gemmBudget(layers: 12, denseLayers: 1, fused: true)
             let separate = UnlimitedOCRDecodeFuse.gemmBudget(layers: 12, denseLayers: 1, fused: false)
             NovaMLXLog.info(
-                "[UnlimitedOCR] seq=1 decode fuse stacks QKV, router QK, and gate+up (\(budget.total) GEMMs, separate path \(separate.total)). DASH gather stays 512 keys."
+                "[UnlimitedOCR] seq=1 decode fuse stacks QKV, router QK, gate+up, and the MoE score (\(budget.total) GEMMs, separate path \(separate.total)). DASH gather stays 512 keys."
             )
         }
 
