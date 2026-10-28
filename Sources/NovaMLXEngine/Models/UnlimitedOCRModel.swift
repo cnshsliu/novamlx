@@ -29,6 +29,7 @@ final class UnlimitedOCRDenseMLP: Module {
 
 final class UnlimitedOCRMoE: Module {
     let topK: Int
+    let expertsCount: Int
     let scale: Float
     @ModuleInfo(key: "gate") var gate: Linear
     @ModuleInfo(key: "switch_mlp") var experts: SwitchGLU
@@ -36,6 +37,7 @@ final class UnlimitedOCRMoE: Module {
 
     init(_ config: UnlimitedOCRConfiguration) {
         topK = config.expertsPerToken
+        expertsCount = config.routedExperts
         scale = 1
         _gate.wrappedValue = Linear(config.hiddenSize, config.routedExperts, bias: false)
         _experts.wrappedValue = SwitchGLU(
@@ -50,12 +52,85 @@ final class UnlimitedOCRMoE: Module {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let scores = softmax(gate(x).asType(.float32), axis: -1, precise: true)
-        let kth = scores.dim(-1) - topK
-        let part = argPartition(scores, kth: kth, axis: -1)
-        let inds = part[.ellipsis, kth...].asType(.int32)
-        let chosen = takeAlong(scores, inds, axis: -1) * scale
-        let mixed = weightedExpertSum(experts(x, inds), chosen.asType(x.dtype))
+        let singleRow = x.dim(0) == 1 && x.dim(1) == 1
+        let (inds, chosen) = singleRow
+            ? UnlimitedOCRExpertTopK.selectRow(scores, experts: expertsCount, k: topK)
+            : UnlimitedOCRExpertTopK.chain(scores, k: topK)
+        let mixed = weightedExpertSum(experts(x, inds), (chosen * scale).asType(x.dtype))
         return mixed + shared(x)
+    }
+}
+
+/// Single-row top-k. One threadgroup, ascending, same experts as
+/// `argPartition` + `takeAlong`. Prefill and any wider row keep that chain.
+enum UnlimitedOCRExpertTopK {
+    private static let lock = NSLock()
+    private static var kernels: [Int: MLXFast.MLXFastKernel] = [:]
+
+    static func selectRow(_ scores: MLXArray, experts: Int, k: Int) -> (MLXArray, MLXArray) {
+        guard experts <= 1024, k > 0, k <= experts, scores.dtype == .float32,
+            let kernel = kernel(experts: experts, k: k)
+        else {
+            return chain(scores, k: k)
+        }
+        let shape = [1, 1, k]
+        let out = kernel(
+            [scores],
+            grid: (experts, 1, 1),
+            threadGroup: (experts, 1, 1),
+            outputShapes: [shape, shape],
+            outputDTypes: [.uint32, .float32]
+        )
+        return (out[0].asType(.int32), out[1])
+    }
+
+    static func chain(_ scores: MLXArray, k: Int) -> (MLXArray, MLXArray) {
+        let kth = scores.dim(-1) - k
+        let inds = argPartition(scores, kth: kth, axis: -1)[.ellipsis, kth...].asType(.int32)
+        return (inds, takeAlong(scores, inds, axis: -1))
+    }
+
+    private static func kernel(experts: Int, k: Int) -> MLXFast.MLXFastKernel? {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = experts * 1024 + k
+        if let cached = kernels[key] { return cached }
+        let source = """
+            uint t = thread_position_in_threadgroup.x;
+            threadgroup ulong sk[\(experts)];
+            threadgroup float top_v[\(k)];
+            float v = selection[t];
+            uint b = (v == 0.0f) ? 0u : as_type<uint>(v);
+            uint mono = isnan(v) ? 0xFFFFFFFFu : (b ^ ((uint)(((int)b) >> 31) | 0x80000000u));
+            ulong key = (((ulong)mono) << 32) | (ulong)t;
+            sk[t] = key;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            int above = 0;
+            for (uint j = 0; j < \(experts)u; ++j) {
+                above += (sk[j] > key) ? 1 : 0;
+            }
+            if (above < \(k)) {
+                uint slot = (uint)(\(k) - 1 - above);
+                top_v[slot] = selection[t];
+                inds[slot] = t;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (t == 0) {
+                for (int q = 0; q < \(k); ++q) {
+                    scores[q] = top_v[q];
+                }
+            }
+            """
+        let kernel = MLXFast.metalKernel(
+            name: "uocr_router_topk_\(experts)_\(k)",
+            inputNames: ["selection"],
+            outputNames: ["inds", "scores"],
+            source: source,
+            header: "",
+            ensureRowContiguous: true
+        )
+        kernels[key] = kernel
+        return kernel
     }
 }
 

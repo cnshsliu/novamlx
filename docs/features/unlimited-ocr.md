@@ -29,7 +29,9 @@ OCR-2 没有 mlx-community 量化包。Nova 直接读官方 safetensors（`model
 - 12 个远端块 × 32 token，块由每层 `dash_router`（1.5-entmax，top-16 里再取 12）选出，并带 log-prior 偏置
 - 128 token 的局部窗（4 × 32），偏置为 0
 
-合计 **512** 个 key。实现是从定长 slab 上 `take` 这 512 个 key/value（slab 长度按步长增长，避免每步重编译 SDPA），再交给 MLX 的 fused SDPA。没有「页数一长就退回全注意力」的路径。块表在 prefill 之后留在设备上。解码一步只在读出采样 id 时同步一次。
+合计 **512** 个 key。实现是从定长 slab 上 `take` 这 512 个 key/value（slab 长度按步长增长），再交给 MLX 的 SDPA。`take` 和 SDPA 合成一次编译，块计划也按形状编译，所以一层不会在每个 token 上重搭这两段图。单 token 的专家选择是一个 Metal top-k（升序，和 `argPartition` 同一组专家）；prefill 仍走原来的多行链。没有「页数一长就退回全注意力」的路径。
+
+语言栈是 4-bit。解码要读 MoE 专家和 DASH 路由，工作集大约是加载后的 2–3GB。在 M 系列的内存带宽上，这是每步几毫秒量级的上限，不是 gen-1 那种更瘦的环注意力在短票上的几百 tok/s。gen-1 的数字不能当成 OCR-2 的目标分数。这里不记录新的 tok/s。
 
 MoE 走 Nova 现有的 `SwitchGLU`（排序后的专家 GEMM，和 Flint 同一条原语）。未量化的语言线性和专家在加载后做 affine 分组量化，组大小 64：
 
@@ -72,7 +74,7 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 
 ## Limits / notes
 
-- 不要把别的栈上的 tok/s 当成 Nova 的数字。`[STREAM] VLM` 现在分开打 prefill 秒数和 decode tok/s（第一枚 token 之后）。对照本机的 mlx-vlm gen-1，以及官方 CUDA OCR-2 在可比页数上的延迟。
+- `[STREAM] VLM` 分开打 prefill 秒数和 decode tok/s（第一枚 token 之后）。gen-1 mlx-vlm 在短票上的 tok/s 是环注意力，不是这条 DASH + 64 专家的路径。对照时看解码 tok/s，不要把那一个数当成 OCR-2 的未达标线。4-bit 语言栈每次解码都要碰专家权重，上限由内存带宽决定。
 - 视觉塔按 tile 求值并清中间激活。一张很高的收据不会把全部 SAM/CLIP 图和语言 prefill 焊成一张图再挂住。
 - 解码的注意力工作集是 512 key。KV 仍按已见 token 线性保存，因为当前页的图像块可能被选中。工作集不随页数变宽；缓存占用会变。
 - Prefill 仍按块（最多 2048 个 query）对整段 prompt 建稀疏加性 mask，所以首 token 时间随页数涨。这是 prefill，不是解码退回全注意力。

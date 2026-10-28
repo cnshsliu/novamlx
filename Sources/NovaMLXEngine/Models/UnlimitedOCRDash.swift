@@ -414,7 +414,24 @@ enum UnlimitedOCRDashMath {
     }
 
     /// One decode query: top-m entmax, top-k blocks, then the 512 gather plan.
+    /// The body is traced once per shape. Rebuilding it on every layer was
+    /// most of the host time in a decode step.
     static func decodePlan(
+        query: MLXArray,
+        summaries: MLXArray,
+        candidates: MLXArray,
+        position: MLXArray,
+        indexScale: Float,
+        floor: Float,
+        params: UnlimitedOCRDashParams
+    ) -> (MLXArray, MLXArray) {
+        let out = UnlimitedOCRCompiledDecode.plan(
+            query: query, summaries: summaries, candidates: candidates, position: position,
+            indexScale: indexScale, floor: floor, params: params)
+        return out
+    }
+
+    static func planEager(
         query: MLXArray,
         summaries: MLXArray,
         candidates: MLXArray,
@@ -566,6 +583,8 @@ struct UnlimitedOCRDashContext {
     var length: Int
     var decode: Bool
     var candidates: MLXArray?
+    /// Width of `candidates`. Kept on the host so decode does not read a shape.
+    var candidateCount: Int
     var position: MLXArray?
 }
 
@@ -597,7 +616,7 @@ func unlimitedOCRContext(
         let cand = MLXArray(flat).reshaped(length, blocks) .== MLXArray(Int32(1))
         return UnlimitedOCRDashContext(
             cos: angles.0, sin: angles.1, offset: offset, length: length,
-            decode: false, candidates: cand, position: nil)
+            decode: false, candidates: cand, candidateCount: blocks, position: nil)
     }
 
     let token = tokens!.reshaped(-1)[-1].asType(.int32)
@@ -642,7 +661,96 @@ func unlimitedOCRContext(
     }
     return UnlimitedOCRDashContext(
         cos: angles.0, sin: angles.1, offset: offset, length: length,
-        decode: true, candidates: candidates, position: MLXArray(Int32(offset)))
+        decode: true, candidates: candidates, candidateCount: cap,
+        position: MLXArray(Int32(offset)))
+}
+
+/// Compiled single-token DASH pieces. Shapes are stable for a slab step, so
+/// the host does not rebuild the gather or the block plan on every layer.
+private enum UnlimitedOCRCompiledDecode {
+    private struct PlanKey: Hashable {
+        var block: Int
+        var local: Int
+        var localBlocks: Int
+        var topM: Int
+        var topK: Int
+        var sigmaBits: UInt32
+        var scaleBits: UInt32
+        var floorBits: UInt32
+    }
+
+    private final class Store: @unchecked Sendable {
+        static let shared = Store()
+        let lock = NSLock()
+        var plans: [PlanKey: @Sendable ([MLXArray]) -> [MLXArray]] = [:]
+        var attend: [UInt32: @Sendable ([MLXArray]) -> [MLXArray]] = [:]
+    }
+
+    static func plan(
+        query: MLXArray,
+        summaries: MLXArray,
+        candidates: MLXArray,
+        position: MLXArray,
+        indexScale: Float,
+        floor: Float,
+        params: UnlimitedOCRDashParams
+    ) -> (MLXArray, MLXArray) {
+        let key = PlanKey(
+            block: params.blockSize,
+            local: params.localWindow,
+            localBlocks: params.localBlocks,
+            topM: params.topM,
+            topK: params.topK,
+            sigmaBits: params.sigma.bitPattern,
+            scaleBits: indexScale.bitPattern,
+            floorBits: floor.bitPattern)
+        let function = planFunction(key, indexScale: indexScale, floor: floor, params: params)
+        let out = function([query, summaries, candidates, position])
+        return (out[0], out[1])
+    }
+
+    static func attend(
+        q: MLXArray, keys: MLXArray, values: MLXArray, index: MLXArray, mask: MLXArray, scale: Float
+    ) -> MLXArray {
+        attendFunction(scale)([q, keys, values, index, mask])[0]
+    }
+
+    private static func planFunction(
+        _ key: PlanKey, indexScale: Float, floor: Float, params: UnlimitedOCRDashParams
+    ) -> @Sendable ([MLXArray]) -> [MLXArray] {
+        let store = Store.shared
+        store.lock.lock()
+        defer { store.lock.unlock() }
+        if let cached = store.plans[key] { return cached }
+        let created = compile(shapeless: true) { (args: [MLXArray]) -> [MLXArray] in
+            let pair = UnlimitedOCRDashMath.planEager(
+                query: args[0], summaries: args[1], candidates: args[2], position: args[3],
+                indexScale: indexScale, floor: floor, params: params)
+            return [pair.0, pair.1]
+        }
+        store.plans[key] = created
+        return created
+    }
+
+    private static func attendFunction(_ scale: Float) -> @Sendable ([MLXArray]) -> [MLXArray] {
+        let store = Store.shared
+        let bits = scale.bitPattern
+        store.lock.lock()
+        defer { store.lock.unlock() }
+        if let cached = store.attend[bits] { return cached }
+        let created = compile(shapeless: true) { (args: [MLXArray]) -> [MLXArray] in
+            let queries = args[0]
+            let gatheredK = args[1].take(args[3], axis: 2)
+            let gatheredV = args[2].take(args[3], axis: 2)
+            let additive = args[4].asType(queries.dtype).reshaped([1, 1, 1, -1])
+            let out = MLXFast.scaledDotProductAttention(
+                queries: queries, keys: gatheredK, values: gatheredV,
+                scale: scale, mask: .array(additive))
+            return [out]
+        }
+        store.attend[bits] = created
+        return created
+    }
 }
 
 // MARK: - Router and attention
@@ -745,22 +853,19 @@ final class UnlimitedOCRDashAttention: Module {
         cache.addIndexKeys(idxK, head: router.headCls)
         let out: MLXArray
         if ctx.decode {
-            let cap = ctx.candidates?.dim(-1) ?? params.attendedKeys
-            let summaries = cache.summaryRows(capacity: cap, dim: idxK.dim(-1))
+            let cap = ctx.candidateCount
+            let summaries = cache.summaryRows(capacity: cap, dim: router.headCls.dim(0))
             let (idx, mask) = UnlimitedOCRDashMath.decodePlan(
                 query: idxQ, summaries: summaries, candidates: ctx.candidates!,
                 position: ctx.position!, indexScale: indexScale, floor: floor, params: params)
             // Gather from the slab, not the trimmed prefix. The trimmed length
             // changes every token and retraces SDPA; the slab is stable until
             // the next growth step. Indices are clamped to the live position.
+            // take + SDPA are one compiled trace so the host does not rebuild them.
             let sourceK = cache.keys ?? keys
             let sourceV = cache.values ?? values
-            let gatheredK = sourceK.take(idx, axis: 2)
-            let gatheredV = sourceV.take(idx, axis: 2)
-            let additive = mask.asType(q.dtype).reshaped(1, 1, 1, mask.dim(0))
-            out = MLXFast.scaledDotProductAttention(
-                queries: q, keys: gatheredK, values: gatheredV,
-                scale: scale, mask: .array(additive))
+            out = UnlimitedOCRCompiledDecode.attend(
+                q: q, keys: sourceK, values: sourceV, index: idx, mask: mask, scale: scale)
         } else {
             out = prefill(q, keys: keys, values: values, query: idxQ, ctx: ctx, cache: cache)
         }

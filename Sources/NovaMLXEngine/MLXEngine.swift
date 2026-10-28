@@ -3512,7 +3512,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                                 }
                                 emit(tokenId)
                                 count += 1
-                                if count % 64 == 0 { Memory.clearCache() }
                             }
 
                             let decodeSec = Date().timeIntervalSince(decodeBegan)
