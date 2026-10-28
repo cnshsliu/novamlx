@@ -165,6 +165,19 @@ final class OCROptimizerTests: XCTestCase {
         XCTAssertEqual(overrides.maxTokens, 8192) // default
     }
 
+    func testUnlimitedOCRPromptAndBudget() {
+        XCTAssertTrue(OCROptimizer.isOCRModel("baidu/Unlimited-OCR-2"))
+        XCTAssertTrue(OCROptimizer.isOCRModel("mlx-community/Unlimited-OCR-8bit"))
+        let messages = [ChatMessage(role: .user, content: "", images: ["page.png"])]
+        let result = OCROptimizer.applyPrompt(messages: messages, modelName: "baidu/Unlimited-OCR-2")
+        XCTAssertEqual(result[0].content, "document parsing.")
+        let overrides = OCROptimizer.samplingOverrides(
+            modelName: "mlx-community/Unlimited-OCR-8bit", userTemperature: nil,
+            userMaxTokens: nil, userRepetitionPenalty: nil)
+        XCTAssertEqual(overrides.temperature, 0.0)
+        XCTAssertEqual(overrides.maxTokens, 8192)
+    }
+
     func testNoOverridesForNonOCRModel() {
         let overrides = OCROptimizer.samplingOverrides(
             modelName: "qwen3-4b", userTemperature: nil,

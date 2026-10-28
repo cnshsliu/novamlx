@@ -1,7 +1,82 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-10-26T11:42:49Z",
+  "updatedAt": "2026-10-28T00:00:00Z",
   "models": [
+    {
+      "id": "baidu/Unlimited-OCR-2",
+      "url": "https://huggingface.co/baidu/Unlimited-OCR-2",
+      "name": "Unlimited OCR 2",
+      "description": "Baidu Unlimited OCR 2 (MIT, ~3.3B BF16, ~6.6 GiB). Native Swift/MLX. SR-SWA decode gathers 512 keys (12x32 remote blocks + 128 local) so the attention matmul does not grow with page count. Official HF safetensors load directly. Unquantized language weights quantize to affine 4-bit on load (NOVA_UOCR_BITS=8 or 0). Vision and the DASH router stay dense. Prompts: document parsing. / Multi page parsing.",
+      "category": "vlm",
+      "family": "other",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "bf16",
+      "size": "~6.6 GiB (BF16)",
+      "sizeBytes": 7104298077,
+      "minRamGB": 24,
+      "addedAt": "2026-10-28T00:00:00Z",
+      "tags": [
+        "MLX",
+        "OCR",
+        "BF16",
+        "Baidu",
+        "Vision"
+      ],
+      "capabilities": [
+        "vision"
+      ]
+    },
+    {
+      "id": "mlx-community/Unlimited-OCR-8bit",
+      "url": "https://huggingface.co/mlx-community/Unlimited-OCR-8bit",
+      "name": "Unlimited OCR 8-bit",
+      "description": "Gen-1 Baidu Unlimited OCR, mlx-community affine 8-bit (~3.66 GiB). Native Swift/MLX via the R-SWA ring (window 128), not OCR-2 DASH. MIT. Prompt: document parsing.",
+      "category": "vlm",
+      "family": "other",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "8bit",
+      "size": "~3.66 GiB (8-bit)",
+      "sizeBytes": 3919426527,
+      "minRamGB": 16,
+      "addedAt": "2026-10-28T00:00:00Z",
+      "tags": [
+        "MLX",
+        "OCR",
+        "8-bit",
+        "Baidu",
+        "Vision"
+      ],
+      "capabilities": [
+        "vision"
+      ]
+    },
+    {
+      "id": "mlx-community/Unlimited-OCR-4bit",
+      "url": "https://huggingface.co/mlx-community/Unlimited-OCR-4bit",
+      "name": "Unlimited OCR 4-bit",
+      "description": "Gen-1 Baidu Unlimited OCR, mlx-community affine 4-bit (~2.28 GiB). Same R-SWA ring loader as the 8-bit pack. Not Unlimited OCR 2.",
+      "category": "vlm",
+      "family": "other",
+      "format": "mlx",
+      "status": "preview",
+      "quant": "4bit",
+      "size": "~2.28 GiB (4-bit)",
+      "sizeBytes": 2451215084,
+      "minRamGB": 16,
+      "addedAt": "2026-10-28T00:00:00Z",
+      "tags": [
+        "MLX",
+        "OCR",
+        "4-bit",
+        "Baidu",
+        "Vision"
+      ],
+      "capabilities": [
+        "vision"
+      ]
+    },
     {
       "id": "rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",
       "url": "https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit",

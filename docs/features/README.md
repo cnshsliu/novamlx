@@ -103,3 +103,4 @@ This directory is the user-facing documentation, one page per feature.
 | 功能 / Feature | 一句话 / Pitch | 状态 |
 |----------------|----------------|------|
 | [Nemotron 3.5 Bolt 文本 / Nemotron 3.5 Bolt text](nemotron-bolt-text.md) | 本地 74B 级异构 MoE，仅文本，思考默认开启。 | preview |
+| [Unlimited OCR](unlimited-ocr.md) | 本地文档解析。OCR-2 用定长 SR-SWA 解码；gen-1 用 R-SWA 环。 | preview |

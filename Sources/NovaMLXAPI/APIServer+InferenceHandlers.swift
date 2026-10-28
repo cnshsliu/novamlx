@@ -430,10 +430,20 @@ extension NovaMLXAPIServer {
                             let finalData = try JSONEncoder().encode(finalChunk)
                             try await writer.write(ByteBuffer(string: "data: \(String(data: finalData, encoding: .utf8) ?? "")\n\n"))
                         } else {
-                            completionTokenCount += 1
-                            logTokenProgress()
+                            // The image VLM path used to yield one empty role
+                            // chunk, one text blob, and one finish chunk. Counting
+                            // the empty chunk made `completion_tokens` land on 2–3
+                            // while the engine had generated the whole page.
+                            // A real id still counts when its text delta is empty
+                            // (a split byte). The id-0 placeholder does not.
+                            let isPlaceholder = token.text.isEmpty && token.id == 0 && token.finishReason == nil
+                            if !isPlaceholder {
+                                completionTokenCount += 1
+                                logTokenProgress()
+                            }
                             var cleanText = token.text
-                            if cleanText.contains("<|") || (!shouldParseThinking && cleanText.contains("<think")) {
+                            let preserveLayout = UnlimitedOCRGeneration.preservesLayoutTags(modelId: openAIReq.model)
+                            if !preserveLayout && (cleanText.contains("<|") || (!shouldParseThinking && cleanText.contains("<think"))) {
                                 let pattern = shouldParseThinking
                                     ? "<\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)"
                                     : "<(?:\\|[a-zA-Z_/][a-zA-Z0-9_/]*(?:\\|>|>)|/?think[^>]*)>"
