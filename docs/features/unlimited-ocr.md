@@ -31,7 +31,7 @@ OCR-2 没有 mlx-community 量化包。Nova 直接读官方 safetensors（`model
 
 合计 **512** 个 key。`take` 和 SDPA、以及块计划，按**具体形状**各编译一次（slab 长度、summary 行数），不再每个 token 重搭。不用 shapeless，切片也不用 `-1`：那两种写法会在第二个 token 上让 Slice 推不出形状。单 token 的专家选择仍是一个 Metal top-k（升序，和 `argPartition` 同一组专家）；prefill 仍走原来的多行链。没有「页数一长就退回全注意力」的路径。
 
-语言栈是 4-bit。选中的专家走 `SwitchGLU` 的 `gatherQuantizedMM`，不是把 64 个专家整层展开。单 token 的 MoE 和稠密 MLP 各编译一次，形状固定为 `[1, 1, hidden]`，不用 shapeless。专家权重只读 top-6，按 M 系列带宽这不是「几十 tok/s」的天花板；图重建才是。这里不记录新的 tok/s。gen-1 环注意力在短票上的几百 tok/s 仍是另一条架构。
+语言栈是 4-bit。选中的专家走 `SwitchGLU` 的 `gatherQuantizedMM`（top-6），不是把 64 个专家整层展开。把单 token 的 MoE / 稠密 MLP 再编译一次，Mac 上测出来和只编译 DASH 一样，所以那层编译已去掉。
 
 MoE 走 Nova 现有的 `SwitchGLU`（排序后的专家 GEMM，和 Flint 同一条原语）。未量化的语言线性和专家在加载后做 affine 分组量化，组大小 64：
 
@@ -74,7 +74,24 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 
 ## Limits / notes
 
-- `[STREAM] VLM` 分开打 prefill 秒数和 decode tok/s（第一枚 token 之后）。gen-1 mlx-vlm 在短票上的 tok/s 是环注意力，不是这条 DASH + 64 专家的路径。对照时看解码 tok/s。选中的 6 个专家走 `gatherQuantizedMM`，不是每次把全部专家权重读一遍。
+MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill 不算在内）：
+
+| 尖端 | 解码 |
+|------|------|
+| `9e49ee3` / `52a1f2a`，DASH 即时求值 | 约 39–45 |
+| `9d762ef`，DASH 按具体形状编译 | **53.3–56.5** |
+| `5047946`，再编译 MoE / 稠密 MLP | **55.0–55.4**（相对上一行没有增益） |
+
+当前这条栈停在大约 **55 tok/s**。再编译一层图不会再涨。这不是「把 2–3GB 权重每步读一遍」的带宽墙：选中的 6 个 4-bit 专家加上注意力和 `lm_head`，在 M4 Max 的带宽上是亚毫秒级。剩下的时间是 12 层 DASH 计划仍要发射的一串小核（排序、1.5-entmax、逐元素），再加上 batch=1 的量化 GEMM 启动。Shapeless 编译能少掉搭图，但第二个 token 会因 Slice 推不出形状而中断，不能再用。
+
+要明显超过大约 55、朝 80–100 以上走，得换结构，而不是再包一层 `compile`：
+
+- 把解码用的 DASH 块计划收成**一个**静态形状的 Metal 核，而不是一串已编译但仍逐个发射的算子。
+- 或者给这路 VLM 接投机解码。现有的 DFlash / DSpark 钩子是文本模型的，没有套在 Unlimited OCR 上。
+
+gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH + 64 专家。
+
+- `[STREAM] VLM` 分开打 prefill 秒数和 decode tok/s。
 - 视觉塔按 tile 求值并清中间激活。一张很高的收据不会把全部 SAM/CLIP 图和语言 prefill 焊成一张图再挂住。
 - 解码的注意力工作集是 512 key。KV 仍按已见 token 线性保存，因为当前页的图像块可能被选中。工作集不随页数变宽；缓存占用会变。
 - Prefill 仍按块（最多 2048 个 query）对整段 prompt 建稀疏加性 mask，所以首 token 时间随页数涨。这是 prefill，不是解码退回全注意力。
