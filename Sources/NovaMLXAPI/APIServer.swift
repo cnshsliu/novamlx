@@ -657,6 +657,7 @@ private extension String {
             || self.hasPrefix("/v1/video/talking-head")
             || self.hasPrefix("/v1/videos")
             || self.hasPrefix("/v1/3d")
+            || VendorOCRCatalog.matchesInferencePath(self)
     }
 }
 
@@ -2070,6 +2071,17 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
             // Image and video share this query. Registered from its own
             // function: the router closure is already at the stack limit.
             Self.mediaTaskRoutes(inference: inference)
+
+            // MARK: - Vendor OCR (Baidu / Aliyun / Tencent general OCR)
+            //
+            // Thin compatibility routes. Chat completions is not involved.
+
+            VendorOCRMiddleware(
+                inference: inference,
+                cfg: cfg,
+                embeddings: embeddings,
+                coordinator: coordinator
+            )
 
             // MARK: - Task-style 3D Generation (Hunyuan3D-2.1)
 

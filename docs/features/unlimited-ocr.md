@@ -72,6 +72,8 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 
 多页把多张图按顺序放进同一条 user 消息，或传一个 PDF 文件 URL。输出里常见 `<table>`、`<|det|>…<|/det|>` 和 `<PAGE>`。这些版面标记不会被当成停止符，也不会从流式文本里剥掉。停止只看 EOS。重复的 35-gram（窗口 1024）会被禁掉，避免表格行死循环把 `max_tokens` 吃满。流式接口按生成的 token id 计数，`completion_tokens` 与引擎日志里的 tokens 一致。
 
+同一条 `document parsing.` 路径也可以用百度、阿里云、腾讯云的通用 OCR 形状调用，聊天接口不变。见 [厂商 OCR](vendor-ocr.md)。
+
 要对齐 BF16 语言栈再测：`NOVA_UOCR_BITS=0`。
 
 ## Limits / notes
@@ -166,5 +168,6 @@ Shapeless compile 不回到热路径。
 - [支持的模型](supported-models.md)
 - [视觉 / VLM](vision.md)
 - [API 兼容性](api-compatibility.md)
+- [厂商 OCR](vendor-ocr.md)
 - 权重：[baidu/Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2)、[mlx-community/Unlimited-OCR-8bit](https://huggingface.co/mlx-community/Unlimited-OCR-8bit)
 - 代码：`Sources/NovaMLXEngine/Models/UnlimitedOCR*.swift`

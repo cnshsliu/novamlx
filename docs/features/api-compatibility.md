@@ -64,6 +64,20 @@ OpenAI、Anthropic、Responses 三种协议共用同一套推理引擎与工具�
 | **Compact** | `POST /v1/responses/compact` 截断已存对话 |
 | **Input tokens** | `POST /v1/responses/input_tokens` 精确 token 计数 |
 
+<a id="vendor-ocr"></a>
+
+### 厂商通用 OCR / Vendor OCR
+
+百度、阿里云、腾讯云的通用文字识别形状，背后是 Unlimited OCR 2，不是第二套模型。聊天补全不变。路径、curl 与鉴权映射见 [厂商 OCR](vendor-ocr.md)。
+
+| 端点 | 方法 | 备注 |
+|------|------|------|
+| `/rest/2.0/ocr/v1/general_basic` | POST | 百度。`accurate_basic`、`general`、`accurate` 同一次识别 |
+| `/ocr/RecognizeGeneral` | POST | 阿里云。`POST /ocr?Action=RecognizeGeneral` 相同。`RecognizeAdvanced` 也进这里 |
+| `/ocr/GeneralBasicOCR` | POST | 腾讯云。`GeneralAccurateOCR` 同一次识别。也认 `X-TC-Action` |
+
+鉴权仍是 Nova 的 `Bearer` 或 `x-api-key`。`access_token`、`SecretId` 和 ACS / TC3 签名不是凭证。
+
 <a id="admin"></a>
 
 ### 管理端口（6591）
@@ -118,6 +132,7 @@ curl http://localhost:6590/v1/messages \
 
 ## Related
 
+- [厂商 OCR](vendor-ocr.md)
 - [工具调用](tool-calling.md)
 - [结构化输出](structured-output.md)
 - [Tokenhub](tokenhub.md)
