@@ -189,6 +189,49 @@ struct UnlimitedOCRTests {
             UnlimitedOCRDecodeFuse.expertRowShape(x: [1, 1, 1280], indices: [1, 1, 6], hidden: 1280)
                 == [1, 1, 6, 1280])
     }
+
+    @Test("Seq-1 megakernel matches the affine SwiGLU and 512-key softmax")
+    func megaDecodeReference() {
+        #expect(!UnlimitedOCRMegaDecode.allows(nil))
+        #expect(!UnlimitedOCRMegaDecode.allows("0"))
+        #expect(UnlimitedOCRMegaDecode.allows("1"))
+        let budget = UnlimitedOCRMegaDecode.budget(layers: 12, denseLayers: 1)
+        #expect(budget.mlxGemm == 36)
+        #expect(budget.swigluKernels == 23)
+        #expect(budget.attendKernels == 12)
+        #expect(UnlimitedOCRMegaDecode.nibble4(0x21, 0) == 1)
+        #expect(UnlimitedOCRMegaDecode.nibble4(0x21, 1) == 2)
+        #expect(UnlimitedOCRMegaDecode.byte8(0x21, 0) == 0x21)
+
+        var x = [Float](repeating: 0, count: 64)
+        x[0] = 1
+        func plane(_ first: UInt32, rows: Int) -> UnlimitedOCRMegaDecode.Row {
+            var words = [UInt32](repeating: 0, count: rows * 8)
+            words[0] = first
+            return UnlimitedOCRMegaDecode.Row(
+                words: words,
+                scales: Array(repeating: [1], count: rows),
+                biases: Array(repeating: [0], count: rows),
+                packed: 8)
+        }
+        let y = UnlimitedOCRMegaDecode.referenceSwiGLU(
+            x: x, gate: plane(2, rows: 64), up: plane(4, rows: 64), down: plane(1, rows: 1), bits: 4)
+        let hidden = UnlimitedOCRMegaDecode.silu(2) * 4
+        #expect(y.count == 1)
+        #expect(abs(y[0] - hidden) < 0.0001)
+        #expect(abs(hidden - 7.046377) < 0.001)
+
+        let attended = UnlimitedOCRMegaDecode.referenceAttend(
+            q: [1, 0],
+            keys: [[1, 0], [0, 1]],
+            values: [[3, 0], [0, 4]],
+            mask: [0, 0],
+            scale: 1)
+        #expect(attended.count == 2)
+        #expect(attended[0] > attended[1])
+        #expect(abs(attended[0] - 2.193) < 0.01)
+        #expect(UnlimitedOCRDashParams().attendedKeys == 512)
+    }
 }
 
 private let ocr2JSON = """

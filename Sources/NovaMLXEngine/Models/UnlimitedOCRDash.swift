@@ -916,6 +916,13 @@ final class UnlimitedOCRDashAttention: Module {
             // constant 512-wide mask. No shapeless trace, no `-1` slice.
             let sourceK = cache.keys ?? keys
             let sourceV = cache.values ?? values
+            if let fused = UnlimitedOCRMegaDecode.attend(
+                q: q, keys: sourceK, values: sourceV, index: idx, mask: mask,
+                scale: scale, output: oProj, heads: heads, dim: headDim,
+                width: params.attendedKeys)
+            {
+                return fused
+            }
             out = UnlimitedOCRCompiledDecode.attend(
                 q: q, keys: sourceK, values: sourceV, index: idx, mask: mask,
                 scale: scale, slab: sourceK.dim(2), width: params.attendedKeys)

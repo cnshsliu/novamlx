@@ -109,17 +109,14 @@ gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH +
 
 ## Follow-up
 
-80–100 tok/s 不是再少几次小 GEMM 能到的。`9946de8` 相对 `0693994` 少了 11 次打分发射，STREAM 只动了 **+0.5 / +1.9**。融合打开的实测带是 **57.9 / 60.8**，大约 **58–61 tok/s**。对照大约 **54–56**。
+同一向量的 GEMM 拼接停在大约 **58–61 tok/s**（`9946de8` 打开 **57.9 / 60.8**，关掉 **54.4 / 56.2**）。这一版加上 seq=1 的 Metal 核，专门做拼接做不到的两件事：
 
-`silu(gate) * up` 再乘 down，输入已经不是原来的隐层向量。要把它收成一个核，就得在 seq=1、top-6（M=6）上重写 affine int4、group 64 的 `gatherQuantizedMM`，并且比 MLX 自己的核更快。Flint 的 steel `BlockMMA` 是 prefill 核：tile 16×32，行数门槛是专家数的 4 倍（64 专家要 256 行）。解码只有 6 行。单线程的 DASH 计划核已经测过，**53.9 / 54.5**，没有增益，所以没有再放一个未测的 int4 核。树里不留这种空核。
+- **SwiGLU**：每个选中的专家、以及共享 / 稠密 MLP，在一个 threadgroup 里做 int4 或 int8 的 gate、up、`silu(gate) * up`，再做 down。中间激活留在 threadgroup 里。
+- **512-key SDPA + O**：按 DASH 下标收集 512 个 key，做 softmax，再做输出投影的 int4/int8 点积。块计划仍是按具体形状编译的那条，不是单线程计划核。
 
-再往上只有三条，都还没有新的 tok/s：
+QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV 和 SDPA 中间，所以没有把 QKV 再写进这个核。默认**关**，因为还没有 Mac 上的 tok/s。`NOVA_UOCR_MEGA=1` 打开。打不开的权重退回行拼接。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。发布配置上，打开之后 MLX GEMM 还剩 36 次（QKV、router QK、打分、`lm_head`），另加 23 个 SwiGLU 核和 12 个 SDPA+O 核。这里不写新的 tok/s。
 
-- 一个真正的层核：隐层留在核里，一层里做完 int4 QKV、512-key SDPA 和 SwiGLU，而不是把相同的 K 再拼一次。
-- 给这个 VLM 写的投机解码：每个草稿位置自己的 RoPE、块计划和 512-key gather，并且能回滚页游标和块摘要。现成的 DFlash / DSpark 只接文本模型，隐层也不是 1280。
-- 另一套量化或解码核，而不是在现有 affine 4-bit 上继续叠行。
-
-512-key 的 SR-SWA、按具体形状编译、以及 `NOVA_UOCR_DECODE_FUSE` 开关保持现状。Shapeless compile 和单线程块计划核不回到热路径。
+还没做、也还没有 tok/s 的是：把 QKV 和 RoPE 收进同一个层核，给这个 VLM 写能回滚页游标的投机解码，以及换一套量化。Shapeless compile 不回到热路径。
 
 ## Related
 
