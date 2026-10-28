@@ -398,6 +398,36 @@ enum UnlimitedOCRDashMath {
     }
 
     /// 1.5-entmax. Rows must already be sorted descending.
+    /// Host form used by `UnlimitedOCRDashPlan.reference` and mirrored in the Metal plan.
+    static func entmax15(_ x: [Float]) -> [Float] {
+        guard let origin = x.first else { return [] }
+        let shifted = x.map { ($0 - origin) / 2 }
+        let m = shifted.count
+        var cumulative: Float = 0
+        var cumulativeSquare: Float = 0
+        var tau = [Float](repeating: 0, count: m)
+        for index in 0..<m {
+            let rho = Float(index + 1)
+            cumulative += shifted[index]
+            cumulativeSquare += shifted[index] * shifted[index]
+            let mean = cumulative / rho
+            let meanSquare = cumulativeSquare / rho
+            let variance = rho * (meanSquare - mean * mean)
+            let delta = max((1 - variance) / rho, 0)
+            tau[index] = mean - delta.squareRoot()
+        }
+        var support = 0
+        for index in 0..<m where tau[index] <= shifted[index] {
+            support += 1
+        }
+        if support < 1 { support = 1 }
+        let tauStar = tau[support - 1]
+        return shifted.map { gap in
+            let positive = max(gap - tauStar, 0)
+            return positive * positive
+        }
+    }
+
     static func entmax15(_ x: MLXArray, width: Int) -> MLXArray {
         let shifted = (x - x[.ellipsis, ..<1]) / 2
         let m = width

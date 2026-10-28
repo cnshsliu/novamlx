@@ -133,8 +133,20 @@ struct UnlimitedOCRTests {
         #expect(plan.indices.suffix(2) == [19, 20])
         #expect(plan.mask[4] == 0)
         #expect(plan.mask[5] == 0)
-        #expect(plan.mask[0].isFinite)
+        #expect(plan.mask[0] == plan.mask[1])
+        #expect(plan.mask[2] == plan.mask[3])
+        #expect(abs(plan.mask[0] - 1.316958) < 0.0005)
+        #expect(abs(plan.mask[2] + 1.316958) < 0.0005)
+        #expect(abs(plan.mask[0] + plan.mask[2]) < 0.0005)
         #expect(plan.indices.allSatisfy { $0 >= 0 && $0 <= 20 })
+        // Host 1.5-entmax. The Metal plan inlines the same shift, tau, and square.
+        let prior = UnlimitedOCRDashMath.entmax15([1, 0.5, 0])
+        #expect(prior.count == 3)
+        #expect(abs(prior[0] - 0.624197) < 0.0002)
+        #expect(abs(prior[1] - 0.291667) < 0.0002)
+        #expect(abs(prior[2] - 0.084136) < 0.0002)
+        #expect(prior[0] > prior[1] && prior[1] > prior[2])
+        #expect(UnlimitedOCRDashMath.entmax15([]).isEmpty)
     }
 }
 

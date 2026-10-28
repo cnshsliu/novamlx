@@ -99,7 +99,7 @@ enum UnlimitedOCRDashPlan {
         for j in 0..<mCount {
             taken[j] = masked[chosenOrder[j]]
         }
-        let prior = entmax15(taken)
+        let prior = UnlimitedOCRDashMath.entmax15(taken)
         let k = min(spec.topK, mCount)
         var valid = [Bool](repeating: false, count: k)
         var logp = [Float](repeating: 0, count: k)
