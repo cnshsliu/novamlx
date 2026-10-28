@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import MLX
+import MLXLLM
 import MLXLMCommon
 @testable import NovaMLXEngine
 

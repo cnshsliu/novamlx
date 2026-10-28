@@ -1148,11 +1148,13 @@ final class Glm5TextModel: Module {
         var hidden = embedTokens(inputs)
         hidden = MLX.repeated(
             MLX.expandedDimensions(hidden, axis: 2), count: config.hcMult, axis: 2)
-        let decoding = inputs.dim(1) == 1
         var topk: MLXArray?
         for (index, layer) in layers.enumerated() {
             (hidden, topk) = layer(hidden, cache: cache?[index], previousTopk: topk)
-            if decoding, (index + 1) % Glm5ChatDecode.decodeEvalStride == 0 {
+            // Prefill also strides eval: a full 45-layer MoE graph in one
+            // command buffer hits Metal GPU Timeout on M4 Max Debug (and
+            // can on Release). Decode already used decodeEvalStride.
+            if (index + 1) % Glm5ChatDecode.decodeEvalStride == 0 {
                 MLX.eval(hidden)
             }
         }
