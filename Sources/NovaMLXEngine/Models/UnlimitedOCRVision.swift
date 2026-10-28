@@ -216,7 +216,7 @@ final class UnlimitedOCRConv: Module {
     init(input: Int, output: Int, kernel: Int, stride: Int, bias: Bool, name: String) {
         _proj.wrappedValue = Conv2d(
             inputChannels: input, outputChannels: output,
-            kernelSize: IntOrPair(kernel), stride: stride, bias: bias)
+            kernelSize: IntOrPair(kernel), stride: IntOrPair(stride), bias: bias)
         super.init()
         _ = name
     }

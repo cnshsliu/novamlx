@@ -442,7 +442,8 @@ final class UnlimitedOCRClipEmbed: Module {
         _classEmbedding.wrappedValue = MLXArray.zeros([hidden])
         _patch.wrappedValue = Conv2d(
             inputChannels: 3, outputChannels: hidden,
-            kernelSize: IntOrPair(config.clipPatch), stride: config.clipPatch, bias: false)
+            kernelSize: IntOrPair(config.clipPatch), stride: IntOrPair(config.clipPatch),
+            bias: false)
         _position.wrappedValue = Embedding(embeddingCount: grid * grid + 1, dimensions: hidden)
         super.init()
     }
@@ -555,9 +556,12 @@ public struct UnlimitedOCRProcessorConfiguration: Decodable, Sendable {
 
 public struct UnlimitedOCRProcessor: UserInputProcessor {
     let config: UnlimitedOCRProcessorConfiguration
-    let tokenizer: any Tokenizer
+    /// `MLXLMCommon.Tokenizer`. Unqualified `Tokenizer` is Nova's concrete struct.
+    let tokenizer: any MLXLMCommon.Tokenizer
 
-    public init(_ config: UnlimitedOCRProcessorConfiguration, tokenizer: any Tokenizer) {
+    public init(
+        _ config: UnlimitedOCRProcessorConfiguration, tokenizer: any MLXLMCommon.Tokenizer
+    ) {
         self.config = config
         self.tokenizer = tokenizer
     }
@@ -566,7 +570,7 @@ public struct UnlimitedOCRProcessor: UserInputProcessor {
         let images = try Self.collect(input.images)
         if images.isEmpty {
             let text = Self.promptText(input)
-            let ids = [UnlimitedOCRSupport.bosTokenID] + tokenizer.encode(text: text, addSpecialTokens: false)
+            let ids = [UnlimitedOCRSupport.bosTokenID] + encodeText(text)
             return LMInput(tokens: MLXArray(ids).expandedDimensions(axis: 0))
         }
         let prompt = Self.composePrompt(Self.promptText(input), images: images.count, pageLayout: config.pageLayout)
@@ -631,8 +635,18 @@ public struct UnlimitedOCRProcessor: UserInputProcessor {
         for (index, piece) in pieces.enumerated() {
             if index > 0 { ids.append(config.pageTokenID) }
             if !piece.isEmpty {
-                ids += tokenizer.encode(text: piece, addSpecialTokens: false)
+                ids += encodeText(piece)
             }
+        }
+        return ids
+    }
+
+    /// `encode(text:)` is the tokenizer call this checkout exposes. Drop a
+    /// leading BOS when that call already inserted one.
+    private func encodeText(_ text: String) -> [Int] {
+        var ids = tokenizer.encode(text: text)
+        if ids.first == UnlimitedOCRSupport.bosTokenID {
+            ids.removeFirst()
         }
         return ids
     }
