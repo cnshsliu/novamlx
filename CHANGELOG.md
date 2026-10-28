@@ -16,6 +16,7 @@ All notable changes to NovaMLX will be documented in this file.
 
 ### Fixed
 - **Unlimited OCR expert-kernel cache** — the Metal top-k kernel map is `nonisolated(unsafe)`, matching the other kernel caches. The lock stays.
+- **Unlimited OCR MoE token compile** — a single decode token traces each MoE block and the dense MLP once, at shape `[1, 1, hidden]`, with shapeless compile left off. Selected experts stay on `gatherQuantizedMM`. Prefill stays eager. No tok/s is recorded here.
 - **Unlimited OCR static decode compile** — the DASH plan and the 512-key gather+SDPA are compiled once per concrete summary width and KV slab. Shapeless compile and `-1` slices stay out; those aborted on the second token. Expert top-k stays one Metal kernel. No tok/s is recorded here.
 - **Unlimited OCR decode speed** — single-token expert choice is one Metal top-k (ascending, same experts as `argPartition`). The 4-bit MoE working set is still the bandwidth ceiling; gen-1 ring tok/s is a different architecture.
 - **Unlimited OCR decode** — `UnlimitedOCR` implements `callAsFunction(_ inputs: MLXArray, cache: [KVCache]?)`, the overload ContinuousBatcher calls after prefill. The `LMInput.Text` method forwards to it. The `LanguageModel` default of that overload traps.

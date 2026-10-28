@@ -22,7 +22,20 @@ final class UnlimitedOCRDenseMLP: Module {
         super.init()
     }
 
+    private var compiledToken: (([MLXArray]) -> [MLXArray])?
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
+        // One static trace for a single token. Prefill stays eager.
+        guard x.dim(0) == 1, x.dim(1) == 1 else { return eager(x) }
+        if compiledToken == nil {
+            compiledToken = compile { [self] (args: [MLXArray]) -> [MLXArray] in
+                [self.eager(args[0])]
+            }
+        }
+        return compiledToken!([x])[0]
+    }
+
+    private func eager(_ x: MLXArray) -> MLXArray {
         down(compiledSiluProduct(gate(x), up(x)))
     }
 }
@@ -50,7 +63,21 @@ final class UnlimitedOCRMoE: Module {
         super.init()
     }
 
+    private var compiledToken: (([MLXArray]) -> [MLXArray])?
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
+        // Traced once at [1, 1, hidden] after 4-bit quantize. Not shapeless.
+        // `SwitchGLU` then stays on `gatherQuantizedMM` of the top-k experts.
+        guard x.dim(0) == 1, x.dim(1) == 1 else { return eager(x) }
+        if compiledToken == nil {
+            compiledToken = compile { [self] (args: [MLXArray]) -> [MLXArray] in
+                [self.eager(args[0])]
+            }
+        }
+        return compiledToken!([x])[0]
+    }
+
+    private func eager(_ x: MLXArray) -> MLXArray {
         let scores = softmax(gate(x).asType(.float32), axis: -1, precise: true)
         let singleRow = x.dim(0) == 1 && x.dim(1) == 1
         let (inds, chosen) = singleRow
