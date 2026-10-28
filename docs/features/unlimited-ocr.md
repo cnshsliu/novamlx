@@ -88,6 +88,9 @@ MacMaxPro，`[STREAM] VLM` 的 decode tok/s（第一枚 token 之后，prefill �
 | `0693994`，GEMM 叠放（94 次） | **57.4 / 58.9**（约 **+2.8** tok/s，约 +5%） |
 | `9946de8`，同一构建，`NOVA_UOCR_DECODE_FUSE=0` | **54.4 / 56.2** |
 | `9946de8`，叠放默认打开（83 次，含打分） | **57.9 / 60.8**（相对对照约 +7%） |
+| `e9eb6f2`，`NOVA_UOCR_DECODE_FUSE=0` | **55.8 / 53.9** |
+| `e9eb6f2`，叠放默认打开 | **61.0 / 59.8** |
+| `e9eb6f2`，`NOVA_UOCR_MEGA=1` | **25.7 / 25.8**（发票与融合一致，大约 **−57%**） |
 
 `9d762ef` / `c8e1942` 上，按具体形状编译 DASH 之后，MacMaxPro 的 decode 大约是 **53–56 tok/s**。再编译 MoE 没有增益（约 55）。`68c478b` 的单线程块计划是 **53.9 / 54.5**，已从热路径拿掉。把相同输入的 GEMM 叠到一起仍然有用：`0693994` 打开是 **57.4 / 58.9**，关掉是 **55.6 / 55.1**。`9946de8` 再把打分并进共享 gate+up（94 次降到 83 次），打开是 **57.9 / 60.8**，关掉是 **54.4 / 56.2**。相对 r14 的融合只多 **+0.5 / +1.9** tok/s，和噪声贴在一起，不能算再赢了一截。默认仍打开，因为它仍然快过对照。同一向量上的 GEMM 拼接到此为止。实测天花板大约是 **58–61 tok/s**（融合）对对照大约 **54–56**。热路径仍是按形状编译的计划和 512-key gather。
 
@@ -114,9 +117,11 @@ gen-1 mlx-vlm 在短票上大约 401 tok/s 是环注意力，不是这套 DASH +
 - **SwiGLU**：每个选中的专家、以及共享 / 稠密 MLP，在一个 threadgroup 里做 int4 或 int8 的 gate、up、`silu(gate) * up`，再做 down。中间激活留在 threadgroup 里。
 - **512-key SDPA + O**：按 DASH 下标收集 512 个 key，做 softmax，再做输出投影的 int4/int8 点积。块计划仍是按具体形状编译的那条，不是单线程计划核。
 
-QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV 和 SDPA 中间，所以没有把 QKV 再写进这个核。默认**关**，因为还没有 Mac 上的 tok/s。`NOVA_UOCR_MEGA=1` 打开。`f1c6920` 在 Mac 上编 Metal 失败：bf16 输出不能直接收 `float`。写入改为 `static_cast<bfloat16_t>`。`578f468` 能编过，但 `NOVA_UOCR_MEGA=1` 的发票是 BOS 重复、没有表格：`grid` 是总线程数，核却把它当成 threadgroup 个数。6 个专家配 128 宽的组只跑了 1 个线程，其余专家行和 SDPA 输出是未初始化的。`grid` 改为 `组数 × 组宽`。打不开的权重退回行拼接。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。发布配置上，打开之后 MLX GEMM 还剩 36 次（QKV、router QK、打分、`lm_head`），另加 23 个 SwiGLU 核和 12 个 SDPA+O 核。这里不写新的 tok/s。
+QKV 仍是那一次叠好的 `quantizedMatmul`。RoPE 和 KV 写回夹在 QKV 和 SDPA 中间，所以没有把 QKV 再写进这个核。默认**关**，因为还没有 Mac 上的 tok/s。`NOVA_UOCR_MEGA=1` 打开。`f1c6920` 在 Mac 上编 Metal 失败：bf16 输出不能直接收 `float`。写入改为 `static_cast<bfloat16_t>`。`578f468` 能编过，但发票是 BOS 重复：`grid` 是总线程数，核却把它当成 threadgroup 个数。`e9eb6f2` 把 `grid` 改成 `组数 × 组宽` 之后，发票表格和融合路径一致，没有 BOS 重复。STREAM 是 **25.7 / 25.8**，融合是 **61.0 / 59.8**，对照是 **55.8 / 53.9**。Megakernel 大约慢 **57%**。`NOVA_UOCR_MEGA` 保持默认关闭。这不是速度胜利。
 
-还没做、也还没有 tok/s 的是：把 QKV 和 RoPE 收进同一个层核，给这个 VLM 写能回滚页游标的投机解码，以及换一套量化。Shapeless compile 不回到热路径。
+慢在核的形状，不在 launch 个数。每个输出行用一个线程做标量 int4 点积，128 宽的组盖住 top-6 和 512 个 key。MLX 的 `quantizedMatmul` / `gatherQuantizedMM` 已经是这条 M=1、M=6 的 qmv。把 silu 和 down 焊在一起省下的是几 KB 的中间激活，权重还是要整行读。Flint 的 steel `BlockMMA`（tile 16×32）在行数低于 `4 × 专家数`（这里是 256）时不用，因为半空的 tile 比 `SwitchGLU` 慢。解码只有 1 行或 6 行，再铺一次同样的标量循环预期追不上融合。所以不再为这个核请 Mac 重测。
+
+要到 80–100，得是每一层**一次**发射，把 1280 维激活留在 threadgroup 里走完 int4 QKV、RoPE、KV 写回、512-key SDPA 和 SwiGLU，或者换一套能喂满 MMA tile 的量化核。页游标可回滚的投机解码仍然是另一条路，DFlash / DSpark 接不上这个 VLM。`NOVA_UOCR_DECODE_FUSE=0` 仍是拆开的 GEMM。Shapeless compile 不回到热路径。
 
 ## Related
 

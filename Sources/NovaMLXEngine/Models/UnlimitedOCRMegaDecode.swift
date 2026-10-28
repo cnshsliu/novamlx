@@ -14,9 +14,11 @@ import NovaMLXUtils
 /// GEMV is already one MLX launch, and RoPE plus the KV write sit between it
 /// and SDPA.
 ///
-/// Off unless `NOVA_UOCR_MEGA=1`. The measured row-stack fuse stays the
-/// default. Ineligible weights fall back to that fuse. No shapeless compile
-/// and no DASH plan kernel.
+/// Off unless `NOVA_UOCR_MEGA=1`. MacMaxPro `e9eb6f2` matched the fuse
+/// invoice and measured 25.7 / 25.8 tok/s against a fuse of 61.0 / 59.8.
+/// The dots are scalar, one output row per thread. MLX's qmv is already
+/// tuned for M=1 and M=6, and Flint's 16×32 MMA stays off below 256 rows.
+/// Do not enable this for speed. The row-stack fuse stays the default.
 enum UnlimitedOCRMegaDecode {
     struct Budget: Equatable {
         var mlxGemm: Int
