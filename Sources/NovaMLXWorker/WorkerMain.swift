@@ -218,10 +218,13 @@ struct NovaMLXWorker {
                 }
                 result = try await fusedScheduler.submit(request)
             }
+            NovaMLXLog.info("[Worker:\(reqTag)] writing result tokens=\(result.completionTokens) chars=\(result.text.utf8.count)")
             writer.write(WorkerMessage(type: WorkerMessageType.result, requestId: msg.requestId, result: result))
+            NovaMLXLog.info("[Worker:\(reqTag)] result written")
         } catch {
             writer.write(WorkerMessage(type: WorkerMessageType.error, requestId: msg.requestId, errorMessage: error.localizedDescription))
         }
+        engine.reapVLMWorkingSets()
     }
 
     // MARK: - Stream
@@ -344,8 +347,25 @@ final class LineWriter: @unchecked Sendable {
     /// keeps memory-stats lines from interleaving; the host reader is a
     /// blocking thread and drains the pipe while this write waits.
     func write(_ message: WorkerMessage) {
-        guard var data = try? JSONEncoder().encode(message) else { return }
-        data.append(0x0A)
+        let data: Data
+        do {
+            var encoded = try JSONEncoder().encode(message)
+            encoded.append(0x0A)
+            data = encoded
+        } catch {
+            NovaMLXLog.error("[Worker] failed to encode \(message.type): \(error)")
+            guard message.type != WorkerMessageType.error else { return }
+            write(WorkerMessage(
+                type: WorkerMessageType.error,
+                requestId: message.requestId,
+                errorMessage: "Failed to encode worker \(message.type): \(error)"
+            ))
+            return
+        }
+        writeRaw(data)
+    }
+
+    private func writeRaw(_ data: Data) {
         lock.lock()
         defer { lock.unlock() }
         data.withUnsafeBytes { raw in

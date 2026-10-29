@@ -513,8 +513,12 @@ public struct Tokenizer: Sendable {
     }
 }
 
-/// Owns a finished VLM generation's pages and KV cache so the generate
-/// thread can return the text before those objects are destroyed.
+/// Owns a finished VLM generation's pages and KV cache.
+///
+/// Destroying those objects syncs the GPU. Doing that on a second thread
+/// while `tokenizer.decode` still runs deadlocks after the Prefill log, so
+/// the worker never writes the result line and the host stays blocked in
+/// `read`. Stash the objects, return the text, write stdout, then drain.
 private final class VLMWorkingSetRetirement: @unchecked Sendable {
     var caches: [KVCache]
     var boxed: [KVCache]?
@@ -526,11 +530,32 @@ private final class VLMWorkingSetRetirement: @unchecked Sendable {
         self.imageInput = imageInput
     }
 
-    func release() {
+    fileprivate func release() {
         caches = []
         boxed = nil
         imageInput = LMInput(tokens: MLXArray([Int32(0)]))
         MLXMemoryGate.clearCache()
+    }
+}
+
+private enum VLMDeferredRelease {
+    private static let lock = NSLock()
+    private static var pending: [VLMWorkingSetRetirement] = []
+
+    static func stash(_ item: VLMWorkingSetRetirement) {
+        lock.lock()
+        pending.append(item)
+        lock.unlock()
+    }
+
+    static func drain() {
+        lock.lock()
+        let items = pending
+        pending.removeAll()
+        lock.unlock()
+        for item in items {
+            item.release()
+        }
     }
 }
 
@@ -3178,26 +3203,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 vlmLogitStats = unpacked.1
                 NovaMLXLog.info("[Prefill:\(reqTag)] VLM — \(tokenIds.count) prompt, \(vlmGeneratedIds.count) generated, logits=[\(vlmLogitStats)]")
                 }
-                // Hand the page bitmaps and KV cache to another thread before
-                // detokenize. Freeing them here, or calling clearCache on this
-                // thread, runs before the worker writes the result, so a 100-page
-                // PDF never produces an HTTP body. The gate is taken on that
-                // thread and not while `lock` is held.
-                let retired = VLMWorkingSetRetirement(
-                    caches: kvCache,
-                    boxed: kvCacheBox.value,
-                    imageInput: input
-                )
-                kvCache = []
-                kvCacheBox.value = nil
-                input = LMInput(tokens: MLXArray([Int32(0)]))
-                effectiveInput = input
-                Thread.detachNewThread {
-                    retired.release()
-                }
 
+                // Detokenize while the caches and page images are still alive.
+                // A concurrent clearCache here deadlocks the tokenizer and the
+                // result line is never written.
                 let decodedText = mlxTokenizer.decode(tokenIds: vlmGeneratedIds)
                 let cleanText = layoutOCR ? decodedText : Self.scrubControlTokens(decodedText)
+                NovaMLXLog.info("[Prefill:\(reqTag)] VLM detokenized \(cleanText.utf8.count) bytes")
 
                 let elapsed = Date().timeIntervalSince(startTime)
                 let tps = vlmGeneratedIds.count > 0 ? Double(vlmGeneratedIds.count) / elapsed : 0
@@ -3207,6 +3219,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     totalTokensGenerated += UInt64(vlmGeneratedIds.count)
                     totalInferenceTime += elapsed
                 }
+
+                // Keep the GPU objects alive across this return so the worker
+                // can write the result line first. `reapVLMWorkingSets` drops
+                // them after that write.
+                VLMDeferredRelease.stash(VLMWorkingSetRetirement(
+                    caches: kvCache,
+                    boxed: kvCacheBox.value,
+                    imageInput: input
+                ))
+                kvCache = []
+                kvCacheBox.value = nil
+                input = LMInput(tokens: MLXArray([Int32(0)]))
+                effectiveInput = input
 
                 return InferenceResult(
                     id: request.id,
@@ -4160,6 +4185,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     public var gpuActiveMemory: UInt64 { MLXMemoryGate.activeBytes() }
+
+    /// Drops page images and KV caches stashed by the last VLM generate.
+    /// Call after the worker has written the result line. Doing it earlier
+    /// races the tokenizer and the stdout write never happens.
+    public func reapVLMWorkingSets() {
+        VLMDeferredRelease.drain()
+    }
 
     /// Wire settings provider into the memory enforcer and start 1s polling.
     /// Call once after config is loaded. The abortAllHandler cancels active
