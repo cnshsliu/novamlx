@@ -540,7 +540,8 @@ private final class VLMWorkingSetRetirement: @unchecked Sendable {
 
 private enum VLMDeferredRelease {
     private static let lock = NSLock()
-    private static var pending: [VLMWorkingSetRetirement] = []
+    // StrictConcurrency: lock-guarded static (same pattern as UnlimitedOCRLayerKernel / FlintM4MaxPrefill).
+    private nonisolated(unsafe) static var pending: [VLMWorkingSetRetirement] = []
 
     static func stash(_ item: VLMWorkingSetRetirement) {
         lock.lock()
