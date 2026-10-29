@@ -16,8 +16,10 @@ import NovaMLXUtils
 ///
 /// `ExecutorJob` is noncopyable and cannot be captured by an escaping
 /// closure. `UnownedJob` is the handoff that compiles on Mac Swift 6.
-final class MLXGPUExecutor: TaskExecutor, @unchecked Sendable {
-    static let shared: MLXGPUExecutor = {
+/// Visible to `NovaMLXWorker` (another target). Not a client API:
+/// `NovaMLXEngine` is a library product, so this stays `package`.
+package final class MLXGPUExecutor: TaskExecutor, @unchecked Sendable {
+    package static let shared: MLXGPUExecutor = {
         let executor = MLXGPUExecutor()
         executor.start()
         return executor
@@ -60,7 +62,7 @@ final class MLXGPUExecutor: TaskExecutor, @unchecked Sendable {
         }
     }
 
-    func enqueue(_ job: consuming ExecutorJob) {
+    package func enqueue(_ job: consuming ExecutorJob) {
         let unowned = UnownedJob(job)
         let executor = asUnownedTaskExecutor()
         schedule {
@@ -70,7 +72,7 @@ final class MLXGPUExecutor: TaskExecutor, @unchecked Sendable {
 
     /// Run `body` on the MLX pthread. Re-enters inline when the caller
     /// already is that pthread, so a job cannot deadlock on itself.
-    func sync<T>(_ body: @escaping () -> T) -> T {
+    package func sync<T>(_ body: @escaping () -> T) -> T {
         if ownsCurrentThread() {
             return body()
         }
@@ -97,7 +99,7 @@ final class MLXGPUExecutor: TaskExecutor, @unchecked Sendable {
     /// `withTaskExecutorPreference` and `Task(executorPreference:)` keep
     /// running on the caller until the first await. MLX before that await
     /// would bind `Stream.gpu` to the wrong pthread.
-    func resumeOnPinnedThread() async {
+    package func resumeOnPinnedThread() async {
         // Already on the MLX pthread: returning without suspending keeps
         // the caller there. A second hop would queue a resume behind the
         // job that is running.
@@ -111,7 +113,7 @@ final class MLXGPUExecutor: TaskExecutor, @unchecked Sendable {
         }
     }
 
-    static func pthreadLabel() -> String {
+    package static func pthreadLabel() -> String {
         String(describing: pthread_self())
     }
 
