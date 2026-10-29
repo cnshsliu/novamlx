@@ -1861,9 +1861,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return params
     }
 
-    /// Prompt tokens from `prepare` are born on the ModelContainer actor thread.
-    /// GLM weights are realized on `MLXGPUExecutor`. Rebuild the prompt array
-    /// on that executor so prefill does not `async_eval` a foreign Metal stream.
+    /// Prompt tokens from `prepare` are an `MLXArray` that may have been born
+    /// off the MLX pthread. Rebuild them on that pthread so prefill's
+    /// `async_eval` uses the same `Stream.gpu` load primed.
     private func glmReboundInput(
         _ input: LMInput,
         family: ModelFamily,
@@ -1876,7 +1876,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
         return MLXGPUExecutor.shared.sync {
             NovaMLXLog.info(
-                "[MLXGPU] glm prompt rebound pthread=\(MLXGPUExecutor.pthreadLabel()) tokens=\(ids.count)"
+                "[MLXGPU] glm prompt rebound pthread=\(MLXGPUExecutor.pthreadLabel()) stream=\(Stream.gpu) tokens=\(ids.count)"
             )
             return LMInput(tokens: MLXArray(ids))
         }
@@ -2527,6 +2527,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
+        await MLXGPUExecutor.shared.resumeOnPinnedThread()
         // Dispatch to specialized paths based on request fields
         if let sessionId = request.sessionId {
             return try await generateWithSession(request, sessionId: sessionId)
@@ -3340,6 +3341,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         return AsyncThrowingStream { continuation in
             let task = Task(executorPreference: MLXGPUExecutor.shared) {
+                await MLXGPUExecutor.shared.resumeOnPinnedThread()
                 do {
                     guard let container = self.getContainer(for: request.model) else {
                         throw NovaMLXError.modelNotFound(request.model)
@@ -4284,6 +4286,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             let engine = self
 
             let task = Task(executorPreference: MLXGPUExecutor.shared) {
+                await MLXGPUExecutor.shared.resumeOnPinnedThread()
                 do {
                     guard let container = engine.getContainer(for: request.model),
                           let mlxContainer = container.mlxContainer else {
@@ -4650,6 +4653,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             let engine = self
 
             let task = Task(executorPreference: MLXGPUExecutor.shared) {
+                await MLXGPUExecutor.shared.resumeOnPinnedThread()
                 do {
                     guard let container = engine.getContainer(for: request.model),
                           let mlxContainer = container.mlxContainer else {

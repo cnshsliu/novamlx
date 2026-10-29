@@ -1248,7 +1248,9 @@ enum Glm5NextSanitizer {
     static func remap(
         _ weights: [String: MLXArray], config: Glm5NextConfiguration
     ) -> (weights: [String: MLXArray], droppedMtpKeys: Int) {
-        NovaMLXLog.info("[MLXGPU] glm sanitize pthread=\(MLXGPUExecutor.pthreadLabel())")
+        NovaMLXLog.info(
+            "[MLXGPU] glm sanitize pthread=\(MLXGPUExecutor.pthreadLabel()) stream=\(Stream.gpu)"
+        )
         var mapped: [String: MLXArray] = [:]
         mapped.reserveCapacity(weights.count)
         var droppedMtpKeys = 0

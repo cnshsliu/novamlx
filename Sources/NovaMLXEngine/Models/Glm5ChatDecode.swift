@@ -19,9 +19,9 @@ enum Glm5ChatDecode {
     static let decodeEvalStride = 1
 
     /// Hybrid models otherwise prefill in one 32768-token chunk (`asyncEval`).
-    /// On a 128 GB Mac that chunk of this MoE swaps and the following
-    /// `async_eval` runs off the load thread's Metal stream. 128 tokens is
-    /// one forward for a short chat and a bounded chunk for a longer prompt.
+    /// On a 128 GB Mac that chunk of this MoE swaps. 128 tokens is one
+    /// forward for a short chat and a bounded chunk for a longer prompt.
+    /// `async_eval` still has to run on the pthread that owns `Stream.gpu`.
     static let prefillChunk = 128
 
     /// oMLX public benchmark `0g84suc9`. Not a Z.ai figure.
