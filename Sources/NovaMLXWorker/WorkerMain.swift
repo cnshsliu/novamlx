@@ -9,6 +9,15 @@ import NovaMLXEngine
 @main
 struct NovaMLXWorker {
     static func main() async {
+        // Bind Stream.gpu's thread-local Metal encoder to the MLX pthread
+        // before MLXEngine, the memory enforcer, or a load can touch it.
+        MLXGPUExecutor.shared.sync {
+            let stream = Stream.gpu
+            NovaMLXLog.info(
+                "[MLXGPU] primed pthread=\(MLXGPUExecutor.pthreadLabel()) stream=\(stream)"
+            )
+        }
+
         // Workers read prefix-cache kill switch from the SQLite configStore.
         // The worker process owns no other DB consumer, so we open the same
         // ~/.nova SQLite files the host app uses (read-only access would be a
@@ -99,21 +108,27 @@ struct NovaMLXWorker {
 
                 switch msg.type {
                 case WorkerMessageType.load:
-                    await handleLoad(msg, engine: engine, writer: writer)
+                    await withTaskExecutorPreference(MLXGPUExecutor.shared) {
+                        await handleLoad(msg, engine: engine, writer: writer)
+                    }
 
                 case WorkerMessageType.unload:
                     await handleUnload(msg, engine: engine, writer: writer)
 
                 case WorkerMessageType.generate:
                     group.addTask {
-                        await handleGenerate(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        await withTaskExecutorPreference(MLXGPUExecutor.shared) {
+                            await handleGenerate(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        }
                     }
 
                 case WorkerMessageType.stream:
                     let reqTagRead = (msg.requestId ?? "?").prefix(8)
                     NovaMLXLog.info("[Worker:\(reqTagRead)] stdin read + decoded — dispatching to handleStream")
                     group.addTask {
-                        await handleStream(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        await withTaskExecutorPreference(MLXGPUExecutor.shared) {
+                            await handleStream(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        }
                     }
 
                 case WorkerMessageType.abort:
@@ -138,6 +153,7 @@ struct NovaMLXWorker {
     // MARK: - Load
 
     private static func handleLoad(_ msg: WorkerMessage, engine: MLXEngine, writer: LineWriter) async {
+        await MLXGPUExecutor.shared.resumeOnPinnedThread()
         guard let modelId = msg.modelId, let path = msg.modelPath, let config = msg.modelConfig else {
             writer.write(WorkerMessage(type: WorkerMessageType.error, errorMessage: "Missing modelId/path/config"))
             return
@@ -194,6 +210,7 @@ struct NovaMLXWorker {
         fusedScheduler: FusedBatchScheduler,
         writer: LineWriter
     ) async {
+        await MLXGPUExecutor.shared.resumeOnPinnedThread()
         guard let codableReq = msg.request else {
             writer.write(WorkerMessage(type: WorkerMessageType.error, requestId: msg.requestId, errorMessage: "Missing request"))
             return
@@ -236,6 +253,7 @@ struct NovaMLXWorker {
         fusedScheduler: FusedBatchScheduler,
         writer: LineWriter
     ) async {
+        await MLXGPUExecutor.shared.resumeOnPinnedThread()
         guard let codableReq = msg.request else {
             writer.write(WorkerMessage(type: WorkerMessageType.error, requestId: msg.requestId, errorMessage: "Missing request"))
             return

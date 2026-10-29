@@ -695,6 +695,36 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             ? (try? String(contentsOf: jinjaPath, encoding: .utf8)).flatMap { $0.isEmpty ? nil : $0 }
             : nil
 
+        // GLM Jinja uses attribute indexes (`m.content.0.type`). swift-jinja
+        // rejects that as "Expected identifier but found number." Rewrite to
+        // `m.content[0].type` and keep the .jinja from overriding it.
+        if family == .glm {
+            let baseline = configTemplate ?? jinjaTemplate
+            let chosen = ChatTemplateLibrary.resolve(
+                modelId: modelId,
+                family: family,
+                architecture: architecture,
+                downloadedTemplate: baseline
+            ) ?? baseline
+            if let chosen {
+                let (fixed, rewrites) = GlmJinja.rewriteNumericIndexes(chosen)
+                if fixed != configTemplate {
+                    injectTemplate(fixed, into: modelDir, modelId: modelId)
+                }
+                if rewrites > 0 {
+                    NovaMLXLog.info(
+                        "[ChatTemplate] \(modelId): swift-jinja numeric index rewrite \(rewrites) (.N → [N])"
+                    )
+                }
+                quarantineJinjaIfPresent(
+                    jinjaPath: jinjaPath,
+                    reason: "glm swift-jinja index rewrite",
+                    modelId: modelId
+                )
+                return
+            }
+        }
+
         // 2. Apply NovaMLX-maintained override if ChatTemplateLibrary has one.
         //    The override is the source of truth: write it to tokenizer_config and
         //    remove any .jinja file (which swift-transformers would otherwise prefer).
@@ -861,6 +891,19 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // Distributed inference Workers may intentionally exceed the recommended working set
         // since they only use a subset of layers. Skip the gate when explicitly requested.
         if !skipMemoryGate {
+        if let configJson, Glm5NextMemory.isTextModel(configJson) {
+            let weightBytes = Glm5NextMemory.indexedWeightBytes(at: url)
+                ?? Self.estimateModelWeightSize(at: url)
+                ?? 0
+            if let message = Glm5NextMemory.refusalMessage(
+                modelId: config.identifier.id,
+                weightBytes: weightBytes,
+                physicalBytes: ProcessInfo.processInfo.physicalMemory
+            ) {
+                NovaMLXLog.error("[MemoryGate] \(message)")
+                throw NovaMLXError.configurationError(message)
+            }
+        }
         if let configJson, NemotronHPuzzleMemory.isTextPuzzle(configJson) {
             if let vision = configJson["vision_config"], !(vision is NSNull) {
                 throw NovaMLXError.configurationError(
@@ -1004,7 +1047,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             // Multimodal models (Qwen3.5) store attention params in text_config
             let tc = (json["text_config"] as? [String: Any]) ?? json
-            if let hd = tc["head_dim"] as? Int {
+            if let hd = tc["head_dim"] as? Int, hd > 0 {
                 headDim = hd
             } else if let hs = tc["hidden_size"] as? Int,
                       let nah = tc["num_attention_heads"] as? Int, nah > 0 {
@@ -1018,6 +1061,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             if let maxPos = tc["max_position_embeddings"] as? Int, maxPos > 0 {
                 container.config.contextLength = maxPos
                 NovaMLXLog.info("[Engine] Auto-detected context length: \(maxPos) tokens for \(config.identifier.displayName)")
+            }
+
+            let rootType = (json["model_type"] as? String)?.lowercased() ?? ""
+            let textType = (tc["model_type"] as? String)?.lowercased() ?? ""
+            if rootType == "glm5_next" || rootType == "glm5_next_text"
+                || textType == "glm5_next_text"
+            {
+                if let rank = tc["kv_lora_rank"] as? Int, rank > 0 {
+                    headDim = rank
+                }
+                let cap = Glm5NextMemory.validatedContextTokens
+                if container.config.contextLength > cap {
+                    NovaMLXLog.info(
+                        "[Engine] GLM-5.3-Flash text path caps context at \(cap) tokens (checkpoint advertises \(container.config.contextLength))"
+                    )
+                    container.config.contextLength = cap
+                }
+                container.config.hasLinearAttention = true
+                NovaMLXLog.info("[Engine] Detected glm5_next text model — will use ContinuousBatcher")
             }
 
             // Detect hybrid linear attention models (e.g. Qwen3.5, bailing_hybrid).
@@ -1856,10 +1918,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let familyOpt = ModelFamilyRegistry.shared.optimization(
             for: config.identifier.id, family: config.identifier.family)
-        params.prefill.stepSize = ResourceLimits.prefillStepSize(
-            hasLinearAttention: config.hasLinearAttention,
-            familyDefault: familyOpt.prefillStepSize
-        )
+        if config.identifier.family == .glm {
+            params.prefill.stepSize = Glm5ChatDecode.prefillChunk
+        } else {
+            params.prefill.stepSize = ResourceLimits.prefillStepSize(
+                hasLinearAttention: config.hasLinearAttention,
+                familyDefault: familyOpt.prefillStepSize
+            )
+        }
         if config.hasLinearAttention {
             // Keep KV in fp16 through GDN prefill so full-attn layers use
             // flash SDPA. 4-bit KV from token 0 was the 16k TTFT cliff.
@@ -1882,6 +1948,27 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         return params
+    }
+
+    /// Prompt tokens from `prepare` are an `MLXArray` that may have been born
+    /// off the MLX pthread. Rebuild them on that pthread so prefill's
+    /// `async_eval` uses the same `Stream.gpu` load primed.
+    private func glmReboundInput(
+        _ input: LMInput,
+        family: ModelFamily,
+        mlxContainer: MLXLMCommon.ModelContainer
+    ) async -> LMInput {
+        guard family == .glm else { return input }
+        let boxed = SendableBox(input.text.tokens)
+        let ids = await mlxContainer.perform { (_: ModelContext) in
+            boxed.value.asArray(Int32.self)
+        }
+        return MLXGPUExecutor.shared.sync {
+            NovaMLXLog.info(
+                "[MLXGPU] glm prompt rebound pthread=\(MLXGPUExecutor.pthreadLabel()) stream=\(Stream.gpu) tokens=\(ids.count)"
+            )
+            return LMInput(tokens: MLXArray(ids))
+        }
     }
 
     /// Flint serial decode uses a resident packet when the route allows it.
@@ -2553,6 +2640,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
+        await MLXGPUExecutor.shared.resumeOnPinnedThread()
         // Dispatch to specialized paths based on request fields
         if let sessionId = request.sessionId {
             return try await generateWithSession(request, sessionId: sessionId)
@@ -3254,8 +3342,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     ) == .nativeStubDisabled {
                         logNativeMtpStubDisabled(tag: "GENERATE:\(String(request.id.uuidString.prefix(8)))")
                     }
+                    let glmInput = await glmReboundInput(
+                        effectiveInput, family: container.identifier.family, mlxContainer: mlxContainer)
                     iterator = try Self.openDecodeIterator(
-                        input: effectiveInput, model: model.value,
+                        input: glmInput, model: model.value,
                         cache: kvCache,
                         processor: processor, sampler: sampler,
                         parameters: parameters, maxTokens: maxTokens,
@@ -3303,6 +3393,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 genStopReason = String(describing: info.stopReason)
                 if case .length = info.stopReason { finishReason = .length }
                 decodeTokensPerSecond = info.tokensPerSecond
+                logGlmChatDecode(
+                    container: container,
+                    model: model.value,
+                    promptTokens: Int(promptTokenCount),
+                    generationTokens: info.generationTokenCount,
+                    tokensPerSecond: info.tokensPerSecond)
                 logQwenMtpCompletion(info, tag: String(request.id.uuidString.prefix(8)))
                         NovaMLXLog.debug("[GENERATE:\(request.id.uuidString.prefix(8))] Info: tokens=\(info.generationTokenCount), stopReason=\(genStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
             case .toolCall(let tc):
@@ -3385,7 +3481,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         return AsyncThrowingStream { continuation in
-            let task = Task {
+            let task = Task(executorPreference: MLXGPUExecutor.shared) {
+                await MLXGPUExecutor.shared.resumeOnPinnedThread()
                 do {
                     guard let container = self.getContainer(for: request.model) else {
                         throw NovaMLXError.modelNotFound(request.model)
@@ -3981,8 +4078,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             ) == .nativeStubDisabled {
                                 logNativeMtpStubDisabled(tag: "STREAM:\(String(request.id.uuidString.prefix(8)))")
                             }
+                            let glmInput = await self.glmReboundInput(
+                                effectiveInput, family: container.identifier.family, mlxContainer: mlxContainer)
                             iterator = try Self.openDecodeIterator(
-                                input: effectiveInput, model: model.value,
+                                input: glmInput, model: model.value,
                                 cache: kvCache,
                                 processor: processor, sampler: sampler,
                                 parameters: parameters, maxTokens: maxTokens,
@@ -4056,6 +4155,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             completionTokens = info.generationTokenCount
                             infoStopReason = String(describing: info.stopReason)
                             if case .length = info.stopReason { finishReason = .length }
+                            logGlmChatDecode(
+                                container: container,
+                                model: model.value,
+                                promptTokens: Int(promptTokenCount),
+                                generationTokens: info.generationTokenCount,
+                                tokensPerSecond: info.tokensPerSecond)
                             logQwenMtpCompletion(info, tag: reqTag)
                             NovaMLXLog.debug("[STREAM:\(reqTag)] Info: tokens=\(info.generationTokenCount), stopReason=\(infoStopReason), tps=\(String(format: "%.1f", info.tokensPerSecond))")
                         case .toolCall(let tc):
@@ -4345,7 +4450,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let engine = self
 
-            let task = Task {
+            let task = Task(executorPreference: MLXGPUExecutor.shared) {
+                await MLXGPUExecutor.shared.resumeOnPinnedThread()
                 do {
                     guard let container = engine.getContainer(for: request.model),
                           let mlxContainer = container.mlxContainer else {
@@ -4711,7 +4817,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let engine = self
 
-            let task = Task {
+            let task = Task(executorPreference: MLXGPUExecutor.shared) {
+                await MLXGPUExecutor.shared.resumeOnPinnedThread()
                 do {
                     guard let container = engine.getContainer(for: request.model),
                           let mlxContainer = container.mlxContainer else {

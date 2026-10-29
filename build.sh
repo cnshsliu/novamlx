@@ -189,6 +189,11 @@ if [ -d .build/checkouts/mlx-swift ] && ! grep -q "NOVAMLX_PATCHED" .build/check
 	python3 Scripts/patch-mlx-complex.py
 fi
 
+# Stream(gpu, N) encoders are thread-local. Chat eval must install a missing
+# encoder on the MLX pthread instead of aborting. No-op when vendors is absent.
+echo "→ Applying MLX Metal stream registration patch..."
+python3 Scripts/patch-mlx-metal-stream.py
+
 # Apply fused quantized SDPA patch to mlx-swift-lm
 if [ -d .build/checkouts/mlx-swift-lm ] && ! grep -q "NOVAMLX_FUSED_SDPA_PATCHED" .build/checkouts/mlx-swift-lm/Libraries/MLXLMCommon/AttentionUtils.swift 2>/dev/null; then
 	echo "→ Applying fused quantized SDPA patch..."

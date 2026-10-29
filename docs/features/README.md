@@ -104,4 +104,5 @@ This directory is the user-facing documentation, one page per feature.
 | 功能 / Feature | 一句话 / Pitch | 状态 |
 |----------------|----------------|------|
 | [Nemotron 3.5 Bolt 文本 / Nemotron 3.5 Bolt text](nemotron-bolt-text.md) | 本地 74B 级异构 MoE，仅文本，思考默认开启。 | preview |
+| [GLM-5.3-Flash 文本 / GLM-5.3-Flash text](glm-5-3-flash.md) | 文本 glm5_next。128 GB 能加载 2-bit，解码会换页；4-bit 要 256 GB 才能加载。 | preview |
 | [Unlimited OCR](unlimited-ocr.md) | 本地文档解析。OCR-2 用定长 SR-SWA 解码；gen-1 用 R-SWA 环。 | preview |

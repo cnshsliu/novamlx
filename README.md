@@ -35,6 +35,7 @@ Per-feature docs, one page each: **[Feature index](docs/features/README.md)**（
 - [Image generation](docs/features/image-generation.md) and [image matting](docs/features/matting.md) — T2I plus BiRefNet background removal
 - [Menu bar app](docs/features/menu-bar.md)
 - [Nemotron 3.5 Bolt text](docs/features/nemotron-bolt-text.md) — preview, text only
+- [GLM-5.3-Flash text](docs/features/glm-5-3-flash.md) — preview, text only; 128 GB loads hybrid 2-bit and swaps on decode, 4-bit needs 256 GB to load
 
 ---
 

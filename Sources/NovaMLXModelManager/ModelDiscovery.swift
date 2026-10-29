@@ -144,6 +144,7 @@ public final class ModelDiscovery: Sendable {
         "starcoder2": .starcoder,
         "bailing_moe": .bailing, "bailing_hybrid": .bailing,
         "deepseek_v3": .deepseek, "deepseek_v4": .deepseek, "deepseek_v41": .deepseek,
+        "glm5_next": .glm, "glm5_next_text": .glm,
         "nemotron_h": .nemotron, "nemotron_h_puzzle": .nemotron,
         "hy_v4": .hunyuan, "hunyuan_v1_dense": .hunyuan,
         "gpt_oss": .gptOss,
@@ -179,6 +180,7 @@ public final class ModelDiscovery: Sendable {
         "FlintForCausalLM": .flint,
         "DeepseekV4ForCausalLM": .deepseek,
         "DeepseekV41ForCausalLM": .deepseek,
+        "Glm5NextForConditionalGeneration": .glm,
         "NemotronHForCausalLM": .nemotron,
         "NemotronHPuzzleForCausalLM": .nemotron,
         "HYV4ForCausalLM": .hunyuan, "HunYuanDenseV1ForCausalLM": .hunyuan,
@@ -754,9 +756,14 @@ public final class ModelDiscovery: Sendable {
             // 2. Built-in
             if let family = Self.familyByModelType[normalized] { return family }
 
-            // Prefix match against built-in (e.g. "qwen3_5" → "qwen3" → .qwen)
+            // Prefix match against built-in (e.g. "qwen3_5" → "qwen3" → .qwen).
+            // `glm4` / `glm4_moe` strip to "glm". Do not let that hit `glm5_next`:
+            // GLM-4 stays on its previous family (.other unless an exact key exists).
             let baseType = normalized.components(separatedBy: CharacterSet(charactersIn: "_0123456789")).first ?? normalized
-            for (key, family) in Self.familyByModelType where key.hasPrefix(baseType) { return family }
+            for (key, family) in Self.familyByModelType where key.hasPrefix(baseType) {
+                if baseType == "glm", key.hasPrefix("glm5") { continue }
+                return family
+            }
         }
 
         if let architectures = config.architectures {

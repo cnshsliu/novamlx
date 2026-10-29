@@ -37,7 +37,7 @@ Tokenhub 在请求含图像时还有三层后端：本地 VLM、provider 的 `an
 
 - 3D-mRoPE 模型不能走 fused-decode，否则视觉状态不会按连续批处理那条路径维护。
 - 本页的架构列表来自多模态表的视觉行，不是 `ModelFamily` 枚举的全集。
-- 文本专用检查点（例如带 `vision_config` 会被拒绝的 Nemotron Bolt 文本量化）不能当 VLM 用。见 [Nemotron 3.5 Bolt 文本](nemotron-bolt-text.md)。
+- 文本专用检查点不能当 VLM 用。Nemotron Bolt 文本量化带 `vision_config` 时会在加载前被拒绝。见 [Nemotron 3.5 Bolt 文本](nemotron-bolt-text.md)。GLM-5.3-Flash 带 `vision_config` 时仍按文本 LLM 发现，视觉权重在加载时丢掉。见 [GLM-5.3-Flash 文本](glm-5-3-flash.md)。
 
 ## Related
 

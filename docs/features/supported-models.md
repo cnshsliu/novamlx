@@ -31,6 +31,8 @@ Each id below is one repository.
 
 | Name | Weight id | Size / quant | Status | Minimum memory | Download | Hugging Face |
 |------|-----------|--------------|--------|----------------|----------|--------------|
+| GLM-5.3-Flash hybrid 2-bit | `TensorFold/GLM-5.3-Flash-MLX-2bit-MTP` | ~111 GB (hybrid 2-bit; 128 GB loads, decode swaps) | preview | 128 GB | `nova download TensorFold/GLM-5.3-Flash-MLX-2bit-MTP` | [Hugging Face](https://huggingface.co/TensorFold/GLM-5.3-Flash-MLX-2bit-MTP) |
+| GLM-5.3-Flash 4-bit (256 GB) | `mlx-community/GLM-5.3-Flash-4bit` | ~204 GB (4-bit) | preview | 256 GB | `nova download mlx-community/GLM-5.3-Flash-4bit` | [Hugging Face](https://huggingface.co/mlx-community/GLM-5.3-Flash-4bit) |
 | Nemotron 3.5 Bolt 74B-A9B 4-bit | `rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit` | ~43 GB (4-bit) | preview | 64 GB | `nova download rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit` | [Hugging Face](https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-4bit) |
 | Nemotron 3.5 Bolt 74B-A9B 3-bit | `rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit` | ~32 GB (3-bit) | preview | 48 GB | `nova download rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit` | [Hugging Face](https://huggingface.co/rapid-mlx/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-MLX-3bit) |
 | DeepSeek-V4.1-Flash DSpark drafter | `mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter` | ~4.5 GB (2-bit) | verified | 16 GB | `nova download mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter` | [Hugging Face](https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-DSpark-drafter) |
