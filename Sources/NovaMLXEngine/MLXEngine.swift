@@ -1861,6 +1861,27 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         return params
     }
 
+    /// Prompt tokens from `prepare` are born on the ModelContainer actor thread.
+    /// GLM weights are realized on `MLXGPUExecutor`. Rebuild the prompt array
+    /// on that executor so prefill does not `async_eval` a foreign Metal stream.
+    private func glmReboundInput(
+        _ input: LMInput,
+        family: ModelFamily,
+        mlxContainer: MLXLMCommon.ModelContainer
+    ) async -> LMInput {
+        guard family == .glm else { return input }
+        let boxed = SendableBox(input.text.tokens)
+        let ids = await mlxContainer.perform { (_: ModelContext) in
+            boxed.value.asArray(Int32.self)
+        }
+        return MLXGPUExecutor.shared.sync {
+            NovaMLXLog.info(
+                "[MLXGPU] glm prompt rebound pthread=\(MLXGPUExecutor.pthreadLabel()) tokens=\(ids.count)"
+            )
+            return LMInput(tokens: MLXArray(ids))
+        }
+    }
+
     /// Flint serial decode uses a resident packet when the route allows it.
     /// Greedy with no grammar stays on the device argmax packet. Grammar and
     /// recommended sampling use the filtered packet (processor mask, then the
@@ -3179,8 +3200,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     ) == .nativeStubDisabled {
                         logNativeMtpStubDisabled(tag: "GENERATE:\(String(request.id.uuidString.prefix(8)))")
                     }
+                    let glmInput = await glmReboundInput(
+                        effectiveInput, family: container.identifier.family, mlxContainer: mlxContainer)
                     iterator = try Self.openDecodeIterator(
-                        input: effectiveInput, model: model.value,
+                        input: glmInput, model: model.value,
                         cache: kvCache,
                         processor: processor, sampler: sampler,
                         parameters: parameters, maxTokens: maxTokens,
@@ -3316,7 +3339,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         return AsyncThrowingStream { continuation in
-            let task = Task {
+            let task = Task(executorPreference: MLXGPUExecutor.shared) {
                 do {
                     guard let container = self.getContainer(for: request.model) else {
                         throw NovaMLXError.modelNotFound(request.model)
@@ -3895,8 +3918,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             ) == .nativeStubDisabled {
                                 logNativeMtpStubDisabled(tag: "STREAM:\(String(request.id.uuidString.prefix(8)))")
                             }
+                            let glmInput = await glmReboundInput(
+                                effectiveInput, family: container.identifier.family, mlxContainer: mlxContainer)
                             iterator = try Self.openDecodeIterator(
-                                input: effectiveInput, model: model.value,
+                                input: glmInput, model: model.value,
                                 cache: kvCache,
                                 processor: processor, sampler: sampler,
                                 parameters: parameters, maxTokens: maxTokens,
@@ -4258,7 +4283,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let engine = self
 
-            let task = Task {
+            let task = Task(executorPreference: MLXGPUExecutor.shared) {
                 do {
                     guard let container = engine.getContainer(for: request.model),
                           let mlxContainer = container.mlxContainer else {
@@ -4624,7 +4649,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let engine = self
 
-            let task = Task {
+            let task = Task(executorPreference: MLXGPUExecutor.shared) {
                 do {
                     guard let container = engine.getContainer(for: request.model),
                           let mlxContainer = container.mlxContainer else {

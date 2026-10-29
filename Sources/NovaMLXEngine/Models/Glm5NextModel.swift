@@ -4,6 +4,7 @@ import MLXLLM
 import MLXLMCommon
 import MLXNN
 import MLXRandom
+import NovaMLXCore
 import NovaMLXUtils
 
 // Text-only GLM-5.3-Flash (`model_type: glm5_next` / `glm5_next_text`).
@@ -1247,6 +1248,7 @@ enum Glm5NextSanitizer {
     static func remap(
         _ weights: [String: MLXArray], config: Glm5NextConfiguration
     ) -> (weights: [String: MLXArray], droppedMtpKeys: Int) {
+        NovaMLXLog.info("[MLXGPU] glm sanitize pthread=\(MLXGPUExecutor.pthreadLabel())")
         var mapped: [String: MLXArray] = [:]
         mapped.reserveCapacity(weights.count)
         var droppedMtpKeys = 0

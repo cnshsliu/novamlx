@@ -223,7 +223,7 @@ public final class ContinuousBatcher: @unchecked Sendable {
             let priority: RequestPriority = .normal
             let modelId = request.model
 
-            Task {
+            Task(executorPreference: MLXGPUExecutor.shared) {
                 let bytesPerToken = self.engine.effectiveBytesPerToken(modelId: modelId)
                 let estimatedTokens = self.engine.estimateRequestTokens(modelId: modelId, request: request)
                 let memoryOk = await self.budgetTracker.canAdmit(
@@ -242,7 +242,7 @@ public final class ContinuousBatcher: @unchecked Sendable {
 
                     NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Processing stream (active: \(self.activeRequests), model=\(modelId))")
 
-                    let task = Task {
+                    let task = Task(executorPreference: MLXGPUExecutor.shared) {
                         do {
                             let stream = self.engine.stream(request)
                             for try await token in stream {
@@ -336,7 +336,7 @@ public final class ContinuousBatcher: @unchecked Sendable {
         let continuation = item.continuation
         let modelId = request.model
 
-        Task {
+        Task(executorPreference: MLXGPUExecutor.shared) {
             let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
             let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
 
@@ -400,7 +400,7 @@ public final class ContinuousBatcher: @unchecked Sendable {
         let continuation = item.continuation
         let modelId = request.model
 
-        let task = Task {
+        let task = Task(executorPreference: MLXGPUExecutor.shared) {
             let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
             let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
 
