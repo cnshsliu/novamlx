@@ -18,6 +18,12 @@ enum Glm5ChatDecode {
     /// whole graph lazy, and it does not sync inside every KDA step.
     static let decodeEvalStride = 1
 
+    /// Hybrid models otherwise prefill in one 32768-token chunk (`asyncEval`).
+    /// On a 128 GB Mac that chunk of this MoE swaps and the following
+    /// `async_eval` runs off the load thread's Metal stream. 128 tokens is
+    /// one forward for a short chat and a bounded chunk for a longer prompt.
+    static let prefillChunk = 128
+
     /// oMLX public benchmark `0g84suc9`. Not a Z.ai figure.
     static let communityCeilingTokPerSecond = 38.5
     static let communityBenchmarkURL = "https://omlx.ai/benchmarks/performance/0g84suc9"

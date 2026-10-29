@@ -116,7 +116,9 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 - 4-bit 约 204 GB，目录最低内存是 256 GB。128 GB 加载不了它。
 - 混合 2-bit 在 MacMaxPro 128 GB 上能加载（`c8b7875` 峰值大约 101–112 GB），解码时 IOAccelerator 换页大约 50–86 GB，没有有效 `GLM-CHAT`。Release 对话崩溃信息是 `There is no Stream(gpu, 26)`。
 - 目录状态是 preview。`c8b7875` 上的 TensorFold 2-bit MTP 不是合并就绪。
-- `pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`（约 90 GB，已在 `/Volumes/Samsung768/Models/pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`）把 KDA 的 `f_a_proj` / `f_b_proj` / `A_log` / `dt_bias` 放在 `self_attn.forget_gate` 下，并把 q/k/v 深度卷积收成一条 `conv1d`。TensorFold 这些键是平的，三条 `q_conv1d` / `k_conv1d` / `v_conv1d`。加载时嵌套键抬到平的模块上；已经是平键的检查点保持原样。抬上来的 `f_a_proj` / `f_b_proj` 会反量化成浮点 `Linear`，因为量化表用的是 `forget_gate.f_*_proj`，而模块路径是平的，全局 bit 会配错。`n_routed_experts` 读配置：这份 REAP 50% 是 144，专家权重已经是 `mlp.switch_mlp.*`、专家轴 144，不按 288 再堆一次。这次改动还没有在 Mac 上跑完加载和对话。
+- `pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`（约 90 GB，路径 `/Volumes/Samsung768/Models/pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`）在 `f872475` 上加载成功（峰值约 91 GB）。短对话在 `async_eval` 里崩溃：`There is no Stream(gpu, 18) in current thread`，没有 `GLM-CHAT`。原因是 Metal 的命令编码器按线程保存，加载和对话不在同一条线程。Worker 现在把加载、生成、流式放在同一个串行 executor 上。GLM 的预填充块是 128 token，不是混合模型默认的 32768。
+- 检查点 Jinja 里的 `m.content.0.type` 会被 swift-jinja 拒绝（`Expected identifier but found number`）。加载时改成 `m.content[0].type`。`1.0` 这种小数不动。不必再手改 `tokenizer_config.json` 或放 `~/.nova/templates/*.jinja`。
+- 同一份 REAP 包的 KDA 权重在 `self_attn.forget_gate` 下，q/k/v 卷积是一条 `conv1d`。TensorFold 这些键是平的。嵌套键只在平键不存在时抬上去。`n_routed_experts` 读配置（这份是 144，`switch_mlp` 已经按 144 堆好）。
 
 ## Related
 

@@ -5,6 +5,22 @@ import NovaMLXDB
 import NovaMLXUtils
 import NovaMLXEngine
 
+/// Metal command encoders are thread-local. Load and chat are different Swift
+/// tasks, so `async_eval` during prefill looks up `Stream(gpu, N)` on a thread
+/// that never created it and aborts. One serial executor keeps both on the
+/// thread that owns the stream.
+final class MLXWorkerExecutor: TaskExecutor, @unchecked Sendable {
+    static let shared = MLXWorkerExecutor()
+    private let queue = DispatchQueue(label: "novamlx.worker.mlx")
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let executor = asUnownedTaskExecutor()
+        queue.async {
+            job.runSynchronously(on: executor)
+        }
+    }
+}
+
 @main
 struct NovaMLXWorker {
     static func main() async {
@@ -98,21 +114,27 @@ struct NovaMLXWorker {
 
                 switch msg.type {
                 case WorkerMessageType.load:
-                    await handleLoad(msg, engine: engine, writer: writer)
+                    await withTaskExecutorPreference(MLXWorkerExecutor.shared) {
+                        await handleLoad(msg, engine: engine, writer: writer)
+                    }
 
                 case WorkerMessageType.unload:
                     await handleUnload(msg, engine: engine, writer: writer)
 
                 case WorkerMessageType.generate:
                     group.addTask {
-                        await handleGenerate(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        await withTaskExecutorPreference(MLXWorkerExecutor.shared) {
+                            await handleGenerate(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        }
                     }
 
                 case WorkerMessageType.stream:
                     let reqTagRead = (msg.requestId ?? "?").prefix(8)
                     NovaMLXLog.info("[Worker:\(reqTagRead)] stdin read + decoded — dispatching to handleStream")
                     group.addTask {
-                        await handleStream(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        await withTaskExecutorPreference(MLXWorkerExecutor.shared) {
+                            await handleStream(msg, engine: engine, batcher: batcher, fusedScheduler: fusedScheduler, writer: writer)
+                        }
                     }
 
                 case WorkerMessageType.abort:

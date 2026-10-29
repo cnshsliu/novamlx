@@ -620,6 +620,36 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             ? (try? String(contentsOf: jinjaPath, encoding: .utf8)).flatMap { $0.isEmpty ? nil : $0 }
             : nil
 
+        // GLM Jinja uses attribute indexes (`m.content.0.type`). swift-jinja
+        // rejects that as "Expected identifier but found number." Rewrite to
+        // `m.content[0].type` and keep the .jinja from overriding it.
+        if family == .glm {
+            let baseline = configTemplate ?? jinjaTemplate
+            let chosen = ChatTemplateLibrary.resolve(
+                modelId: modelId,
+                family: family,
+                architecture: architecture,
+                downloadedTemplate: baseline
+            ) ?? baseline
+            if let chosen {
+                let (fixed, rewrites) = GlmJinja.rewriteNumericIndexes(chosen)
+                if fixed != configTemplate {
+                    injectTemplate(fixed, into: modelDir, modelId: modelId)
+                }
+                if rewrites > 0 {
+                    NovaMLXLog.info(
+                        "[ChatTemplate] \(modelId): swift-jinja numeric index rewrite \(rewrites) (.N → [N])"
+                    )
+                }
+                quarantineJinjaIfPresent(
+                    jinjaPath: jinjaPath,
+                    reason: "glm swift-jinja index rewrite",
+                    modelId: modelId
+                )
+                return
+            }
+        }
+
         // 2. Apply NovaMLX-maintained override if ChatTemplateLibrary has one.
         //    The override is the source of truth: write it to tokenizer_config and
         //    remove any .jinja file (which swift-transformers would otherwise prefer).
@@ -1799,10 +1829,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         let familyOpt = ModelFamilyRegistry.shared.optimization(
             for: config.identifier.id, family: config.identifier.family)
-        params.prefill.stepSize = ResourceLimits.prefillStepSize(
-            hasLinearAttention: config.hasLinearAttention,
-            familyDefault: familyOpt.prefillStepSize
-        )
+        if config.identifier.family == .glm {
+            params.prefill.stepSize = Glm5ChatDecode.prefillChunk
+        } else {
+            params.prefill.stepSize = ResourceLimits.prefillStepSize(
+                hasLinearAttention: config.hasLinearAttention,
+                familyDefault: familyOpt.prefillStepSize
+            )
+        }
         if config.hasLinearAttention {
             // Keep KV in fp16 through GDN prefill so full-attn layers use
             // flash SDPA. 4-bit KV from token 0 was the 16k TTFT cliff.
