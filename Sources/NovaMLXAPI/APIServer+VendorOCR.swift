@@ -218,25 +218,24 @@ extension NovaMLXAPIServer {
         {
             pixelSize = VendorOCRImages.pixelSize(of: data)
         }
-        // Parse and JSON-encode off this task. `generate` resumes on the
-        // worker stdout reader; doing this inline stalls that reader, and
-        // doing it on the NIO loop stalls /health for the whole encode.
+        // Build the vendor JSON on this task. `generate` already resumed off
+        // the pipe reader. A further `Task.detached` hop after that resume
+        // never completed, so curl sat at http=000 after the worker had
+        // logged `result written`. 30KB of OCR text is a straight parse.
         let ocrText = result.text
         let imageSize = pixelSize
-        let vendor = route.vendor
         let promptTokens = result.promptTokens
         let completionTokens = result.completionTokens
-        let bodyData = await Task.detached(priority: .userInitiated) {
-            let lines = UnlimitedOCRMarkup.parse(ocrText, imagePixelSize: imageSize)
-            let payload = VendorOCRResponses.success(
-                vendor: vendor,
-                lines: lines,
-                logID: logID,
-                requestID: requestID,
-                imageSize: imageSize
-            )
-            return VendorOCRResponses.encode(payload)
-        }.value
+        NovaMLXLog.info("[API] vendor OCR packaging chars=\(ocrText.utf8.count) vendor=\(route.vendor.rawValue)")
+        let lines = UnlimitedOCRMarkup.parse(ocrText, imagePixelSize: imageSize)
+        let bodyData = VendorOCRResponses.encode(VendorOCRResponses.success(
+            vendor: route.vendor,
+            lines: lines,
+            logID: logID,
+            requestID: requestID,
+            imageSize: imageSize
+        ))
+        NovaMLXLog.info("[API] vendor OCR response bytes=\(bodyData.count) lines=\(lines.count)")
         var response = Response(
             status: .ok,
             headers: [.contentType: "application/json"],

@@ -51,9 +51,6 @@ public final class WorkerSupervisor: @unchecked Sendable {
     /// Set before the stdout/stderr handles are closed so an intentional
     /// stop is not reported as a worker crash.
     private var readersStopped = false
-    /// After an oversized stdout record, skip bytes until the next newline
-    /// so the following message can still be decoded.
-    private var discardStdoutUntilNewline = false
     private static let maxStdoutLineBytes = 16 * 1024 * 1024
     private static let readChunkBytes = 64 * 1024
     private var pendingLoadModelId: String?
@@ -103,7 +100,6 @@ public final class WorkerSupervisor: @unchecked Sendable {
         self.stderrPipe = stderr
         self.isRunning = true
         self.readersStopped = false
-        self.discardStdoutUntilNewline = false
 
         startReader(stdout: stdout)
         startStderrReader(stderr, pid: proc.processIdentifier)
@@ -387,6 +383,10 @@ public final class WorkerSupervisor: @unchecked Sendable {
     private func readLoop(_ handle: FileHandle, kind: PipeKind) {
         var buffer = Data()
         let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0, (flags & O_NONBLOCK) != 0 {
+            _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+        }
         var scratch = [UInt8](repeating: 0, count: Self.readChunkBytes)
         while true {
             let n = scratch.withUnsafeMutableBytes { raw -> Int in
@@ -396,6 +396,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
             if n > 0 {
                 buffer.append(contentsOf: scratch.prefix(n))
             } else if n < 0 && errno == EINTR {
+                continue
+            } else if n < 0 && errno == EAGAIN {
+                usleep(2_000)
                 continue
             } else {
                 // n == 0 is EOF. Any other error (EBADF from stop()'s close)
@@ -420,31 +423,66 @@ public final class WorkerSupervisor: @unchecked Sendable {
         handleWorkerCrash()
     }
 
+    /// `10 digits + newline + payload`. The payload is the JSON bytes from
+    /// `JSONEncoder` with no extra newline, so a newline inside a string
+    /// cannot end the frame early.
+    private static let frameHeaderLength = 11
+
     private func drainStdout(_ buffer: inout Data) {
-        if discardStdoutUntilNewline {
-            guard let newline = buffer.firstIndex(of: 0x0A) else {
-                buffer.removeAll(keepingCapacity: true)
-                return
-            }
-            buffer.removeSubrange(..<buffer.index(after: newline))
-            discardStdoutUntilNewline = false
-        }
-        while let newline = buffer.firstIndex(of: 0x0A) {
-            let line = Data(buffer[..<newline])
-            buffer.removeSubrange(..<buffer.index(after: newline))
-            guard !line.isEmpty else { continue }
-            guard let msg = try? JSONDecoder().decode(WorkerMessage.self, from: line) else {
-                let preview = String(data: line.prefix(180), encoding: .utf8) ?? "?"
-                NovaMLXLog.warning("[WorkerSupervisor] Decode failed (\(line.count) bytes): \(preview)")
+        while buffer.count >= Self.frameHeaderLength {
+            let header = buffer.prefix(Self.frameHeaderLength)
+            let lengthText = String(data: Data(header.prefix(10)), encoding: .ascii) ?? ""
+            let marker = header[header.index(header.startIndex, offsetBy: 10)]
+            guard marker == 0x0A, let length = Int(lengthText), length >= 2, length <= Self.maxStdoutLineBytes else {
+                NovaMLXLog.error("[WorkerSupervisor] bad stdout frame header \(lengthText)")
+                buffer.removeFirst()
                 continue
             }
-            handleMessage(msg)
+            let total = Self.frameHeaderLength + length
+            guard buffer.count >= total else { return }
+            let payloadStart = buffer.index(buffer.startIndex, offsetBy: Self.frameHeaderLength)
+            let payloadEnd = buffer.index(payloadStart, offsetBy: length)
+            let payload = Data(buffer[payloadStart..<payloadEnd])
+            buffer.removeSubrange(..<payloadEnd)
+            do {
+                let msg = try JSONDecoder().decode(WorkerMessage.self, from: payload)
+                if msg.type == WorkerMessageType.result || msg.type == WorkerMessageType.error {
+                    NovaMLXLog.info("[Sup] stdout \(msg.type) id=\(msg.requestId ?? "-") chars=\(msg.result?.text.utf8.count ?? 0)")
+                }
+                handleMessage(msg)
+            } catch {
+                NovaMLXLog.error("[WorkerSupervisor] Decode failed (\(payload.count) bytes): \(error)")
+                if let requestId = Self.requestId(in: payload) {
+                    failWaiter(requestId: requestId, message: "Worker result could not be decoded: \(error)")
+                }
+            }
         }
         if buffer.count > Self.maxStdoutLineBytes {
-            NovaMLXLog.error("[WorkerSupervisor] stdout record exceeded \(Self.maxStdoutLineBytes) bytes without a newline")
+            NovaMLXLog.error("[WorkerSupervisor] stdout buffer exceeded \(Self.maxStdoutLineBytes) bytes without a frame")
             buffer.removeAll(keepingCapacity: true)
-            discardStdoutUntilNewline = true
             failPendingLineOverflow()
+        }
+    }
+
+    /// Best-effort `"requestId":"..."` pull so a corrupt result still unblocks HTTP.
+    private static func requestId(in payload: Data) -> String? {
+        guard let text = String(data: payload.prefix(4096), encoding: .utf8) else { return nil }
+        guard let key = text.range(of: "\"requestId\":\"") else { return nil }
+        let rest = text[key.upperBound...]
+        guard let end = rest.firstIndex(of: "\"") else { return nil }
+        let id = String(rest[..<end])
+        return id.isEmpty ? nil : id
+    }
+
+    private func failWaiter(requestId: String, message: String) {
+        lock.lock()
+        let cont = pendingRequests.removeValue(forKey: requestId)
+        lock.unlock()
+        guard let cont else { return }
+        let box = ContinuationResume(cont)
+        let error = NovaMLXError.inferenceFailed(message)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.resume(throwing: error)
         }
     }
 
@@ -721,6 +759,11 @@ private final class ContinuationResume: @unchecked Sendable {
 
     func resume(returning message: WorkerMessage) {
         continuation?.resume(returning: message)
+        continuation = nil
+    }
+
+    func resume(throwing error: Error) {
+        continuation?.resume(throwing: error)
         continuation = nil
     }
 }

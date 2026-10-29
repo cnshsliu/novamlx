@@ -219,8 +219,8 @@ struct NovaMLXWorker {
                 result = try await fusedScheduler.submit(request)
             }
             NovaMLXLog.info("[Worker:\(reqTag)] writing result tokens=\(result.completionTokens) chars=\(result.text.utf8.count)")
-            writer.write(WorkerMessage(type: WorkerMessageType.result, requestId: msg.requestId, result: result))
-            NovaMLXLog.info("[Worker:\(reqTag)] result written")
+            let wrote = writer.write(WorkerMessage(type: WorkerMessageType.result, requestId: msg.requestId, result: result))
+            NovaMLXLog.info("[Worker:\(reqTag)] result written ok=\(wrote)")
         } catch {
             writer.write(WorkerMessage(type: WorkerMessageType.error, requestId: msg.requestId, errorMessage: error.localizedDescription))
         }
@@ -342,46 +342,58 @@ struct NovaMLXWorker {
 final class LineWriter: @unchecked Sendable {
     private let lock = NSLock()
 
-    /// Writes the whole JSON line. A short `write` used to drop the tail, so
-    /// the host waited forever for a newline that never arrived. The lock
-    /// keeps memory-stats lines from interleaving; the host reader is a
-    /// blocking thread and drains the pipe while this write waits.
-    func write(_ message: WorkerMessage) {
-        let data: Data
+    /// Length-prefixed frame: 10 decimal digits, a newline, then that many
+    /// JSON bytes. A raw `0x0A` inside the JSON cannot split the message, and
+    /// a short `write` is retried until every byte is in the pipe.
+    @discardableResult
+    func write(_ message: WorkerMessage) -> Bool {
+        let payload: Data
         do {
-            var encoded = try JSONEncoder().encode(message)
-            encoded.append(0x0A)
-            data = encoded
+            payload = try JSONEncoder().encode(message)
         } catch {
             NovaMLXLog.error("[Worker] failed to encode \(message.type): \(error)")
-            guard message.type != WorkerMessageType.error else { return }
-            write(WorkerMessage(
+            guard message.type != WorkerMessageType.error else { return false }
+            return write(WorkerMessage(
                 type: WorkerMessageType.error,
                 requestId: message.requestId,
                 errorMessage: "Failed to encode worker \(message.type): \(error)"
             ))
-            return
         }
-        writeRaw(data)
+        let header = String(format: "%010d\n", payload.count)
+        var frame = Data(header.utf8)
+        frame.append(payload)
+        let ok = writeRaw(frame)
+        if !ok {
+            NovaMLXLog.error("[Worker] stdout write failed type=\(message.type) bytes=\(frame.count) errno=\(errno)")
+        }
+        return ok
     }
 
-    private func writeRaw(_ data: Data) {
+    private func writeRaw(_ data: Data) -> Bool {
+        let fd = STDOUT_FILENO
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0, (flags & O_NONBLOCK) != 0 {
+            _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+        }
         lock.lock()
         defer { lock.unlock() }
-        data.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return false }
             var offset = 0
             let bytes = raw.count
             while offset < bytes {
-                let wrote = Darwin.write(STDOUT_FILENO, base.advanced(by: offset), bytes - offset)
+                let wrote = Darwin.write(fd, base.advanced(by: offset), bytes - offset)
                 if wrote > 0 {
                     offset += wrote
                 } else if wrote < 0 && errno == EINTR {
                     continue
+                } else if wrote < 0 && errno == EAGAIN {
+                    continue
                 } else {
-                    return
+                    return false
                 }
             }
+            return true
         }
     }
 }
