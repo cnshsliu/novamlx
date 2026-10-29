@@ -1147,7 +1147,7 @@ public final class InferenceService: @unchecked Sendable {
         guard maxGPU > 0 else { return nil }
 
         let estimatedBytes = MLXEngine.estimateModelWeightSize(at: localURL) ?? sizeBytes
-        let currentBytes = UInt64(MLX.Memory.activeMemory)
+        let currentBytes = MLXMemoryGate.activeBytes()
         let available = currentBytes < maxGPU ? maxGPU - currentBytes : 0
 
         return MemoryFeasibility.evaluate(

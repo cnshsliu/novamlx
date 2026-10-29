@@ -57,6 +57,7 @@ public final class ModelDiscovery: Sendable {
         "LlavaQwen2ForCausalLM",
         "Gemma4ForConditionalGeneration",
         "Qwen4ExpForConditionalGeneration",
+        "UnlimitedOCRForCausalLM",
     ]
 
     private static let vlmModelTypes: Set<String> = [
@@ -67,6 +68,7 @@ public final class ModelDiscovery: Sendable {
         "gemma4",
         "pixtral", "molmo", "multi_modality", "florence2", "minicpmv",
         "phi4_siglip", "phi4mm", "deepseek_vl2",
+        "unlimited_ocr", "unlimited-ocr",
     ]
 
     private static let embeddingArchitectures: Set<String> = [

@@ -194,7 +194,7 @@ public actor AutoLoadCoordinator {
         for _ in 0..<maxIterations {
             let freed = inference.engine.pool.evictLRU(excluding: modelId)
             guard freed != nil else {
-                let current = UInt64(MLX.Memory.activeMemory)
+                let current = MLXMemoryGate.activeBytes()
                 let maxGPU = MLX.GPU.maxRecommendedWorkingSetBytes().map { UInt64($0) } ?? 0
                 let availableMB = current < maxGPU ? (maxGPU - current) / 1_048_576 : 0
                 throw NovaMLXError.insufficientMemory(

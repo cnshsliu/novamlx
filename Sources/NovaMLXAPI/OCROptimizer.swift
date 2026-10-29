@@ -11,6 +11,7 @@ enum OCROptimizer {
         "deepseekocr", "deepseekocr_2", "deepseek-ocr",
         "dots_ocr", "dots-ocr",
         "glm_ocr", "glm-ocr",
+        "unlimited-ocr", "unlimited_ocr",
     ]
 
     static func isOCRModel(_ modelName: String) -> Bool {
@@ -23,6 +24,7 @@ enum OCROptimizer {
         if lower.contains("deepseekocr_2") || lower.contains("deepseek-ocr-2") { return "deepseekocr_2" }
         if lower.contains("deepseekocr") || lower.contains("deepseek-ocr") { return "deepseekocr" }
         if lower.contains("dots_ocr") || lower.contains("dots-ocr") { return "dots_ocr" }
+        if lower.contains("unlimited-ocr") || lower.contains("unlimited_ocr") { return "unlimited_ocr" }
         if lower.contains("glm_ocr") || lower.contains("glm-ocr") { return "glm_ocr" }
         return nil
     }
@@ -34,6 +36,7 @@ enum OCROptimizer {
         "deepseekocr_2": "Convert the document to markdown.",
         "dots_ocr": "Convert this page to clean Markdown while preserving reading order.",
         "glm_ocr": "Text Recognition:",
+        "unlimited_ocr": "document parsing.",
     ]
 
     // MARK: - Extra Stop Sequences
@@ -53,6 +56,7 @@ enum OCROptimizer {
         static let deepseekocr_2 = OCRSamplingDefaults(temperature: 0.0, maxTokens: 8192, repetitionPenalty: nil)
         static let dots_ocr = OCRSamplingDefaults(temperature: 0.0, maxTokens: 8192, repetitionPenalty: nil)
         static let glm_ocr = OCRSamplingDefaults(temperature: 0.0, maxTokens: 4096, repetitionPenalty: 1.1)
+        static let unlimited_ocr = OCRSamplingDefaults(temperature: 0.0, maxTokens: 8192, repetitionPenalty: nil)
     }
 
     private static let samplingDefaults: [String: OCRSamplingDefaults] = [
@@ -60,6 +64,7 @@ enum OCROptimizer {
         "deepseekocr_2": .deepseekocr_2,
         "dots_ocr": .dots_ocr,
         "glm_ocr": .glm_ocr,
+        "unlimited_ocr": .unlimited_ocr,
     ]
 
     // MARK: - Prompt Injection

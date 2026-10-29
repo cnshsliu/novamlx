@@ -1,6 +1,7 @@
 import Foundation
 import MLXLMCommon
 import MLXLLM
+import MLXVLM
 
 private func createCustom<C: Codable, M>(
     _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
@@ -56,5 +57,6 @@ enum CustomModelRegistration {
             "flint",
             creator: createCustom(FlintConfiguration.self, FlintModel.init))
         await QwenMtpRegistration.ensure()
+        await UnlimitedOCRRegistration.register()
     }
 }
