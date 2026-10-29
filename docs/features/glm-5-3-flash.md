@@ -116,7 +116,7 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 - 4-bit 约 204 GB，目录最低内存是 256 GB。128 GB 加载不了它。
 - 混合 2-bit 在 MacMaxPro 128 GB 上能加载（`c8b7875` 峰值大约 101–112 GB），解码时 IOAccelerator 换页大约 50–86 GB，没有有效 `GLM-CHAT`。Release 对话崩溃信息是 `There is no Stream(gpu, 26)`。
 - 目录状态是 preview。`c8b7875` 上的 TensorFold 2-bit MTP 不是合并就绪。
-- `pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`（约 90 GB）在 `86f265b` 上能加载。短对话约 203s 后仍在 `async_eval` 崩溃（`Stream(gpu, 17)`），没有 `GLM-CHAT`。串行 `DispatchQueue` 不会守住同一个 pthread：`Stream.gpu` 的 Metal encoder 是线程局部的，加载时登记的那条在下一次队列空闲后会丢。现在 MLX 跑在单独的 `Thread`（`novamlx.worker.mlx`）上，worker 启动时就在那条线程上碰 `Stream.gpu`。日志里这三行的 pthread 和 `stream=` 必须相同：`[MLXGPU] primed`、`glm sanitize`、`glm prompt rebound`。预填充块仍是 128。压缩内存仍可能让这次短对话很慢；跑完才会有 `GLM-CHAT`。这里不写 tok/s。
+- `pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`（约 90 GB）在 `f58e0b1` 上能编译、能加载。`primed` / `glm sanitize` / `glm prompt rebound` 是同一个 pthread，而且都是 `Stream(Device(gpu, 0), 0)`。短对话仍在 `async_eval` 崩溃：`Stream(gpu, 17)`。那是别的 pthread 上 `new_stream` 留下的懒节点，钉住的线程只有 index 0 的 encoder。`./build.sh` 会改 Metal 的 `get_command_encoder`：评估线程上缺这个 index 时就地登记，不再直接终止。预填充（多于 1 个 token）会多打一行 `[MLXGPU] glm forward`。预填充块仍是 128。压缩内存仍可能让短对话很慢；跑完才会有 `GLM-CHAT`。这里不写 tok/s。
 - 检查点 Jinja 里的 `m.content.0.type` 会被 swift-jinja 拒绝（`Expected identifier but found number`）。加载时改成 `m.content[0].type`。`1.0` 这种小数不动。不必再手改 `tokenizer_config.json` 或放 `~/.nova/templates/*.jinja`。
 - 同一份 REAP 包的 KDA 权重在 `self_attn.forget_gate` 下，q/k/v 卷积是一条 `conv1d`。TensorFold 这些键是平的。嵌套键只在平键不存在时抬上去。`n_routed_experts` 读配置（这份是 144，`switch_mlp` 已经按 144 堆好）。
 

@@ -16,8 +16,19 @@ This document tracks all patches applied to external MLX libraries that NovaMLX 
 | Pre-quantized SwitchLinear init | mlx-swift-lm | `Libraries/MLXLMCommon/SwitchLayers.swift` | Active |
 | Pre-quantized QuantizedEmbedding init | mlx-swift | `Source/MLXNN/Quantized.swift` | Active |
 | Local mlx-swift dependency | mlx-swift-lm | `Package.swift` | Active |
+| Metal stream encoder on the evaluating thread | mlx-swift | `mlx/backend/metal/device.cpp` | Active |
 
 **Test model:** `mlx-community/Qwen3.6-35B-A3B-nvfp4`
+
+## Patch: Metal stream encoder on the evaluating thread
+
+**File:** `vendors/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal/device.cpp` (also `.build/checkouts/mlx-swift` when that tree exists)
+
+**Script:** `Scripts/patch-mlx-metal-stream.py`, run from `./build.sh`.
+
+**Problem:** `get_command_encoder` throws `There is no Stream(gpu, N) in current thread` when the stream index was allocated by `new_stream` on another pthread. Mac `f58e0b1` kept load and the GLM prompt on `Stream(Device(gpu, 0), 0)` and still died in chat on `Stream(gpu, 17)`.
+
+**Fix:** On that throw path, install an encoder for the missing index on the current thread, using the same `try_emplace` arguments as `new_stream` in `eval.cpp`. A stream already in the global thread-unsafe map is unchanged. Marker: `NOVAMLX_STREAM_PATCH`.
 
 ---
 

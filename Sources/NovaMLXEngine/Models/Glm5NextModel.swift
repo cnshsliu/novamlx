@@ -1147,6 +1147,11 @@ final class Glm5TextModel: Module {
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        if inputs.dim(1) > 1 {
+            NovaMLXLog.info(
+                "[MLXGPU] glm forward pthread=\(MLXGPUExecutor.pthreadLabel()) stream=\(Stream.gpu) tokens=\(inputs.dim(1))"
+            )
+        }
         var hidden = embedTokens(inputs)
         hidden = MLX.repeated(
             MLX.expandedDimensions(hidden, axis: 2), count: config.hcMult, axis: 2)
