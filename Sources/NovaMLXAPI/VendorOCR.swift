@@ -607,12 +607,15 @@ enum VendorOCRResponses {
             return Array(lines.prefix(budget))
         }
         func payload(_ count: Int) -> Int {
-            encode(successBody(
-                vendor: vendor,
-                lines: Array(lines.prefix(count)),
-                logID: logID,
-                requestID: requestID,
-                imageSize: imageSize
+            encode(VendorOCRPayload(
+                status: 200,
+                body: successBody(
+                    vendor: vendor,
+                    lines: Array(lines.prefix(count)),
+                    logID: logID,
+                    requestID: requestID,
+                    imageSize: imageSize
+                )
             )).count
         }
         if payload(budget) <= limits.maxResponseBytes {
@@ -656,12 +659,15 @@ enum VendorOCRResponses {
         requestID: String,
         imageSize: OCRPixelSize?
     ) -> Int {
-        encode(successBody(
-            vendor: vendor,
-            lines: lines,
-            logID: logID,
-            requestID: requestID,
-            imageSize: imageSize
+        encode(VendorOCRPayload(
+            status: 200,
+            body: successBody(
+                vendor: vendor,
+                lines: lines,
+                logID: logID,
+                requestID: requestID,
+                imageSize: imageSize
+            )
         )).count
     }
 

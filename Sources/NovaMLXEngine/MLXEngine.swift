@@ -513,6 +513,27 @@ public struct Tokenizer: Sendable {
     }
 }
 
+/// Owns a finished VLM generation's pages and KV cache so the generate
+/// thread can return the text before those objects are destroyed.
+private final class VLMWorkingSetRetirement: @unchecked Sendable {
+    var caches: [KVCache]
+    var boxed: [KVCache]?
+    var imageInput: LMInput
+
+    init(caches: [KVCache], boxed: [KVCache]?, imageInput: LMInput) {
+        self.caches = caches
+        self.boxed = boxed
+        self.imageInput = imageInput
+    }
+
+    func release() {
+        caches = []
+        boxed = nil
+        imageInput = LMInput(tokens: MLXArray([Int32(0)]))
+        MLXMemoryGate.clearCache()
+    }
+}
+
 public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public private(set) var isReady: Bool
 
@@ -3157,14 +3178,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 vlmLogitStats = unpacked.1
                 NovaMLXLog.info("[Prefill:\(reqTag)] VLM — \(tokenIds.count) prompt, \(vlmGeneratedIds.count) generated, logits=[\(vlmLogitStats)]")
                 }
-                // GPU loop finished. Release page bitmaps and the KV cache before
-                // detokenize and before the worker writes the result. clearCache
-                // goes through the memory gate and must not hold `lock`.
+                // Hand the page bitmaps and KV cache to another thread before
+                // detokenize. Freeing them here, or calling clearCache on this
+                // thread, runs before the worker writes the result, so a 100-page
+                // PDF never produces an HTTP body. The gate is taken on that
+                // thread and not while `lock` is held.
+                let retired = VLMWorkingSetRetirement(
+                    caches: kvCache,
+                    boxed: kvCacheBox.value,
+                    imageInput: input
+                )
                 kvCache = []
                 kvCacheBox.value = nil
                 input = LMInput(tokens: MLXArray([Int32(0)]))
                 effectiveInput = input
-                MLXMemoryGate.clearCache()
+                Thread.detachNewThread {
+                    retired.release()
+                }
 
                 let decodedText = mlxTokenizer.decode(tokenIds: vlmGeneratedIds)
                 let cleanText = layoutOCR ? decodedText : Self.scrubControlTokens(decodedText)

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import NovaMLXCore
 import NovaMLXUtils
 
@@ -358,12 +359,20 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     private enum PipeKind { case stdout, stderr }
 
-    /// Blocking read loop. `FileHandle.readabilityHandler` + `availableData`
-    /// deadlocks once a record is larger than the pipe buffer: the handler
-    /// suspends the dispatch source, `availableData` waits for that source,
-    /// and the worker's `write` of the OCR JSON never finishes. `/health`
-    /// then stops because this process is stuck in that handler (`Data.init`
-    /// of the growing buffer) while the request sits in the HTTP router.
+    /// Blocking read loop.
+    ///
+    /// `FileHandle.read(upToCount:)` waits until that many bytes arrive or the
+    /// pipe closes. A `loaded` ack and the 5s memory-stats lines are a few
+    /// hundred bytes, so the host sat in that call forever: the worker logged
+    /// `Loaded model` and `/health` stayed at `loadedModels: 0`.
+    /// `FileHandle.availableData` inside `readabilityHandler` is the other
+    /// failure: the handler suspends the dispatch source and a result larger
+    /// than the pipe buffer never finishes.
+    ///
+    /// POSIX `read` on a blocking pipe returns whatever is already buffered
+    /// (at least one byte) and blocks only when the pipe is empty. Short
+    /// control messages are delivered immediately, and a large OCR line is
+    /// drained while the worker is still writing it.
     private func startReader(stdout: Pipe) {
         let handle = stdout.fileHandleForReading
         handle.readabilityHandler = nil
@@ -377,18 +386,23 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     private func readLoop(_ handle: FileHandle, kind: PipeKind) {
         var buffer = Data()
+        let fd = handle.fileDescriptor
+        var scratch = [UInt8](repeating: 0, count: Self.readChunkBytes)
         while true {
-            let chunk: Data?
-            do {
-                chunk = try handle.read(upToCount: Self.readChunkBytes)
-            } catch {
-                chunk = nil
+            let n = scratch.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return 0 }
+                return Darwin.read(fd, base, raw.count)
             }
-            guard let chunk, !chunk.isEmpty else {
+            if n > 0 {
+                buffer.append(contentsOf: scratch.prefix(n))
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else {
+                // n == 0 is EOF. Any other error (EBADF from stop()'s close)
+                // ends the loop too.
                 notePipeClosed(kind)
                 return
             }
-            buffer.append(chunk)
             switch kind {
             case .stdout:
                 drainStdout(&buffer)
@@ -465,6 +479,16 @@ public final class WorkerSupervisor: @unchecked Sendable {
         }
     }
 
+    private func resumeOffReader(
+        _ continuation: CheckedContinuation<WorkerMessage, Error>,
+        returning message: WorkerMessage
+    ) {
+        let box = ContinuationResume(continuation)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.resume(returning: message)
+        }
+    }
+
     private func failPendingLineOverflow() {
         lock.lock()
         let pending = pendingRequests
@@ -507,7 +531,13 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 let callback = loadProgressCallbacks.removeValue(forKey: key)
                 let cont = pendingRequests.removeValue(forKey: key)
                 lock.unlock()
-                cont?.resume(returning: msg)
+                // Same rule as generate results: the host's load bookkeeping
+                // continues on the resuming thread. Doing it here stalls this
+                // reader, so the next stdout line (memory stats, OCR result)
+                // sits unread.
+                if let cont {
+                    resumeOffReader(cont, returning: msg)
+                }
                 if let callback = callback, msg.type == WorkerMessageType.loaded {
                     callback(.ready)
                 }
@@ -528,7 +558,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 let cont = pendingRequests.removeValue(forKey: key)
                 lock.unlock()
                 if let cont {
-                    cont.resume(returning: msg)
+                    resumeOffReader(cont, returning: msg)
                 } else {
                     NovaMLXLog.warning("[WorkerSupervisor] Unhandled worker error (no pending request for '\(key)'): \(msg.errorMessage ?? "unknown")")
                 }
@@ -545,10 +575,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
             // The HTTP task continues on the resuming thread until its next
             // await. Packaging the OCR body here used to run inside the pipe
             // reader and wedge the host.
-            let box = ContinuationResume(cont)
-            DispatchQueue.global(qos: .userInitiated).async {
-                box.resume(returning: msg)
-            }
+            resumeOffReader(cont, returning: msg)
 
         case WorkerMessageType.token:
             let tokenToYield: Token?

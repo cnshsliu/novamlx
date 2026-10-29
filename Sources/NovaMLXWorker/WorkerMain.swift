@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import MLX
 import NovaMLXCore
 import NovaMLXDB
