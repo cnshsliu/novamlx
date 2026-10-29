@@ -3920,7 +3920,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             ) == .nativeStubDisabled {
                                 logNativeMtpStubDisabled(tag: "STREAM:\(String(request.id.uuidString.prefix(8)))")
                             }
-                            let glmInput = await glmReboundInput(
+                            let glmInput = await self.glmReboundInput(
                                 effectiveInput, family: container.identifier.family, mlxContainer: mlxContainer)
                             iterator = try Self.openDecodeIterator(
                                 input: glmInput, model: model.value,

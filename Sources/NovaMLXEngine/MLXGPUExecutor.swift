@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import NovaMLXCore
+import NovaMLXUtils
 
 /// One pthread for MLX load and prefill.
 ///

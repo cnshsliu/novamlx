@@ -340,40 +340,40 @@ public final class ContinuousBatcher: @unchecked Sendable {
 
         Task(executorPreference: MLXGPUExecutor.shared) {
             await MLXGPUExecutor.shared.resumeOnPinnedThread()
-            let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
-            let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
+            let bytesPerToken = self.engine.effectiveBytesPerToken(modelId: modelId)
+            let estimatedTokens = self.engine.estimateRequestTokens(modelId: modelId, request: request)
 
-            let canAdmit = await budgetTracker.canAdmit(
+            let canAdmit = await self.budgetTracker.canAdmit(
                 modelId: modelId, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
             )
 
             if !canAdmit {
-                lock.withLock {
-                    generateQueue.insert(item, at: 0)
-                    _totalQueued -= 1
+                self.lock.withLock {
+                    self.generateQueue.insert(item, at: 0)
+                    self._totalQueued -= 1
                 }
-                releaseSlot(modelId: modelId, completed: false)
+                self.releaseSlot(modelId: modelId, completed: false)
                 NovaMLXLog.info("Scheduler: generate dequeue rejected — insufficient memory, re-queuing")
                 return
             }
 
-            await budgetTracker.reserve(
+            await self.budgetTracker.reserve(
                 modelId: modelId, sequenceId: request.id,
                 weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
             )
 
             do {
-                let result = try await engine.generate(request)
+                let result = try await self.engine.generate(request)
                 continuation.resume(returning: result)
             } catch {
                 continuation.resume(throwing: error)
             }
 
-            releaseSlot(modelId: modelId, completed: true)
-            await budgetTracker.release(sequenceId: request.id)
+            self.releaseSlot(modelId: modelId, completed: true)
+            await self.budgetTracker.release(sequenceId: request.id)
 
-            processQueuedGenerate()
-            processQueuedStream()
+            self.processQueuedGenerate()
+            self.processQueuedStream()
         }
     }
 
@@ -405,31 +405,31 @@ public final class ContinuousBatcher: @unchecked Sendable {
 
         let task = Task(executorPreference: MLXGPUExecutor.shared) {
             await MLXGPUExecutor.shared.resumeOnPinnedThread()
-            let bytesPerToken = engine.effectiveBytesPerToken(modelId: modelId)
-            let estimatedTokens = engine.estimateRequestTokens(modelId: modelId, request: request)
+            let bytesPerToken = self.engine.effectiveBytesPerToken(modelId: modelId)
+            let estimatedTokens = self.engine.estimateRequestTokens(modelId: modelId, request: request)
 
-            let canAdmit = await budgetTracker.canAdmit(
+            let canAdmit = await self.budgetTracker.canAdmit(
                 modelId: modelId, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
             )
 
             if !canAdmit {
-                lock.withLock {
-                    streamQueue.insert(item, at: 0)
-                    _totalQueued -= 1
+                self.lock.withLock {
+                    self.streamQueue.insert(item, at: 0)
+                    self._totalQueued -= 1
                 }
-                releaseSlot(modelId: modelId, completed: false)
+                self.releaseSlot(modelId: modelId, completed: false)
                 NovaMLXLog.info("Scheduler: stream dequeue rejected — insufficient memory, re-queuing")
                 return
             }
 
-            await budgetTracker.reserve(
+            await self.budgetTracker.reserve(
                 modelId: modelId, sequenceId: request.id,
                 weightsBytes: 0, estimatedTokens: estimatedTokens, bytesPerToken: bytesPerToken
             )
 
             NovaMLXLog.request(request.id.uuidString.prefix(8).description, "Processing dequeued stream")
             do {
-                let stream = engine.stream(request)
+                let stream = self.engine.stream(request)
                 for try await token in stream {
                     if Task.isCancelled {
                         NovaMLXLog.info("[Batcher:\(request.id.uuidString.prefix(8))] stream cancelled — model=\(modelId)")
@@ -444,11 +444,11 @@ public final class ContinuousBatcher: @unchecked Sendable {
                 NovaMLXLog.error("[Batcher:\(request.id.uuidString.prefix(8))] dequeued stream errored — model=\(modelId): \(error) — \(type(of: error))")
             }
 
-            releaseSlot(modelId: modelId, completed: true)
-            await budgetTracker.release(sequenceId: request.id)
+            self.releaseSlot(modelId: modelId, completed: true)
+            await self.budgetTracker.release(sequenceId: request.id)
 
-            processQueuedStream()
-            processQueuedGenerate()
+            self.processQueuedStream()
+            self.processQueuedGenerate()
         }
         lock.withLock { activeTasks[request.id] = task }
     }
