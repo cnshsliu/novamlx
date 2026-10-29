@@ -1250,6 +1250,7 @@ enum Glm5NextSanitizer {
         var mapped: [String: MLXArray] = [:]
         mapped.reserveCapacity(weights.count)
         var droppedMtpKeys = 0
+        var nestedForgetGate: [(String, MLXArray)] = []
         for (rawKey, rawValue) in weights {
             if shouldDrop(rawKey, layerCount: config.numHiddenLayers) {
                 if isMtpKey(rawKey, layerCount: config.numHiddenLayers) {
@@ -1260,16 +1261,127 @@ enum Glm5NextSanitizer {
             var key = rewritePrefix(rawKey)
             key = renameHyperConnection(key)
             var value = rawValue
-            if key.contains("conv1d.weight"), value.ndim == 3,
+            if key.contains("conv1d.weight"), !key.contains(".forget_gate."),
+               value.ndim == 3,
                value.dim(2) == config.linearConvKernel, value.dim(1) != config.linearConvKernel
             {
                 value = value.swappedAxes(1, 2)
             }
+            if key.contains(".forget_gate.") {
+                nestedForgetGate.append((key, value))
+                continue
+            }
             mapped[key] = value
         }
+        let lifted = liftForgetGate(&mapped, nested: nestedForgetGate)
+        dequantizeLiftedForgetGates(&mapped, lifted: lifted)
+        splitFusedQKVConv(&mapped, kernel: config.linearConvKernel)
         stackExperts(&mapped, config: config)
         splitKVB(&mapped, config: config)
         return (mapped, droppedMtpKeys)
+    }
+
+    /// mlx-vlm-style checkpoints store KDA `f_a_proj`, `f_b_proj`, `A_log`, and
+    /// `dt_bias` under `self_attn.forget_gate`. TensorFold stores those same
+    /// tensors flat on `self_attn`. The module tree is the flat one, so a
+    /// nested key is copied there only when the flat key is absent.
+    private static func liftForgetGate(
+        _ weights: inout [String: MLXArray],
+        nested: [(String, MLXArray)]
+    ) -> Set<String> {
+        var lifted = Set<String>()
+        lifted.reserveCapacity(nested.count)
+        for (key, value) in nested {
+            let flat = key.replacingOccurrences(of: ".forget_gate.", with: ".")
+            guard weights[flat] == nil else { continue }
+            weights[flat] = value
+            lifted.insert(flat)
+        }
+        return lifted
+    }
+
+    /// Per-layer quant keys for the nested layout name `forget_gate.f_*_proj`.
+    /// `loadWeights` looks up the flat module path and would otherwise quantize
+    /// those 8-bit tensors with the pack's global bit width. Dequantizing only
+    /// the lifted pair leaves a float `Linear`. Flat packs never enter here,
+    /// so their quantized `f_a_proj` / `f_b_proj` stay on the quantizer path.
+    private static func dequantizeLiftedForgetGates(
+        _ weights: inout [String: MLXArray], lifted: Set<String>
+    ) {
+        for weightKey in lifted where weightKey.hasSuffix(".weight") {
+            let prefix = String(weightKey.dropLast(".weight".count))
+            let scalesKey = prefix + ".scales"
+            guard lifted.contains(scalesKey),
+                  var weight = weights[weightKey],
+                  let scales = weights[scalesKey],
+                  let quant = inferQuant(weight: weight, scales: scales)
+            else { continue }
+            let biasesKey = prefix + ".biases"
+            let biases = weights[biasesKey]
+            let mode: QuantizationMode = (biases == nil && quant.bits == 8) ? .mxfp8 : .affine
+            weight = MLX.dequantized(
+                weight, scales: scales, biases: biases,
+                groupSize: quant.groupSize, bits: quant.bits, mode: mode)
+            weights[weightKey] = weight
+            weights.removeValue(forKey: scalesKey)
+            weights.removeValue(forKey: biasesKey)
+        }
+    }
+
+    private static func inferQuant(
+        weight: MLXArray, scales: MLXArray
+    ) -> (bits: Int, groupSize: Int)? {
+        guard weight.ndim >= 2, scales.ndim >= 1 else { return nil }
+        let packed = weight.dim(-1)
+        let groups = scales.dim(-1)
+        guard packed > 0, groups > 0 else { return nil }
+        for groupSize in [64, 32, 128, 16] {
+            let input = groups * groupSize
+            guard input > 0, (packed * 32) % input == 0 else { continue }
+            let bits = packed * 32 / input
+            if [2, 3, 4, 6, 8].contains(bits) {
+                return (bits, groupSize)
+            }
+        }
+        return nil
+    }
+
+    /// Some converters store one depthwise conv over concatenated q, k, v.
+    /// The module has three convs. Split only when `q_conv1d` is absent.
+    /// Channel order is q, then k, then v, matching `qkv` concatenation.
+    private static func splitFusedQKVConv(
+        _ weights: inout [String: MLXArray], kernel: Int
+    ) {
+        let fusedKeys = weights.keys.filter { key in
+            guard let range = key.range(of: ".self_attn.conv1d.") else { return false }
+            let tail = key[range.upperBound...]
+            return !tail.contains("conv1d")
+        }
+        for key in fusedKeys {
+            guard let value = weights.removeValue(forKey: key) else { continue }
+            guard let dot = key.range(of: ".self_attn.conv1d.", options: .backwards) else {
+                weights[key] = value
+                continue
+            }
+            let suffix = String(key[dot.upperBound...])
+            let attention = String(key[..<dot.lowerBound]) + ".self_attn"
+            if weights[attention + ".q_conv1d." + suffix] != nil {
+                continue
+            }
+            var tensor = value
+            if tensor.ndim == 3, tensor.dim(2) == kernel, tensor.dim(1) != kernel {
+                tensor = tensor.swappedAxes(1, 2)
+            }
+            let channels = tensor.dim(0)
+            guard tensor.ndim == 3, channels > 0, channels % 3 == 0 else {
+                weights[key] = tensor
+                continue
+            }
+            let span = channels / 3
+            weights[attention + ".q_conv1d." + suffix] = contiguous(tensor[0..<span, 0..., 0...])
+            weights[attention + ".k_conv1d." + suffix] = contiguous(tensor[span..<(span * 2), 0..., 0...])
+            weights[attention + ".v_conv1d." + suffix] = contiguous(tensor[(span * 2)..<channels, 0..., 0...])
+        }
     }
 
     private static func isMtpKey(_ key: String, layerCount: Int) -> Bool {

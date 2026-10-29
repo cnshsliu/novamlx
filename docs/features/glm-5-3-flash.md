@@ -115,7 +115,8 @@ curl http://127.0.0.1:6590/v1/chat/completions \
 - 混合 2-bit 压缩很重，长代码和细致推理不如 4-bit 稳。它是独立仓库，不是 orcarouter 多量化仓库里的 2bit-lite 子目录。
 - 4-bit 约 204 GB，目录最低内存是 256 GB。128 GB 加载不了它。
 - 混合 2-bit 在 MacMaxPro 128 GB 上能加载（`c8b7875` 峰值大约 101–112 GB），解码时 IOAccelerator 换页大约 50–86 GB，没有有效 `GLM-CHAT`。Release 对话崩溃信息是 `There is no Stream(gpu, 26)`。
-- 目录状态是 preview。`c8b7875` 不是合并就绪。
+- 目录状态是 preview。`c8b7875` 上的 TensorFold 2-bit MTP 不是合并就绪。
+- `pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`（约 90 GB，已在 `/Volumes/Samsung768/Models/pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit`）把 KDA 的 `f_a_proj` / `f_b_proj` / `A_log` / `dt_bias` 放在 `self_attn.forget_gate` 下，并把 q/k/v 深度卷积收成一条 `conv1d`。TensorFold 这些键是平的，三条 `q_conv1d` / `k_conv1d` / `v_conv1d`。加载时嵌套键抬到平的模块上；已经是平键的检查点保持原样。抬上来的 `f_a_proj` / `f_b_proj` 会反量化成浮点 `Linear`，因为量化表用的是 `forget_gate.f_*_proj`，而模块路径是平的，全局 bit 会配错。`n_routed_experts` 读配置：这份 REAP 50% 是 144，专家权重已经是 `mlp.switch_mlp.*`、专家轴 144，不按 288 再堆一次。这次改动还没有在 Mac 上跑完加载和对话。
 
 ## Related
 

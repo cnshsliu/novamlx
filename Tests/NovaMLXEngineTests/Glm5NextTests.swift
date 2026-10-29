@@ -165,6 +165,75 @@ struct Glm5NextTests {
             decodeTokens: 4, seconds: 0, promptTokens: 4, mtp: .absent) == nil)
         #expect(Glm5ChatDecode.decodeEvalStride == 1)
     }
+
+    @Test("forget_gate keys land on the flat linear-attention modules")
+    func liftsForgetGateAndKeepsFlatKeys() throws {
+        let config = try! Glm5NextConfiguration.decode(from: wrapperJSON())
+        let model = Glm5NextModel(config)
+        let source = MLXArray.ones([4, 32], dtype: .float32)
+        let (qWeight, scales, biases) = MLX.quantized(
+            source, groupSize: 32, bits: 8, mode: .affine)
+        let prefix = "language_model.model.layers.0.self_attn"
+        var weights: [String: MLXArray] = [
+            "\(prefix).forget_gate.f_a_proj.weight": qWeight,
+            "\(prefix).forget_gate.f_a_proj.scales": scales,
+            "\(prefix).forget_gate.A_log": MLXArray.ones([2], dtype: .float32),
+            "\(prefix).forget_gate.dt_bias": MLXArray.ones([16], dtype: .float32),
+            "\(prefix).f_b_proj.weight": MLXArray([Float](repeating: 3, count: 4)).reshaped([2, 2]),
+            "\(prefix).forget_gate.f_b_proj.weight": MLXArray.zeros([2, 2]),
+            "\(prefix).conv1d.weight": MLXArray((0..<96).map { Float($0) }).reshaped([24, 4, 1]),
+        ]
+        storeQuantBiases(biases, key: "\(prefix).forget_gate.f_a_proj.biases", into: &weights)
+        let sanitized = model.sanitize(weights: weights)
+        #expect(sanitized["\(prefix).forget_gate.f_a_proj.weight"] == nil)
+        #expect(sanitized["\(prefix).f_a_proj.scales"] == nil)
+        #expect(sanitized["\(prefix).f_a_proj.weight"]?.shape == [4, 32])
+        #expect(sanitized["\(prefix).A_log"]?.shape == [2])
+        #expect(sanitized["\(prefix).dt_bias"]?.shape == [16])
+        let flatFB = try #require(sanitized["\(prefix).f_b_proj.weight"])
+        #expect(flatFB[0, 0].item(Float.self) == 3)
+        #expect(sanitized["\(prefix).conv1d.weight"] == nil)
+        let qConv = try #require(sanitized["\(prefix).q_conv1d.weight"])
+        let kConv = try #require(sanitized["\(prefix).k_conv1d.weight"])
+        let vConv = try #require(sanitized["\(prefix).v_conv1d.weight"])
+        #expect(qConv.shape == [8, 4, 1])
+        #expect(kConv.shape == [8, 4, 1])
+        #expect(vConv.shape == [8, 4, 1])
+        #expect(qConv[0, 0, 0].item(Float.self) == 0)
+        #expect(kConv[0, 0, 0].item(Float.self) == 32)
+        #expect(vConv[0, 0, 0].item(Float.self) == 64)
+    }
+
+    @Test("REAP expert count follows n_routed_experts and pre-stacked switch_mlp")
+    func reapExpertCountIsNotHardCoded() throws {
+        var object = tinyObject()
+        object["n_routed_experts"] = 144
+        object["num_experts_per_tok"] = 8
+        let data = try JSONSerialization.data(withJSONObject: [
+            "model_type": "glm5_next",
+            "text_config": object,
+        ])
+        let config = try Glm5NextConfiguration.decode(from: data)
+        #expect(config.nRoutedExperts == 144)
+        let model = Glm5NextModel(config)
+        let moe = try #require(model.languageModel.model.layers[1].mlp as? Glm5MoE)
+        #expect(moe.gate.weight.shape == [144, 32])
+
+        let stacked = MLXArray.ones([144, 2, 2])
+        let sanitized = model.sanitize(weights: [
+            "language_model.model.layers.1.mlp.switch_mlp.gate_proj.weight": stacked,
+        ])
+        #expect(sanitized["language_model.model.layers.1.mlp.switch_mlp.gate_proj.weight"]?.shape == [144, 2, 2])
+        #expect(sanitized["language_model.model.layers.1.mlp.experts.0.gate_proj.weight"] == nil)
+    }
+}
+
+private func storeQuantBiases(
+    _ biases: MLXArray?, key: String, into weights: inout [String: MLXArray]
+) {
+    if let biases {
+        weights[key] = biases
+    }
 }
 
 private func tinyObject() -> [String: Any] {
