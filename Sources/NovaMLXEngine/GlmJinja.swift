@@ -7,7 +7,7 @@ enum GlmJinja {
     /// A digit before the dot (`1.0`) is left alone.
     static func rewriteNumericIndexes(_ template: String) -> (String, Int) {
         guard let regex = try? NSRegularExpression(
-            pattern: #"(?<=[A-Za-z_\])])\.([0-9]+)"#
+            pattern: #"(?<=[A-Za-z_)\])])\.([0-9]+)"#
         ) else {
             return (template, 0)
         }
