@@ -512,7 +512,7 @@ public final class UnlimitedOCR: Module, VLMModel, KVCacheDimensionProvider {
             let features = encodeTile(images[index..<(index + 1)])
             eval(features)
             parts.append(features)
-            Memory.clearCache()
+            MLXMemoryGate.clearCache()
         }
         return concatenated(parts, axis: 0)
     }
@@ -866,11 +866,28 @@ public struct UnlimitedOCRProcessor: UserInputProcessor {
         return result
     }
 
+    /// `NOVA_UOCR_PDF_MAX_PAGES` bounds a single PDF. `0` means no limit.
+    /// The default stays above the 100-page smoke case. Over the limit the
+    /// call fails instead of rendering every page into memory.
+    static var maxPDFPages: Int {
+        let raw = ProcessInfo.processInfo.environment["NOVA_UOCR_PDF_MAX_PAGES"] ?? ""
+        if raw.isEmpty { return 128 }
+        if raw == "0" { return .max }
+        return Int(raw) ?? 128
+    }
+
     static func renderPDF(_ url: URL) throws -> [CIImage] {
         guard let document = PDFDocument(url: url), document.pageCount > 0 else {
             throw NSError(
                 domain: "UnlimitedOCR", code: 3,
                 userInfo: [NSLocalizedDescriptionKey: "Could not open PDF \(url.path)"])
+        }
+        let pageLimit = maxPDFPages
+        if document.pageCount > pageLimit {
+            throw NSError(
+                domain: "UnlimitedOCR", code: 4,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "PDF has \(document.pageCount) pages, over the limit of \(pageLimit). Set NOVA_UOCR_PDF_MAX_PAGES=0 for no limit."])
         }
         let dpi = Double(ProcessInfo.processInfo.environment["NOVA_UOCR_PDF_DPI"] ?? "") ?? 150
         let scale = dpi / 72

@@ -513,6 +513,53 @@ public struct Tokenizer: Sendable {
     }
 }
 
+/// Owns a finished VLM generation's pages and KV cache.
+///
+/// Destroying those objects syncs the GPU. Doing that on a second thread
+/// while `tokenizer.decode` still runs deadlocks after the Prefill log, so
+/// the worker never writes the result line and the host stays blocked in
+/// `read`. Stash the objects, return the text, write stdout, then drain.
+private final class VLMWorkingSetRetirement: @unchecked Sendable {
+    var caches: [KVCache]
+    var boxed: [KVCache]?
+    var imageInput: LMInput
+
+    init(caches: [KVCache], boxed: [KVCache]?, imageInput: LMInput) {
+        self.caches = caches
+        self.boxed = boxed
+        self.imageInput = imageInput
+    }
+
+    fileprivate func release() {
+        caches = []
+        boxed = nil
+        imageInput = LMInput(tokens: MLXArray([Int32(0)]))
+        MLXMemoryGate.clearCache()
+    }
+}
+
+private enum VLMDeferredRelease {
+    private static let lock = NSLock()
+    // StrictConcurrency: lock-guarded static (same pattern as UnlimitedOCRLayerKernel / FlintM4MaxPrefill).
+    private nonisolated(unsafe) static var pending: [VLMWorkingSetRetirement] = []
+
+    static func stash(_ item: VLMWorkingSetRetirement) {
+        lock.lock()
+        pending.append(item)
+        lock.unlock()
+    }
+
+    static func drain() {
+        lock.lock()
+        let items = pending
+        pending.removeAll()
+        lock.unlock()
+        for item in items {
+            item.release()
+        }
+    }
+}
+
 public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public private(set) var isReady: Bool
 
@@ -1269,7 +1316,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         CharacterGrammarMaskCache.tables.invalidate(modelId: modelIdForCache)
         _ = pool.remove(identifier.id)
         metricsStore.recordModelUnload()
-        MLX.Memory.clearCache()
+        MLXMemoryGate.clearCache()
         NovaMLXLog.info("[Engine] GPU cache cleared after unloading \(identifier.displayName)")
     }
 
@@ -1472,12 +1519,18 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     private func deferredClearCache() {
-        lock.withLock {
+        let shouldClear = lock.withLock { () -> Bool in
             deferredClearCounter += 1
             if deferredClearCounter >= deferredClearThreshold {
                 deferredClearCounter = 0
-                MLX.Memory.clearCache()
+                return true
             }
+            return false
+        }
+        // Never call into MLX while holding `lock`. The enforcer and
+        // checkMemoryFeasibility take the memory gate and may need this lock.
+        if shouldClear {
+            MLXMemoryGate.clearCache()
         }
     }
 
@@ -1565,13 +1618,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     private func ensureMemoryHeadroom(neededBytes: UInt64, softLimitBytes: UInt64) async -> Bool {
         let maxIterations = 10
         for _ in 0..<maxIterations {
-            let current = UInt64(MLX.Memory.activeMemory)
+            let current = MLXMemoryGate.activeBytes()
             if current + neededBytes <= softLimitBytes { return true }
             let freed = pool.evictLRU()
             if freed == nil { break }
             try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms settle for Metal
         }
-        return UInt64(MLX.Memory.activeMemory) + neededBytes <= softLimitBytes
+        return MLXMemoryGate.activeBytes() + neededBytes <= softLimitBytes
     }
 
     /// Pre-emptive memory feasibility check — can this model be loaded?
@@ -1598,7 +1651,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
         let neededBytes = estimatedBytes + safetyMargin
 
-        let currentBytes = UInt64(MLX.Memory.activeMemory)
+        let currentBytes = MLXMemoryGate.activeBytes()
         let available = currentBytes < maxGPU ? maxGPU - currentBytes : 0
         let gpuMB = maxGPU / 1_048_576
         let availableMB = available / 1_048_576
@@ -2527,7 +2580,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         let userInput = try await buildUserInput(request: request, hasImages: hasImages)
-        let input: LMInput
+        var input: LMInput
         do {
             input = try await mlxContainer.prepare(input: userInput)
         } catch {
@@ -2642,7 +2695,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         // Build effective input and cache — use prefix cache hit if valid
         var effectiveInput = input
-        let kvCache: [KVCache]
+        var kvCache: [KVCache]
         if let result = prefixResult, result.cachedTokenCount > 0, let restored = result.cache {
             let freshCaches = try model.value.newCache(parameters: parameters)
             var cacheValid = restored.count == freshCaches.count
@@ -3028,6 +3081,11 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 // LMInput itself is not Sendable, but MLXArray and THW are, so we extract
                 // the pixel data and reconstruct LMInput inside the closure. This is needed
                 // because model.prepare() reads the merged image pixels from LMInput.image.
+                // The `do` ends those boxes before detokenize so a 100-page PDF is not
+                // still resident while the reply is encoded.
+                let vlmGeneratedIds: [Int]
+                let vlmLogitStats: String
+                do {
                 let prefillImage = effectiveInput.image
                 let prefillVideo = effectiveInput.video
                 let prefillTextTokens = effectiveInput.text.tokens
@@ -3141,24 +3199,40 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     return SendableBox((generatedIds, stats, caches as [KVCache]))
                 }
 
-                let (generatedIds, logitStats, finalCaches) = genResult.value
-                kvCacheBox.value = finalCaches
-                NovaMLXLog.info("[Prefill:\(reqTag)] VLM — \(tokenIds.count) prompt, \(generatedIds.count) generated, logits=[\(logitStats)]")
+                let unpacked = genResult.value
+                vlmGeneratedIds = unpacked.0
+                vlmLogitStats = unpacked.1
+                NovaMLXLog.info("[Prefill:\(reqTag)] VLM — \(tokenIds.count) prompt, \(vlmGeneratedIds.count) generated, logits=[\(vlmLogitStats)]")
+                }
 
-                // Decode generated tokens to text
-                let decodedText = mlxTokenizer.decode(tokenIds: generatedIds)
+                // Detokenize while the caches and page images are still alive.
+                // A concurrent clearCache here deadlocks the tokenizer and the
+                // result line is never written.
+                let decodedText = mlxTokenizer.decode(tokenIds: vlmGeneratedIds)
                 let cleanText = layoutOCR ? decodedText : Self.scrubControlTokens(decodedText)
+                NovaMLXLog.info("[Prefill:\(reqTag)] VLM detokenized \(cleanText.utf8.count) bytes")
 
                 let elapsed = Date().timeIntervalSince(startTime)
-                let tps = generatedIds.count > 0 ? Double(generatedIds.count) / elapsed : 0
+                let tps = vlmGeneratedIds.count > 0 ? Double(vlmGeneratedIds.count) / elapsed : 0
 
                 lock.withLock {
                     totalRequests += 1
-                    totalTokensGenerated += UInt64(generatedIds.count)
+                    totalTokensGenerated += UInt64(vlmGeneratedIds.count)
                     totalInferenceTime += elapsed
                 }
 
-                deferredClearCache()
+                // Keep the GPU objects alive across this return so the worker
+                // can write the result line first. `reapVLMWorkingSets` drops
+                // them after that write.
+                VLMDeferredRelease.stash(VLMWorkingSetRetirement(
+                    caches: kvCache,
+                    boxed: kvCacheBox.value,
+                    imageInput: input
+                ))
+                kvCache = []
+                kvCacheBox.value = nil
+                input = LMInput(tokens: MLXArray([Int32(0)]))
+                effectiveInput = input
 
                 return InferenceResult(
                     id: request.id,
@@ -3166,8 +3240,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     text: cleanText,
                     tokensPerSecond: tps,
                     promptTokens: Int(promptTokenCount),
-                    completionTokens: generatedIds.count,
-                    finishReason: generatedIds.count >= maxTokens ? .length : .stop
+                    completionTokens: vlmGeneratedIds.count,
+                    finishReason: vlmGeneratedIds.count >= maxTokens ? .length : .stop
                 )
             } else {
                 do {
@@ -3329,7 +3403,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     let userInput = try await self.buildUserInput(request: request, hasImages: hasImages)
 
-                    let input = try await mlxContainer.prepare(input: userInput)
+                    var input = try await mlxContainer.prepare(input: userInput)
 
                     let promptTokenCount = input.text.tokens.size
                     let maxTokens = try self.outputTokenBudget(
@@ -3409,7 +3483,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }()
 
                         let startTime = Date()
-                        let kvCache = try model.value.newCache(parameters: parameters)
+                        var kvCache = try model.value.newCache(parameters: parameters)
                         let cacheBox = MutableSendableBox<[KVCache]?>(kvCache)
                         let samplerBox = SamplerBox(sampler)
                         let unknownTokenId = mlxTokenizer.unknownTokenId
@@ -3425,7 +3499,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         // Box the LMInput image/video payload for @Sendable closure capture
                         // (mirrors the non-stream VLM fix). model.prepare() reads the merged image
                         // pixels from LMInput.image, so we must pass the full LMInput — not raw
-                        // token IDs — to the prefill call.
+                        // token IDs — to the prefill call. The `do` releases those pages
+                        // before clearCache.
+                        let streamGeneratedIds: [Int]
+                        let streamPrefillSec: Double
+                        let streamDecodeSec: Double
+                        var completionTokens = 0
+                        var finishReason: FinishReason = .stop
+                        do {
                         let prefillImage = input.image
                         let prefillVideo = input.video
                         let prefillTextTokens = input.text.tokens
@@ -3436,9 +3517,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         let detokenizer = VLMStreamDetokenizer { ids in
                             mlxTokenizer.decode(tokenIds: ids)
                         }
-
-                        var completionTokens = 0
-                        var finishReason: FinishReason = .stop
 
                         let genResult = try await mlxContainer.perform { context in
                             let modelObj = context.model
@@ -3488,13 +3566,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                             let tid = sample(logits[0..., -1, 0...], generated: generatedIds)
                             eval(caches)
-                            Memory.clearCache()
+                            MLXMemoryGate.clearCache()
                             let prefillSec = Date().timeIntervalSince(begun)
                             let decodeBegan = Date()
                             let unknownStops = !layoutOCR && tid == unknownTokenId
                             if unknownStops || stopTokenIds.contains(tid) {
                                 NovaMLXLog.warning("[VLM-Stream] first token \(tid) is stop token — returning empty (promptTokens=\(tokenIds.count))")
-                                return SendableBox((generatedIds, caches as [KVCache], prefillSec, 0.0))
+                                return SendableBox((generatedIds, prefillSec, 0.0))
                             }
                             emit(tid)
 
@@ -3515,19 +3593,26 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                             }
 
                             let decodeSec = Date().timeIntervalSince(decodeBegan)
-                            return SendableBox((generatedIds, caches as [KVCache], prefillSec, decodeSec))
+                            return SendableBox((generatedIds, prefillSec, decodeSec))
                         }
 
-                        let (generatedIds, finalCaches, prefillSec, decodeSec) = genResult.value
-                        cacheBox.value = finalCaches
-                        completionTokens = generatedIds.count
+                            let unpacked = genResult.value
+                            streamGeneratedIds = unpacked.0
+                            streamPrefillSec = unpacked.1
+                            streamDecodeSec = unpacked.2
+                        }
+                        kvCache = []
+                        cacheBox.value = nil
+                        input = LMInput(tokens: MLXArray([Int32(0)]))
+                        MLXMemoryGate.clearCache()
+                        completionTokens = streamGeneratedIds.count
 
                         if completionTokens >= maxTokens { finishReason = .length }
 
                         let elapsed = Date().timeIntervalSince(startTime)
-                        let decodeTps = decodeSec > 0 ? Double(max(completionTokens - 1, 0)) / decodeSec : 0
+                        let decodeTps = streamDecodeSec > 0 ? Double(max(completionTokens - 1, 0)) / streamDecodeSec : 0
 
-                        NovaMLXLog.info("[STREAM:\(reqTag)] VLM: tokens=\(completionTokens), stopReason=\(finishReason), prefill=\(String(format: "%.2f", prefillSec))s decode=\(String(format: "%.1f", decodeTps)) tok/s")
+                        NovaMLXLog.info("[STREAM:\(reqTag)] VLM: tokens=\(completionTokens), stopReason=\(finishReason), prefill=\(String(format: "%.2f", streamPrefillSec))s decode=\(String(format: "%.1f", decodeTps)) tok/s")
 
                         self.lock.withLock {
                             self.totalRequests += 1
@@ -4100,7 +4185,14 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         )
     }
 
-    public var gpuActiveMemory: UInt64 { UInt64(MLX.Memory.activeMemory) }
+    public var gpuActiveMemory: UInt64 { MLXMemoryGate.activeBytes() }
+
+    /// Drops page images and KV caches stashed by the last VLM generate.
+    /// Call after the worker has written the result line. Doing it earlier
+    /// races the tokenizer and the stdout write never happens.
+    public func reapVLMWorkingSets() {
+        VLMDeferredRelease.drain()
+    }
 
     /// Wire settings provider into the memory enforcer and start 1s polling.
     /// Call once after config is loaded. The abortAllHandler cancels active

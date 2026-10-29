@@ -1,5 +1,4 @@
 import Foundation
-import MLX
 import NovaMLXCore
 import NovaMLXUtils
 
@@ -119,7 +118,7 @@ public actor ProcessMemoryEnforcer {
     }
 
     public var currentMemoryBytes: UInt64 {
-        UInt64(MLX.Memory.activeMemory)
+        MLXMemoryGate.activeBytes()
     }
 
     // MARK: - Internal
@@ -145,7 +144,7 @@ public actor ProcessMemoryEnforcer {
         if models.count == 1 {
             NovaMLXLog.warning("[MemoryEnforcer] single model loaded, aborting active requests to free KV cache")
             await abortAllHandler?()
-            MLX.Memory.clearCache()
+            MLXMemoryGate.clearCache()
             return
         }
 
@@ -174,7 +173,7 @@ public actor ProcessMemoryEnforcer {
     }
 
     private func waitForMemorySettle(targetBytes: UInt64) async {
-        MLX.Memory.clearCache()
+        MLXMemoryGate.clearCache()
         var current = currentMemoryBytes
 
         for _ in 0..<5 {

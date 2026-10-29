@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import NovaMLXCore
 import NovaMLXUtils
 
@@ -21,7 +22,6 @@ public final class WorkerSupervisor: @unchecked Sendable {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var stderrFile: FileHandle?
-    private var stderrRemainder = Data()
     private var lastStderrLines: [String] = []
     private let lock = NSLock()
 
@@ -48,6 +48,11 @@ public final class WorkerSupervisor: @unchecked Sendable {
     private let workerBinaryPath: String
 
     public private(set) var isRunning = false
+    /// Set before the stdout/stderr handles are closed so an intentional
+    /// stop is not reported as a worker crash.
+    private var readersStopped = false
+    private static let maxStdoutLineBytes = 16 * 1024 * 1024
+    private static let readChunkBytes = 64 * 1024
     private var pendingLoadModelId: String?
     private var lastCrashTime: Date?
     private static let restartCooldown: TimeInterval = 2.0
@@ -94,6 +99,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
         self.isRunning = true
+        self.readersStopped = false
 
         startReader(stdout: stdout)
         startStderrReader(stderr, pid: proc.processIdentifier)
@@ -129,12 +135,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
 
     public func stop() {
         lock.lock()
-        if let pipe = stdoutPipe {
-            pipe.fileHandleForReading.readabilityHandler = nil
-        }
-        if let pipe = stderrPipe {
-            pipe.fileHandleForReading.readabilityHandler = nil
-        }
+        readersStopped = true
+        let stdout = stdoutPipe
+        let stderr = stderrPipe
         let proc = process
         process = nil
         stdinPipe = nil
@@ -148,6 +151,9 @@ public final class WorkerSupervisor: @unchecked Sendable {
         clearStreamStateLocked()
         lock.unlock()
 
+        // Unblock the dedicated readers. `read(upToCount:)` returns on close.
+        try? stdout?.fileHandleForReading.close()
+        try? stderr?.fileHandleForReading.close()
         proc?.terminate()
         failWaiters(pending: pending, streams: streams, error: NovaMLXError.inferenceFailed("Worker stopped"))
     }
@@ -335,72 +341,204 @@ public final class WorkerSupervisor: @unchecked Sendable {
         }
         lock.lock()
         stderrFile = file
-        stderrRemainder = Data()
         lastStderrLines.removeAll()
         lock.unlock()
 
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard let self else { return }
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
+        let handle = pipe.fileHandleForReading
+        handle.readabilityHandler = nil
+        let thread = Thread { [weak self] in
+            self?.readLoop(handle, kind: .stderr)
+        }
+        thread.name = "novamlx-worker-stderr"
+        thread.start()
+    }
+
+    private enum PipeKind { case stdout, stderr }
+
+    /// Blocking read loop.
+    ///
+    /// `FileHandle.read(upToCount:)` waits until that many bytes arrive or the
+    /// pipe closes. A `loaded` ack and the 5s memory-stats lines are a few
+    /// hundred bytes, so the host sat in that call forever: the worker logged
+    /// `Loaded model` and `/health` stayed at `loadedModels: 0`.
+    /// `FileHandle.availableData` inside `readabilityHandler` is the other
+    /// failure: the handler suspends the dispatch source and a result larger
+    /// than the pipe buffer never finishes.
+    ///
+    /// POSIX `read` on a blocking pipe returns whatever is already buffered
+    /// (at least one byte) and blocks only when the pipe is empty. Short
+    /// control messages are delivered immediately, and a large OCR line is
+    /// drained while the worker is still writing it.
+    private func startReader(stdout: Pipe) {
+        let handle = stdout.fileHandleForReading
+        handle.readabilityHandler = nil
+        NovaMLXLog.info("[WorkerSupervisor] Reader started (dedicated thread)")
+        let thread = Thread { [weak self] in
+            self?.readLoop(handle, kind: .stdout)
+        }
+        thread.name = "novamlx-worker-stdout"
+        thread.start()
+    }
+
+    private func readLoop(_ handle: FileHandle, kind: PipeKind) {
+        var buffer = Data()
+        let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0, (flags & O_NONBLOCK) != 0 {
+            _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+        }
+        var scratch = [UInt8](repeating: 0, count: Self.readChunkBytes)
+        while true {
+            let n = scratch.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return 0 }
+                return Darwin.read(fd, base, raw.count)
+            }
+            if n > 0 {
+                buffer.append(contentsOf: scratch.prefix(n))
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else if n < 0 && errno == EAGAIN {
+                usleep(2_000)
+                continue
+            } else {
+                // n == 0 is EOF. Any other error (EBADF from stop()'s close)
+                // ends the loop too.
+                notePipeClosed(kind)
                 return
             }
-            self.ingestStderr(data)
+            switch kind {
+            case .stdout:
+                drainStdout(&buffer)
+            case .stderr:
+                drainStderr(&buffer)
+            }
         }
     }
 
-    private func ingestStderr(_ data: Data) {
+    private func notePipeClosed(_ kind: PipeKind) {
         lock.lock()
-        stderrFile?.write(data)
-        stderrRemainder.append(data)
-        var lines: [String] = []
-        while let nl = stderrRemainder.firstIndex(of: 0x0A) {
-            let lineData = stderrRemainder[..<nl]
-            stderrRemainder = Data(stderrRemainder[(nl + 1)...])
-            let line = String(data: Data(lineData), encoding: .utf8)?
+        let stopped = readersStopped
+        lock.unlock()
+        guard !stopped, kind == .stdout else { return }
+        handleWorkerCrash()
+    }
+
+    /// `10 digits + newline + payload`. The payload is the JSON bytes from
+    /// `JSONEncoder` with no extra newline, so a newline inside a string
+    /// cannot end the frame early.
+    private static let frameHeaderLength = 11
+
+    private func drainStdout(_ buffer: inout Data) {
+        while buffer.count >= Self.frameHeaderLength {
+            let header = buffer.prefix(Self.frameHeaderLength)
+            let lengthText = String(data: Data(header.prefix(10)), encoding: .ascii) ?? ""
+            let marker = header[header.index(header.startIndex, offsetBy: 10)]
+            guard marker == 0x0A, let length = Int(lengthText), length >= 2, length <= Self.maxStdoutLineBytes else {
+                NovaMLXLog.error("[WorkerSupervisor] bad stdout frame header \(lengthText)")
+                buffer.removeFirst()
+                continue
+            }
+            let total = Self.frameHeaderLength + length
+            guard buffer.count >= total else { return }
+            let payloadStart = buffer.index(buffer.startIndex, offsetBy: Self.frameHeaderLength)
+            let payloadEnd = buffer.index(payloadStart, offsetBy: length)
+            let payload = Data(buffer[payloadStart..<payloadEnd])
+            buffer.removeSubrange(..<payloadEnd)
+            do {
+                let msg = try JSONDecoder().decode(WorkerMessage.self, from: payload)
+                if msg.type == WorkerMessageType.result || msg.type == WorkerMessageType.error {
+                    NovaMLXLog.info("[Sup] stdout \(msg.type) id=\(msg.requestId ?? "-") chars=\(msg.result?.text.utf8.count ?? 0)")
+                }
+                handleMessage(msg)
+            } catch {
+                NovaMLXLog.error("[WorkerSupervisor] Decode failed (\(payload.count) bytes): \(error)")
+                if let requestId = Self.requestId(in: payload) {
+                    failWaiter(requestId: requestId, message: "Worker result could not be decoded: \(error)")
+                }
+            }
+        }
+        if buffer.count > Self.maxStdoutLineBytes {
+            NovaMLXLog.error("[WorkerSupervisor] stdout buffer exceeded \(Self.maxStdoutLineBytes) bytes without a frame")
+            buffer.removeAll(keepingCapacity: true)
+            failPendingLineOverflow()
+        }
+    }
+
+    /// Best-effort `"requestId":"..."` pull so a corrupt result still unblocks HTTP.
+    private static func requestId(in payload: Data) -> String? {
+        guard let text = String(data: payload.prefix(4096), encoding: .utf8) else { return nil }
+        guard let key = text.range(of: "\"requestId\":\"") else { return nil }
+        let rest = text[key.upperBound...]
+        guard let end = rest.firstIndex(of: "\"") else { return nil }
+        let id = String(rest[..<end])
+        return id.isEmpty ? nil : id
+    }
+
+    private func failWaiter(requestId: String, message: String) {
+        lock.lock()
+        let cont = pendingRequests.removeValue(forKey: requestId)
+        lock.unlock()
+        guard let cont else { return }
+        let box = ContinuationResume(cont)
+        let error = NovaMLXError.inferenceFailed(message)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.resume(throwing: error)
+        }
+    }
+
+    private func drainStderr(_ buffer: inout Data) {
+        var lines: [Data] = []
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            lines.append(Data(buffer[..<newline]))
+            buffer.removeSubrange(..<buffer.index(after: newline))
+        }
+        if buffer.count > Self.maxStdoutLineBytes {
+            buffer.removeAll(keepingCapacity: true)
+        }
+        guard !lines.isEmpty else { return }
+        var echoed: [String] = []
+        echoed.reserveCapacity(lines.count)
+        lock.lock()
+        for lineData in lines where !lineData.isEmpty {
+            stderrFile?.write(lineData)
+            stderrFile?.write(Data([0x0A]))
+            let stored = String(data: lineData.prefix(2_048), encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !line.isEmpty else { continue }
-            lastStderrLines.append(line)
+            guard !stored.isEmpty else { continue }
+            lastStderrLines.append(stored)
             if lastStderrLines.count > 80 {
                 lastStderrLines.removeFirst(lastStderrLines.count - 80)
             }
-            lines.append(line)
+            echoed.append(stored)
         }
         lock.unlock()
-        for line in lines {
+        for line in echoed {
             NovaMLXLog.error("[Worker stderr] \(line)")
         }
     }
 
-    private func startReader(stdout: Pipe) {
-        let handle = stdout.fileHandleForReading
-        NovaMLXLog.info("[WorkerSupervisor] Reader started (readabilityHandler)")
-
-        handle.readabilityHandler = { [weak self] handle in
-            guard let self = self else { return }
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                self.handleWorkerCrash()
-                return
-            }
-
-            self.readBuffer.append(data)
-
-            while let newlineIdx = self.readBuffer.firstIndex(of: 0x0A) {
-                let lineData = self.readBuffer[..<newlineIdx]
-                self.readBuffer = Data(self.readBuffer[(newlineIdx + 1)...])
-
-                guard !lineData.isEmpty else { continue }
-                guard let msg = try? JSONDecoder().decode(WorkerMessage.self, from: lineData) else {
-                    NovaMLXLog.warning("[WorkerSupervisor] Decode failed: \(String(data: lineData, encoding: .utf8) ?? "?")")
-                    continue
-                }
-
-                self.handleMessage(msg)
-            }
+    private func resumeOffReader(
+        _ continuation: CheckedContinuation<WorkerMessage, Error>,
+        returning message: WorkerMessage
+    ) {
+        let box = ContinuationResume(continuation)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.resume(returning: message)
         }
+    }
+
+    private func failPendingLineOverflow() {
+        lock.lock()
+        let pending = pendingRequests
+        pendingRequests.removeAll()
+        let streams = streamContinuations
+        clearStreamStateLocked()
+        lock.unlock()
+        failWaiters(
+            pending: pending,
+            streams: streams,
+            error: NovaMLXError.inferenceFailed(
+                "Worker result exceeded \(Self.maxStdoutLineBytes) bytes"))
     }
 
     private func handleMessage(_ msg: WorkerMessage) {
@@ -431,7 +569,13 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 let callback = loadProgressCallbacks.removeValue(forKey: key)
                 let cont = pendingRequests.removeValue(forKey: key)
                 lock.unlock()
-                cont?.resume(returning: msg)
+                // Same rule as generate results: the host's load bookkeeping
+                // continues on the resuming thread. Doing it here stalls this
+                // reader, so the next stdout line (memory stats, OCR result)
+                // sits unread.
+                if let cont {
+                    resumeOffReader(cont, returning: msg)
+                }
                 if let callback = callback, msg.type == WorkerMessageType.loaded {
                     callback(.ready)
                 }
@@ -452,7 +596,7 @@ public final class WorkerSupervisor: @unchecked Sendable {
                 let cont = pendingRequests.removeValue(forKey: key)
                 lock.unlock()
                 if let cont {
-                    cont.resume(returning: msg)
+                    resumeOffReader(cont, returning: msg)
                 } else {
                     NovaMLXLog.warning("[WorkerSupervisor] Unhandled worker error (no pending request for '\(key)'): \(msg.errorMessage ?? "unknown")")
                 }
@@ -465,7 +609,11 @@ public final class WorkerSupervisor: @unchecked Sendable {
             lock.lock()
             let cont = pendingRequests.removeValue(forKey: requestId)
             lock.unlock()
-            cont?.resume(returning: msg)
+            guard let cont else { return }
+            // The HTTP task continues on the resuming thread until its next
+            // await. Packaging the OCR body here used to run inside the pipe
+            // reader and wedge the host.
+            resumeOffReader(cont, returning: msg)
 
         case WorkerMessageType.token:
             let tokenToYield: Token?
@@ -598,5 +746,24 @@ public final class WorkerSupervisor: @unchecked Sendable {
             NovaMLXLog.error("[WorkerSupervisor] Worker crashed!\(detail)")
             onCrash?()
         }
+    }
+}
+
+/// Resumes a worker continuation off the stdout reader thread.
+private final class ContinuationResume: @unchecked Sendable {
+    private var continuation: CheckedContinuation<WorkerMessage, Error>?
+
+    init(_ continuation: CheckedContinuation<WorkerMessage, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning message: WorkerMessage) {
+        continuation?.resume(returning: message)
+        continuation = nil
+    }
+
+    func resume(throwing error: Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
     }
 }

@@ -218,22 +218,37 @@ extension NovaMLXAPIServer {
         {
             pixelSize = VendorOCRImages.pixelSize(of: data)
         }
-        let lines = UnlimitedOCRMarkup.parse(result.text, imagePixelSize: pixelSize)
-        var response = vendorOCRResponse(VendorOCRResponses.success(
+        // Build the vendor JSON on this task. `generate` already resumed off
+        // the pipe reader. A further `Task.detached` hop after that resume
+        // never completed, so curl sat at http=000 after the worker had
+        // logged `result written`. 30KB of OCR text is a straight parse.
+        let ocrText = result.text
+        let imageSize = pixelSize
+        let promptTokens = result.promptTokens
+        let completionTokens = result.completionTokens
+        NovaMLXLog.info("[API] vendor OCR packaging chars=\(ocrText.utf8.count) vendor=\(route.vendor.rawValue)")
+        let lines = UnlimitedOCRMarkup.parse(ocrText, imagePixelSize: imageSize)
+        let bodyData = VendorOCRResponses.encode(VendorOCRResponses.success(
             vendor: route.vendor,
             lines: lines,
             logID: logID,
             requestID: requestID,
-            imageSize: pixelSize
+            imageSize: imageSize
         ))
+        NovaMLXLog.info("[API] vendor OCR response bytes=\(bodyData.count) lines=\(lines.count)")
+        var response = Response(
+            status: .ok,
+            headers: [.contentType: "application/json"],
+            body: .init(byteBuffer: ByteBuffer(data: bodyData))
+        )
         if case .justLoaded(let ms) = outcome {
             response.headers[.init("X-Model-Cold-Load")!] = "true"
             response.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
         }
         Self.recordTokenUsage(
             request: request,
-            promptTokens: result.promptTokens,
-            completionTokens: result.completionTokens,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
             model: parsed.modelID,
             endpoint: request.uri.path
         )
