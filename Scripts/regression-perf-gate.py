@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
 """Mac-local regression + performance gate for NovaMLX.
 
-Mirrors Scripts/post_reboot_8bit_bench.py (health → load → stream chat →
+Mirrors Scripts/post_reboot_8bit_bench.py (health → load → chat →
 decode_tps) but drives a YAML suite, checks correctness, and compares
 decode_tps against Scripts/regression-baselines.json.
 
-Unload uses GET /admin/models (loaded:true only). LLM chat sends
-enable_thinking=false by default. Warm/measure retry on HTTP 404 / empty.
+Unload uses GET /admin/models with loaded:true, skipping companion draft
+ids (MTP/DFlash/DSpark — same idea as ResourceLimits.isCompanionDraftModelId)
+and pinned unload-400 models. Never storm-unload virtual companions.
+
+Readiness requires /health.loadedModels >= 1 AND the target id in the
+filtered admin loaded set — admin loaded alone is poisoned by on-disk
+companions (companionReady). Warm/correctness prefer non-stream chat;
+stream is used for decode_tps measure with non-stream fallback. Retries
+log 404 bodies and abort if /health dies.
+
+LLM chat sends enable_thinking=false by default.
 
 Exit non-zero on correctness failure or decode_tps regression beyond
 tolerance (default −8%; --strict → −5%). Improvements always pass.
 OCR models gate on correctness only (skip decode_tps when wall ≈ 0).
+
+--seed-baseline skips suspiciously low decode_tps (contention artifacts,
+e.g. Qwen ~33 tok/s when quiet runs are ~70+). Do not commit machine-
+local baselines from a contended gate run.
 """
 from __future__ import annotations
 
@@ -177,12 +190,54 @@ def wait_health(key: str, base: str, seconds: int = 180) -> None:
     raise SystemExit(f"API did not come up at {base}")
 
 
-def loaded_ids(key: str, admin: str) -> list[str]:
-    """Ids currently resident in memory (admin catalog filtered by loaded:true).
+def _last_path_segment(model_id: str) -> str:
+    return model_id.rsplit("/", 1)[-1]
+
+
+def is_companion_draft_model_id(model_id: str) -> bool:
+    """Mirror ResourceLimits.isCompanionDraftModelId (Types.swift).
+
+    Admin `loaded:true` is true for on-disk DSpark/DFlash/MTP companions via
+    companionReady — they are not real chat containers. /health.loadedModels
+    stays 0 for those. Never storm-unload them.
+    """
+    name = _last_path_segment(model_id).upper()
+    is_mtp = ("-MTP-" in name) or ("-MTP_" in name) or name.endswith("-MTP")
+    is_dflash = "DFLASH" in name
+    is_dspark = "DSPARK" in name
+    return is_mtp or is_dflash or is_dspark
+
+
+def health_body(key: str, base: str, timeout: int = 5) -> dict[str, Any] | None:
+    try:
+        code, body = req(key, "GET", f"{base}/health", timeout=timeout)
+    except Exception:
+        return None
+    if code != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+def health_alive(key: str, base: str) -> bool:
+    return health_body(key, base) is not None
+
+
+def health_loaded_count(key: str, base: str) -> int | None:
+    body = health_body(key, base)
+    if body is None:
+        return None
+    try:
+        return int(body.get("loadedModels") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def loaded_ids(key: str, admin: str, *, include_companions: bool = False) -> list[str]:
+    """Ids with admin loaded:true, optionally skipping companion drafts.
 
     Prefer GET /admin/models over /v1/models: the admin list carries an explicit
-    `loaded` flag. Storm-unloading the whole catalog (or anything not loaded)
-    worsens load/chat races for the next model under test.
+    `loaded` flag. That flag is currently poisoned by on-disk companions
+    (companionReady) — filter them unless include_companions=True.
     """
     code, body = req(key, "GET", f"{admin}/admin/models", timeout=30)
     if code != 200:
@@ -199,31 +254,85 @@ def loaded_ids(key: str, admin: str) -> list[str]:
         if not isinstance(m, dict) or not m.get("loaded"):
             continue
         mid = m.get("id") or m.get("modelId") or m.get("model_id")
-        if mid:
-            out.append(str(mid))
+        if not mid:
+            continue
+        mid_s = str(mid)
+        if not include_companions and is_companion_draft_model_id(mid_s):
+            continue
+        out.append(mid_s)
     return out
 
 
-def wait_model_loaded(key: str, admin: str, mid: str, seconds: int = 180) -> bool:
+def wait_model_ready(
+    key: str,
+    base: str,
+    admin: str,
+    mid: str,
+    seconds: int = 180,
+) -> bool:
+    """Target ready = admin loaded (non-companion) AND /health.loadedModels >= 1.
+
+    Admin loaded alone is not trustworthy (on-disk companions look loaded while
+    health.loadedModels stays 0).
+    """
     t0 = time.time()
     while time.time() - t0 < seconds:
-        if mid in loaded_ids(key, admin):
+        ids = loaded_ids(key, admin)
+        n = health_loaded_count(key, base)
+        if mid in ids and n is not None and n >= 1:
             return True
         time.sleep(1)
     return False
 
 
 def unload_all(key: str, admin: str) -> None:
+    """Unload real loaded models only; skip companions and pinned (unload 400)."""
     ids = list(loaded_ids(key, admin))
     if not ids:
+        # Still mention skipped ghosts for operator clarity (once).
+        ghosts = [
+            i
+            for i in loaded_ids(key, admin, include_companions=True)
+            if is_companion_draft_model_id(i)
+        ]
+        if ghosts:
+            print(
+                f"  unload-all: skip {len(ghosts)} companion draft(s) "
+                f"(admin loaded:true is companionReady, not resident)",
+                flush=True,
+            )
         return
-    print(f"  unload-all ({len(ids)} loaded)", flush=True)
+    print(f"  unload-all ({len(ids)} non-companion loaded)", flush=True)
     for mid in ids:
+        if is_companion_draft_model_id(mid):
+            print(f"  skip companion {mid}", flush=True)
+            continue
         print(f"  unload {mid}", flush=True)
         try:
-            req(key, "POST", f"{admin}/admin/models/unload", {"modelId": mid}, timeout=120)
+            code, body = req(
+                key,
+                "POST",
+                f"{admin}/admin/models/unload",
+                {"modelId": mid},
+                timeout=120,
+            )
         except Exception as e:
             print(f"  unload warn {mid}: {e}", flush=True)
+            continue
+        if code == 400:
+            detail = ""
+            if isinstance(body, dict):
+                err = body.get("error") or body
+                if isinstance(err, dict):
+                    detail = str(err.get("message") or err)
+                else:
+                    detail = str(body)
+            else:
+                detail = str(body)
+            print(f"  unload pinned/refused {mid}: HTTP 400 {detail[:200]}", flush=True)
+            continue
+        if code >= 400:
+            print(f"  unload warn {mid}: HTTP {code} {body}", flush=True)
     # Settle after eviction so the next load does not race a dying worker.
     time.sleep(2)
 
@@ -310,6 +419,79 @@ def stream_chat(
         "prefill_tps": round(prefill, 2),
         "finish": finish,
         "text": "".join(text_parts),
+        "stream": True,
+    }
+
+
+
+class ChatHTTPError(Exception):
+    """HTTP failure from chat with response body for logging."""
+
+    def __init__(self, code: int, body: Any, url: str = ""):
+        self.code = code
+        self.body = body
+        self.url = url
+        preview = body
+        if isinstance(body, (dict, list)):
+            preview = json.dumps(body)[:500]
+        else:
+            preview = str(body)[:500]
+        super().__init__(f"HTTP {code}: {preview}")
+
+
+def nonstream_chat(
+    key: str,
+    base: str,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float = 0,
+    timeout: int = 300,
+    enable_thinking: bool | None = False,
+) -> dict[str, Any]:
+    """Non-stream chat — preferred for warm/correctness (Flint stream can empty/404/crash)."""
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if enable_thinking is not None:
+        body["enable_thinking"] = bool(enable_thinking)
+        body["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
+    t0 = time.monotonic()
+    code, payload = req(key, "POST", f"{base}/v1/chat/completions", body, timeout=timeout)
+    t1 = time.monotonic()
+    if code >= 400:
+        raise ChatHTTPError(code, payload, f"{base}/v1/chat/completions")
+    if not isinstance(payload, dict):
+        payload = {}
+    usage = payload.get("usage") or {}
+    choices = payload.get("choices") or []
+    text = ""
+    finish = ""
+    if choices:
+        ch0 = choices[0] or {}
+        finish = str(ch0.get("finish_reason") or "")
+        msg = ch0.get("message") or {}
+        text = str(msg.get("content") or "")
+    pt = int(usage.get("prompt_tokens") or 0)
+    ct = int(usage.get("completion_tokens") or 0)
+    e2e = t1 - t0
+    # Non-stream has no TTFT split — do not invent decode_tps for seeding/gating.
+    return {
+        "ttft_ms": None,
+        "e2e_s": round(e2e, 2),
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "decode_tps": None,
+        "decode_wall_s": None,
+        "prefill_tps": None,
+        "finish": finish,
+        "text": text,
+        "stream": False,
+        "http_status": code,
     }
 
 
@@ -318,6 +500,17 @@ def _chat_empty(result: dict[str, Any]) -> bool:
     ct = int(result.get("completion_tokens") or 0)
     text = (result.get("text") or "").strip()
     return ct == 0 and not text
+
+
+def _http_error_body(err: urllib.error.HTTPError) -> Any:
+    try:
+        raw = err.read().decode("utf-8", "replace")
+    except Exception:
+        return {"raw": "<unreadable>"}
+    try:
+        return json.loads(raw) if raw else {"raw": ""}
+    except Exception:
+        return {"raw": raw[:500]}
 
 
 def chat_with_retry(
@@ -333,52 +526,132 @@ def chat_with_retry(
     attempts: int = 5,
     retry_empty: bool = True,
     label: str = "chat",
+    prefer_stream: bool = False,
 ) -> dict[str, Any]:
     """Retry transient post-load failures (HTTP 404 / empty completion).
 
-    Flint (and sometimes others) can return load 200 while the chat worker is
-    not yet serving; the first stream may be empty or 404, then succeed.
+    Prefer non-stream for warm/correctness: Flint stream often returns empty
+    SSE (ct=0) then 404 model_not_loaded, and has crashed the app under probe.
+    Measure may prefer_stream=True for decode_tps; empty stream falls back to
+    non-stream (text only — decode_tps stays None). Aborts if /health dies.
     """
     last_err: Exception | None = None
     last_empty: dict[str, Any] | None = None
+    use_stream = prefer_stream
     for attempt in range(1, attempts + 1):
-        try:
-            result = stream_chat(
-                key,
-                base,
-                model,
-                messages,
-                max_tokens,
-                temperature=temperature,
-                timeout=timeout,
-                enable_thinking=enable_thinking,
+        if not health_alive(key, base):
+            raise RuntimeError(
+                f"{label}: /health dead — abort retries (NovaMLX likely crashed)"
             )
+        try:
+            if use_stream:
+                result = stream_chat(
+                    key,
+                    base,
+                    model,
+                    messages,
+                    max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                    enable_thinking=enable_thinking,
+                )
+            else:
+                result = nonstream_chat(
+                    key,
+                    base,
+                    model,
+                    messages,
+                    max_tokens,
+                    temperature=temperature,
+                    timeout=timeout,
+                    enable_thinking=enable_thinking,
+                )
             if retry_empty and _chat_empty(result) and attempt < attempts:
                 print(
-                    f"  {label}: empty (ct=0) attempt {attempt}/{attempts}; retry",
+                    f"  {label}: empty (ct=0, stream={use_stream}) "
+                    f"attempt {attempt}/{attempts}; retry",
                     flush=True,
                 )
                 last_empty = result
+                # After empty stream, fall back to non-stream (Flint diagnosis).
+                if use_stream:
+                    print(f"  {label}: falling back to non-stream", flush=True)
+                    use_stream = False
+                if not health_alive(key, base):
+                    raise RuntimeError(
+                        f"{label}: /health dead after empty chat — abort"
+                    )
                 time.sleep(2)
                 continue
             return result
-        except urllib.error.HTTPError as e:
+        except ChatHTTPError as e:
             last_err = e
+            body_preview = (
+                json.dumps(e.body)[:400]
+                if isinstance(e.body, (dict, list))
+                else str(e.body)[:400]
+            )
+            print(
+                f"  {label}: HTTP {e.code} body={body_preview}",
+                flush=True,
+            )
             if e.code in (404, 408, 429, 502, 503, 504) and attempt < attempts:
+                if not health_alive(key, base):
+                    raise RuntimeError(
+                        f"{label}: /health dead after HTTP {e.code} — abort"
+                    )
                 print(
-                    f"  {label}: HTTP {e.code} attempt {attempt}/{attempts}; retry",
+                    f"  {label}: retry attempt {attempt}/{attempts}",
                     flush=True,
                 )
+                # 404 after stream empty → switch to non-stream
+                if use_stream and e.code == 404:
+                    use_stream = False
+                    print(f"  {label}: switching to non-stream after 404", flush=True)
+                time.sleep(2)
+                continue
+            raise
+        except urllib.error.HTTPError as e:
+            last_err = e
+            body = _http_error_body(e)
+            body_preview = (
+                json.dumps(body)[:400]
+                if isinstance(body, (dict, list))
+                else str(body)[:400]
+            )
+            print(
+                f"  {label}: HTTP {e.code} body={body_preview}",
+                flush=True,
+            )
+            if e.code in (404, 408, 429, 502, 503, 504) and attempt < attempts:
+                if not health_alive(key, base):
+                    raise RuntimeError(
+                        f"{label}: /health dead after HTTP {e.code} — abort"
+                    )
+                print(
+                    f"  {label}: retry attempt {attempt}/{attempts}",
+                    flush=True,
+                )
+                if use_stream and e.code == 404:
+                    use_stream = False
+                    print(f"  {label}: switching to non-stream after 404", flush=True)
                 time.sleep(2)
                 continue
             raise
         except (TimeoutError, urllib.error.URLError, ConnectionError, OSError, IncompleteRead) as e:
             last_err = e
+            if not health_alive(key, base):
+                raise RuntimeError(
+                    f"{label}: /health dead after {type(e).__name__} — abort"
+                ) from e
             if attempt < attempts:
                 print(
                     f"  {label}: {type(e).__name__} attempt {attempt}/{attempts}; retry",
                     flush=True,
                 )
+                if use_stream:
+                    use_stream = False
+                    print(f"  {label}: switching to non-stream after transport error", flush=True)
                 time.sleep(2)
                 continue
             raise
@@ -530,13 +803,19 @@ def run_model(
         row["error"] = f"load failed {code} {body}"
         return row
 
-    # Post-load readiness: admin must report loaded:true (not merely catalog presence).
+    # Post-load readiness: /health.loadedModels >= 1 AND admin loaded for target.
+    # Admin loaded alone is poisoned by on-disk companions (companionReady).
     ready_budget = min(180, max(30, load_timeout))
-    if not wait_model_loaded(key, admin, mid, seconds=ready_budget):
-        row["error"] = "load timeout (not loaded:true on /admin/models)"
+    if not wait_model_ready(key, base, admin, mid, seconds=ready_budget):
+        n = health_loaded_count(key, base)
+        row["error"] = (
+            f"load timeout (ready require health.loadedModels>=1 and admin "
+            f"loaded for {mid}; health.loadedModels={n} "
+            f"admin_loaded={loaded_ids(key, admin)})"
+        )
         unload_all(key, admin)
         return row
-    # Brief settle so the chat worker accepts the first stream (Flint 404 race).
+    # Brief settle so the chat worker accepts the first request.
     time.sleep(2)
 
     if kind == "ocr":
@@ -560,7 +839,7 @@ def run_model(
         warm_messages = [{"role": "user", "content": "Say hi in one word."}]
         measure_messages = messages
 
-    print("  warm", flush=True)
+    print("  warm (non-stream)", flush=True)
     try:
         warm = chat_with_retry(
             key,
@@ -572,8 +851,12 @@ def run_model(
             timeout=chat_timeout,
             enable_thinking=enable_thinking,
             label="warm",
+            prefer_stream=False,
         )
-        row["warm"] = {k: warm[k] for k in ("ttft_ms", "decode_tps", "completion_tokens", "finish")}
+        row["warm"] = {
+            k: warm.get(k)
+            for k in ("ttft_ms", "decode_tps", "completion_tokens", "finish", "stream")
+        }
     except Exception as e:
         row["error"] = f"warm failed: {e}"
         unload_all(key, admin)
@@ -582,7 +865,7 @@ def run_model(
     measures: list[dict[str, Any]] = []
     texts: list[str] = []
     for i in range(measure_runs):
-        print(f"  measure {i + 1}/{measure_runs}", flush=True)
+        print(f"  measure {i + 1}/{measure_runs} (stream→non-stream fallback)", flush=True)
         try:
             m = chat_with_retry(
                 key,
@@ -594,6 +877,7 @@ def run_model(
                 timeout=chat_timeout,
                 enable_thinking=enable_thinking,
                 label=f"measure-{i + 1}",
+                prefer_stream=True,
             )
             measures.append(m)
             texts.append(m.get("text") or "")
@@ -646,6 +930,12 @@ def run_model(
     return row
 
 
+# Contention artifact floor: Qwen quiet runs are ~70–90 tok/s; a ~33 tok/s
+# seed under unload storms / pinned Laya / Flint flake must not become baseline.
+# Also refuse to overwrite an existing baseline with a drop >40%.
+SEED_CONTENTION_RATIO = 0.60
+
+
 def seed_baseline(baselines: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
     out = {"version": int(baselines.get("version") or 1), "models": dict(baselines.get("models") or {})}
     for row in results:
@@ -657,9 +947,41 @@ def seed_baseline(baselines: dict[str, Any], results: list[dict[str, Any]]) -> d
         tps = row.get("decode_tps")
         if tps is None:
             continue
+        tps_f = float(tps)
         prev = out["models"].get(mid) or {}
+        prev_tps = prev.get("decode_tps")
+        if prev_tps is not None:
+            try:
+                prev_f = float(prev_tps)
+            except (TypeError, ValueError):
+                prev_f = None
+            if prev_f and prev_f > 0 and tps_f < prev_f * SEED_CONTENTION_RATIO:
+                print(
+                    f"  WARN seed skip {mid}: measured {tps_f:.2f} tok/s is "
+                    f"<{SEED_CONTENTION_RATIO:.0%} of existing baseline "
+                    f"{prev_f:.2f} (likely contention) — not overwriting",
+                    flush=True,
+                )
+                continue
+        # Absolute soft floor for first-time seed of known-fast 8B-class models.
+        # Suite may set min_seed_decode_tps; default keeps Flint (~260) / Qwen (~74+)
+        # from landing a ~33 contention artifact when no prior baseline exists.
+        min_seed = row.get("min_seed_decode_tps")
+        if min_seed is None and mid in (
+            "mlx-community/Qwen3-8B-4bit",
+            "RecursiveSI/flint-int4",
+        ):
+            # Qwen quiet ≈74–92; Flint quiet ≈260. Reject obvious contention.
+            min_seed = 50.0 if "Qwen3-8B" in mid else 100.0
+        if min_seed is not None and tps_f < float(min_seed):
+            print(
+                f"  WARN seed skip {mid}: measured {tps_f:.2f} tok/s below "
+                f"min_seed_decode_tps={min_seed} (contention artifact?) — not seeding",
+                flush=True,
+            )
+            continue
         out["models"][mid] = {
-            "decode_tps": float(tps),
+            "decode_tps": tps_f,
             "seeded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "kind": row.get("kind"),
             **({"previous_decode_tps": prev["decode_tps"]} if "decode_tps" in prev else {}),

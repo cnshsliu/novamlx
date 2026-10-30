@@ -2,7 +2,7 @@
 
 **Pitch:** Mac-local correctness and decode tok/s gate so core models cannot silently regress after engine or Metal changes.
 
-A small suite that loads one model at a time against a running NovaMLX, warms it, measures streaming `decode_tps`, checks a trivial correctness assertion, unloads, then compares against a committed baseline. Improvements are fine; drops beyond tolerance fail the run.
+A small suite that loads one model at a time against a running NovaMLX, warms it, measures `decode_tps` (stream for measure; non-stream warm/correctness), checks a trivial correctness assertion, unloads, then compares against a committed baseline. Improvements are fine; drops beyond tolerance fail the run.
 
 ## Who it is for
 
@@ -34,9 +34,11 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 
 ### Load / unload / readiness
 
-- **Unload** only models with `loaded: true` from `GET /admin/models` (never storm-unload the full catalog via a naive `/v1/models` dump).
-- After `POST /admin/models/load`, wait until that id is `loaded: true`, then settle briefly.
-- **Warm and measure** retry on HTTP 404 / empty completion (Flint has been seen to return load 200, warm `ct=0`, then measure 404 before the worker is ready).
+- **Unload** only non-companion models with `loaded: true` from `GET /admin/models`. Companion draft ids (MTP / DFlash / DSpark — same idea as `ResourceLimits.isCompanionDraftModelId`) are skipped: admin currently reports them `loaded:true` via on-disk `companionReady` while `/health.loadedModels` stays 0. Never storm-unload those virtual companions.
+- Unload **HTTP 400** (pinned models, e.g. `rufang/laya-hknews-tags-v4`) is logged once and not retried; a fully empty GPU is not required.
+- After `POST /admin/models/load`, wait until **`/health.loadedModels >= 1` and** the target id is in the filtered admin loaded set — admin `loaded` alone is not trustworthy.
+- **Warm / correctness** use **non-stream** chat by default (Flint stream has returned empty SSE then `404 model_not_loaded`, and can crash the app).
+- **Measure** prefers stream for `decode_tps` math, with non-stream fallback after empty SSE / 404. Retries log HTTP bodies and **abort if `/health` dies**.
 
 ### Pass / fail
 
@@ -44,6 +46,7 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 - **decode_tps regression** → non-zero when measured tok/s is more than **8%** below baseline (`tolerance.default`). `--strict` tightens to **5%**. Skipped for OCR / unreliable decode walls (`decode_wall < 50ms`)
 - **Higher tok/s** always passes
 - **No baseline yet** → warning only (unless correctness failed); seed with `--seed-baseline` (LLM only)
+- **`--seed-baseline`** refuses suspiciously low `decode_tps` (contention artifacts): will not overwrite an existing baseline with a drop beyond ~40%, and applies soft floors for Flint / Qwen3-8B first seeds (e.g. rejects Qwen ~33 tok/s when quiet runs are ~70+). **Do not commit** machine-local baselines from a contended gate run — keep `Scripts/regression-baselines.json` as the empty seed in git until a quiet seed is intentional.
 
 Results land in `~/.nova/regression/results-<gitsha>-<timestamp>.json`.
 
@@ -68,4 +71,6 @@ Model weight paths in the YAML point at the maintainer Mac layout (`/Users/lucas
 
 ## Notes
 
-Patterned on `Scripts/post_reboot_8bit_bench.py` (same stream chat decode_tps math, same admin load/unload, same `enable_thinking: false` default). This gate does not start NovaMLX and does not wait for Apple Silicon CI.
+Patterned on `Scripts/post_reboot_8bit_bench.py` (stream chat decode_tps math for measure, admin load/unload, `enable_thinking: false` default). This gate does not start NovaMLX and does not wait for Apple Silicon CI.
+
+**Engine follow-up (out of scope for the gate PR):** admin should eventually split `loaded` (resident container) vs `companionReady` / draft-on-disk so UI and scripts stop treating companions as chat-resident. Until then the gate filters companions client-side.
