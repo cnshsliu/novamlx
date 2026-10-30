@@ -46,7 +46,7 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 - **decode_tps regression** → non-zero when measured tok/s is more than **8%** below baseline (`tolerance.default`). `--strict` tightens to **5%**. Skipped for OCR / unreliable decode walls (`decode_wall < 50ms`)
 - **Higher tok/s** always passes
 - **No baseline yet** → warning only (unless correctness failed); seed with `--seed-baseline` (LLM only)
-- **`--seed-baseline`** refuses suspiciously low `decode_tps` (contention artifacts): will not overwrite an existing baseline with a drop beyond ~40%, and applies soft floors for Flint / Qwen3-8B first seeds (e.g. rejects Qwen ~33 tok/s when quiet runs are ~70+). **Do not commit** machine-local baselines from a contended gate run — keep `Scripts/regression-baselines.json` as the empty seed in git until a quiet seed is intentional.
+- **`--seed-baseline`** refuses suspiciously low `decode_tps` (contention artifacts): will not overwrite an existing baseline with a drop beyond ~40%, and honors per-model **`min_seed_decode_tps`** from `Scripts/regression-suite.yaml` (e.g. Flint 100, Qwen3-8B 50) — no hardcoded global floors in the gate script. **Do not commit** machine-local baselines from a contended gate run unless they are intentional quiet seeds.
 
 Results land in `~/.nova/regression/results-<gitsha>-<timestamp>.json`.
 

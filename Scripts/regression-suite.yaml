@@ -38,6 +38,8 @@ core:
     temperature: 0
     # Disable CoT so max_tokens are not burned before the answer.
     enable_thinking: false
+    # Quiet Mac ~260 tok/s; reject contention artifacts when seeding.
+    min_seed_decode_tps: 100
 
   - id: mlx-community/Qwen3-8B-4bit
     kind: llm
@@ -48,6 +50,8 @@ core:
     temperature: 0
     # Disable CoT so max_tokens are not burned before the answer.
     enable_thinking: false
+    # Quiet Mac ~74–92 tok/s; reject ~33 contention seeds.
+    min_seed_decode_tps: 50
 
   - id: baidu/Unlimited-OCR-2
     kind: ocr

@@ -5,6 +5,11 @@
       "decode_tps": 260.75,
       "seeded_at": "2026-10-29T21:50:50-0400",
       "kind": "llm"
+    },
+    "mlx-community/Qwen3-8B-4bit": {
+      "decode_tps": 91.38,
+      "seeded_at": "2026-10-29T22:06:24-0400",
+      "kind": "llm"
     }
   }
 }

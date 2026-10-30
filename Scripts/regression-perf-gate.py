@@ -22,9 +22,10 @@ Exit non-zero on correctness failure or decode_tps regression beyond
 tolerance (default −8%; --strict → −5%). Improvements always pass.
 OCR models gate on correctness only (skip decode_tps when wall ≈ 0).
 
---seed-baseline skips suspiciously low decode_tps (contention artifacts,
-e.g. Qwen ~33 tok/s when quiet runs are ~70+). Do not commit machine-
-local baselines from a contended gate run.
+--seed-baseline skips suspiciously low decode_tps when a suite entry sets
+min_seed_decode_tps (per model/architecture) or measured tps is far below
+an existing baseline. Do not commit machine-local baselines from a
+contended gate run.
 """
 from __future__ import annotations
 
@@ -805,6 +806,11 @@ def run_model(
         "gate_decode_tps": gate_decode_tps,
         "enable_thinking": enable_thinking,
     }
+    if model.get("min_seed_decode_tps") is not None:
+        try:
+            row["min_seed_decode_tps"] = float(model["min_seed_decode_tps"])
+        except (TypeError, ValueError):
+            pass
 
     path = model.get("path")
     if path and not os.path.isdir(path):
@@ -955,8 +961,8 @@ def run_model(
     return row
 
 
-# Contention artifact floor: Qwen quiet runs are ~70–90 tok/s; a ~33 tok/s
-# seed under unload storms / pinned Laya / Flint flake must not become baseline.
+# Contention guard vs prior baseline (ratio). Absolute floors are per-model
+# via suite `min_seed_decode_tps` (see Scripts/regression-suite.yaml).
 # Also refuse to overwrite an existing baseline with a drop >40%.
 SEED_CONTENTION_RATIO = 0.60
 
@@ -988,16 +994,10 @@ def seed_baseline(baselines: dict[str, Any], results: list[dict[str, Any]]) -> d
                     flush=True,
                 )
                 continue
-        # Absolute soft floor for first-time seed of known-fast 8B-class models.
-        # Suite may set min_seed_decode_tps; default keeps Flint (~260) / Qwen (~74+)
-        # from landing a ~33 contention artifact when no prior baseline exists.
+        # Per-model floor from suite YAML (`min_seed_decode_tps`) only — no
+        # hardcoded global/id defaults here (architecture-specific values live
+        # on each suite entry).
         min_seed = row.get("min_seed_decode_tps")
-        if min_seed is None and mid in (
-            "mlx-community/Qwen3-8B-4bit",
-            "RecursiveSI/flint-int4",
-        ):
-            # Qwen quiet ≈74–92; Flint quiet ≈260. Reject obvious contention.
-            min_seed = 50.0 if "Qwen3-8B" in mid else 100.0
         if min_seed is not None and tps_f < float(min_seed):
             print(
                 f"  WARN seed skip {mid}: measured {tps_f:.2f} tok/s below "
