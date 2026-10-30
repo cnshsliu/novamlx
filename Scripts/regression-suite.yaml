@@ -1,0 +1,80 @@
+# NovaMLX Mac-local regression + performance gate suite.
+# Core models are the default tok/s gate. Optional models are for
+# longer runs and are excluded from the default decode_tps gate.
+
+version: 1
+
+ports:
+  inference: 6590
+  admin: 6591
+
+# Auth: NOVA_API_KEY env, else sqlite ~/.nova/nova_config.db primary key,
+# else the local-dev fallback below (same as Scripts/run-e2e-tests.sh).
+auth:
+  env: NOVA_API_KEY
+  fallback: abcd1234
+
+# Fail when measured decode_tps is more than this fraction below baseline.
+# Improvements (higher tok/s) always pass. Absolute floor: 5%; soft band: 8%.
+tolerance:
+  decode_tps_min: 0.05
+  decode_tps_max: 0.08
+  # Gate uses decode_tps_max (8%) unless --strict (then decode_tps_min / 5%).
+  default: 0.08
+
+defaults:
+  warm_max_tokens: 16
+  measure_max_tokens: 128
+  measure_runs: 2
+  load_timeout_s: 3600
+  chat_timeout_s: 600
+
+core:
+  - id: RecursiveSI/flint-int4
+    kind: llm
+    path: /Users/lucas/Models/RecursiveSI/flint-int4
+    prompt: "What is 17*23? Reply with the product only."
+    expect_contains: ["391"]
+    temperature: 0
+
+  - id: mlx-community/Qwen3-8B-4bit
+    kind: llm
+    path: /Volumes/Samsung768/Models/mlx-community/Qwen3-8B-4bit
+    prompt: "What is 2+2? Reply with the number only."
+    expect_contains: ["4"]
+    temperature: 0
+
+  - id: baidu/Unlimited-OCR-2
+    kind: ocr
+    path: /Volumes/Samsung768/Models/baidu/Unlimited-OCR-2
+    # Chat path: user text "document parsing." + image_url data URL (base64 PNG).
+    ocr_prompt: "document parsing."
+    # Correctness: OCR must return non-empty content (fixture has the digits 391).
+    expect_contains: ["391"]
+    temperature: 0
+    max_tokens: 512
+
+optional:
+  - id: mlx-community/Qwen3.8-27B-8bit
+    kind: llm
+    path: /Volumes/Samsung768/Models/mlx-community/Qwen3.8-27B-8bit
+    prompt: "What is 2+2? Reply with the number only."
+    expect_contains: ["4"]
+    temperature: 0
+    load_timeout_s: 3600
+
+  - id: mlx-community/Qwen3.6-35B-A3B-4bit
+    kind: llm
+    path: /Volumes/Samsung768/Models/mlx-community/Qwen3.6-35B-A3B-4bit
+    prompt: "What is 2+2? Reply with the number only."
+    expect_contains: ["4"]
+    temperature: 0
+    load_timeout_s: 3600
+
+  - id: pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit
+    kind: llm
+    path: /Volumes/Samsung768/Models/pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit
+    prompt: "What is 2+2? Reply with the number only."
+    expect_contains: ["4"]
+    temperature: 0
+    load_timeout_s: 7200
