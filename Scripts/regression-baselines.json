@@ -1,4 +1,10 @@
 {
   "version": 1,
-  "models": {}
+  "models": {
+    "RecursiveSI/flint-int4": {
+      "decode_tps": 260.75,
+      "seeded_at": "2026-10-29T21:50:50-0400",
+      "kind": "llm"
+    }
+  }
 }
