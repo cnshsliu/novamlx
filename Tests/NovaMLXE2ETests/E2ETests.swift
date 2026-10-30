@@ -168,6 +168,7 @@ struct AdminModelStatus: Decodable, Sendable {
     let id: String
     let downloaded: Bool
     let loaded: Bool
+    let companionReady: Bool?
 }
 
 func getAllDownloadedModels(_ client: HTTPClient) async throws -> [AdminModelStatus] {

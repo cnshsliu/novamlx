@@ -34,9 +34,9 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 
 ### Load / unload / readiness
 
-- **Unload** only non-companion models with `loaded: true` from `GET /admin/models`. Companion draft ids (MTP / DFlash / DSpark — same idea as `ResourceLimits.isCompanionDraftModelId`) are skipped: admin currently reports them `loaded:true` via on-disk `companionReady` while `/health.loadedModels` stays 0. Never storm-unload those virtual companions.
+- **Unload** models with admin `loaded: true` (resident/serving). Companion draft ids (MTP / DFlash / DSpark) are still skipped as a belt-and-suspenders filter for older engines; after the readiness API split they report `companionReady: true` / `loaded: false` instead of poisoning `loaded`.
 - Unload **HTTP 400** (pinned models, e.g. `rufang/laya-hknews-tags-v4`) is logged once and not retried; a fully empty GPU is not required.
-- After `POST /admin/models/load`, wait until **`/health.loadedModels >= 1` and** the target id is in the filtered admin loaded set — admin `loaded` alone is not trustworthy.
+- After `POST /admin/models/load`, wait until **`/health.loadedModels >= 1` and** the target id has admin **`loaded: true`**. Do **not** treat `companionReady` as chat-ready.
 - **Warm / correctness** use **non-stream** chat by default (Flint stream has returned empty SSE then `404 model_not_loaded`, and can crash the app).
 - **Measure** prefers stream for `decode_tps` math, with non-stream fallback after empty SSE / 404. Retries log HTTP bodies and **abort if `/health` dies**.
 
@@ -73,4 +73,4 @@ Model weight paths in the YAML point at the maintainer Mac layout (`/Users/lucas
 
 Patterned on `Scripts/post_reboot_8bit_bench.py` (stream chat decode_tps math for measure, admin load/unload, `enable_thinking: false` default). This gate does not start NovaMLX and does not wait for Apple Silicon CI.
 
-**Engine follow-up (out of scope for the gate PR):** admin should eventually split `loaded` (resident container) vs `companionReady` / draft-on-disk so UI and scripts stop treating companions as chat-resident. Until then the gate filters companions client-side.
+**Readiness API:** `loaded` = resident/serving (aligned with `/health.loadedModels`). `companionReady` = on-disk speculative draft available as an accelerator, **not** chat-ready. `/health` also reports `companionReadyCount`. The gate waits on truthful `loaded` + health; companion-id filtering remains only as a legacy guard.

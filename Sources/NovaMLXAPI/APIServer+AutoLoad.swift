@@ -32,6 +32,13 @@ extension NovaMLXAPIServer {
             return .alreadyLoaded
         }
 
+        // Companions report companionReady, not loaded — never auto-load as chat.
+        if ResourceLimits.isCompanionDraftModelId(modelId) || inference.isCompanionReady(modelId) {
+            throw NovaMLXError.modelNotLoaded(
+                "\(modelId): speculative companion (companionReady) cannot serve chat; use as draft_model only"
+            )
+        }
+
         // Peer-relay fast-fail (X-No-Autoload): checked BEFORE the auto-load
         // decision — the tknet peer relay opts out of queue-behind-load, so a
         // non-resident model must 503 "model not loaded" immediately (the

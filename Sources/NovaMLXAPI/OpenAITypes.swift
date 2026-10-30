@@ -877,7 +877,12 @@ public struct AdminModelStatus: Codable, Sendable {
     public let id: String
     public let family: String
     public let downloaded: Bool
+    /// Resident weights / host process present (chat/completions can target this id).
+    /// On-disk speculative companions are **not** `loaded` — see `companionReady`.
     public let loaded: Bool
+    /// Speculative companion (DSpark / DFlash / MTP) is on disk and usable as a
+    /// draft accelerator. Does **not** mean the id can serve chat/completions.
+    public let companionReady: Bool
     public let sizeBytes: UInt64
     public let downloadedAt: String?
     public let memoryFeasibility: MemoryFeasibility?
@@ -895,6 +900,7 @@ public struct AdminModelStatus: Codable, Sendable {
         loaded: Bool,
         sizeBytes: UInt64,
         downloadedAt: Date?,
+        companionReady: Bool = false,
         memoryFeasibility: MemoryFeasibility? = nil,
         specBoost: SpecBoostInfo? = nil,
         tie: TieStatusInfo? = nil,
@@ -906,6 +912,7 @@ public struct AdminModelStatus: Codable, Sendable {
         self.family = family
         self.downloaded = downloaded
         self.loaded = loaded
+        self.companionReady = companionReady
         self.sizeBytes = sizeBytes
         self.memoryFeasibility = memoryFeasibility
         self.specBoost = specBoost
