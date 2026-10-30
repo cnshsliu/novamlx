@@ -15,7 +15,7 @@ Maintainers on Apple Silicon who want a fast gate before merging engine/Metal ch
 | `Scripts/regression-suite.yaml` | Core vs optional models, ports, auth fallback, tolerance |
 | `Scripts/regression-perf-gate.py` | Driver: health → unload-all → load → warm → measure → correctness → unload |
 | `Scripts/regression-baselines.json` | Per-model `decode_tps` baselines (`version` + `models`) |
-| `Scripts/regression-perf-gate.sh` | Wrapper; defaults to `--suite core` |
+| `Scripts/regression-perf-gate.sh` | Wrapper; picks PATH/Homebrew `python3` with PyYAML; defaults to `--suite core` |
 
 ### Suites
 
@@ -23,7 +23,9 @@ Maintainers on Apple Silicon who want a fast gate before merging engine/Metal ch
 - **optional**: larger Qwen (`Qwen3.8-27B-8bit`, `Qwen3.6-35B-A3B-4bit`) and `pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit` — not part of the default gate
 - **all**: core + optional
 
-OCR uses the chat path with `document parsing.` plus an inline `image_url` data URL (tiny generated PNG fixture with the digits `391`).
+LLM correctness prompts ask for `17*23` and expect substring `391` (avoids weak single-digit checks that match CoT).
+
+OCR uses the chat path with `document parsing.` plus an inline `image_url` data URL (tiny generated PNG fixture with the digits `391`). Unlimited-OCR-2 typically returns PAGE/BLOCK markup rather than plain digits; the suite sets `expect_nonempty` + `expect_has_digit` and `gate_decode_tps: false`. Decode tok/s is **not** gated for OCR when the decode wall is ≈0 (that previously produced absurd tok/s like hundreds of thousands).
 
 ### Auth and ports
 
@@ -32,10 +34,10 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 
 ### Pass / fail
 
-- **Correctness fail** → non-zero exit (expected substrings missing, empty OCR text, load/chat errors)
-- **decode_tps regression** → non-zero when measured tok/s is more than **8%** below baseline (`tolerance.default`). `--strict` tightens to **5%**
+- **Correctness fail** → non-zero exit (expected substrings missing, empty OCR text, no digit in OCR markup, load/chat errors)
+- **decode_tps regression** → non-zero when measured tok/s is more than **8%** below baseline (`tolerance.default`). `--strict` tightens to **5%**. Skipped for OCR / unreliable decode walls (`decode_wall < 50ms`)
 - **Higher tok/s** always passes
-- **No baseline yet** → warning only (unless correctness failed); seed with `--seed-baseline`
+- **No baseline yet** → warning only (unless correctness failed); seed with `--seed-baseline` (LLM only)
 
 Results land in `~/.nova/regression/results-<gitsha>-<timestamp>.json`.
 
@@ -44,7 +46,7 @@ Results land in `~/.nova/regression/results-<gitsha>-<timestamp>.json`.
 NovaMLX must already be running on this Mac.
 
 ```bash
-# Default core gate
+# Default core gate (uses Homebrew/PATH python3 with PyYAML)
 ./Scripts/regression-perf-gate.sh
 
 # First time (or after intentional speedups): write baselines from this machine

@@ -7,6 +7,7 @@ decode_tps against Scripts/regression-baselines.json.
 
 Exit non-zero on correctness failure or decode_tps regression beyond
 tolerance (default −8%; --strict → −5%). Improvements always pass.
+OCR models gate on correctness only (skip decode_tps when wall ≈ 0).
 """
 from __future__ import annotations
 
@@ -250,28 +251,53 @@ def stream_chat(
     ttft = (first - t0) if first else (t1 - t0)
     pt = int(usage.get("prompt_tokens") or 0)
     ct = int(usage.get("completion_tokens") or 0)
-    decode = 0.0
-    if ct > 1 and first and t1 > first:
-        decode = (ct - 1) / (t1 - first)
+    # Tiny decode walls produce absurd tok/s (esp. vendor OCR markup dumps).
+    decode_wall = (t1 - first) if first else 0.0
+    decode = None
+    if ct > 1 and first and decode_wall >= 0.05:
+        decode = (ct - 1) / decode_wall
     prefill = pt / max(ttft, 1e-6) if pt else 0.0
     return {
         "ttft_ms": round(ttft * 1000, 1),
         "e2e_s": round(t1 - t0, 2),
         "prompt_tokens": pt,
         "completion_tokens": ct,
-        "decode_tps": round(decode, 2),
+        "decode_tps": round(decode, 2) if decode is not None else None,
+        "decode_wall_s": round(decode_wall, 4) if first else None,
         "prefill_tps": round(prefill, 2),
         "finish": finish,
         "text": "".join(text_parts),
     }
 
 
-def correctness_ok(text: str, expect_contains: list[str] | None) -> tuple[bool, str]:
+def correctness_ok(
+    text: str,
+    expect_contains: list[str] | None = None,
+    *,
+    expect_nonempty: bool = False,
+    expect_has_digit: bool = False,
+) -> tuple[bool, str]:
+    """Check response text.
+
+    OCR models (Unlimited-OCR-2) often return PAGE/BLOCK markup rather than
+    plain digits; use expect_nonempty / expect_has_digit for those.
+    """
+    stripped = (text or "").strip()
+    preview = stripped[:200].replace("\n", "\\n")
+    if expect_nonempty or expect_has_digit:
+        if not stripped:
+            return False, "empty response"
+        if expect_has_digit and not any(ch.isdigit() for ch in stripped):
+            return False, f"no digit in markup {preview!r}"
+        # Optional substrings still enforced when provided.
+        missing = [s for s in (expect_contains or []) if s not in text]
+        if missing:
+            return False, f"missing {missing!r} in {preview!r}"
+        return True, "ok"
     if not expect_contains:
-        return (bool(text.strip()), "empty response" if not text.strip() else "ok")
+        return (bool(stripped), "empty response" if not stripped else "ok")
     missing = [s for s in expect_contains if s not in text]
     if missing:
-        preview = text[:200].replace("\n", "\\n")
         return False, f"missing {missing!r} in {preview!r}"
     return True, "ok"
 
@@ -338,12 +364,21 @@ def run_model(
     measure_runs = int(defaults.get("measure_runs") or 2)
     temp = float(model.get("temperature") if model.get("temperature") is not None else 0)
     expect = list(model.get("expect_contains") or [])
+    expect_nonempty = bool(model.get("expect_nonempty"))
+    expect_has_digit = bool(model.get("expect_has_digit"))
+    # OCR defaults: skip decode_tps gate (markup dumps often have ~0 decode wall).
+    gate_decode_tps = model.get("gate_decode_tps")
+    if gate_decode_tps is None:
+        gate_decode_tps = kind != "ocr"
+    else:
+        gate_decode_tps = bool(gate_decode_tps)
 
     row: dict[str, Any] = {
         "id": mid,
         "kind": kind,
         "path": model.get("path"),
         "ok": False,
+        "gate_decode_tps": gate_decode_tps,
     }
 
     path = model.get("path")
@@ -427,7 +462,8 @@ def run_model(
             measures.append(m)
             texts.append(m.get("text") or "")
             print(
-                f"    decode_tps={m['decode_tps']} ct={m['completion_tokens']} ttft_ms={m['ttft_ms']}",
+                f"    decode_tps={m['decode_tps']} wall={m.get('decode_wall_s')} "
+                f"ct={m['completion_tokens']} e2e_s={m['e2e_s']} ttft_ms={m['ttft_ms']}",
                 flush=True,
             )
         except Exception as e:
@@ -435,16 +471,35 @@ def run_model(
             unload_all(key, base, admin)
             return row
 
-    # Prefer the best (highest) decode_tps among runs — regressions are against peak.
-    best = max(measures, key=lambda m: float(m.get("decode_tps") or 0))
+    # Prefer the best (highest) reliable decode_tps among runs — regressions are against peak.
+    reliable = [m for m in measures if m.get("decode_tps") is not None]
+    best = max(reliable, key=lambda m: float(m["decode_tps"])) if reliable else None
     text_for_check = "\n".join(texts)
-    ok, reason = correctness_ok(text_for_check, expect)
+    ok, reason = correctness_ok(
+        text_for_check,
+        expect,
+        expect_nonempty=expect_nonempty,
+        expect_has_digit=expect_has_digit,
+    )
     row["correctness"] = {"ok": ok, "detail": reason}
-    row["measures"] = [
-        {k: m[k] for k in ("ttft_ms", "e2e_s", "prompt_tokens", "completion_tokens", "decode_tps", "prefill_tps", "finish")}
-        for m in measures
-    ]
-    row["decode_tps"] = float(best.get("decode_tps") or 0)
+    measure_keys = (
+        "ttft_ms",
+        "e2e_s",
+        "prompt_tokens",
+        "completion_tokens",
+        "decode_tps",
+        "decode_wall_s",
+        "prefill_tps",
+        "finish",
+    )
+    row["measures"] = [{k: m.get(k) for k in measure_keys} for m in measures]
+    if best is not None and gate_decode_tps:
+        row["decode_tps"] = float(best["decode_tps"])
+    else:
+        # OCR / unreliable wall: do not seed or gate on decode_tps.
+        row["decode_tps"] = None
+        if measures:
+            row["e2e_s"] = max(float(m.get("e2e_s") or 0) for m in measures)
     row["text_preview"] = text_for_check[:300]
     row["ok"] = ok
     if not ok:
@@ -459,6 +514,8 @@ def seed_baseline(baselines: dict[str, Any], results: list[dict[str, Any]]) -> d
     out = {"version": int(baselines.get("version") or 1), "models": dict(baselines.get("models") or {})}
     for row in results:
         if not row.get("ok"):
+            continue
+        if not row.get("gate_decode_tps", True):
             continue
         mid = row["id"]
         tps = row.get("decode_tps")
@@ -480,7 +537,7 @@ def main() -> int:
     ap.add_argument("--seed-baseline", action="store_true", help="write measured decode_tps into baselines")
     ap.add_argument("--suite-file", default=str(SUITE_PATH))
     ap.add_argument("--baseline-file", default=str(BASELINE_PATH))
-    ap.add_argument("--strict", action="store_true", help="use 5% tolerance instead of 8%")
+    ap.add_argument("--strict", action="store_true", help="use 5%% tolerance instead of 8%%")
     ap.add_argument("--skip-missing-path", action="store_true", help="skip models whose path is absent")
     args = ap.parse_args()
 
@@ -533,7 +590,14 @@ def main() -> int:
             failed = True
             comparisons[mid] = {"status": "fail_correctness_or_error", "error": row.get("error")}
             continue
-        cmp_ = compare_tps(mid, float(row.get("decode_tps") or 0), baselines, tolerance)
+        if not row.get("gate_decode_tps", True) or row.get("decode_tps") is None:
+            comparisons[mid] = {
+                "status": "pass_skip_tps",
+                "reason": "ocr_or_unreliable_decode_wall",
+                "e2e_s": row.get("e2e_s"),
+            }
+            continue
+        cmp_ = compare_tps(mid, float(row["decode_tps"]), baselines, tolerance)
         comparisons[mid] = cmp_
         if cmp_["status"] == "fail_regression":
             failed = True
