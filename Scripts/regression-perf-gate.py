@@ -5,6 +5,9 @@ Mirrors Scripts/post_reboot_8bit_bench.py (health → load → stream chat →
 decode_tps) but drives a YAML suite, checks correctness, and compares
 decode_tps against Scripts/regression-baselines.json.
 
+Unload uses GET /admin/models (loaded:true only). LLM chat sends
+enable_thinking=false by default. Warm/measure retry on HTTP 404 / empty.
+
 Exit non-zero on correctness failure or decode_tps regression beyond
 tolerance (default −8%; --strict → −5%). Improvements always pass.
 OCR models gate on correctness only (skip decode_tps when wall ≈ 0).
@@ -174,21 +177,55 @@ def wait_health(key: str, base: str, seconds: int = 180) -> None:
     raise SystemExit(f"API did not come up at {base}")
 
 
-def loaded_ids(key: str, base: str) -> list[str]:
-    code, body = req(key, "GET", f"{base}/v1/models", timeout=15)
-    if code != 200 or not isinstance(body, dict):
+def loaded_ids(key: str, admin: str) -> list[str]:
+    """Ids currently resident in memory (admin catalog filtered by loaded:true).
+
+    Prefer GET /admin/models over /v1/models: the admin list carries an explicit
+    `loaded` flag. Storm-unloading the whole catalog (or anything not loaded)
+    worsens load/chat races for the next model under test.
+    """
+    code, body = req(key, "GET", f"{admin}/admin/models", timeout=30)
+    if code != 200:
         return []
-    return [m.get("id") for m in body.get("data") or [] if m.get("id")]
+    rows: list[Any]
+    if isinstance(body, list):
+        rows = body
+    elif isinstance(body, dict):
+        rows = list(body.get("models") or body.get("data") or [])
+    else:
+        return []
+    out: list[str] = []
+    for m in rows:
+        if not isinstance(m, dict) or not m.get("loaded"):
+            continue
+        mid = m.get("id") or m.get("modelId") or m.get("model_id")
+        if mid:
+            out.append(str(mid))
+    return out
 
 
-def unload_all(key: str, base: str, admin: str) -> None:
-    for mid in list(loaded_ids(key, base)):
+def wait_model_loaded(key: str, admin: str, mid: str, seconds: int = 180) -> bool:
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        if mid in loaded_ids(key, admin):
+            return True
+        time.sleep(1)
+    return False
+
+
+def unload_all(key: str, admin: str) -> None:
+    ids = list(loaded_ids(key, admin))
+    if not ids:
+        return
+    print(f"  unload-all ({len(ids)} loaded)", flush=True)
+    for mid in ids:
         print(f"  unload {mid}", flush=True)
         try:
             req(key, "POST", f"{admin}/admin/models/unload", {"modelId": mid}, timeout=120)
         except Exception as e:
             print(f"  unload warn {mid}: {e}", flush=True)
-    time.sleep(1)
+    # Settle after eviction so the next load does not race a dying worker.
+    time.sleep(2)
 
 
 def stream_chat(
@@ -199,8 +236,9 @@ def stream_chat(
     max_tokens: int,
     temperature: float = 0,
     timeout: int = 300,
+    enable_thinking: bool | None = False,
 ) -> dict[str, Any]:
-    body = {
+    body: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
@@ -208,6 +246,11 @@ def stream_chat(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    # Match Scripts/post_reboot_8bit_bench.py: disable CoT so max_tokens
+    # are not burned on reasoning before the expected answer token.
+    if enable_thinking is not None:
+        body["enable_thinking"] = bool(enable_thinking)
+        body["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
     r = urllib.request.Request(
         f"{base}/v1/chat/completions",
         data=json.dumps(body).encode(),
@@ -268,6 +311,82 @@ def stream_chat(
         "finish": finish,
         "text": "".join(text_parts),
     }
+
+
+
+def _chat_empty(result: dict[str, Any]) -> bool:
+    ct = int(result.get("completion_tokens") or 0)
+    text = (result.get("text") or "").strip()
+    return ct == 0 and not text
+
+
+def chat_with_retry(
+    key: str,
+    base: str,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    *,
+    temperature: float = 0,
+    timeout: int = 300,
+    enable_thinking: bool | None = False,
+    attempts: int = 5,
+    retry_empty: bool = True,
+    label: str = "chat",
+) -> dict[str, Any]:
+    """Retry transient post-load failures (HTTP 404 / empty completion).
+
+    Flint (and sometimes others) can return load 200 while the chat worker is
+    not yet serving; the first stream may be empty or 404, then succeed.
+    """
+    last_err: Exception | None = None
+    last_empty: dict[str, Any] | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = stream_chat(
+                key,
+                base,
+                model,
+                messages,
+                max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+                enable_thinking=enable_thinking,
+            )
+            if retry_empty and _chat_empty(result) and attempt < attempts:
+                print(
+                    f"  {label}: empty (ct=0) attempt {attempt}/{attempts}; retry",
+                    flush=True,
+                )
+                last_empty = result
+                time.sleep(2)
+                continue
+            return result
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in (404, 408, 429, 502, 503, 504) and attempt < attempts:
+                print(
+                    f"  {label}: HTTP {e.code} attempt {attempt}/{attempts}; retry",
+                    flush=True,
+                )
+                time.sleep(2)
+                continue
+            raise
+        except (TimeoutError, urllib.error.URLError, ConnectionError, OSError, IncompleteRead) as e:
+            last_err = e
+            if attempt < attempts:
+                print(
+                    f"  {label}: {type(e).__name__} attempt {attempt}/{attempts}; retry",
+                    flush=True,
+                )
+                time.sleep(2)
+                continue
+            raise
+    if last_empty is not None:
+        return last_empty
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"{label}: exhausted retries")
 
 
 def correctness_ok(
@@ -372,6 +491,14 @@ def run_model(
         gate_decode_tps = kind != "ocr"
     else:
         gate_decode_tps = bool(gate_decode_tps)
+    # Default False (post_reboot_8bit_bench pattern). Suite may override.
+    enable_thinking: bool | None
+    if "enable_thinking" in model:
+        enable_thinking = bool(model.get("enable_thinking"))
+    elif kind == "ocr":
+        enable_thinking = None  # OCR path: omit thinking knobs
+    else:
+        enable_thinking = False
 
     row: dict[str, Any] = {
         "id": mid,
@@ -379,6 +506,7 @@ def run_model(
         "path": model.get("path"),
         "ok": False,
         "gate_decode_tps": gate_decode_tps,
+        "enable_thinking": enable_thinking,
     }
 
     path = model.get("path")
@@ -387,8 +515,7 @@ def run_model(
         return row
 
     print(f"\n=== {mid} ({kind}) ===", flush=True)
-    print("  unload-all", flush=True)
-    unload_all(key, base, admin)
+    unload_all(key, admin)
 
     print("  load", flush=True)
     code, body = req(
@@ -403,15 +530,14 @@ def run_model(
         row["error"] = f"load failed {code} {body}"
         return row
 
-    # Wait until listed as loaded.
-    t0 = time.time()
-    while time.time() - t0 < load_timeout:
-        if mid in loaded_ids(key, base):
-            break
-        time.sleep(2)
-    else:
-        row["error"] = "load timeout (not in /v1/models)"
+    # Post-load readiness: admin must report loaded:true (not merely catalog presence).
+    ready_budget = min(180, max(30, load_timeout))
+    if not wait_model_loaded(key, admin, mid, seconds=ready_budget):
+        row["error"] = "load timeout (not loaded:true on /admin/models)"
+        unload_all(key, admin)
         return row
+    # Brief settle so the chat worker accepts the first stream (Flint 404 race).
+    time.sleep(2)
 
     if kind == "ocr":
         messages = [
@@ -436,13 +562,21 @@ def run_model(
 
     print("  warm", flush=True)
     try:
-        warm = stream_chat(
-            key, base, mid, warm_messages, warm_n, temperature=temp, timeout=chat_timeout
+        warm = chat_with_retry(
+            key,
+            base,
+            mid,
+            warm_messages,
+            warm_n,
+            temperature=temp,
+            timeout=chat_timeout,
+            enable_thinking=enable_thinking,
+            label="warm",
         )
         row["warm"] = {k: warm[k] for k in ("ttft_ms", "decode_tps", "completion_tokens", "finish")}
     except Exception as e:
         row["error"] = f"warm failed: {e}"
-        unload_all(key, base, admin)
+        unload_all(key, admin)
         return row
 
     measures: list[dict[str, Any]] = []
@@ -450,7 +584,7 @@ def run_model(
     for i in range(measure_runs):
         print(f"  measure {i + 1}/{measure_runs}", flush=True)
         try:
-            m = stream_chat(
+            m = chat_with_retry(
                 key,
                 base,
                 mid,
@@ -458,6 +592,8 @@ def run_model(
                 measure_n,
                 temperature=temp,
                 timeout=chat_timeout,
+                enable_thinking=enable_thinking,
+                label=f"measure-{i + 1}",
             )
             measures.append(m)
             texts.append(m.get("text") or "")
@@ -468,7 +604,7 @@ def run_model(
             )
         except Exception as e:
             row["error"] = f"measure failed: {e}"
-            unload_all(key, base, admin)
+            unload_all(key, admin)
             return row
 
     # Prefer the best (highest) reliable decode_tps among runs — regressions are against peak.
@@ -506,7 +642,7 @@ def run_model(
         row["error"] = f"correctness: {reason}"
 
     print("  unload", flush=True)
-    unload_all(key, base, admin)
+    unload_all(key, admin)
     return row
 
 

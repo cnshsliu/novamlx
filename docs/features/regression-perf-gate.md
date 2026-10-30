@@ -13,7 +13,7 @@ Maintainers on Apple Silicon who want a fast gate before merging engine/Metal ch
 | Piece | Role |
 |-------|------|
 | `Scripts/regression-suite.yaml` | Core vs optional models, ports, auth fallback, tolerance |
-| `Scripts/regression-perf-gate.py` | Driver: health → unload-all → load → warm → measure → correctness → unload |
+| `Scripts/regression-perf-gate.py` | Driver: health → unload loaded-only → load → ready → warm → measure → correctness → unload |
 | `Scripts/regression-baselines.json` | Per-model `decode_tps` baselines (`version` + `models`) |
 | `Scripts/regression-perf-gate.sh` | Wrapper; picks PATH/Homebrew `python3` with PyYAML; defaults to `--suite core` |
 
@@ -23,7 +23,7 @@ Maintainers on Apple Silicon who want a fast gate before merging engine/Metal ch
 - **optional**: larger Qwen (`Qwen3.8-27B-8bit`, `Qwen3.6-35B-A3B-4bit`) and `pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit` — not part of the default gate
 - **all**: core + optional
 
-LLM correctness prompts ask for `17*23` and expect substring `391` (avoids weak single-digit checks that match CoT).
+LLM correctness prompts ask for `17*23` and expect substring `391`. Chat requests send `enable_thinking: false` (and matching `chat_template_kwargs`) so Qwen-style CoT cannot burn `max_tokens` before the answer.
 
 OCR uses the chat path with `document parsing.` plus an inline `image_url` data URL (tiny generated PNG fixture with the digits `391`). Unlimited-OCR-2 typically returns PAGE/BLOCK markup rather than plain digits; the suite sets `expect_nonempty` + `expect_has_digit` and `gate_decode_tps: false`. Decode tok/s is **not** gated for OCR when the decode wall is ≈0 (that previously produced absurd tok/s like hundreds of thousands).
 
@@ -31,6 +31,12 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 
 - Inference `http://127.0.0.1:6590`, admin `http://127.0.0.1:6591` (overridable in the YAML)
 - API key: `NOVA_API_KEY` → else enabled `primary` key in `~/.nova/nova_config.db` → else `abcd1234`
+
+### Load / unload / readiness
+
+- **Unload** only models with `loaded: true` from `GET /admin/models` (never storm-unload the full catalog via a naive `/v1/models` dump).
+- After `POST /admin/models/load`, wait until that id is `loaded: true`, then settle briefly.
+- **Warm and measure** retry on HTTP 404 / empty completion (Flint has been seen to return load 200, warm `ct=0`, then measure 404 before the worker is ready).
 
 ### Pass / fail
 
@@ -62,4 +68,4 @@ Model weight paths in the YAML point at the maintainer Mac layout (`/Users/lucas
 
 ## Notes
 
-Patterned on `Scripts/post_reboot_8bit_bench.py` (same stream chat decode_tps math, same admin load/unload). This gate does not start NovaMLX and does not wait for Apple Silicon CI.
+Patterned on `Scripts/post_reboot_8bit_bench.py` (same stream chat decode_tps math, same admin load/unload, same `enable_thinking: false` default). This gate does not start NovaMLX and does not wait for Apple Silicon CI.

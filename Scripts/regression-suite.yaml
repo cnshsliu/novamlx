@@ -36,6 +36,8 @@ core:
     prompt: "What is 17*23? Reply with the product only."
     expect_contains: ["391"]
     temperature: 0
+    # Disable CoT so max_tokens are not burned before the answer.
+    enable_thinking: false
 
   - id: mlx-community/Qwen3-8B-4bit
     kind: llm
@@ -44,6 +46,8 @@ core:
     prompt: "What is 17*23? Reply with the product only."
     expect_contains: ["391"]
     temperature: 0
+    # Disable CoT so max_tokens are not burned before the answer.
+    enable_thinking: false
 
   - id: baidu/Unlimited-OCR-2
     kind: ocr
@@ -66,6 +70,8 @@ optional:
     prompt: "What is 17*23? Reply with the product only."
     expect_contains: ["391"]
     temperature: 0
+    # Disable CoT so max_tokens are not burned before the answer.
+    enable_thinking: false
     load_timeout_s: 3600
 
   - id: mlx-community/Qwen3.6-35B-A3B-4bit
@@ -74,6 +80,8 @@ optional:
     prompt: "What is 17*23? Reply with the product only."
     expect_contains: ["391"]
     temperature: 0
+    # Disable CoT so max_tokens are not burned before the answer.
+    enable_thinking: false
     load_timeout_s: 3600
 
   - id: pipenetwork/GLM-5.3-Flash-REAP50-MLX-mixed-4_8bit
@@ -82,4 +90,6 @@ optional:
     prompt: "What is 17*23? Reply with the product only."
     expect_contains: ["391"]
     temperature: 0
+    # Disable CoT so max_tokens are not burned before the answer.
+    enable_thinking: false
     load_timeout_s: 7200
