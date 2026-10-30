@@ -77,5 +77,6 @@ Flint 的 `select_prefix` 仍是内存里的会话前缀，不走这条 SSD 路�
 - [Tokenhub](tokenhub.md)
 - [Anthropic↔OpenAI 翻译桥](anthropic-openai-bridge.md)
 - [可观测性](observability.md)
+- Design only (not shipped): [KV page archive](../porting/kv-page-archive-swift-mlx.md) for a bounded working set over a longer agent history. Today’s prefix store and `session_id` lineage stay as this page describes them.
 
 正文来自 `features.zh-CN.md`「KV Cache 与前缀共享」；标题与 pitch 为英文。
