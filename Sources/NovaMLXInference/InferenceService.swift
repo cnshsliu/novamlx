@@ -1050,20 +1050,17 @@ public final class InferenceService: @unchecked Sendable {
         await applyResourceLimits()
     }
 
+    /// Resident weights / host process only.
+    ///
+    /// On-disk speculative companions (DSpark / DFlash / MTP) used to return
+    /// `true` here so `draft_model` skipped pool auto-load. That poisoned admin
+    /// `loaded` and `/v1/models` (ghost "loaded" companions, Flint 404 races).
+    /// Companions now report via ``isCompanionReady(_:)``; generate paths already
+    /// detect draft configs directly and do not need this lie.
     public func isModelLoaded(_ modelId: String) -> Bool {
         let resolvedId = settingsManager.resolveModelId(modelId)
         if workerLoadedModels.contains(resolvedId) { return true }
         if !workerMode, engine.getContainer(for: resolvedId)?.isLoaded == true { return true }
-        // DSpark companion drafters ship no tokenizer and never enter the model pool;
-        // the engine's DSpark dispatch lazy-loads them from disk. Report an on-disk,
-        // parseable one as loaded so an explicit `draft_model` skips the pool
-        // auto-load (which cannot load these checkpoints).
-        if DSparkDrafterStore.isLoadableDSparkDraft(modelId: resolvedId) { return true }
-        // Same for DFlash2: an on-disk checkpoint with weights is "loaded" so
-        // auto-inject can set draft_model without pool-loading it as Qwen3.
-        if dflashCompanionReady(modelId: resolvedId) { return true }
-        // Qwen MTP heads are loaded by QwenMtpDrafterStore during generate.
-        if qwenMtpCompanionReady(modelId: resolvedId) { return true }
         // Decision, ASR, TTS and image models stay on the host. In worker mode
         // they are not in workerLoadedModels; treating that as "not loaded"
         // reloaded the 678 MB Laya checkpoint on every request.
@@ -1073,6 +1070,22 @@ public final class InferenceService: @unchecked Sendable {
         if hy3DService.isLoaded(resolvedId) { return true }
         if decisionService.isLoaded(resolvedId) { return true }
         return false
+    }
+
+    /// On-disk speculative companion that can be used as a draft accelerator
+    /// (lazy-loaded by the engine during generate). Not a chat-resident model —
+    /// never treat this as ``isModelLoaded`` / admin `loaded`.
+    public func isCompanionReady(_ modelId: String) -> Bool {
+        let resolvedId = settingsManager.resolveModelId(modelId)
+        if DSparkDrafterStore.isLoadableDSparkDraft(modelId: resolvedId) { return true }
+        if dflashCompanionReady(modelId: resolvedId) { return true }
+        if qwenMtpCompanionReady(modelId: resolvedId) { return true }
+        return false
+    }
+
+    /// Draft available without pool-loading it as a chat model.
+    public func isDraftAvailable(_ modelId: String) -> Bool {
+        isModelLoaded(modelId) || isCompanionReady(modelId)
     }
 
     public func isHybridModel(_ modelId: String) -> Bool {

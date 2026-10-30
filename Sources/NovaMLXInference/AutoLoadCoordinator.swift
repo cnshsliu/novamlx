@@ -55,6 +55,14 @@ public actor AutoLoadCoordinator {
             return
         }
 
+        // Speculative companions are never chat-resident. `companionReady` means
+        // draft-on-disk only — do not pool-load them as LanguageModel.
+        if ResourceLimits.isCompanionDraftModelId(modelId) || inference.isCompanionReady(modelId) {
+            throw NovaMLXError.modelNotLoaded(
+                "\(modelId): speculative companion (companionReady) cannot serve chat; use as draft_model only"
+            )
+        }
+
         // Lookup record
         guard let record = models.getRecord(modelId) else {
             throw NovaMLXError.modelNotFound(modelId)

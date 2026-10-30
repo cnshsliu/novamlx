@@ -62,8 +62,8 @@ public final class DSparkDrafterStore: @unchecked Sendable {
     private init() {}
 
     /// True when `modelId` is an on-disk DSpark drafter this store can load (config
-    /// parses into a supported family). Used by `isModelLoaded` so an explicit
-    /// `draft_model` skips the pool auto-load, which cannot load these checkpoints.
+    /// parses into a supported family). Surfaces as admin/API `companionReady`
+    /// (not `loaded`) via `InferenceService.isCompanionReady`.
     public static func isLoadableDSparkDraft(modelId: String) -> Bool {
         let dir = NovaMLXPaths.directory(forModelId: modelId)
         guard DSparkConfig.isDSparkDraftConfig(at: dir) else { return false }

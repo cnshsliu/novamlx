@@ -34,9 +34,9 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 
 ### Load / unload / readiness
 
-- **Unload** only non-companion models with `loaded: true` from `GET /admin/models`. Companion draft ids (MTP / DFlash / DSpark — same idea as `ResourceLimits.isCompanionDraftModelId`) are skipped: admin currently reports them `loaded:true` via on-disk `companionReady` while `/health.loadedModels` stays 0. Never storm-unload those virtual companions.
+- **Unload** models with admin `loaded: true` (resident/serving). Companion draft ids (MTP / DFlash / DSpark) are still skipped as a belt-and-suspenders filter for older engines; after the readiness API split they report `companionReady: true` / `loaded: false` instead of poisoning `loaded`.
 - Unload **HTTP 400** (pinned models, e.g. `rufang/laya-hknews-tags-v4`) is logged once and not retried; a fully empty GPU is not required.
-- After `POST /admin/models/load`, wait until **`/health.loadedModels >= 1` and** the target id is in the filtered admin loaded set — admin `loaded` alone is not trustworthy.
+- After `POST /admin/models/load`, wait until **`/health.loadedModels >= 1` and** the target id has admin **`loaded: true`**. Do **not** treat `companionReady` as chat-ready.
 - **Warm / correctness** use **non-stream** chat by default (Flint stream has returned empty SSE then `404 model_not_loaded`, and can crash the app).
 - **Measure** prefers stream for `decode_tps` math, with non-stream fallback after empty SSE / 404. Retries log HTTP bodies and **abort if `/health` dies**.
 
@@ -46,7 +46,7 @@ OCR uses the chat path with `document parsing.` plus an inline `image_url` data 
 - **decode_tps regression** → non-zero when measured tok/s is more than **8%** below baseline (`tolerance.default`). `--strict` tightens to **5%**. Skipped for OCR / unreliable decode walls (`decode_wall < 50ms`)
 - **Higher tok/s** always passes
 - **No baseline yet** → warning only (unless correctness failed); seed with `--seed-baseline` (LLM only)
-- **`--seed-baseline`** refuses suspiciously low `decode_tps` (contention artifacts): will not overwrite an existing baseline with a drop beyond ~40%, and applies soft floors for Flint / Qwen3-8B first seeds (e.g. rejects Qwen ~33 tok/s when quiet runs are ~70+). **Do not commit** machine-local baselines from a contended gate run — keep `Scripts/regression-baselines.json` as the empty seed in git until a quiet seed is intentional.
+- **`--seed-baseline`** refuses suspiciously low `decode_tps` (contention artifacts): will not overwrite an existing baseline with a drop beyond ~40%, and honors per-model **`min_seed_decode_tps`** from `Scripts/regression-suite.yaml` (e.g. Flint 100, Qwen3-8B 50) — no hardcoded global floors in the gate script. **Do not commit** machine-local baselines from a contended gate run unless they are intentional quiet seeds.
 
 Results land in `~/.nova/regression/results-<gitsha>-<timestamp>.json`.
 
@@ -73,4 +73,4 @@ Model weight paths in the YAML point at the maintainer Mac layout (`/Users/lucas
 
 Patterned on `Scripts/post_reboot_8bit_bench.py` (stream chat decode_tps math for measure, admin load/unload, `enable_thinking: false` default). This gate does not start NovaMLX and does not wait for Apple Silicon CI.
 
-**Engine follow-up (out of scope for the gate PR):** admin should eventually split `loaded` (resident container) vs `companionReady` / draft-on-disk so UI and scripts stop treating companions as chat-resident. Until then the gate filters companions client-side.
+**Readiness API:** `loaded` = resident/serving (aligned with `/health.loadedModels`). `companionReady` = on-disk speculative draft available as an accelerator, **not** chat-ready. `/health` also reports `companionReadyCount`. The gate waits on truthful `loaded` + health; companion-id filtering remains only as a legacy guard.

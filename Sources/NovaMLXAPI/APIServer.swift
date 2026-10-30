@@ -2358,9 +2358,15 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let uptime = Date().timeIntervalSince(self.startTime)
                 let diskFree = (try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())[.systemFreeSize] as? Int64) ?? 0
                 let diskTotal = (try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())[.systemSize] as? Int64) ?? 0
+                // loadedModels = resident chat/host containers only.
+                // companionReadyCount = on-disk speculative drafts (not chat-ready).
+                let companionReadyCount = models.downloadedModels().filter {
+                    inference.isCompanionReady($0.id)
+                }.count
                 let body: [String: Any] = [
                     "status": "ok",
                     "loadedModels": stats.loadedModels,
+                    "companionReadyCount": companionReadyCount,
                     "gpuMemoryUsed": stats.gpuMemoryUsed,
                     "uptime": Int(uptime),
                     "diskUsage": diskTotal - diskFree,
@@ -2644,10 +2650,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     statuses.reserveCapacity(records.count)
                     for record in records {
                         let isDownloaded = models.isDownloaded(record.id)
+                        let isCompanionReady = inference.isCompanionReady(record.id)
                         let isLoaded = inference.isModelLoaded(record.id) || embeddings.isLoaded(record.id) || inference.transcriptionService.isLoaded(record.id) || inference.imageGenerationService.isLoaded(record.id)
-                        // Only check feasibility for downloaded, non-loaded, non-embedding models
+                        // Only check feasibility for downloaded, non-loaded, non-embedding,
+                        // non-companion models (companions never enter the chat pool).
                         var feasibility: MemoryFeasibility? = nil
-                        if isDownloaded && !isLoaded && record.modelType != .embedding {
+                        if isDownloaded && !isLoaded && !isCompanionReady && record.modelType != .embedding {
                             feasibility = await inference.checkMemoryFeasibility(
                                 modelId: record.id, sizeBytes: record.sizeBytes, localURL: record.localURL
                             )
@@ -2671,7 +2679,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                                 modelId: record.id,
                                 nativeMtp: nativeOn,
                                 mtpEnabled: mtpOn,
-                                draftModelLoaded: { id in inference.isModelLoaded(id) },
+                                draftModelLoaded: { id in inference.isDraftAvailable(id) },
                                 draftModelOnDisk: { id in models.isDownloaded(id) }
                             )
                             switch status {
@@ -2706,6 +2714,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             loaded: isLoaded,
                             sizeBytes: record.sizeBytes,
                             downloadedAt: record.downloadedAt,
+                            companionReady: isCompanionReady,
                             memoryFeasibility: feasibility,
                             specBoost: specBoost,
                             tie: tie.status == .none ? nil : tie,
@@ -2738,7 +2747,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         return try Self.jsonResponse(AdminModelStatus(
                             id: req.modelId, family: record.family.rawValue,
                             downloaded: true, loaded: inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId),
-                            sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt
+                            sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt,
+                            companionReady: inference.isCompanionReady(req.modelId)
                         ))
                     }
 
@@ -2765,12 +2775,20 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         throw NovaMLXError.modelNotFound(req.modelId)
                     }
 
+                    // Companions stay out of the chat pool; surface companionReady only.
+                    if ResourceLimits.isCompanionDraftModelId(req.modelId) || inference.isCompanionReady(req.modelId) {
+                        throw NovaMLXError.apiError(
+                            "Model '\(req.modelId)' is a speculative companion (companionReady). It cannot be loaded as a chat model; pass it as draft_model on a resident target."
+                        )
+                    }
+
                     if inference.isModelLoaded(req.modelId) || embeddings.isLoaded(req.modelId) || inference.transcriptionService.isLoaded(req.modelId) || inference.imageGenerationService.isLoaded(req.modelId) {
                         let record = models.getRecord(req.modelId)
                         return try Self.jsonResponse(AdminModelStatus(
                             id: req.modelId, family: record?.family.rawValue ?? "other",
                             downloaded: true, loaded: true,
-                            sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt
+                            sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt,
+                            companionReady: inference.isCompanionReady(req.modelId)
                         ))
                     }
 
@@ -2841,6 +2859,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         id: req.modelId, family: record.family.rawValue,
                         downloaded: true, loaded: true,
                         sizeBytes: record.sizeBytes, downloadedAt: record.downloadedAt,
+                        companionReady: inference.isCompanionReady(req.modelId),
                         acceleratorPrompt: Self.acceleratorPromptInfo(
                             inference.pendingAcceleratorPrompt(for: req.modelId))
                     ))
@@ -2870,7 +2889,8 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     return try Self.jsonResponse(AdminModelStatus(
                         id: req.modelId, family: record?.family.rawValue ?? "other",
                         downloaded: models.isDownloaded(req.modelId), loaded: false,
-                        sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt
+                        sizeBytes: record?.sizeBytes ?? 0, downloadedAt: record?.downloadedAt,
+                        companionReady: inference.isCompanionReady(req.modelId)
                     ))
                 }
                 Delete("/{id}") { request, context in
@@ -2906,6 +2926,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         loaded: inference.isModelLoaded(req.modelId),
                         sizeBytes: record?.sizeBytes ?? 0,
                         downloadedAt: record?.downloadedAt,
+                        companionReady: inference.isCompanionReady(req.modelId),
                         acceleratorPrompt: Self.acceleratorPromptInfo(
                             inference.pendingAcceleratorPrompt(for: req.modelId))
                     ))

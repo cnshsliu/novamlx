@@ -210,7 +210,7 @@ private final class DFlashDiskDrafters: @unchecked Sendable {
 }
 
 /// True when a DFlash checkpoint is on disk with weights the drafter can read.
-/// Config alone is not enough: a failed download must not look loaded.
+/// Config alone is not enough: a failed download must not look companionReady.
 public func dflashCompanionReady(modelId: String) -> Bool {
     let dir = NovaMLXPaths.directory(forModelId: modelId)
     guard NovaMLXEngine.isDFlashDraftConfig(at: dir) else { return false }

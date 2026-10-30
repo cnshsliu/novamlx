@@ -5,15 +5,16 @@ Mirrors Scripts/post_reboot_8bit_bench.py (health → load → chat →
 decode_tps) but drives a YAML suite, checks correctness, and compares
 decode_tps against Scripts/regression-baselines.json.
 
-Unload uses GET /admin/models with loaded:true, skipping companion draft
-ids (MTP/DFlash/DSpark — same idea as ResourceLimits.isCompanionDraftModelId)
-and pinned unload-400 models. Never storm-unload virtual companions.
+Unload uses GET /admin/models with loaded:true (resident only after the
+companionReady API split). Companion draft ids are still skipped as a
+belt-and-suspenders filter. Pinned unload-400 models are logged once.
 
-Readiness requires /health.loadedModels >= 1 AND the target id in the
-filtered admin loaded set — admin loaded alone is poisoned by on-disk
-companions (companionReady). Warm/correctness prefer non-stream chat;
-stream is used for decode_tps measure with non-stream fallback. Retries
-log 404 bodies and abort if /health dies.
+Readiness waits on truthful admin `loaded` for the target (aligned with
+resident/serving) plus /health.loadedModels >= 1. On-disk companions now
+report companionReady=true / loaded=false — do not treat companionReady
+as chat-ready. Warm/correctness prefer non-stream chat; stream is used
+for decode_tps measure with non-stream fallback. Retries log 404 bodies
+and abort if /health dies.
 
 LLM chat sends enable_thinking=false by default.
 
@@ -21,9 +22,10 @@ Exit non-zero on correctness failure or decode_tps regression beyond
 tolerance (default −8%; --strict → −5%). Improvements always pass.
 OCR models gate on correctness only (skip decode_tps when wall ≈ 0).
 
---seed-baseline skips suspiciously low decode_tps (contention artifacts,
-e.g. Qwen ~33 tok/s when quiet runs are ~70+). Do not commit machine-
-local baselines from a contended gate run.
+--seed-baseline skips suspiciously low decode_tps when a suite entry sets
+min_seed_decode_tps (per model/architecture) or measured tps is far below
+an existing baseline. Do not commit machine-local baselines from a
+contended gate run.
 """
 from __future__ import annotations
 
@@ -197,9 +199,9 @@ def _last_path_segment(model_id: str) -> str:
 def is_companion_draft_model_id(model_id: str) -> bool:
     """Mirror ResourceLimits.isCompanionDraftModelId (Types.swift).
 
-    Admin `loaded:true` is true for on-disk DSpark/DFlash/MTP companions via
-    companionReady — they are not real chat containers. /health.loadedModels
-    stays 0 for those. Never storm-unload them.
+    After the companionReady API split, admin `loaded` is resident-only and
+    companions report `companionReady` instead. Keep this filter as a
+    belt-and-suspenders guard so older engines cannot re-poison unload-all.
     """
     name = _last_path_segment(model_id).upper()
     is_mtp = ("-MTP-" in name) or ("-MTP_" in name) or name.endswith("-MTP")
@@ -233,11 +235,11 @@ def health_loaded_count(key: str, base: str) -> int | None:
 
 
 def loaded_ids(key: str, admin: str, *, include_companions: bool = False) -> list[str]:
-    """Ids with admin loaded:true, optionally skipping companion drafts.
+    """Ids with admin loaded:true (resident/serving).
 
-    Prefer GET /admin/models over /v1/models: the admin list carries an explicit
-    `loaded` flag. That flag is currently poisoned by on-disk companions
-    (companionReady) — filter them unless include_companions=True.
+    Prefer GET /admin/models over /v1/models. Engine now keeps `loaded` for
+    residents and exposes `companionReady` for on-disk drafts. Companion-id
+    filtering remains optional for older builds that still poison `loaded`.
     """
     code, body = req(key, "GET", f"{admin}/admin/models", timeout=30)
     if code != 200:
@@ -263,6 +265,28 @@ def loaded_ids(key: str, admin: str, *, include_companions: bool = False) -> lis
     return out
 
 
+def companion_ready_ids(key: str, admin: str) -> list[str]:
+    """Ids with admin companionReady:true (on-disk draft companions, not chat)."""
+    code, body = req(key, "GET", f"{admin}/admin/models", timeout=30)
+    if code != 200:
+        return []
+    rows: list[Any]
+    if isinstance(body, list):
+        rows = body
+    elif isinstance(body, dict):
+        rows = list(body.get("models") or body.get("data") or [])
+    else:
+        return []
+    out: list[str] = []
+    for m in rows:
+        if not isinstance(m, dict) or not m.get("companionReady"):
+            continue
+        mid = m.get("id") or m.get("modelId") or m.get("model_id")
+        if mid:
+            out.append(str(mid))
+    return out
+
+
 def wait_model_ready(
     key: str,
     base: str,
@@ -270,15 +294,16 @@ def wait_model_ready(
     mid: str,
     seconds: int = 180,
 ) -> bool:
-    """Target ready = admin loaded (non-companion) AND /health.loadedModels >= 1.
+    """Target ready = admin loaded (resident) AND /health.loadedModels >= 1.
 
-    Admin loaded alone is not trustworthy (on-disk companions look loaded while
-    health.loadedModels stays 0).
+    After the API split, `loaded` means serving/resident. `companionReady` is
+    never chat-ready — if the target only shows companionReady, keep waiting.
     """
     t0 = time.time()
     while time.time() - t0 < seconds:
         ids = loaded_ids(key, admin)
         n = health_loaded_count(key, base)
+        # Never treat companionReady alone as ready for a chat/OCR gate target.
         if mid in ids and n is not None and n >= 1:
             return True
         time.sleep(1)
@@ -298,7 +323,7 @@ def unload_all(key: str, admin: str) -> None:
         if ghosts:
             print(
                 f"  unload-all: skip {len(ghosts)} companion draft(s) "
-                f"(admin loaded:true is companionReady, not resident)",
+                f"(legacy poisoned loaded:true; prefer companionReady)",
                 flush=True,
             )
         return
@@ -781,6 +806,11 @@ def run_model(
         "gate_decode_tps": gate_decode_tps,
         "enable_thinking": enable_thinking,
     }
+    if model.get("min_seed_decode_tps") is not None:
+        try:
+            row["min_seed_decode_tps"] = float(model["min_seed_decode_tps"])
+        except (TypeError, ValueError):
+            pass
 
     path = model.get("path")
     if path and not os.path.isdir(path):
@@ -803,15 +833,16 @@ def run_model(
         row["error"] = f"load failed {code} {body}"
         return row
 
-    # Post-load readiness: /health.loadedModels >= 1 AND admin loaded for target.
-    # Admin loaded alone is poisoned by on-disk companions (companionReady).
+    # Post-load readiness: truthful admin loaded (resident) + health.loadedModels.
+    # companionReady alone is never enough for a chat/OCR gate target.
     ready_budget = min(180, max(30, load_timeout))
     if not wait_model_ready(key, base, admin, mid, seconds=ready_budget):
         n = health_loaded_count(key, base)
         row["error"] = (
             f"load timeout (ready require health.loadedModels>=1 and admin "
             f"loaded for {mid}; health.loadedModels={n} "
-            f"admin_loaded={loaded_ids(key, admin)})"
+            f"admin_loaded={loaded_ids(key, admin)} "
+            f"companion_ready={companion_ready_ids(key, admin)})"
         )
         unload_all(key, admin)
         return row
@@ -930,8 +961,8 @@ def run_model(
     return row
 
 
-# Contention artifact floor: Qwen quiet runs are ~70–90 tok/s; a ~33 tok/s
-# seed under unload storms / pinned Laya / Flint flake must not become baseline.
+# Contention guard vs prior baseline (ratio). Absolute floors are per-model
+# via suite `min_seed_decode_tps` (see Scripts/regression-suite.yaml).
 # Also refuse to overwrite an existing baseline with a drop >40%.
 SEED_CONTENTION_RATIO = 0.60
 
@@ -963,16 +994,10 @@ def seed_baseline(baselines: dict[str, Any], results: list[dict[str, Any]]) -> d
                     flush=True,
                 )
                 continue
-        # Absolute soft floor for first-time seed of known-fast 8B-class models.
-        # Suite may set min_seed_decode_tps; default keeps Flint (~260) / Qwen (~74+)
-        # from landing a ~33 contention artifact when no prior baseline exists.
+        # Per-model floor from suite YAML (`min_seed_decode_tps`) only — no
+        # hardcoded global/id defaults here (architecture-specific values live
+        # on each suite entry).
         min_seed = row.get("min_seed_decode_tps")
-        if min_seed is None and mid in (
-            "mlx-community/Qwen3-8B-4bit",
-            "RecursiveSI/flint-int4",
-        ):
-            # Qwen quiet ≈74–92; Flint quiet ≈260. Reject obvious contention.
-            min_seed = 50.0 if "Qwen3-8B" in mid else 100.0
         if min_seed is not None and tps_f < float(min_seed):
             print(
                 f"  WARN seed skip {mid}: measured {tps_f:.2f} tok/s below "
