@@ -31,6 +31,8 @@ xcuserdata/
 __pycache__/
 *.pyc
 *.pyo
+# Local OCR comparison captures. Mac baseline stays on the machine.
+Scripts/competitive-ocr/out/
 dist/
 build/
 *.egg-info/

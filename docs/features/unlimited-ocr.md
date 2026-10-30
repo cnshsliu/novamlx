@@ -171,3 +171,4 @@ Shapeless compile 不回到热路径。
 - [厂商 OCR](vendor-ocr.md)
 - 权重：[baidu/Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2)、[mlx-community/Unlimited-OCR-8bit](https://huggingface.co/mlx-community/Unlimited-OCR-8bit)
 - 代码：`Sources/NovaMLXEngine/Models/UnlimitedOCR*.swift`
+- 与 MiniCPM-OCR 的对照（含本地 Mac 基线）：[minicpm-ocr-vs-unlimited-ocr.md](../competitive/minicpm-ocr-vs-unlimited-ocr.md)
