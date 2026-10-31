@@ -4,7 +4,11 @@ import Testing
 
 @Suite("Model list filters")
 struct ModelListFilterTests {
-    private func entry(id: String, tags: [String]) -> CatalogEntry {
+    private func entry(
+        id: String,
+        tags: [String] = [],
+        status: CatalogStatus = .verified
+    ) -> CatalogEntry {
         CatalogEntry(
             id: id,
             url: "https://example.com/\(id)",
@@ -12,7 +16,8 @@ struct ModelListFilterTests {
             category: .llm,
             family: .qwen,
             format: .mlx,
-            tags: tags
+            tags: tags,
+            status: status
         )
     }
 
@@ -71,6 +76,94 @@ struct ModelListFilterTests {
         let b = URL(fileURLWithPath: "/Volumes/Disk1/b/Models")
         let options = ModelRootFilter.options(for: [a, b])
         #expect(options.map(\.label) == [a.path, b.path])
+    }
+
+    @Test("Verified means an exact catalog weight, not a family glob or unsupported row")
+    func verifiedWeight() {
+        let verified = entry(id: "mlx-community/Qwen3-0.6B-4bit", status: .verified)
+        let preview = entry(id: "mlx-community/Qwen3-1.7B-4bit", status: .preview)
+        let unsupported = entry(id: "org/broken", status: .unsupported)
+        let glob = CatalogEntry(
+            id: "mlx-community/Qwen3-*",
+            url: "https://example.com/qwen",
+            name: "Qwen3",
+            category: .llm,
+            family: .qwen,
+            format: .mlx,
+            status: .verified
+        )
+        let catalog = [verified, preview, unsupported, glob]
+        #expect(LocalModelListFilter.isVerifiedWeight(id: verified.id, catalog: catalog))
+        #expect(LocalModelListFilter.isVerifiedWeight(id: preview.id, catalog: catalog))
+        #expect(!LocalModelListFilter.isVerifiedWeight(id: unsupported.id, catalog: catalog))
+        #expect(!LocalModelListFilter.isVerifiedWeight(id: "mlx-community/Qwen3-8B-4bit", catalog: catalog))
+        #expect(!LocalModelListFilter.isVerifiedWeight(id: "org/local-only", catalog: catalog))
+    }
+
+    @Test("Downloaded and verified facets narrow the local list")
+    func statusFacets() {
+        let onDiskVerified = LocalModelRowState(
+            id: "org/verified", isDownloaded: true, isVerified: true, isLoaded: true
+        )
+        let onDiskPlain = LocalModelRowState(
+            id: "org/plain", isDownloaded: true, isVerified: false, isLoaded: false
+        )
+        let catalogOnly = LocalModelRowState(
+            id: "org/catalog", isDownloaded: false, isVerified: true, isLoaded: false
+        )
+        let rows = [onDiskVerified, onDiskPlain, catalogOnly]
+
+        let all = rows.filter { LocalModelListFilter.matches($0, downloaded: .any, verified: .any) }
+        #expect(all.map(\.id) == ["org/verified", "org/plain", "org/catalog"])
+
+        let downloaded = rows.filter { LocalModelListFilter.matches($0, downloaded: .yes, verified: .any) }
+        #expect(downloaded.map(\.id) == ["org/verified", "org/plain"])
+
+        let notDownloaded = rows.filter { LocalModelListFilter.matches($0, downloaded: .no, verified: .any) }
+        #expect(notDownloaded.map(\.id) == ["org/catalog"])
+
+        let verifiedOnly = rows.filter { LocalModelListFilter.matches($0, downloaded: .any, verified: .yes) }
+        #expect(verifiedOnly.map(\.id) == ["org/verified", "org/catalog"])
+
+        let unverifiedOnDisk = rows.filter { LocalModelListFilter.matches($0, downloaded: .yes, verified: .no) }
+        #expect(unverifiedOnDisk.map(\.id) == ["org/plain"])
+
+        let impossible = rows.filter { LocalModelListFilter.matches($0, downloaded: .no, verified: .no) }
+        #expect(impossible.isEmpty)
+    }
+
+    @Test("Loaded badge is present only while the model is resident")
+    func loadedBadge() {
+        let resident = LocalModelRowState(
+            id: "org/resident", isDownloaded: true, isVerified: true, isLoaded: true
+        )
+        let idle = LocalModelRowState(
+            id: "org/idle", isDownloaded: true, isVerified: false, isLoaded: false
+        )
+        #expect(resident.showsLoadedBadge)
+        #expect(!idle.showsLoadedBadge)
+    }
+
+    @Test("Not-downloaded rows are catalog weights missing from disk")
+    func notDownloadedCatalog() {
+        let onDisk = entry(id: "org/on-disk", status: .verified)
+        let missing = entry(id: "org/missing", status: .preview)
+        let duplicate = entry(id: "org/missing", status: .verified)
+        let unsupported = entry(id: "org/broken", status: .unsupported)
+        let glob = CatalogEntry(
+            id: "org/Family-*",
+            url: "https://example.com/family",
+            name: "Family",
+            category: .llm,
+            family: .qwen,
+            format: .mlx
+        )
+        let weights = LocalModelListFilter.notDownloadedWeights(
+            catalog: [onDisk, missing, duplicate, unsupported, glob],
+            excluding: ["org/on-disk"]
+        )
+        #expect(weights.map(\.id) == ["org/missing"])
+        #expect(weights.first?.status == .preview)
     }
 
     @Test("Disk match is prefix-safe and All keeps every model")

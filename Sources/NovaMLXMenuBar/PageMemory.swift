@@ -21,6 +21,8 @@ final class PageMemoryBox {
 final class ModelsPageMemory {
     var typeFilter: ModelsPageView.ModelTypeFilter = .all
     var modelQuery = ""
+    var downloadedFacet: LocalModelFacet = .any
+    var verifiedFacet: LocalModelFacet = .any
     var scrollAnchor: String?
 }
 
