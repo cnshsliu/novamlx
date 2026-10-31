@@ -5,6 +5,7 @@ import NovaMLXCore
 struct LocalModelFacetBar: View {
     @Binding var downloaded: LocalModelFacet
     @Binding var verified: LocalModelFacet
+    var horizontalPadding: CGFloat = 24
     @EnvironmentObject var l10n: L10n
 
     var body: some View {
@@ -25,7 +26,7 @@ struct LocalModelFacetBar: View {
                     identifier: "models-facet-verified"
                 )
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, horizontalPadding)
             .padding(.bottom, 4)
         }
         .accessibilityIdentifier("models-status-facets")

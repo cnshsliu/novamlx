@@ -119,12 +119,6 @@ struct ModelsPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ModelTypeFilterBar(filter: $typeFilter)
-            LocalModelFacetBar(downloaded: $downloadedFacet, verified: $verifiedFacet)
-            modelFilterField
-
-            Divider().padding(.horizontal, 24)
-
             localModelsContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -262,9 +256,9 @@ struct ModelsPageView: View {
         }.value
     }
 
-    /// Companions stay out of both lists unless the user opts in.
-    /// The id / catalog check is synchronous so known companions do not flash
-    /// in before the config scan finishes.
+    /// Companions stay out of the catalog sections unless the user opts in.
+    /// Active models always list what is resident. The id / catalog check is
+    /// synchronous so known companions do not flash in before the config scan finishes.
     private func passesCompanionFilter(_ id: String, catalog: [CatalogEntry]) -> Bool {
         if showCompanions { return true }
         if companionIds.contains(id) { return false }
@@ -299,25 +293,52 @@ struct ModelsPageView: View {
     }
 
     private var localModelsContent: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 20) {
-                    if downloadedFacet != .no {
-                        loadedSection
-                        downloadedSection
-                        if showUnmountedModels && !unmountedSnapshot.isEmpty {
-                            unmountedSection
-                                .id(Self.unmountedSectionAnchor)
-                        }
-                    }
-                    if showsNotDownloadedSection {
-                        notDownloadedSection
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                loadedSection
+                catalogFilterBar
+                if downloadedFacet != .no {
+                    downloadedSection
+                    if showUnmountedModels && !unmountedSnapshot.isEmpty {
+                        unmountedSection
+                            .id(Self.unmountedSectionAnchor)
                     }
                 }
-                .padding(24)
+                if showsNotDownloadedSection {
+                    notDownloadedSection
+                }
             }
-            .scrollPosition(id: $scrollAnchor)
+            .padding(24)
         }
+        .scrollPosition(id: $scrollAnchor)
+    }
+
+    /// Type, downloaded, verified, and search apply only to the sections under this bar.
+    private var catalogFilterBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ModelTypeFilterBar(filter: $typeFilter, horizontalPadding: 0)
+            LocalModelFacetBar(
+                downloaded: $downloadedFacet,
+                verified: $verifiedFacet,
+                horizontalPadding: 0
+            )
+            modelFilterField
+            HStack(spacing: 10) {
+                downloadedHeaderFilters
+                Spacer(minLength: 8)
+                Button {
+                    refreshTrigger.toggle()
+                    NotificationCenter.default.post(name: .novaMLXModelsChanged, object: nil)
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .accessibilityIdentifier("models-refresh")
+            }
+        }
+        .accessibilityIdentifier("models-catalog-filters")
     }
 
     /// Scroll anchor for the unmounted-disks section; model ids are
@@ -449,8 +470,6 @@ struct ModelsPageView: View {
                 .help(l10n.tr("models.unmountedToggleHelp"))
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.bottom, 8)
     }
 
     /// Toggle the unmounted-disks section; turning it on jumps the scroll
@@ -466,20 +485,10 @@ struct ModelsPageView: View {
         ModelQueryMatch.matches(modelQuery, in: id)
     }
 
+    /// Resident models. Search, type, and downloaded/verified facets do not apply.
     private var loadedSection: some View {
-        let catalog = catalogSnapshot
-        let loaded = appState.loadedModels.filter { id in
-            guard matchesQuery(id), passesCompanionFilter(id, catalog: catalog) else { return false }
-            guard passesStatusFacets(id: id, isDownloaded: true, isLoaded: true) else { return false }
-            guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
-            return typeFilter.matches(record.modelType)
-        }
-        let restoring = appState.restoringModels.filter { id in
-            guard matchesQuery(id), passesCompanionFilter(id, catalog: catalog) else { return false }
-            guard passesStatusFacets(id: id, isDownloaded: true, isLoaded: false) else { return false }
-            guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
-            return typeFilter.matches(record.modelType)
-        }
+        let loaded = appState.loadedModels
+        let restoring = appState.restoringModels
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -495,11 +504,7 @@ struct ModelsPageView: View {
             }
 
             if loaded.isEmpty && restoring.isEmpty {
-                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !statusFacetsNarrowed {
-                    emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
-                } else {
-                    emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
-                }
+                emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
             } else {
                 // Models currently being restored on startup — show spinner rows
                 ForEach(restoring, id: \.self) { modelId in
@@ -732,8 +737,8 @@ struct ModelsPageView: View {
         )
     }
 
-    /// Disk menu and companion checkbox. Both sit on the downloaded-not-loaded
-    /// header. The companion choice also filters the loaded list.
+    /// Disk menu and companion checkbox. They filter the catalog sections under
+    /// the bar. Active models stay listed either way.
     private var downloadedHeaderFilters: some View {
         let roots = ModelRootFilter.options(for: NovaMLXPaths.configuredModelsDirs)
         return HStack(spacing: 10) {
@@ -774,22 +779,7 @@ struct ModelsPageView: View {
         let queryNarrowed = !modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
-                Spacer(minLength: 8)
-                downloadedHeaderFilters
-                    .layoutPriority(1)
-                Button {
-                    refreshTrigger.toggle()
-                    // Force rescan of local models directory
-                    NotificationCenter.default.post(name: .novaMLXModelsChanged, object: nil)
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
+            sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
 
             if downloaded.isEmpty {
                 if queryNarrowed || diskNarrowed || statusFacetsNarrowed {
@@ -1260,6 +1250,7 @@ struct ModelsPageView: View {
 
 struct ModelTypeFilterBar: View {
     @Binding var filter: ModelsPageView.ModelTypeFilter
+    var horizontalPadding: CGFloat = 24
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1284,7 +1275,7 @@ struct ModelTypeFilterBar: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, horizontalPadding)
             .padding(.vertical, 8)
         }
     }
