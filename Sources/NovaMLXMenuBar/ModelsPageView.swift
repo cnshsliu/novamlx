@@ -34,6 +34,12 @@ struct ModelsPageView: View {
     @AppStorage("models.showCompanions") private var showCompanions = false
     /// Empty means every configured model root.
     @State private var diskFilter = ModelRootFilter.all
+    /// Downloaded and verified are list facets, not buried labels.
+    @State private var downloadedFacet: LocalModelFacet
+    @State private var verifiedFacet: LocalModelFacet
+    /// Catalog snapshot so the not-downloaded facet redraws after a fetch.
+    @State private var catalogSnapshot: [CatalogEntry]
+    @State private var didFetchCatalog = false
     @State private var companionIds: Set<String> = []
     @State private var redownloadRoots: [NovaMLXPaths.ModelDirStatus] = []
     @State private var redownloadTarget: ModelRecord?
@@ -47,6 +53,9 @@ struct ModelsPageView: View {
         self.memory = memory
         _typeFilter = State(initialValue: memory.typeFilter)
         _modelQuery = State(initialValue: memory.modelQuery)
+        _downloadedFacet = State(initialValue: memory.downloadedFacet)
+        _verifiedFacet = State(initialValue: memory.verifiedFacet)
+        _catalogSnapshot = State(initialValue: modelManager.catalogStore.models)
         _scrollAnchor = State(initialValue: memory.scrollAnchor)
     }
 
@@ -110,11 +119,6 @@ struct ModelsPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ModelTypeFilterBar(filter: $typeFilter)
-            modelFilterField
-
-            Divider().padding(.horizontal, 24)
-
             localModelsContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -193,6 +197,8 @@ struct ModelsPageView: View {
         .onAppear { Task { await refreshDownloaded() } }
         .onChange(of: modelQuery) { _, value in memory.modelQuery = value }
         .onChange(of: typeFilter) { _, value in memory.typeFilter = value }
+        .onChange(of: downloadedFacet) { _, value in memory.downloadedFacet = value }
+        .onChange(of: verifiedFacet) { _, value in memory.verifiedFacet = value }
         .onChange(of: scrollAnchor) { _, value in memory.scrollAnchor = value }
         .onChange(of: refreshTrigger) { _, _ in Task { await refreshDownloaded(fullRescan: true) } }
         .onReceive(NotificationCenter.default.publisher(for: .novaMLXModelsChanged)) { _ in
@@ -210,9 +216,16 @@ struct ModelsPageView: View {
             }.value
         }
         await modelManager.refreshModelCaches()
+        if !didFetchCatalog {
+            didFetchCatalog = true
+            if modelManager.catalogStore.models.isEmpty {
+                await modelManager.fetchCatalog()
+            }
+        }
+        catalogSnapshot = modelManager.catalogStore.models
         downloadedSnapshot = modelManager.downloadedModels()
         unmountedSnapshot = modelManager.unmountedModels()
-        let catalog = modelManager.catalogStore.models
+        let catalog = catalogSnapshot
         var items = downloadedSnapshot.map { (id: $0.id, directory: $0.localURL) }
         let known = Set(items.map(\.id))
         for id in appState.loadedModels + appState.restoringModels where !known.contains(id) {
@@ -243,9 +256,9 @@ struct ModelsPageView: View {
         }.value
     }
 
-    /// Companions stay out of both lists unless the user opts in.
-    /// The id / catalog check is synchronous so known companions do not flash
-    /// in before the config scan finishes.
+    /// Companions stay out of the catalog sections unless the user opts in.
+    /// Active models always list what is resident. The id / catalog check is
+    /// synchronous so known companions do not flash in before the config scan finishes.
     private func passesCompanionFilter(_ id: String, catalog: [CatalogEntry]) -> Bool {
         if showCompanions { return true }
         if companionIds.contains(id) { return false }
@@ -263,21 +276,69 @@ struct ModelsPageView: View {
         ModelRootFilter.matches(modelURL: record.localURL, selectedRoot: resolvedDiskFilter)
     }
 
+    private var statusFacetsNarrowed: Bool {
+        downloadedFacet != .any || verifiedFacet != .any
+    }
+
+    /// `isDownloaded` is on-disk (or previously downloaded, for an unmounted copy).
+    /// `isLoaded` is resident in memory and is independent of `companionReady`.
+    private func passesStatusFacets(id: String, isDownloaded: Bool, isLoaded: Bool) -> Bool {
+        let row = LocalModelRowState(
+            id: id,
+            isDownloaded: isDownloaded,
+            isVerified: LocalModelListFilter.isVerifiedWeight(id: id, catalog: catalogSnapshot),
+            isLoaded: isLoaded
+        )
+        return LocalModelListFilter.matches(row, downloaded: downloadedFacet, verified: verifiedFacet)
+    }
+
     private var localModelsContent: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 20) {
-                    loadedSection
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                loadedSection
+                catalogFilterBar
+                if downloadedFacet != .no {
                     downloadedSection
                     if showUnmountedModels && !unmountedSnapshot.isEmpty {
                         unmountedSection
                             .id(Self.unmountedSectionAnchor)
                     }
                 }
-                .padding(24)
+                if showsNotDownloadedSection {
+                    notDownloadedSection
+                }
             }
-            .scrollPosition(id: $scrollAnchor)
+            .padding(24)
         }
+        .scrollPosition(id: $scrollAnchor)
+    }
+
+    /// Type, downloaded, verified, and search apply only to the sections under this bar.
+    private var catalogFilterBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ModelTypeFilterBar(filter: $typeFilter, horizontalPadding: 0)
+            LocalModelFacetBar(
+                downloaded: $downloadedFacet,
+                verified: $verifiedFacet,
+                horizontalPadding: 0
+            )
+            modelFilterField
+            HStack(spacing: 10) {
+                downloadedHeaderFilters
+                Spacer(minLength: 8)
+                Button {
+                    refreshTrigger.toggle()
+                    NotificationCenter.default.post(name: .novaMLXModelsChanged, object: nil)
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .accessibilityIdentifier("models-refresh")
+            }
+        }
+        .accessibilityIdentifier("models-catalog-filters")
     }
 
     /// Scroll anchor for the unmounted-disks section; model ids are
@@ -292,12 +353,13 @@ struct ModelsPageView: View {
                 .map { $0.id }
                 .filter { modelManager.getDownloadStatus($0)?.state == .downloading }
         )
-        let catalog = modelManager.catalogStore.models
+        let catalog = catalogSnapshot
         let unmounted = unmountedSnapshot.filter { record in
             !downloading.contains(record.id)
                 && matchesQuery(record.id)
                 && typeFilter.matches(record.modelType)
                 && passesCompanionFilter(record.id, catalog: catalog)
+                && passesStatusFacets(id: record.id, isDownloaded: true, isLoaded: false)
         }
 
         return VStack(alignment: .leading, spacing: 12) {
@@ -306,7 +368,7 @@ struct ModelsPageView: View {
             }
 
             if unmounted.isEmpty {
-                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !statusFacetsNarrowed {
                     emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
                 } else {
                     emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
@@ -317,6 +379,7 @@ struct ModelsPageView: View {
                         record.id,
                         subtitle: "\(volumeName(of: record.localURL)) · \(l10n.tr("models.notMounted"))",
                         isLoaded: false,
+                        isDownloaded: true,
                         actions: {
                             Button(l10n.tr("models.redownload")) {
                                 requestRedownload(record)
@@ -407,8 +470,6 @@ struct ModelsPageView: View {
                 .help(l10n.tr("models.unmountedToggleHelp"))
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.bottom, 8)
     }
 
     /// Toggle the unmounted-disks section; turning it on jumps the scroll
@@ -424,18 +485,10 @@ struct ModelsPageView: View {
         ModelQueryMatch.matches(modelQuery, in: id)
     }
 
+    /// Resident models. Search, type, and downloaded/verified facets do not apply.
     private var loadedSection: some View {
-        let catalog = modelManager.catalogStore.models
-        let loaded = appState.loadedModels.filter { id in
-            guard matchesQuery(id), passesCompanionFilter(id, catalog: catalog) else { return false }
-            guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
-            return typeFilter.matches(record.modelType)
-        }
-        let restoring = appState.restoringModels.filter { id in
-            guard matchesQuery(id), passesCompanionFilter(id, catalog: catalog) else { return false }
-            guard let record = modelManager.getRecord(id) else { return typeFilter == .all }
-            return typeFilter.matches(record.modelType)
-        }
+        let loaded = appState.loadedModels
+        let restoring = appState.restoringModels
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -451,11 +504,7 @@ struct ModelsPageView: View {
             }
 
             if loaded.isEmpty && restoring.isEmpty {
-                if modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
-                } else {
-                    emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
-                }
+                emptyState(l10n.tr("models.noModelsLoaded"), subtitle: l10n.tr("models.noModelsLoadedSub"))
             } else {
                 // Models currently being restored on startup — show spinner rows
                 ForEach(restoring, id: \.self) { modelId in
@@ -467,6 +516,7 @@ struct ModelsPageView: View {
                         modelId,
                         subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
                         isLoaded: true,
+                        isDownloaded: true,
                         actions: {
                             playButton(modelId: modelId)
                             specCompanionToggle(for: modelId)
@@ -500,7 +550,7 @@ struct ModelsPageView: View {
         HStack(spacing: 10) {
             ProgressView()
                 .controlSize(.small)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(modelId)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.secondary)
@@ -508,6 +558,12 @@ struct ModelsPageView: View {
                 Text("Loading…")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+                LocalModelStatusBadges(
+                    modelId: modelId,
+                    isVerified: LocalModelListFilter.isVerifiedWeight(id: modelId, catalog: catalogSnapshot),
+                    isDownloaded: true,
+                    isLoaded: false
+                )
             }
             Spacer()
         }
@@ -681,8 +737,8 @@ struct ModelsPageView: View {
         )
     }
 
-    /// Disk menu and companion checkbox. Both sit on the downloaded-not-loaded
-    /// header. The companion choice also filters the loaded list.
+    /// Disk menu and companion checkbox. They filter the catalog sections under
+    /// the bar. Active models stay listed either way.
     private var downloadedHeaderFilters: some View {
         let roots = ModelRootFilter.options(for: NovaMLXPaths.configuredModelsDirs)
         return HStack(spacing: 10) {
@@ -709,7 +765,7 @@ struct ModelsPageView: View {
     }
 
     private var downloadedSection: some View {
-        let catalog = modelManager.catalogStore.models
+        let catalog = catalogSnapshot
         let allDownloaded = downloadedSnapshot
         let loaded = Set(inferenceService.listLoadedModels())
         let downloaded = allDownloaded.filter {
@@ -717,30 +773,16 @@ struct ModelsPageView: View {
                 && matchesQuery($0.id)
                 && passesCompanionFilter($0.id, catalog: catalog)
                 && passesDiskFilter($0)
+                && passesStatusFacets(id: $0.id, isDownloaded: true, isLoaded: false)
         }
         let diskNarrowed = !resolvedDiskFilter.isEmpty
         let queryNarrowed = !modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
-                Spacer(minLength: 8)
-                downloadedHeaderFilters
-                    .layoutPriority(1)
-                Button {
-                    refreshTrigger.toggle()
-                    // Force rescan of local models directory
-                    NotificationCenter.default.post(name: .novaMLXModelsChanged, object: nil)
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
+            sectionHeader(l10n.tr("models.unloaded"), icon: "arrow.down.circle", count: downloaded.count)
 
             if downloaded.isEmpty {
-                if queryNarrowed || diskNarrowed {
+                if queryNarrowed || diskNarrowed || statusFacetsNarrowed {
                     emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
                 } else {
                     emptyState(l10n.tr("models.noInactiveModels"), subtitle: l10n.tr("models.noInactiveModelsSub"))
@@ -751,6 +793,7 @@ struct ModelsPageView: View {
                         record.id,
                         subtitle: "\(record.family.rawValue)  \(record.sizeBytes > 0 ? record.sizeBytes.bytesFormatted : "")",
                         isLoaded: false,
+                        isDownloaded: true,
                         actions: {
                             if convertingModelId == record.id || appState.tieStatus[record.id]?.status == .converting {
                                 tieConvertingLabel(for: record.id)
@@ -806,6 +849,90 @@ struct ModelsPageView: View {
             }
         }
         .sectionCard()
+    }
+
+    /// Verified catalog weights that are not on disk. Hidden when the
+    /// Downloaded facet is "downloaded". A chosen disk has no not-downloaded
+    /// rows; that combination still shows the empty filter state.
+    private var showsNotDownloadedSection: Bool {
+        guard downloadedFacet != .yes else { return false }
+        if !resolvedDiskFilter.isEmpty { return downloadedFacet == .no }
+        if downloadedFacet == .no || verifiedFacet != .any { return true }
+        if !modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return !filteredNotDownloadedWeights().isEmpty
+    }
+
+    private func filteredNotDownloadedWeights() -> [CatalogEntry] {
+        guard resolvedDiskFilter.isEmpty else { return [] }
+        let excluding = Set(
+            downloadedSnapshot.map(\.id)
+                + unmountedSnapshot.map(\.id)
+                + appState.loadedModels
+                + appState.restoringModels
+                + inferenceService.listLoadedModels()
+        )
+        return LocalModelListFilter.notDownloadedWeights(
+            catalog: catalogSnapshot,
+            excluding: excluding
+        ).filter { entry in
+            typeFilter.matches(entry.category)
+                && (matchesQuery(entry.id) || matchesQuery(entry.name) || matchesQuery(entry.quant ?? ""))
+                && passesCompanionFilter(entry.id, catalog: catalogSnapshot)
+                && passesStatusFacets(id: entry.id, isDownloaded: false, isLoaded: false)
+        }
+    }
+
+    private var notDownloadedSection: some View {
+        let weights = filteredNotDownloadedWeights()
+        let queryNarrowed = !modelQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return VStack(alignment: .leading, spacing: 12) {
+            sectionHeader(l10n.tr("models.notDownloadedSection"), icon: "square.and.arrow.down", count: weights.count)
+            if weights.isEmpty {
+                if queryNarrowed || statusFacetsNarrowed {
+                    emptyState(l10n.tr("models.noFilterMatch"), subtitle: "")
+                } else if catalogSnapshot.isEmpty {
+                    emptyState(l10n.tr("models.notDownloadedSection"), subtitle: l10n.tr("models.notDownloadedEmpty"))
+                } else {
+                    emptyState(l10n.tr("models.notDownloadedEmpty"), subtitle: "")
+                }
+            } else {
+                ForEach(weights, id: \.id) { entry in
+                    let subtitle = [entry.family.rawValue, entry.quant, entry.size]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "  ")
+                    modelRow(
+                        entry.id,
+                        subtitle: subtitle,
+                        isLoaded: false,
+                        isDownloaded: false,
+                        actions: {
+                            notDownloadedActions(for: entry.id)
+                        }
+                    )
+                }
+            }
+        }
+        .sectionCard()
+    }
+
+    @ViewBuilder
+    private func notDownloadedActions(for modelId: String) -> some View {
+        if let task = appState.downloadTasks[modelId], task.isActive {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(l10n.tr("models.downloading"))
+                    .font(.caption)
+                    .foregroundColor(NovaTheme.Colors.accent)
+            }
+        } else {
+            Button(l10n.tr("models.download")) {
+                appState.startDownload(repoId: modelId)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityIdentifier("models-download-\(modelId)")
+        }
     }
 
     @ViewBuilder
@@ -869,14 +996,20 @@ struct ModelsPageView: View {
         NSWorkspace.shared.open(url)
     }
 
-    private func modelRow(_ modelId: String, subtitle: String, isLoaded: Bool, @ViewBuilder actions: () -> some View) -> some View {
+    private func modelRow(
+        _ modelId: String,
+        subtitle: String,
+        isLoaded: Bool,
+        isDownloaded: Bool,
+        @ViewBuilder actions: () -> some View
+    ) -> some View {
         HStack(spacing: 12) {
             Circle()
                 .fill(isLoaded ? NovaTheme.Colors.statusOK : Color.clear)
                 .frame(width: 8, height: 8)
                 .overlay(Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 1))
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Text(modelId).font(.system(size: 13, weight: .medium)).lineLimit(1)
                         .foregroundColor(NovaTheme.Colors.accent)
@@ -884,10 +1017,19 @@ struct ModelsPageView: View {
                         .onTapGesture { fetchModelCard(repoId: modelId) }
                     CopyIDButton(id: modelId)
                 }
-                Text(subtitle).font(.caption2).foregroundColor(.secondary)
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(.caption2).foregroundColor(.secondary)
+                }
+                LocalModelStatusBadges(
+                    modelId: modelId,
+                    isVerified: LocalModelListFilter.isVerifiedWeight(id: modelId, catalog: catalogSnapshot),
+                    isDownloaded: isDownloaded,
+                    isLoaded: isLoaded
+                )
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer()
+            Spacer(minLength: 8)
             actions()
         }
         .id(modelId)
@@ -1108,6 +1250,7 @@ struct ModelsPageView: View {
 
 struct ModelTypeFilterBar: View {
     @Binding var filter: ModelsPageView.ModelTypeFilter
+    var horizontalPadding: CGFloat = 24
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1132,7 +1275,7 @@ struct ModelTypeFilterBar: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, horizontalPadding)
             .padding(.vertical, 8)
         }
     }
