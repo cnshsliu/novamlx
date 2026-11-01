@@ -459,6 +459,13 @@ struct FlintAlignmentTests {
         #expect(text.contains("<think>reasoning</think>answer"))
         #expect(text.contains("<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value></tool_call>"))
         #expect(text.hasSuffix("<|observation|><tool_response>/work</tool_response><|assistant|>"))
+        let prefill = FlintRecChatTemplate.render(
+            messages: [
+                .init(role: "user", content: "summarize"),
+                .init(role: "assistant", content: "31日，"),
+            ])
+        #expect(prefill == "<|user|>summarize<|assistant|>31日，")
+        #expect(!prefill.hasSuffix("<|assistant|>31日，<|assistant|>"))
         #expect(FlintRecChatTemplate.sha256Hex(Data(text.utf8))
             == "032f373234cb07781f4ca3f90a69852afdd16ac6179daa6f2074eda0cb9fce0a")
         let ids = FlintRecChatTemplate.fixtureTokenIDs(text)

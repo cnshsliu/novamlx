@@ -11,7 +11,7 @@ import NovaMLXUtils
 enum FlintRecChatTemplate {
     static let resourceName = "flint_rec"
     /// `hashlib.sha256(template.encode()).hexdigest()` of the package file.
-    static let sha256 = "44fd1b0f94b78d9cf554c5a207945e48fef698b279d65863a33a77d787ca411b"
+    static let sha256 = "61520acb003027a672561dfbd984a043e23f30578dec308a25135770e6ba63b8"
 
     struct TemplateMessage: Equatable, Sendable {
         var role: String
@@ -213,7 +213,11 @@ enum FlintRecChatTemplate {
             segments.append(contentsOf: toolPreambleSegments(tools))
         }
         if addGenerationPrompt {
-            special("<|assistant|>")
+            // A trailing assistant message is a prefill. A second header
+            // starts a new turn and the model ignores the prefill.
+            if messages.last?.role != "assistant" {
+                special("<|assistant|>")
+            }
         }
         return segments
     }
