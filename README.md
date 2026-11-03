@@ -622,3 +622,5 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for:
 ## License
 
 [Apache License 2.0](LICENSE)
+
+Copyright © 2026 深圳市数字流动软件有限公司 (Shenzhen Digital Flow Software Co., Ltd.)
