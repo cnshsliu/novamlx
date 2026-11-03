@@ -265,7 +265,7 @@ struct FlintToolSchemaTests {
 
     @Test("compile does not mutate the client tool list")
     func testToolsUnchanged() throws {
-        var tools = [shellTool(strict: false)]
+        let tools = [shellTool(strict: false)]
         let before = try JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])
         _ = FlintToolSchemaSession.compile(tools: tools, enforceToolSchemas: true)
         let after = try JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])
@@ -391,5 +391,34 @@ struct FlintToolSchemaTests {
         #expect(!play(
             &wrongOrder,
             "<tool_call>shell<arg_key>command</arg_key><arg_value>pwd</arg_value><arg_key>timeout</arg_key>"))
+    }
+
+    @Test("empty-text tokens and turn stops cannot end a constrained tool call")
+    func emptyTextAndStopsRejectedMidCall() throws {
+        var grammar = try makeGrammar(strict: nil, flag: true)
+        let opened = grammar.consume(tokenId: FlintStructuralGrammar.toolOpenId, text: "<tool_call>")
+        #expect(opened)
+        let named = grammar.consume(tokenId: 1, text: "shell")
+        #expect(named)
+        // A token whose decoded text is empty (specials, EOS) adds no
+        // content but would end the turn mid-call through stop handling —
+        // the extractor then closes with `{}` arguments (live regression:
+        // read_file / run_shell calls with empty arguments).
+        let eos = grammar.consume(tokenId: FlintStructuralGrammar.endOfTextId, text: "")
+        #expect(!eos)
+        let emptyText = grammar.consume(tokenId: 1, text: "")
+        #expect(!emptyText)
+        let userHeader = grammar.consume(tokenId: FlintStructuralGrammar.userId, text: "")
+        #expect(!userHeader)
+        // Turn-stop ids are masked while the schema call is open, including
+        // when the free-text scan is off.
+        let masked = grammar.maskedTokenIds(vocabSize: 0)
+        #expect(masked.contains(FlintStructuralGrammar.endOfTextId))
+        #expect(masked.contains(FlintStructuralGrammar.userId))
+        #expect(masked.contains(FlintStructuralGrammar.observationId))
+        #expect(masked.contains(FlintStructuralGrammar.developerId))
+        // The call still completes normally after those guards.
+        #expect(play(
+            &grammar, "<arg_key>command</arg_key><arg_value>ls</arg_value></tool_call>"))
     }
 }

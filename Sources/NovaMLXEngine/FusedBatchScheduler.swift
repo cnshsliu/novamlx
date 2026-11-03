@@ -361,6 +361,19 @@ struct ActiveStreamSequence: @unchecked Sendable {
     /// JSON schema, JSON object, regex, or GBNF. Nil for unconstrained text
     /// and for Flint structural grammar (`flintGrammar` is that mask).
     var hostGrammar: HostGrammarSession? = nil
+    /// Flint only. ByteLevel split-character state: when sampled bytes end
+    /// mid-UTF-8-sequence (娟 = E5 A8 + 9F as two tokens), the next sample
+    /// is masked to tokens supplying the continuation bytes. EOS included
+    /// in the ban — a turn cannot end on half a character.
+    var utf8Guard: ByteLevelUTF8Guard? = nil
+    /// Characters of `lastDecodedText` already streamed. The pointer never
+    /// crosses a U+FFFD: an incomplete split stays withheld until the
+    /// completing token arrives (the count delta is useless there — �→娟
+    /// swaps one character for one). Index-based, unlike the old count-diff.
+    var safeEmittedCount: Int = 0
+    /// Flint only. Decoded prompt text, materialized once for the
+    /// recitation guard (see the finish checks in `fusedDecodeStep`).
+    var recitationPromptText: String? = nil
 
     /// Yield a token to the stream IFF the sequence has not been finished
     /// by any concurrent path. Silent no-op if already finished.
@@ -388,10 +401,24 @@ struct ActiveStreamSequence: @unchecked Sendable {
     mutating func decodeNextToken(_ tokenId: Int, tokenizer: Tokenizer) -> String? {
         accumulatedTokenIds.append(tokenId)
         let fullText = tokenizer.decode(accumulatedTokenIds)
-        let deltaLength = fullText.count - lastDecodedText.count
         lastDecodedText = fullText
-        guard deltaLength > 0 else { return nil }
-        return String(fullText.suffix(deltaLength))
+        // ByteLevel split characters: a token can end mid-UTF-8 and the
+        // count delta then measures U+FFFD, not the real glyph. Emit only
+        // up to the first replacement character; the completing token
+        // flushes the withheld text as one piece.
+        let next = FFFDSafePrefix.nextDelta(fullText: fullText, emittedCount: safeEmittedCount)
+        safeEmittedCount = next.emittedCount
+        return next.delta.isEmpty ? nil : next.delta
+    }
+
+    /// Stream whatever is still withheld behind an unresolved U+FFFD. The
+    /// stream is ending, so the raw tail (replacement character included)
+    /// goes out as-is.
+    mutating func flushWithheld() -> String? {
+        guard safeEmittedCount < lastDecodedText.count else { return nil }
+        let tail = String(lastDecodedText.suffix(lastDecodedText.count - safeEmittedCount))
+        safeEmittedCount = lastDecodedText.count
+        return tail.isEmpty ? nil : tail
     }
 }
 
@@ -1426,8 +1453,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         Self.armFlintExtractor(
             toolStream, family: container.identifier.family, request: request,
             config: container.config, promptTokens: allTokens, maxTokens: maxTokens)
-        if !firstDecision.yield.isEmpty {
-            Self.emitProcessed(toolStream, firstDecision.yield,
+        // A first token ending mid-UTF-8 (ByteLevel split character) must
+        // not stream its dangling replacement char; the completing token
+        // flushes it through decodeNextToken.
+        let safeFirstYield = FFFDSafePrefix.nextDelta(
+            fullText: firstDecision.yield, emittedCount: 0).delta
+        if !safeFirstYield.isEmpty {
+            Self.emitProcessed(toolStream, safeFirstYield,
                 continuation: continuation,
                 logprob: resolvedLogprobs.map { ($0.logprob, $0.topLogprobs) })
         }
@@ -1476,6 +1508,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         seq.flintPresencePenalty = request.presencePenalty ?? container.config.presencePenalty
         if seq.flintPresencePenalty != 0, firstTokenId >= 0 {
             seq.flintPresenceSeen.insert(firstTokenId)
+        }
+        if isFlint, let tok = container.tokenizer,
+            let vocab = GrammarVocabHint.shared.size(for: request.model),
+            let table = await engine.byteLevelTokenBytesCache.builder(
+                for: request.model, tokenizer: tok, vocabSize: vocab)
+        {
+            seq.utf8Guard = ByteLevelUTF8Guard(table: table, seedTokens: initialAccumulatedIds)
+            seq.safeEmittedCount = FFFDSafePrefix.initialSafeCount(of: initialDecodedText)
         }
         let grammarText = container.tokenizer?.decode([firstTokenId]) ?? firstTokenText
         armHostGrammar(
@@ -1733,6 +1773,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         Self.armFlintExtractor(
             toolStream, family: container.identifier.family, request: request,
             config: container.config, promptTokens: allTokens, maxTokens: maxTokens)
+        // ByteLevel split guard: never stream a dangling replacement char
+        // from the first token (see prefillSequence for the full note).
+        emitText = FFFDSafePrefix.nextDelta(fullText: emitText, emittedCount: 0).delta
         if !emitText.isEmpty {
             Self.emitProcessed(toolStream, emitText,
                 continuation: continuation,
@@ -1774,6 +1817,14 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         seq.flintPresencePenalty = request.presencePenalty ?? container.config.presencePenalty
         if seq.flintPresencePenalty != 0, firstTokenId >= 0 {
             seq.flintPresenceSeen.insert(firstTokenId)
+        }
+        if isFlint, let tok = container.tokenizer,
+            let vocab = GrammarVocabHint.shared.size(for: request.model),
+            let table = await engine.byteLevelTokenBytesCache.builder(
+                for: request.model, tokenizer: tok, vocabSize: vocab)
+        {
+            seq.utf8Guard = ByteLevelUTF8Guard(table: table, seedTokens: prefixAccumulatedIds)
+            seq.safeEmittedCount = FFFDSafePrefix.initialSafeCount(of: prefixDecodedText)
         }
         let grammarText = container.tokenizer?.decode([firstTokenId]) ?? firstTokenText
         armHostGrammar(
@@ -1920,6 +1971,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let probeIds = seq.accumulatedTokenIds + tokens
         let fullText = tokenizer.decode(probeIds)
         let prior = seq.lastDecodedText
+        // Text withheld behind an unresolved U+FFFD must keep flowing through
+        // the per-token pointer in `decodeNextToken`; the count-diff delta
+        // here would mis-split it.
+        if seq.safeEmittedCount != prior.count { return .skip }
         if let stops = seq.request.stop {
             for stop in stops where !stop.isEmpty {
                 let appeared = fullText.contains(stop) && !prior.contains(stop)
@@ -1937,6 +1992,31 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         {
             return .skip
         }
+        // A packet crossing into a repetition loop falls to the per-token
+        // loop, which stops the turn exactly at the loop boundary.
+        if futureCount > 60, FlintChatDecode.detectRepetitionLoop(fullText) {
+            return .skip
+        }
+        // Same for prompt recitation (see the finish checks in
+        // fusedDecodeStep for the rationale and thresholds).
+        if futureCount > 150 {
+            if seq.recitationPromptText == nil {
+                seq.recitationPromptText = FlintChatDecode.normalizedForRecitation(
+                    tokenizer.decode(seq.promptTokenIds))
+            }
+            if let promptText = seq.recitationPromptText {
+                let tail = FlintChatDecode.normalizedForRecitation(String(fullText.suffix(64)))
+                if tail.count >= 48, promptText.contains(tail) {
+                    return .skip
+                }
+            }
+        }
+        // And for planning chatter (拆解请求 / 起草摘要 / …).
+        if futureCount > 20,
+            FlintChatDecode.containsCondensePlanningMarker(fullText)
+        {
+            return .skip
+        }
         let openedControl = (fullText.contains("<|") && !prior.contains("<|"))
             || (fullText.contains("|>") && !prior.contains("|>"))
         if openedControl { return .skip }
@@ -1944,6 +2024,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let deltaLength = fullText.count - prior.count
         if deltaLength < 0 { return .skip }
         let rawDelta = deltaLength > 0 ? String(fullText.suffix(deltaLength)) : ""
+        // A packet that introduces a replacement character (incomplete
+        // ByteLevel split) falls through to the per-token loop, which
+        // withholds it until the sequence resolves or the stream ends.
+        if rawDelta.contains(FFFDSafePrefix.replacement) { return .skip }
         // Flint always installs the GLM4 tool parser. A `<` in this chunk can
         // be a tool tag, a think tag, or a partial tag the parser must see
         // token by token. Prose with no `<` is one decode.
@@ -1961,8 +2045,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         seq.accumulatedTokenIds = probeIds
         seq.lastDecodedText = fullText
         seq.generatedText = fullText
+        seq.safeEmittedCount = fullText.count
         for id in tokens {
             seq.lastTokenId = id
+            seq.utf8Guard?.consume(id)
             seq.recentTokenIds.append(id)
             if seq.recentTokenIds.count > 128 {
                 seq.recentTokenIds = Array(seq.recentTokenIds.suffix(64))
@@ -2259,6 +2345,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             let topK: Int
             let applyFlintFilter: Bool
             let hostMask: [Bool]?
+            let utf8Mask: [Bool]?
         }
         let rows: [RowCtx] = sequences.map { seq in
             RowCtx(
@@ -2273,7 +2360,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 temperature: Float(seq.request.temperature ?? container.config.temperature),
                 topK: seq.request.topK ?? container.config.topK,
                 applyFlintFilter: isFlint,
-                hostMask: seq.hostGrammar?.readyMask()
+                hostMask: seq.hostGrammar?.readyMask(),
+                utf8Mask: seq.utf8Guard?.hasPending == true
+                    ? seq.utf8Guard?.peekMask() : nil
             )
         }
 
@@ -2317,6 +2406,9 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 }
                 if let mask = row.hostMask {
                     lastLogits = HostGrammarMask.apply(mask, to: lastLogits)
+                }
+                if let utf8Mask = row.utf8Mask {
+                    lastLogits = HostGrammarMask.apply(utf8Mask, to: lastLogits)
                 }
                 if row.applyFlintFilter {
                     lastLogits = FlintChatDecode.filterLogits(
@@ -2538,7 +2630,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                 let flintPresence = seq.flintPresencePenalty
                 let flintRepetition = seq.request.repetitionPenalty ?? container.config.repeatPenalty
                 let freqPenForRoute = seq.frequencyPenalty
-                let flintRoute: FlintChatDecode.ResidentRoute = isFlint
+                var flintRoute: FlintChatDecode.ResidentRoute = isFlint
                     ? FlintChatDecode.residentRoute(
                         FlintChatDecode.Policy(
                             temperature: flintTemperature,
@@ -2556,14 +2648,32 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                             usesGrammar: hostGrammarOn,
                             usesStructuralGrammar: grammarOn))
                     : .singleStep
+                // A pending UTF-8 continuation needs a host mask on this
+                // sample. The device argmax packet and n-gram verify sample
+                // without host masks, so both stay off for this one step —
+                // the mask completes the character and the route returns.
+                let utf8Pending = seq.utf8Guard?.hasPending == true
+                if utf8Pending, flintRoute != .singleStep {
+                    flintRoute = .singleStep
+                }
                 if isFlint, flintRouteLogged.insert(seq.id).inserted {
                     NovaMLXLog.info(
                         "[Flint] resident route \(flintRoute) grammar=\(grammarOn) hostGrammar=\(hostGrammarOn) temp=\(flintTemperature) topP=\(flintTopP) topK=\(flintTopK) minP=\(flintMinP) freq=\(freqPenForRoute) rep=\(flintRepetition) presence=\(flintPresence) logprobs=\(wantLogprobs) batch=\(decoding.count)")
                 }
+                // The perform closure below cannot capture the mutable route.
+                let flintRouteFinal = flintRoute
+                // UTF-8 continuation mask (nil when nothing is pending). The
+                // filtered packet re-derives per-step masks from the guard
+                // copy; the single-step path applies this one mask.
+                let utf8Mask = utf8Pending ? seq.utf8Guard?.peekMask() : nil
+                let utf8GuardCopy = seq.utf8Guard
                 // Greedy must stay step-by-step: batch verify KV vs stepwise can
                 // flip near-tie argmax (max |Δ|~0.5), breaking lossless compares.
+                // A pending UTF-8 continuation also stays single-step: verify
+                // is argmax-only and would not see the continuation mask.
                 let draftTokens = (
                     wantLogprobs || grammarOn || hostGrammarOn || flintRoute != .singleStep
+                        || utf8Pending
                         || seq.sampler.isGreedy || !specDecoder.shouldSpeculate()
                 )
                     ? []
@@ -2600,7 +2710,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     }
                     let tidBox = await mlxContainer.perform(nonSendable: (token, seqCaches)) { context, values in
                         let (tokenInput, caches) = values
-                        if flintRoute == .greedyDevice, let flint = context.model as? FlintModel,
+                        if flintRouteFinal == .greedyDevice, let flint = context.model as? FlintModel,
                             flint.recGreedyPacketReady(cache: caches)
                         {
                             do {
@@ -2615,24 +2725,30 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                                 // The single-token forward below is the eager fallback.
                             }
                         }
-                        if flintRoute == .filtered {
+                        if flintRouteFinal == .filtered {
                             var ids: [Int] = []
                             ids.reserveCapacity(packetCount)
                             var stepToken = inputToken
                             var grammar = grammarSeed
                             var seen = presenceSeed
+                            var utf8Guard = utf8GuardCopy
                             var stopPacket = false
                             for _ in 0..<packetCount {
                                 let step = MLXArray(Int32(stepToken)).reshaped(1, 1)
                                 let stepLogits = context.model(step, cache: caches)
                                 eval(stepLogits)
-                                let filtered = FlintChatDecode.filterLogits(
+                                var filtered = FlintChatDecode.filterLogits(
                                     stepLogits[0..., -1, 0...],
                                     grammar: grammar,
                                     presenceSeen: seen,
                                     presencePenalty: flintPresence,
                                     temperature: flintTemperature,
                                     topK: flintTopK)
+                                if utf8Guard?.hasPending == true,
+                                    let utf8StepMask = utf8Guard?.peekMask()
+                                {
+                                    filtered = HostGrammarMask.apply(utf8StepMask, to: filtered)
+                                }
                                 let sampled = seqSampler.sample(logits: filtered)
                                 eval(sampled)
                                 let id = sampled.item(Int.self)
@@ -2648,6 +2764,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                                     stopPacket = true
                                 case .keep(_, let stop):
                                     ids.append(id)
+                                    utf8Guard?.consume(id)
                                     if flintPresence != 0 { seen.insert(id) }
                                     if var activeGrammar = grammar {
                                         activeGrammar.advancePhase(tokenId: id)
@@ -2677,6 +2794,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         }
                         if let hostMask {
                             lastLogits = HostGrammarMask.apply(hostMask, to: lastLogits)
+                        }
+                        if let utf8Mask {
+                            // Pending ByteLevel split: only tokens that supply
+                            // the missing UTF-8 continuation bytes may be
+                            // sampled (EOS and specials are masked out).
+                            lastLogits = HostGrammarMask.apply(utf8Mask, to: lastLogits)
                         }
                         if isFlint {
                             lastLogits = FlintChatDecode.filterLogits(
@@ -2862,6 +2985,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                     let isEOSNow = FlintChatDecode.isStopToken(
                         tokenId, primaryEOS: eosId, stopIds: flintStopIds)
                     seq.lastTokenId = tokenId
+                    seq.utf8Guard?.consume(tokenId)
                     if seq.flintPresencePenalty != 0 {
                         seq.flintPresenceSeen.insert(tokenId)
                     }
@@ -3056,7 +3180,70 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         }
                     }
 
-                    if !(isEOS || atMax || hitStop || hitControlToken || hitThinkReentry || hitGrammarReject),
+                    // Paragraph-level repetition loop: greedy Flint condense
+                    // re-emits one sentence block until max_tokens. Cut the
+                    // turn when the current tail is a verbatim copy of an
+                    // earlier block (see FlintChatDecode.detectRepetitionLoop).
+                    var hitRepetitionLoop = false
+                    if container.identifier.family == .flint,
+                        !hitControlToken, !hitStop, !isEOS,
+                        seq.completionTokens > 60,
+                        seq.completionTokens % 4 == 0,
+                        FlintChatDecode.detectRepetitionLoop(seq.generatedText)
+                    {
+                        hitRepetitionLoop = true
+                        NovaMLXLog.info(
+                            "[DecodeStep:\(stepNum)] seq \(seq.id.uuidString.prefix(8)) repetition loop at \(seq.completionTokens) tokens; stopping turn")
+                    }
+
+                    // Prompt recitation: greedy Flint condense sometimes
+                    // writes a good summary and then recites the system
+                    // prompt's rule list verbatim until max_tokens (round-5
+                    // article 7). A 48-char verbatim window from the tail
+                    // that also appears in the rendered prompt is recitation,
+                    // never a summary paraphrase. The token floor keeps short
+                    // echo tasks ("output this verbatim") untouched.
+                    var hitRecitation = false
+                    if container.identifier.family == .flint,
+                        !hitControlToken, !hitStop, !isEOS, !hitRepetitionLoop,
+                        seq.completionTokens > 150,
+                        seq.completionTokens % 4 == 0,
+                        let tok = container.tokenizer
+                    {
+                        if seq.recitationPromptText == nil {
+                            seq.recitationPromptText = FlintChatDecode.normalizedForRecitation(
+                                tok.decode(seq.promptTokenIds))
+                        }
+                        if let promptText = seq.recitationPromptText {
+                            let tail = FlintChatDecode.normalizedForRecitation(
+                                String(seq.generatedText.suffix(64)))
+                            if tail.count >= 48, promptText.contains(tail) {
+                                hitRecitation = true
+                                NovaMLXLog.info(
+                                    "[DecodeStep:\(stepNum)] seq \(seq.id.uuidString.prefix(8)) prompt recitation at \(seq.completionTokens) tokens; stopping turn")
+                            }
+                        }
+                    }
+
+                    // Planning chatter: the same failure mode, paraphrased
+                    // instead of quoted — the model opens a drafting section
+                    // (拆解请求 / 起草摘要 / 初稿 / 尝试1) after the summary and
+                    // never closes it. Cut at the first marker; these phrases
+                    // do not occur in legitimate news prose.
+                    var hitPlanningChatter = false
+                    if container.identifier.family == .flint,
+                        !hitControlToken, !hitStop, !isEOS,
+                        !hitRepetitionLoop, !hitRecitation,
+                        seq.completionTokens > 20,
+                        seq.completionTokens % 4 == 0,
+                        FlintChatDecode.containsCondensePlanningMarker(seq.generatedText)
+                    {
+                        hitPlanningChatter = true
+                        NovaMLXLog.info(
+                            "[DecodeStep:\(stepNum)] seq \(seq.id.uuidString.prefix(8)) planning chatter at \(seq.completionTokens) tokens; stopping turn")
+                    }
+
+                    if !(isEOS || atMax || hitStop || hitControlToken || hitRepetitionLoop || hitRecitation || hitPlanningChatter || hitThinkReentry || hitGrammarReject),
                        let grammar = seq.hostGrammar {
                         let piece = container.tokenizer?.decode([tokenId]) ?? decoded
                         if grammar.note(tokenId: tokenId, text: piece) {
@@ -3064,7 +3251,7 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         }
                     }
 
-                    if isEOS || atMax || hitStop || hitControlToken || hitThinkReentry || hitGrammarReject {
+                    if isEOS || atMax || hitStop || hitControlToken || hitRepetitionLoop || hitRecitation || hitPlanningChatter || hitThinkReentry || hitGrammarReject {
                         // Flush any tool-call buffer the parser still holds, then
                         // mirror the ContinuousBatcher finish semantics: a stop
                         // that produced tool calls reports finish_reason=tool_calls.
@@ -3073,6 +3260,15 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         if container.identifier.family == .flint, !hitThinkReentry {
                             let tail = seq.flintThink.flushHeld()
                             if !tail.isEmpty { seq.yieldProcessed(tail) }
+                        }
+                        // UTF-8 withhold ends here: flush text still held
+                        // behind an unresolved replacement character.
+                        if let withheld = seq.flushWithheld() {
+                            var scrubbedTail = MLXEngine.scrubControlTokens(withheld)
+                            if let familyScrub = container.chatTemplateProcessor?.scrubControlTokens(scrubbedTail) {
+                                scrubbedTail = familyScrub
+                            }
+                            if !scrubbedTail.isEmpty { seq.yieldProcessed(scrubbedTail) }
                         }
                         seq.drainToolProcessor()
                         var finishReason: FinishReason = atMax ? .length : .stop
@@ -3116,6 +3312,13 @@ public final class FusedBatchScheduler: @unchecked Sendable {
                         FlintChatDecode.trim(seq.caches, unused: unused)
                     }
                 }
+                }
+
+                // UTF-8 continuation accounting: a sequence whose split
+                // character is still open steps constrained again next
+                // round; the cap inside lifts a hopeless constraint.
+                if seq.utf8Guard?.hasPending == true {
+                    seq.utf8Guard?.noteStillPending()
                 }
 
                 if !sequenceFinished {

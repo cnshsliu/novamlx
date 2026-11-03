@@ -385,6 +385,13 @@ struct FlintToolSchemaSession: Equatable, Sendable {
     }
 
     private func takeText(_ text: String) -> Step? {
+        // A token whose decoded text is empty (EOS, role headers, specials)
+        // adds no content but still ends the turn through stop handling —
+        // mid-call that silently drops every argument (`finish()` closes the
+        // extractor with `{}`). Empty text is illegal in every constrained
+        // tool-body state; `maskedTokenIds` masks the turn-stop ids
+        // separately for the states where the free-text scan is off.
+        guard !text.isEmpty else { return nil }
         switch step {
         case .name(var buffer, var trailing):
             guard appendName(&buffer, trailing: &trailing, text) else { return nil }
@@ -900,7 +907,14 @@ struct FlintToolSchemaSession: Equatable, Sendable {
     }
 
     private static func additionalAllowed(_ value: Any?) -> Bool {
-        if value == nil { return true }
+        // xgrammar `glm_4_7` closed-world objects: an omitted
+        // `additionalProperties` means no extra keys. JSON-Schema's permissive
+        // default (true) left the `.key` state unmasked, so one junk token
+        // after a legal key (live case: `command` + `preis`) polluted the key
+        // buffer forever — `</arg_key>` stayed masked (the buffer was no
+        // longer a legal key) while free text streamed, wedging the call in
+        // junk until max_tokens and closing the extractor with `{}`.
+        if value == nil { return false }
         if let flag = boolValue(value) { return flag }
         return false
     }

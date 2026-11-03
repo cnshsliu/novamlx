@@ -109,6 +109,62 @@ enum FlintChatDecode {
         value != 0 && value != 1
     }
 
+    /// Paragraph-level repetition loop detector.
+    ///
+    /// Greedy (temperature 0) Flint condense replies sometimes re-emit the
+    /// same sentence block verbatim until `max_tokens` — the 2026-11-02
+    /// round filled 1985 tokens with ~30 copies of one apology paragraph.
+    /// A `tailLength`-character window at the end of the text that already
+    /// occurred earlier means the model is inside a copy of a previous
+    /// block; the caller cuts the turn there instead of streaming copies.
+    ///
+    /// The window is long enough that legitimate prose (names, dates,
+    /// numbers) cannot match it verbatim a second time.
+    static func detectRepetitionLoop(_ text: String, tailLength: Int = 40) -> Bool {
+        guard text.count >= tailLength * 2 else { return false }
+        let tail = String(text.suffix(tailLength))
+        var searchStart = text.startIndex
+        var occurrences = 0
+        while let found = text.range(of: tail, range: searchStart..<text.endIndex) {
+            occurrences += 1
+            if occurrences >= 2 { return true }
+            searchStart = found.upperBound
+        }
+        return false
+    }
+
+    /// Planning-phase markers that greedy Flint condense emits after the
+    /// summary, in the final channel (think-mode separate notwithstanding):
+    /// it starts "拆解请求 / 起草摘要 / 初稿 / 尝试1"-style drafting chatter
+    /// and never returns (round-5/6 articles 4/6 burned 2000+ tokens on it).
+    /// None of these phrases occur in legitimate news prose; the caller cuts
+    /// the turn at the first occurrence. Recitation detection alone misses
+    /// this text — the model paraphrases and reflows the rules rather than
+    /// quoting them verbatim.
+    static let condensePlanningMarkers = [
+        "拆解请求",
+        "起草摘要",
+        "初稿：",
+        "尝试1",
+    ]
+
+    static func containsCondensePlanningMarker(_ text: String) -> Bool {
+        condensePlanningMarkers.contains { text.contains($0) }
+    }
+
+    /// Whitespace- and width-insensitive form for recitation matching. The
+    /// model reflows the prompt's rule list with newlines turned into spaces
+    /// and full-width punctuation（＋／）turned half-width, so a verbatim
+    /// window misses text that is a copy modulo formatting. NFKC (which
+    /// folds full-width forms) plus stripping all whitespace makes the
+    /// window a real copy detector.
+    static func normalizedForRecitation(_ s: String) -> String {
+        let folded = s.precomposedStringWithCompatibilityMapping
+        return String(folded.unicodeScalars
+            .filter { !CharacterSet.whitespacesAndNewlines.contains($0) }
+            .map(Character.init))
+    }
+
     /// One filtered step after the sampler has already seen the mask.
     /// A masked id is not part of the kept packet. A stop id is kept and ends it.
     enum FilteredDecision: Equatable, Sendable {

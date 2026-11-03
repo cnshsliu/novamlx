@@ -25,6 +25,9 @@ struct ActiveBatchSequence: @unchecked Sendable {
     var flintThink = FlintChatDecode.ThinkReentryGuard()
     /// Flint chat grammar. Nil when grammar is off.
     var flintGrammar: FlintStructuralGrammar? = nil
+    /// Flint only. ByteLevel split-character completion state (see
+    /// `ByteLevelUTF8Guard`).
+    var utf8Guard: ByteLevelUTF8Guard? = nil
 }
 
 public final class BatchScheduler: @unchecked Sendable {
@@ -189,6 +192,13 @@ public final class BatchScheduler: @unchecked Sendable {
             flintThink: flintThink
         )
         seq.flintGrammar = flintGrammar
+        if container.identifier.family == .flint, let tok = container.tokenizer,
+            let vocab = GrammarVocabHint.shared.size(for: req.request.model),
+            let table = await engine.byteLevelTokenBytesCache.builder(
+                for: req.request.model, tokenizer: tok, vocabSize: vocab)
+        {
+            seq.utf8Guard = ByteLevelUTF8Guard(table: table, seedTokens: [firstTokenId])
+        }
 
         lock.withLock {
             if activeByModel[req.request.model] == nil {
@@ -269,8 +279,15 @@ public final class BatchScheduler: @unchecked Sendable {
                     seqLogits = FlintStructuralGrammar.suppress(
                         grammar.maskedTokenIds(vocabSize: seqLogits.dim(-1)), in: seqLogits)
                 }
+                if seq.utf8Guard?.hasPending == true, let utf8Mask = seq.utf8Guard?.peekMask() {
+                    seqLogits = HostGrammarMask.apply(utf8Mask, to: seqLogits)
+                }
                 let sampledToken = seq.sampler.sample(logits: seqLogits)
                 let tokenId = sampledToken.item(Int.self)
+                seq.utf8Guard?.consume(tokenId)
+                if seq.utf8Guard?.hasPending == true {
+                    seq.utf8Guard?.noteStillPending()
+                }
 
                 seq.generatedTokens.append(tokenId)
                 let rawPiece = container.tokenizer.map { $0.decode([tokenId]) } ?? ""

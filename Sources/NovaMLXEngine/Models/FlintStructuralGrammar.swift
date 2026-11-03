@@ -136,6 +136,13 @@ public struct FlintStructuralGrammar: Equatable, Sendable {
             for marker in Self.protocolMarkers where !schema.allows(tokenId: marker.tokenId, text: marker.text) {
                 masked.insert(marker.tokenId)
             }
+            // `legalStopIds()` is empty while a call is open: sampling a
+            // turn-stop id mid-call ends the turn through stop handling and
+            // the extractor closes with `{}` arguments. Mask them in every
+            // schema state, including the ones where the free-text scan
+            // below is off.
+            masked.formUnion([
+                Self.endOfTextId, Self.userId, Self.observationId, Self.developerId])
             if vocabSize > 0, schema.constrainsFreeText, let cache = vocabTexts {
                 let markerIds = Set(Self.protocolMarkers.map(\.tokenId))
                 for id in 0..<vocabSize where !markerIds.contains(id) {

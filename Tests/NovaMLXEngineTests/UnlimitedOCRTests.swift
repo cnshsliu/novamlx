@@ -171,15 +171,15 @@ struct UnlimitedOCRTests {
         let x: [Float] = [1, 2]
         let gate = [[Float(3), 4], [Float(5), 0]]
         let up = [[Float(0), 1]]
-        let split = UnlimitedOCRDecodeFuse.referenceConcatDots(x, gate)
-            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, up)
-        let stacked = UnlimitedOCRDecodeFuse.referenceConcatDots(x, gate + up)
+        let split = UnlimitedOCRDecodeFuse.referenceConcatDots(x, rows: gate)
+            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, rows: up)
+        let stacked = UnlimitedOCRDecodeFuse.referenceConcatDots(x, rows: gate + up)
         #expect(split == stacked)
         let score = [[Float(1), 0]]
-        let three = UnlimitedOCRDecodeFuse.referenceConcatDots(x, score)
-            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, gate)
-            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, up)
-        #expect(three == UnlimitedOCRDecodeFuse.referenceConcatDots(x, score + gate + up))
+        let three = UnlimitedOCRDecodeFuse.referenceConcatDots(x, rows: score)
+            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, rows: gate)
+            + UnlimitedOCRDecodeFuse.referenceConcatDots(x, rows: up)
+        #expect(three == UnlimitedOCRDecodeFuse.referenceConcatDots(x, rows: score + gate + up))
 
         #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 160, groups: 20)?.bits == 4)
         #expect(UnlimitedOCRDecodeFuse.affineBits(packed: 160, groups: 20)?.group == 64)

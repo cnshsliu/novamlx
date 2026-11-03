@@ -497,6 +497,10 @@ final class VLMStreamDetokenizer: @unchecked Sendable {
 public struct Tokenizer: Sendable {
     public let encode: @Sendable (String) -> [Int]
     public let decode: @Sendable ([Int]) -> String
+    /// Raw ByteLevel piece for an id (e.g. `"å¨"`), when the underlying
+    /// tokenizer exposes it. `ByteLevelUTF8Guard` reconstructs token bytes
+    /// from these; nil leaves the UTF-8 constraint off.
+    public let convertIdToToken: (@Sendable (Int) -> String?)?
     public let eosToken: String?
     public let eosTokenId: Int?
 
@@ -504,12 +508,14 @@ public struct Tokenizer: Sendable {
         encode: @Sendable @escaping (String) -> [Int],
         decode: @Sendable @escaping ([Int]) -> String,
         eosToken: String?,
-        eosTokenId: Int?
+        eosTokenId: Int?,
+        convertIdToToken: (@Sendable (Int) -> String?)? = nil
     ) {
         self.encode = encode
         self.decode = decode
         self.eosToken = eosToken
         self.eosTokenId = eosTokenId
+        self.convertIdToToken = convertIdToToken
     }
 }
 
@@ -588,6 +594,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// per-request cost of decoding every token in the vocabulary (250k+
     /// tokens for Qwen3.6 / Gemma-4).
     public let tokenMaskBuilderCache = TokenMaskBuilderCache()
+    /// Per-model cache of `ByteLevelTokenBytes` (Flint UTF-8 continuation
+    /// masks). Built on first Flint request; one vocabulary scan per model.
+    public let byteLevelTokenBytesCache = ByteLevelTokenBytesCache()
     private var activeCount: Int
     private var activeTasks: [UUID: Task<Void, Never>]
     private let lock = NovaMLXLock()
@@ -1012,7 +1021,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                 return result
             },
             eosToken: eosString,
-            eosTokenId: mlxTokenizer.eosTokenId
+            eosTokenId: mlxTokenizer.eosTokenId,
+            convertIdToToken: { id in mlxTokenizer.convertIdToToken(id) }
         )
 
         container.setLoaded(mlxContainer: mlxContainer, tokenizer: tokenizer)
