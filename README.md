@@ -16,7 +16,7 @@ Run 50+ model families — Llama, Qwen, Gemma, DeepSeek-V4-Pro (779GB!), Mistral
 <img src="https://img.shields.io/badge/macOS-15%2B-blue" alt="macOS 15+">
 <img src="https://img.shields.io/badge/Apple%20Silicon-M1%20%7C%20M2%20%7C%20M3%20%7C%20M4-green" alt="Apple Silicon">
 <img src="https://img.shields.io/badge/Swift-6.0-orange" alt="Swift 6.0">
-<img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
+<img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0">
 <img src="https://img.shields.io/badge/NovaMLX--TIE-SSD%20Streaming-red" alt="NovaMLX-TIE">
 </p>
 
@@ -621,4 +621,4 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for:
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
