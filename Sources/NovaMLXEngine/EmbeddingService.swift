@@ -105,12 +105,16 @@ public final class EmbeddingService: @unchecked Sendable {
             throw NovaMLXError.inferenceFailed("Embedding model not loaded")
         }
 
+        let useBgeM3 = BgeM3EmbeddingProfile.matches(modelId: model)
         let result: [[Float]] = await embedderContainer.perform { context in
             var allTokenIds: [[Int]] = []
             var totalTokenCount = 0
 
             for text in inputs {
-                let tokenIds = context.tokenizer.encode(text: text, addSpecialTokens: true)
+                var tokenIds = context.tokenizer.encode(text: text, addSpecialTokens: true)
+                if useBgeM3 {
+                    tokenIds = BgeM3EmbeddingProfile.truncate(tokenIds)
+                }
                 allTokenIds.append(tokenIds)
                 totalTokenCount += tokenIds.count
             }
@@ -119,7 +123,11 @@ public final class EmbeddingService: @unchecked Sendable {
                 max = Swift.max(max, tokens.count)
             }
 
-            let padId = context.tokenizer.eosTokenId ?? 0
+            // bge-m3's </s> is a real token (id 2). Padding with eos hides it
+            // from the attention mask. The checkpoint pad id is <pad> (1).
+            let padId = useBgeM3
+                ? BgeM3EmbeddingProfile.padTokenId
+                : (context.tokenizer.eosTokenId ?? 0)
 
             let padded = MLX.stacked(
                 allTokenIds.map { tokens in
@@ -136,7 +144,16 @@ public final class EmbeddingService: @unchecked Sendable {
                 attentionMask: mask
             )
 
-            let pooled = context.pooling(modelOutput, mask: mask, normalize: true)
+            let pooled: MLXArray
+            if useBgeM3, let hidden = modelOutput.hiddenStates {
+                // Dedup's bge-m3 service mean-pools token states. This checkpoint
+                // has no 1_Pooling file, so the shared pooler is the tanh CLS
+                // head, which does not match that service. Other embedders keep
+                // context.pooling.
+                pooled = Self.meanPoolNormalized(hidden, mask: mask)
+            } else {
+                pooled = context.pooling(modelOutput, mask: mask, normalize: true)
+            }
             pooled.eval()
 
             return pooled.map { $0.asArray(Float.self) }
@@ -155,4 +172,30 @@ public final class EmbeddingService: @unchecked Sendable {
             totalTokens: promptTokens
         )
     }
+
+    /// Masked mean of token states, then L2. Mask is 1 for real tokens and 0 for pad.
+    private static func meanPoolNormalized(_ hidden: MLXArray, mask: MLXArray) -> MLXArray {
+        let typedMask = mask.asType(hidden.dtype)
+        let weights = typedMask.expandedDimensions(axes: [-1])
+        let pooled = sum(hidden * weights, axis: 1) / sum(typedMask, axis: -1, keepDims: true)
+        let norm = sqrt(sum(pooled * pooled, axis: -1, keepDims: true))
+        return pooled / maximum(norm, MLXArray(Float(1e-12)))
+    }
+}
+
+enum BgeM3EmbeddingProfile {
+    static let maxLength = 256
+
+    static func matches(modelId: String) -> Bool {
+        modelId.lowercased().contains("bge-m3")
+    }
+
+    /// Hugging Face single-sequence truncation: keep the final special token inside `maxLength`.
+    static func truncate(_ tokenIds: [Int]) -> [Int] {
+        guard tokenIds.count > maxLength else { return tokenIds }
+        return Array(tokenIds.prefix(maxLength - 1)) + [tokenIds[tokenIds.count - 1]]
+    }
+
+    /// XLM-RoBERTa `<pad>`. `</s>` is 2 and must stay visible to the mask.
+    static let padTokenId = 1
 }
