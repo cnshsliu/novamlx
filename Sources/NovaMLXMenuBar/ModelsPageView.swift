@@ -525,6 +525,7 @@ struct ModelsPageView: View {
                             addToCatalogButton(modelId: modelId)
                             tieActions(for: modelId, isLoaded: true)
                             pinToggle(for: modelId)
+                            autoLoadToggle(for: modelId)
                             if !pinned {
                                 Button(l10n.tr("models.unload")) {
                                     Task {
@@ -582,6 +583,23 @@ struct ModelsPageView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(NovaTheme.Colors.accent.opacity(0.2), lineWidth: 0.5)
         )
+    }
+
+    private func autoLoadToggle(for modelId: String) -> some View {
+        Toggle(isOn: Binding(
+            get: { inferenceService.allowsAutoLoad(modelId) },
+            set: { on in
+                inferenceService.setAutoLoad(modelId, enabled: on)
+                refreshTrigger.toggle()
+            }
+        )) {
+            Text(l10n.tr("models.autoLoad"))
+                .font(.caption2.weight(.semibold))
+        }
+        .toggleStyle(.switch)
+        .controlSize(.mini)
+        .help(l10n.tr("models.autoLoadHelp"))
+        .accessibilityIdentifier("models-autoload-\(modelId)")
     }
 
     private func pinToggle(for modelId: String) -> some View {
@@ -816,6 +834,7 @@ struct ModelsPageView: View {
                             } else {
                                 specCompanionToggle(for: record.id)
                                 specBoostBadge(for: record.id)
+                                autoLoadToggle(for: record.id)
                                 addToCatalogButton(modelId: record.id)
                                 tieActions(for: record.id, isLoaded: false)
                                 Button(l10n.tr("models.load")) {

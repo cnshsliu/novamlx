@@ -968,6 +968,17 @@ public final class InferenceService: @unchecked Sendable {
         settingsManager.getSettings(settingsManager.resolveModelId(modelId)).isPinned
     }
 
+    public func allowsAutoLoad(_ modelId: String) -> Bool {
+        settingsManager.getSettings(settingsManager.resolveModelId(modelId)).allowsAutoLoad
+    }
+
+    /// Persist the per-model client auto-load flag. Takes effect on the next request.
+    public func setAutoLoad(_ modelId: String, enabled: Bool) {
+        let id = settingsManager.resolveModelId(modelId)
+        settingsManager.updateSettings(id) { $0.autoLoadEnabled = enabled }
+        NovaMLXLog.info("[InferenceService] auto-load \(id)=\(enabled)")
+    }
+
     /// Persist pin. A pinned model reloads after restart and refuses unload until this is off.
     public func setPinned(_ modelId: String, pinned: Bool) {
         let id = settingsManager.resolveModelId(modelId)

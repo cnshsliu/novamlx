@@ -27,6 +27,9 @@ public struct ModelSettings: Codable, Sendable, Equatable {
     /// Remembered load-time answers for speculative companions, keyed by accelerator id.
     /// `true` loads it next time; `false` skips the prompt. Known-slower profiles still stay off.
     public var acceleratorChoices: [String: Bool]?
+    /// Client auto-load. `nil` and `true` allow a request to load this model from disk.
+    /// `false` leaves an unload in place and answers `model_autoload_disabled`.
+    public var autoLoadEnabled: Bool?
 
     public init(
         maxContextWindow: Int? = nil,
@@ -51,7 +54,8 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         thinkingBudget: Int? = nil,
         kvMemoryBytesPerTokenOverride: Int? = nil,
         nativeMtpEnabled: Bool? = nil,
-        acceleratorChoices: [String: Bool]? = nil
+        acceleratorChoices: [String: Bool]? = nil,
+        autoLoadEnabled: Bool? = nil
     ) {
         self.maxContextWindow = maxContextWindow
         self.maxTokens = maxTokens
@@ -76,7 +80,11 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         self.kvMemoryBytesPerTokenOverride = kvMemoryBytesPerTokenOverride
         self.nativeMtpEnabled = nativeMtpEnabled
         self.acceleratorChoices = acceleratorChoices
+        self.autoLoadEnabled = autoLoadEnabled
     }
+
+    /// Missing setting means allow, so existing models keep auto-load.
+    public var allowsAutoLoad: Bool { autoLoadEnabled != false }
 
     private enum CodingKeys: String, CodingKey {
         case maxContextWindow = "max_context_window"
@@ -98,6 +106,7 @@ public struct ModelSettings: Codable, Sendable, Equatable {
         case kvMemoryBytesPerTokenOverride = "kv_memory_bytes_per_token_override"
         case nativeMtpEnabled = "native_mtp"
         case acceleratorChoices = "accelerator_choices"
+        case autoLoadEnabled = "auto_load"
     }
 
     public func applySamplingOverrides(to request: InferenceRequest) -> InferenceRequest {

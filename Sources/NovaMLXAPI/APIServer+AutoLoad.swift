@@ -48,9 +48,12 @@ extension NovaMLXAPIServer {
             throw NovaMLXError.modelNotResident
         }
 
-        // Auto-load disabled — throw original error
+        // Machine-wide switch. Per-model flags apply only when this is on.
         if !cfg.autoLoad.enabled {
             throw NovaMLXError.modelNotLoaded(modelId)
+        }
+        if !inference.settingsManager.getSettings(modelId).allowsAutoLoad {
+            throw NovaMLXError.modelAutoloadDisabled(modelId)
         }
 
         // X-Wait-Cold-Load: false → fire-and-forget + immediate 503
@@ -112,6 +115,9 @@ extension NovaMLXAPIServer {
             let task = Task {
                 do {
                     if !inference.isModelLoaded(modelId), autoLoadCfg.enabled {
+                        if !inference.settingsManager.getSettings(modelId).allowsAutoLoad {
+                            throw NovaMLXError.modelAutoloadDisabled(modelId)
+                        }
                         try await coordinator.ensureLoaded(
                             modelId,
                             options: AutoLoadCoordinator.Options(

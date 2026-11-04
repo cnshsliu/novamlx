@@ -260,12 +260,18 @@ struct CoreTypesTests {
 
     @Test("ModelSettings default values")
     func modelSettingsDefaults() {
-        let settings = ModelSettings()
+        var settings = ModelSettings()
         #expect(settings.temperature == nil)
         #expect(settings.topP == nil)
         #expect(settings.isPinned == false)
         #expect(settings.isDefault == false)
         #expect(settings.ttlSeconds == nil)
+        #expect(settings.autoLoadEnabled == nil)
+        #expect(settings.allowsAutoLoad)
+        settings.autoLoadEnabled = false
+        #expect(!settings.allowsAutoLoad)
+        settings.autoLoadEnabled = true
+        #expect(settings.allowsAutoLoad)
     }
 
     @Test("ModelSettings coding round-trip")

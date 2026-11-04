@@ -681,6 +681,7 @@ extension NovaMLXError {
         case .tieConversionFailed: .internalServerError
         case .tieLayoutIncomplete: .conflict
         case .tooManyRequests: .tooManyRequests
+        case .modelAutoloadDisabled: .forbidden
         }
     }
 
@@ -703,6 +704,7 @@ extension NovaMLXError {
         case .tieConversionFailed: "server_error"
         case .tieLayoutIncomplete: "invalid_request_error"
         case .tooManyRequests: "rate_limit_error"
+        case .modelAutoloadDisabled: "permission_error"
         }
     }
 
@@ -725,6 +727,7 @@ extension NovaMLXError {
         case .tieConversionFailed: "tie_conversion_failed"
         case .tieLayoutIncomplete: "tie_layout_incomplete"
         case .tooManyRequests: "too_many_requests"
+        case .modelAutoloadDisabled: "model_autoload_disabled"
         }
     }
 }
@@ -818,7 +821,11 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         )
                         return OpenAIModel(
                             id: record.id,
-                            nova: OpenAIModelNova(capabilities: caps, type: record.modelType.rawValue)
+                            nova: OpenAIModelNova(
+                                capabilities: caps,
+                                type: record.modelType.rawValue,
+                                autoload: inference.settingsManager.getSettings(record.id).allowsAutoLoad
+                            )
                         )
                     }
 
@@ -837,7 +844,14 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     modelType: record.modelType,
                     localURL: record.localURL
                 )
-                let model = OpenAIModel(id: record.id, nova: OpenAIModelNova(capabilities: caps, type: record.modelType.rawValue))
+                let model = OpenAIModel(
+                    id: record.id,
+                    nova: OpenAIModelNova(
+                        capabilities: caps,
+                        type: record.modelType.rawValue,
+                        autoload: inference.settingsManager.getSettings(record.id).allowsAutoLoad
+                    )
+                )
                 return try Self.jsonResponse(model)
             }
             Post("/v1/chat/completions") { request, context in
@@ -2864,6 +2878,19 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                             inference.pendingAcceleratorPrompt(for: req.modelId))
                     ))
                 }
+                Post("/autoload") { request, context in
+                    struct AutoLoadBody: Codable { let modelId: String; let enabled: Bool }
+                    let body = try await request.body.collect(upTo: .max)
+                    let req = try JSONDecoder().decode(AutoLoadBody.self, from: body)
+                    guard models.getRecord(req.modelId) != nil else {
+                        throw NovaMLXError.modelNotFound(req.modelId)
+                    }
+                    inference.setAutoLoad(req.modelId, enabled: req.enabled)
+                    let settings = inference.settingsManager.getSettings(req.modelId)
+                    return try Self.jsonResponse(
+                        AdminModelSettingsResponse(modelId: req.modelId, settings: settings)
+                    )
+                }
                 Post("/unload") { request, context in
                     let body = try await request.body.collect(upTo: .max)
                     let req = try JSONDecoder().decode(AdminLoadRequest.self, from: body)
@@ -3098,6 +3125,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         if let v = update.kvGroupSize { settings.kvGroupSize = v }
                         if let v = update.kvMemoryBytesPerTokenOverride { settings.kvMemoryBytesPerTokenOverride = v }
                         if let v = update.nativeMtpEnabled { settings.nativeMtpEnabled = v }
+                        if let v = update.autoLoadEnabled { settings.autoLoadEnabled = v }
 
                         inference.settingsManager.setSettings(modelId, settings)
                         if let v = update.nativeMtpEnabled {

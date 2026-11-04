@@ -34,6 +34,8 @@ public enum NovaMLXError: Error, LocalizedError {
     /// Capacity protection: a bounded queue (e.g. async video jobs) is full.
     /// Maps to HTTP 429.
     case tooManyRequests(String)
+    /// Administrator turned off client auto-load for this model.
+    case modelAutoloadDisabled(String)
 
     public var errorDescription: String? {
         switch self {
@@ -63,6 +65,8 @@ public enum NovaMLXError: Error, LocalizedError {
             "TIE layout for '\(id)' is incomplete (\(reason)). Remove the TIE layout and convert again."
         case .tooManyRequests(let msg):
             "Too many requests: \(msg)"
+        case .modelAutoloadDisabled(let id):
+            "Auto-load is off for '\(id)'. Ask an administrator to turn it on."
         }
     }
 

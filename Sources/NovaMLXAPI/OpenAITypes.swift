@@ -822,10 +822,31 @@ public struct OpenAIModelNova: Codable, Sendable, Equatable {
     /// Model type ("llm" | "vlm" | "embedding" | "audio" | "image" |
     /// "decision") — drives the typed demo pages' model switchers.
     public let type: String?
+    /// Whether a client request may load this model from disk. Missing means yes.
+    public let autoload: Bool
 
-    public init(capabilities: ModelCapabilities, type: String? = nil) {
+    public init(capabilities: ModelCapabilities, type: String? = nil, autoload: Bool = true) {
         self.capabilities = capabilities
         self.type = type
+        self.autoload = autoload
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case capabilities, type, autoload
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        capabilities = try container.decode(ModelCapabilities.self, forKey: .capabilities)
+        type = try container.decodeIfPresent(String.self, forKey: .type)
+        autoload = try container.decodeIfPresent(Bool.self, forKey: .autoload) ?? true
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(capabilities, forKey: .capabilities)
+        try container.encodeIfPresent(type, forKey: .type)
+        try container.encode(autoload, forKey: .autoload)
     }
 }
 
@@ -1100,6 +1121,7 @@ public struct ModelSettingsUpdateRequest: Codable, Sendable {
     public var kvGroupSize: Int?
     public var kvMemoryBytesPerTokenOverride: Int?
     public var nativeMtpEnabled: Bool?
+    public var autoLoadEnabled: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case maxContextWindow = "max_context_window"
@@ -1119,6 +1141,7 @@ public struct ModelSettingsUpdateRequest: Codable, Sendable {
         case kvGroupSize = "kv_group_size"
         case kvMemoryBytesPerTokenOverride = "kv_memory_bytes_per_token_override"
         case nativeMtpEnabled = "native_mtp"
+        case autoLoadEnabled = "auto_load"
     }
 }
 
