@@ -48,10 +48,7 @@ struct StatusPageView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(appState.isServerRunning ? l10n.tr("status.serverOnline") : l10n.tr("status.serverOffline"))
                     .font(.title2.bold())
-                Text("http://127.0.0.1:\(String(appState.serverPort))")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    + Text("  admin:\(String(appState.serverPort == 8080 ? 8081 : 8081))")
+                Text("http://127.0.0.1:\(String(appState.serverPort))  admin:\(String(appState.adminPort))")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                 // Live inference indicator: show the active model + kind if a

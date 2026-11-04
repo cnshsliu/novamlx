@@ -20,6 +20,22 @@ Run 50+ model families — Llama, Qwen, Gemma, DeepSeek-V4-Pro (779GB!), Mistral
 <img src="https://img.shields.io/badge/NovaMLX--TIE-SSD%20Streaming-red" alt="NovaMLX-TIE">
 </p>
 
+### Quick install
+
+```bash
+brew tap cnshsliu/novamlx && brew install novamlx
+```
+
+Or grab the signed + notarized DMG directly — [NovaMLX-1.9.0-arm64.dmg](https://github.com/cnshsliu/novamlx/releases/download/v1.9.0/NovaMLX-1.9.0-arm64.dmg) ([all releases](https://github.com/cnshsliu/novamlx/releases)).
+
+```bash
+# then, a local model in two commands (server: http://localhost:6590)
+nova download RecursiveSI/flint-int4   # 40B agent model, ~23 GB int4
+nova load RecursiveSI/flint-int4       # OpenAI/Anthropic-compatible API on your Mac
+```
+
+Point OpenCode, Codex, or any OpenAI-API client at `http://localhost:6590/v1` — a fully local agent stack on one machine. See [Flint on NovaMLX](docs/features/flint.md).
+
 ---
 
 ## Features
@@ -90,7 +106,7 @@ Go to [Releases](https://github.com/cnshsliu/novamlx/releases) and download the 
 
 1. Open the `.dmg` file
 2. Drag **NovaMLX** to your **Applications** folder
-3. Launch NovaMLX — the menu bar icon appears and the server starts on `localhost:8080`
+3. Launch NovaMLX — the menu bar icon appears and the server starts on `localhost:6590`
 
 **Option 3: Build from source**
 
@@ -110,7 +126,7 @@ cd novamlx
 
 Launch **NovaMLX** from your Applications folder (or Spotlight).
 
-A **menu bar icon** appears. The server runs on `localhost:8080`.
+A **menu bar icon** appears. The server runs on `localhost:6590`.
 
 ### 2. (Optional) Add `nova` CLI to your PATH
 
@@ -139,7 +155,7 @@ nova load mlx-community/Qwen3.5-9B-OptiQ-4bit
 nova chat
 
 # Or via API
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"mlx-community/Qwen3.5-9B-OptiQ-4bit", \
        "messages":[{"role":"user","content":"Write a haiku about coding."}]}'
@@ -151,12 +167,12 @@ That's it. You're running an LLM locally.
 
 ## Use with Your Tools
 
-NovaMLX is fully OpenAI API compatible. Point any tool at `http://localhost:8080/v1`.
+NovaMLX is fully OpenAI API compatible. Point any tool at `http://localhost:6590/v1`.
 
 ### Claude Code
 
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:8080/v1 \
+ANTHROPIC_BASE_URL=http://localhost:6590/v1 \
 ANTHROPIC_API_KEY=unused \
 claude
 ```
@@ -164,7 +180,7 @@ claude
 Or in your shell profile:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8080/v1
+export ANTHROPIC_BASE_URL=http://localhost:6590/v1
 export ANTHROPIC_API_KEY=unused
 ```
 
@@ -176,7 +192,7 @@ Add to your opencode config (`~/.config/opencode/config.json`):
 {
   "provider": {
     "name": "openai",
-    "baseURL": "http://localhost:8080/v1",
+    "baseURL": "http://localhost:6590/v1",
     "apiKey": "unused",
     "models": {
       "default": "mlx-community/Qwen3.5-9B-OptiQ-4bit"
@@ -197,8 +213,8 @@ Set `contextScalingTarget` in `~/.nova/config.json` to enable:
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 8080,
-    "adminPort": 8081,
+    "port": 6590,
+    "adminPort": 6591,
     "apiKeys": [],
     "contextScalingTarget": 200000
   }
@@ -215,7 +231,7 @@ Settings → Models → OpenAI API Compatible:
 
 | Field    | Value                                           |
 | -------- | ----------------------------------------------- |
-| Base URL | `http://localhost:8080/v1`                      |
+| Base URL | `http://localhost:6590/v1`                      |
 | API Key  | `unused`                                        |
 | Model ID | `mlx-community/Qwen3.5-9B-OptiQ-4bit` |
 
@@ -229,7 +245,7 @@ Add to `~/.continue/config.json`:
     {
       "title": "NovaMLX Local",
       "provider": "openai",
-      "apiBase": "http://localhost:8080/v1",
+      "apiBase": "http://localhost:6590/v1",
       "apiKey": "unused",
       "model": "mlx-community/Qwen3.5-9B-OptiQ-4bit"
     }
@@ -242,7 +258,7 @@ Add to `~/.continue/config.json`:
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:6590/v1", api_key="unused")
 
 response = client.chat.completions.create(
     model="mlx-community/Qwen3.5-9B-OptiQ-4bit",
@@ -260,7 +276,7 @@ for chunk in response:
 ```python
 import anthropic
 
-client = anthropic.Anthropic(base_url="http://localhost:8080", api_key="unused")
+client = anthropic.Anthropic(base_url="http://localhost:6590", api_key="unused")
 response = client.messages.create(
     model="mlx-community/Qwen3.5-9B-OptiQ-4bit",
     max_tokens=1024,
@@ -273,17 +289,17 @@ print(response.content[0].text)
 
 ```bash
 # Chat
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"my-model","messages":[{"role":"user","content":"Hi"}]}'
 
 # Streaming
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:6590/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"my-model","messages":[{"role":"user","content":"Hi"}],"stream":true}'
 
 # Embeddings
-curl http://localhost:8080/v1/embeddings \
+curl http://localhost:6590/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"model":"my-embed-model","input":"Hello world"}'
 ```
@@ -442,11 +458,11 @@ See [embeddings and reranking](docs/features/embeddings-rerank.md).
 
 ```bash
 # Embeddings for RAG/semantic search
-curl http://localhost:8080/v1/embeddings \
+curl http://localhost:6590/v1/embeddings \
   -d '{"model":"my-embed-model","input":"Hello world"}'
 
 # Rerank documents
-curl http://localhost:8080/v1/rerank \
+curl http://localhost:6590/v1/rerank \
   -d '{"model":"my-reranker","query":"What is MLX?","documents":["doc1","doc2"]}'
 ```
 
@@ -458,10 +474,10 @@ Uses Apple's built-in on-device speech recognition and synthesis:
 
 ```bash
 # Speech-to-text
-curl http://localhost:8080/v1/audio/transcriptions -F "file=@recording.wav"
+curl http://localhost:6590/v1/audio/transcriptions -F "file=@recording.wav"
 
 # Text-to-speech
-curl http://localhost:8080/v1/audio/speech \
+curl http://localhost:6590/v1/audio/speech \
   -d '{"model":"tts","input":"Hello!","voice":"Samantha"}'
 ```
 
@@ -518,7 +534,7 @@ export NOVAMLX_API_KEYS='["sk-your-key"]'
 
 ```bash
 # Via API
-curl -X PUT http://localhost:8081/admin/models/my-model/settings \
+curl -X PUT http://localhost:6591/admin/models/my-model/settings \
   -d '{"temperature": 0.7, "max_context_window": 8192, "kv_bits": 4}'
 ```
 
@@ -529,8 +545,8 @@ curl -X PUT http://localhost:8081/admin/models/my-model/settings \
 ```json
 {
   "host": "127.0.0.1",
-  "port": 8080,
-  "adminPort": 8081,
+  "port": 6590,
+  "adminPort": 6591,
   "apiKeys": []
 }
 ```
@@ -565,7 +581,7 @@ NovaMLX integrates with **tknet.ai** for automatic nova model discovery and prov
    nova chat --model tknet:deepseek-v4-flash
 
    # Or via API
-   curl http://localhost:8080/v1/chat/completions \
+   curl http://localhost:6590/v1/chat/completions \
      -H "Content-Type: application/json" \
      -d '{"model":"tknet:deepseek-v4-flash","messages":[{"role":"user","content":"Hello!"}]}'
    ```

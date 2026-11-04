@@ -2,9 +2,6 @@ import Foundation
 import NovaMLXCore
 
 enum CLIClient {
-    private static let baseURL = "http://127.0.0.1:8080"
-    private static let adminURL = "http://127.0.0.1:8081"
-
     static func configFromFile() -> [String: Any]? {
         let configURL = NovaMLXPaths.configFile
         guard let data = try? Data(contentsOf: configURL),
