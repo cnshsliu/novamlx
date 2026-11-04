@@ -748,7 +748,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     public init(
         inferenceService: InferenceService,
         modelManager: ModelManager,
-        embeddingService: EmbeddingService = EmbeddingService(),
+        embeddingService: EmbeddingService? = nil,
         rerankerService: RerankerService = RerankerService(),
         mcpManager: MCPManager = MCPManager(),
         config: ServerConfig = ServerConfig(),
@@ -756,7 +756,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
     ) {
         self.inferenceService = inferenceService
         self.modelManager = modelManager
-        self.embeddingService = embeddingService
+        self.embeddingService = embeddingService ?? inferenceService.embeddingService
         self.rerankerService = rerankerService
         self.mcpManager = mcpManager
         self.benchmarkService = BenchmarkService(inferenceService: inferenceService)
@@ -2831,7 +2831,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         }
                         do {
                             if record.modelType == .embedding {
-                                _ = try await embeddings.loadModel(from: url, config: config)
+                                try await inference.loadModel(at: url, config: config)
                             } else if record.modelType == .audio {
                                 if record.family == .dotsTts || record.family == .qwen3Tts {
                                     try await inference.ttsService.loadModel(from: url)
@@ -2880,6 +2880,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                     if embeddings.isLoaded(req.modelId) {
                         embeddings.unloadModel(req.modelId)
+                        inference.saveLoadedModelsList()
                     } else {
                         await inference.unloadModel(
                             ModelIdentifier(id: req.modelId, family: record?.family ?? .other)
@@ -2905,6 +2906,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                     if embeddings.isLoaded(modelId) {
                         embeddings.unloadModel(modelId)
+                        inference.saveLoadedModelsList()
                     }
 
                     try models.deleteModel(modelId)

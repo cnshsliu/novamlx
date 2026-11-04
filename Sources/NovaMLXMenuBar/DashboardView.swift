@@ -166,6 +166,11 @@ public struct DashboardView: View {
                         Text(modelId)
                             .font(.system(size: 12))
                             .lineLimit(1)
+                        if inferenceService.isHostSideLoaded(modelId) {
+                            Text(L10n.shared.tr("models.hostSide"))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                         if appState.tieStatus[modelId]?.status == .ready {
                             Text(l10n.tr("models.tie"))
                                 .font(.caption2.weight(.semibold))

@@ -55,6 +55,9 @@ public final class InferenceService: @unchecked Sendable {
     public let talkingHeadService: TalkingHeadService
     public let h3VideoService: H3VideoService
     public let decisionService: DecisionService
+    /// Host-process embeddings. The API server uses this instance so a loaded
+    /// embedder shows up in `listLoadedModels()` and survives restore.
+    public let embeddingService: EmbeddingService
 
     // Worker subprocess mode
     public let workerMode: Bool
@@ -88,6 +91,7 @@ public final class InferenceService: @unchecked Sendable {
         self.talkingHeadService = TalkingHeadService()
         self.h3VideoService = H3VideoService()
         self.decisionService = DecisionService()
+        self.embeddingService = EmbeddingService()
         // Share the engine's metrics store with every backend so the status
         // panel's "Realtime Inference Speed" reflects ALL model types, not just LLM.
         self.transcriptionService.metricsStore = engine.metricsStore
@@ -521,6 +525,16 @@ public final class InferenceService: @unchecked Sendable {
         asMtpCompanion: Bool = false
     ) async throws {
         let modelId = config.identifier.id
+        if config.modelType == .embedding {
+            try await loadDedup.ensureSingle(modelId: modelId) {
+                if self.embeddingService.isLoaded(modelId) { return }
+                _ = try await self.embeddingService.loadModel(
+                    from: url, config: config, progress: progress
+                )
+                self.saveLoadedModelsList()
+            }
+            return
+        }
         if config.modelType == .decision || config.identifier.family == .laya
             || LayaCheckpoint.isLayaDirectory(url)
         {
@@ -930,6 +944,7 @@ public final class InferenceService: @unchecked Sendable {
                 + transcriptionService.listLoadedModels()
                 + imageGenerationService.listLoadedModels()
                 + decisionService.listLoadedModels()
+                + embeddingService.loadedModelIds()
         )
         let pinned = Set(settingsManager.getPinnedModelIds())
         for id in listLoadedModels() where Self.shouldExclusiveEvict(
@@ -941,7 +956,8 @@ public final class InferenceService: @unchecked Sendable {
     }
 
     /// Chat exclusive-load may replace another LLM/VLM, but never auto-unload
-    /// TTS, ASR, or image models sitting beside it. Pinned models stay loaded.
+    /// TTS, ASR, image, decision, or embedding models sitting beside it.
+    /// Pinned models stay loaded.
     public static func shouldExclusiveEvict(
         id: String, keep: Set<String>, sideLoaded: Set<String>, pinned: Set<String> = []
     ) -> Bool {
@@ -1001,6 +1017,15 @@ public final class InferenceService: @unchecked Sendable {
         let resolvedId = settingsManager.resolveModelId(identifier.id)
         if settingsManager.getSettings(resolvedId).isPinned {
             NovaMLXLog.warning("[InferenceService] refused unload of pinned model \(resolvedId)")
+            return
+        }
+
+        if embeddingService.isLoaded(resolvedId) || embeddingService.isLoaded(identifier.id) {
+            embeddingService.unloadModel(resolvedId)
+            if identifier.id != resolvedId {
+                embeddingService.unloadModel(identifier.id)
+            }
+            saveLoadedModelsList()
             return
         }
 
@@ -1064,6 +1089,7 @@ public final class InferenceService: @unchecked Sendable {
         // Decision, ASR, TTS and image models stay on the host. In worker mode
         // they are not in workerLoadedModels; treating that as "not loaded"
         // reloaded the 678 MB Laya checkpoint on every request.
+        if embeddingService.isLoaded(resolvedId) || embeddingService.isLoaded(modelId) { return true }
         if transcriptionService.isLoaded(resolvedId) { return true }
         if ttsService.listLoadedModels().contains(resolvedId) { return true }
         if imageGenerationService.isLoaded(resolvedId) { return true }
@@ -1187,7 +1213,21 @@ public final class InferenceService: @unchecked Sendable {
         // Include 3D models
         models.append(contentsOf: hy3DService.listLoadedModels().filter { !models.contains($0) })
         models.append(contentsOf: decisionService.listLoadedModels().filter { !models.contains($0) })
+        models.append(contentsOf: embeddingService.loadedModelIds().filter { !models.contains($0) })
         return models
+    }
+
+    /// Embedding, TTS, ASR, image, 3D, and decision weights live in the host
+    /// process. The Models page uses this to mark them apart from worker chat.
+    public func isHostSideLoaded(_ modelId: String) -> Bool {
+        let resolvedId = settingsManager.resolveModelId(modelId)
+        if embeddingService.isLoaded(resolvedId) || embeddingService.isLoaded(modelId) { return true }
+        if transcriptionService.isLoaded(resolvedId) { return true }
+        if ttsService.listLoadedModels().contains(resolvedId) { return true }
+        if imageGenerationService.isLoaded(resolvedId) { return true }
+        if hy3DService.isLoaded(resolvedId) { return true }
+        if decisionService.isLoaded(resolvedId) { return true }
+        return false
     }
 
     public func checkTTLExpirations() {

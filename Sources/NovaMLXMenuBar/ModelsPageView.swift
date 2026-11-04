@@ -514,7 +514,7 @@ struct ModelsPageView: View {
                     let pinned = inferenceService.isPinned(modelId)
                     modelRow(
                         modelId,
-                        subtitle: modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown"),
+                        subtitle: loadedSubtitle(modelId),
                         isLoaded: true,
                         isDownloaded: true,
                         actions: {
@@ -543,6 +543,14 @@ struct ModelsPageView: View {
             }
         }
         .sectionCard()
+    }
+
+    /// Family, plus a host mark when the weights sit in this process
+    /// (embedding, TTS, ASR, image, 3D, decision) rather than the worker.
+    private func loadedSubtitle(_ modelId: String) -> String {
+        let family = modelManager.getRecord(modelId)?.family.rawValue ?? l10n.tr("models.unknown")
+        guard inferenceService.isHostSideLoaded(modelId) else { return family }
+        return family + " · " + l10n.tr("models.hostSide")
     }
 
     /// Spinner row shown for a model that is currently being restored on startup.

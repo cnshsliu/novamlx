@@ -366,7 +366,9 @@ struct SettingsPageView: View {
         let phys = ProcessInfo.processInfo.physicalMemory
         let minGB = ResourceLimits.sliderMinGB()
         let maxGB = ResourceLimits.sliderMaxGB(physicalRAM: phys)
-        let chatCount = appState.loadedModels.filter { !ResourceLimits.isCompanionDraftModelId($0) }.count
+        let chatCount = appState.loadedModels.filter {
+            !ResourceLimits.isCompanionDraftModelId($0) && !inferenceService.isHostSideLoaded($0)
+        }.count
         return VStack(alignment: .leading, spacing: 10) {
             Divider().padding(.bottom, 4)
 
@@ -1095,7 +1097,7 @@ struct SettingsPageView: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ForEach(appState.loadedModels, id: \.self) { modelId in
+                ForEach(appState.loadedModels.filter { !inferenceService.isHostSideLoaded($0) }, id: \.self) { modelId in
                     turboQuantRow(modelId: modelId)
                 }
             }

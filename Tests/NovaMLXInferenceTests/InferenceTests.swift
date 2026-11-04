@@ -26,10 +26,18 @@ struct InferenceServiceTests {
         let side: Set<String> = [
             "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
             "mlx-community/Qwen3-ASR-1.7B-8bit",
+            "mlx-community/bge-m3-mlx-fp16",
         ]
         #expect(
             InferenceService.shouldExclusiveEvict(
                 id: "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+                keep: keep,
+                sideLoaded: side
+            ) == false
+        )
+        #expect(
+            InferenceService.shouldExclusiveEvict(
+                id: "mlx-community/bge-m3-mlx-fp16",
                 keep: keep,
                 sideLoaded: side
             ) == false

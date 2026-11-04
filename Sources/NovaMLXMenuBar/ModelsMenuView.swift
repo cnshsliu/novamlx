@@ -1,9 +1,11 @@
 import SwiftUI
 import NovaMLXCore
+import NovaMLXInference
 import NovaMLXModelManager
 
 struct ModelsMenuView: View {
     @ObservedObject var appState: MenuBarAppState
+    let inferenceService: InferenceService
     let modelManager: ModelManager
 
     var body: some View {
@@ -26,6 +28,10 @@ struct ModelsMenuView: View {
                         Text(model)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        if inferenceService.isHostSideLoaded(model) {
+                            Text(l10n.tr("models.hostSide"))
+                                .foregroundColor(.secondary)
+                        }
                         Spacer()
                     }
                     .font(.system(size: 11))

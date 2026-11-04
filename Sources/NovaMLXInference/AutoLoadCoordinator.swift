@@ -160,19 +160,13 @@ public actor AutoLoadCoordinator {
                     "[AutoLoad] \(modelId): retrying load from fallback location \(url.path)")
             }
             do {
-                if record.modelType == .embedding {
-                    _ = try await embeddings.loadModel(
-                        from: url,
-                        config: modelConfig,
-                        progress: options.progress
-                    )
-                } else {
-                    try await inference.loadModel(
-                        at: url,
-                        config: modelConfig,
-                        progress: options.progress
-                    )
-                }
+                // Embeddings share InferenceService.embeddingService, so this
+                // also persists the id and shows it in the loaded-model list.
+                try await inference.loadModel(
+                    at: url,
+                    config: modelConfig,
+                    progress: options.progress
+                )
                 lastError = nil
                 break
             } catch {
