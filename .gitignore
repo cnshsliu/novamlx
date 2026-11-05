@@ -70,3 +70,6 @@ vendors/
 .aider*
 opencode.json
 mlx-swift-lm
+
+# Agent scratch workspace
+.scratch/
