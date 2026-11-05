@@ -76,14 +76,52 @@ struct BiRefNetMattingTests {
         }
     }
 
-    @Test("a fully transparent frame skips the model")
-    func clearImageSkipsModel() throws {
+    @Test("a fully transparent frame is rejected")
+    func clearImageIsRejected() {
         let pipeline = BiRefNetMattingPipeline(directoryURL: URL(fileURLWithPath: "/tmp"))
         let image = Self.rgba(width: 8, height: 8, alpha: 0)
-        let result = try pipeline.matte(image)
-        #expect(result.mask.width == 8)
-        let pixels = Self.pixels(of: result.mask)
-        #expect(pixels.allSatisfy { $0 == 0 })
+        #expect(throws: BiRefNetMattingPipeline.MattingError.self) {
+            _ = try pipeline.matte(image)
+        }
+    }
+
+    /// The 1×1 transparent PNG that trapped `renderGrayMask` on 2026-11-05.
+    private static let oneByOneTransparentPNG =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAen63NgAAAAASUVORK5CYII="
+
+    @Test("1x1 transparent PNG runs through every BiRefNet weight")
+    func oneByOneTransparentThroughWeights() async throws {
+        guard let data = Data(base64Encoded: Self.oneByOneTransparentPNG),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else {
+            Issue.record("regression PNG did not decode")
+            return
+        }
+        #expect(image.width == 1)
+        #expect(image.height == 1)
+
+        let dirs = [
+            Self.modelDir(env: "NOVAMLX_BIREFNET_DIR", defaultPath: "/ZhengPeng7/BiRefNet"),
+            Self.modelDir(env: "NOVAMLX_BIREFNET_PORTRAIT_DIR", defaultPath: "/ZhengPeng7/BiRefNet-portrait"),
+        ].compactMap { $0 }
+        guard !dirs.isEmpty else {
+            Issue.record("no BiRefNet checkpoint found")
+            return
+        }
+        for dir in dirs {
+            let pipeline = BiRefNetMattingPipeline(directoryURL: dir)
+            try await pipeline.load()
+            defer { pipeline.unload() }
+            do {
+                _ = try pipeline.runModel(image)
+            } catch let error as BiRefNetMattingPipeline.MattingError {
+                let text = String(describing: error)
+                #expect(
+                    text.contains("nonFiniteMask") || text.contains("non-finite"),
+                    "\(dir.lastPathComponent) failed with \(text)")
+            }
+        }
     }
 
     private static func rgba(width: Int, height: Int, alpha: UInt8) -> CGImage {

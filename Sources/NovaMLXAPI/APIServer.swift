@@ -1360,6 +1360,13 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     stream = req.stream ?? false
                 }
 
+                guard !audioData.isEmpty else {
+                    throw NovaMLXError.apiError("Audio data is empty")
+                }
+                if audioData.count > 64 * 1024 * 1024 {
+                    throw NovaMLXError.apiError("Audio is larger than 64 MB")
+                }
+
                 if stream {
                     let tokenStream = inference.transcriptionService.transcribeStream(
                         modelId: model,
@@ -1450,12 +1457,18 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 guard !input.isEmpty else {
                     throw NovaMLXError.apiError("'input' is required and must be non-empty")
                 }
+                if input.count > 20_000 {
+                    throw NovaMLXError.apiError("'input' is longer than 20000 characters")
+                }
 
                 // Resolve voice profile by name
                 let profiles = VoiceProfileManager.shared.listProfiles()
                 voiceProfile = profiles.first { $0.name.lowercased() == voice.lowercased() }
 
-                let rate = Int(175.0 * Double(speed))
+                guard speed.isFinite, speed > 0, speed <= 4 else {
+                    throw NovaMLXError.apiError("'speed' must be a finite number from 0 to 4")
+                }
+                let rate = Int((175.0 * Double(speed)).rounded())
 
                 let ttsStart = Date()
                 let audioData = try await inference.ttsService.synthesize(
@@ -1623,9 +1636,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
 
                 let model = req.model
-                guard let inputCGImage = Self.dataToCGImage(imageData) else {
-                    throw NovaMLXError.apiError("Failed to decode input image")
-                }
+                let inputCGImage = try Self.decodedClientImage(imageData)
                 if inputCGImage.width < 8 || inputCGImage.height < 8 {
                     throw NovaMLXError.apiError(
                         "Image is \(inputCGImage.width)x\(inputCGImage.height). Matting needs at least 8x8."
@@ -1717,9 +1728,22 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let steps = parts["steps"].flatMap { Int(String(data: $0.body, encoding: .utf8) ?? "") }
                 let seed = parts["seed"].flatMap { Int(String(data: $0.body, encoding: .utf8) ?? "") }
                 let strength = parts["strength"].flatMap { Double(String(data: $0.body, encoding: .utf8) ?? "") }
+                if let strength, !strength.isFinite || strength < 0 || strength > 1 {
+                    throw NovaMLXError.apiError("'strength' must be a finite number from 0 to 1")
+                }
 
                 guard !prompt.isEmpty else {
                     throw NovaMLXError.apiError("'prompt' is required and must be non-empty")
+                }
+
+                // Reject a bad upload before loadModel. A 1×1 or non-image
+                // must not pull a checkpoint into the host.
+                let inputCGImage = try Self.clientImage(imageData)
+                let maskCGImage: CGImage?
+                if let maskData {
+                    maskCGImage = try Self.clientImage(maskData)
+                } else {
+                    maskCGImage = nil
                 }
 
                 let (width, height) = ImageEditRequest(
@@ -1765,12 +1789,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                         MediaTaskResponse(image: job, progress: nil),
                         httpStatus: .accepted)
                 }
-
-                // Convert uploaded image to CGImage
-                guard let inputCGImage = Self.dataToCGImage(imageData) else {
-                    throw NovaMLXError.apiError("Failed to decode input image")
-                }
-                let maskCGImage = maskData.flatMap { Self.dataToCGImage($0) }
 
                 let editStart = Date()
                 let result = try await inference.imageGenerationService.edit(
@@ -1849,10 +1867,7 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 let format = responseFormat ?? "b64_json"
                 let resolvedN = min(max(n, 1), 4)
 
-                // Convert uploaded image to CGImage
-                guard let inputCGImage = Self.dataToCGImage(imageData) else {
-                    throw NovaMLXError.apiError("Failed to decode input image")
-                }
+                let inputCGImage = try Self.clientImage(imageData)
 
                 // Auto-load check. X-No-Autoload fails before load or sampling.
                 if !inference.imageGenerationService.isLoaded(model) {

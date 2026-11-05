@@ -488,7 +488,12 @@ public final class ImageGenerationService: @unchecked Sendable {
         }
 
         let startTime = Date()
-        let result = try matting.matte(image)
+        let result: BiRefNetMattingPipeline.MatteResult
+        do {
+            result = try matting.matte(image)
+        } catch let error as BiRefNetMattingPipeline.MattingError {
+            throw NovaMLXError.apiError(error.description)
+        }
         metricsStore?.reportActivity(model: modelId, kind: .image, speed: 1, unit: "img/s")
         NovaMLXLog.info(
             "Matte complete in \(String(format: "%.1f", Date().timeIntervalSince(startTime)))s"

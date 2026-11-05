@@ -20,6 +20,8 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
         case checkpointMissing(String)
         case conversionFailed(String)
         case inputTooSmall(width: Int, height: Int)
+        case inputRejected(String)
+        case nonFiniteMask
 
         public var description: String {
             switch self {
@@ -29,6 +31,10 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
                 return "BiRefNet weight conversion failed: \(reason)"
             case .inputTooSmall(let width, let height):
                 return "Image is \(width)x\(height). Matting needs at least \(BiRefNetMattingPipeline.minimumSide)x\(BiRefNetMattingPipeline.minimumSide)."
+            case .inputRejected(let reason):
+                return reason
+            case .nonFiniteMask:
+                return "BiRefNet mask is non-finite. The input is not a usable image."
             }
         }
     }
@@ -129,15 +135,17 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
         guard image.width >= Self.minimumSide, image.height >= Self.minimumSide else {
             throw MattingError.inputTooSmall(width: image.width, height: image.height)
         }
-        // A fully clear frame has no foreground. Skip the network so a
-        // degenerate alpha plane cannot produce NaNs.
         if Self.isFullyTransparent(image) {
-            let zeros = [Float](repeating: 0, count: image.width * image.height)
-            let mask = try Self.renderGrayMask(alpha: zeros, width: image.width, height: image.height)
-            let cutout = try Self.compositeCutout(
-                image: image, alpha: zeros, width: image.width, height: image.height)
-            return MatteResult(mask: mask, cutout: cutout)
+            throw MattingError.inputRejected(
+                "Image is fully transparent. Matting needs visible pixels.")
         }
+        return try runModel(image)
+    }
+
+    /// Run the checkpoint, then refuse a non-finite mask. Byte conversion
+    /// still clamps, so a NaN cannot trap the process. Tests call this with
+    /// the 1×1 transparent sample so every BiRefNet weight executes it.
+    func runModel(_ image: CGImage) throws -> MatteResult {
         guard let pipeline = currentPipeline() else {
             throw MattingError.checkpointMissing("model not loaded")
         }
@@ -153,6 +161,9 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
         guard alpha.count == width * height else {
             throw MattingError.conversionFailed(
                 "mask has \(alpha.count) values for \(width)x\(height)")
+        }
+        if alpha.contains(where: { !$0.isFinite }) {
+            throw MattingError.nonFiniteMask
         }
 
         let mask = try Self.renderGrayMask(alpha: alpha, width: width, height: height)

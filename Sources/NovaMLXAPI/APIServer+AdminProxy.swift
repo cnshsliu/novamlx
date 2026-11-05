@@ -66,10 +66,51 @@ extension NovaMLXAPIServer {
         return Response(status: status, headers: headers, body: .init(byteBuffer: ByteBuffer(data: data)))
     }
 
-    /// Convert raw PNG/JPEG data to a CGImage.
-    static func dataToCGImage(_ data: Data) -> CGImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    /// Largest side accepted from a client upload. Larger bitmaps are rejected
+    /// before ImageIO expands them, so a huge image cannot exhaust the host.
+    static let maximumImageSide = 8192
+
+    /// Decode a client image. Empty, non-image, and oversized bytes are a 400.
+    static func decodedClientImage(_ data: Data) throws -> CGImage {
+        guard !data.isEmpty else {
+            throw NovaMLXError.apiError("Image data is empty")
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            throw NovaMLXError.apiError(
+                "Failed to decode input image. The bytes are not a supported image.")
+        }
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = Self.imageProperty(props, kCGImagePropertyPixelWidth)
+        let height = Self.imageProperty(props, kCGImagePropertyPixelHeight)
+        if width < 1 || height < 1 {
+            throw NovaMLXError.apiError("Image has no pixels")
+        }
+        if width > maximumImageSide || height > maximumImageSide {
+            throw NovaMLXError.apiError(
+                "Image is \(width)x\(height). Maximum side is \(maximumImageSide).")
+        }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw NovaMLXError.apiError(
+                "Failed to decode input image. The bytes are not a supported image.")
+        }
+        return image
+    }
+
+    /// Client upload with a minimum side. A 1×1 image is a 400, not a model call.
+    static func clientImage(_ data: Data, minimumSide: Int = 8) throws -> CGImage {
+        let image = try decodedClientImage(data)
+        if image.width < minimumSide || image.height < minimumSide {
+            throw NovaMLXError.apiError(
+                "Image is \(image.width)x\(image.height). Minimum side is \(minimumSide).")
+        }
+        return image
+    }
+
+    private static func imageProperty(_ props: [CFString: Any]?, _ key: CFString) -> Int {
+        guard let value = props?[key] else { return 0 }
+        if let number = value as? Int { return number }
+        if let number = value as? NSNumber { return number.intValue }
+        return 0
     }
 
     /// Get MIME type for audio format

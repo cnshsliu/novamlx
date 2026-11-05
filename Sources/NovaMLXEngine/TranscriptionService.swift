@@ -120,11 +120,27 @@ public final class TranscriptionService: @unchecked Sendable {
             throw NovaMLXError.modelNotFound(modelId)
         }
 
-        // Decode audio bytes to 16kHz mono PCM via AVFoundation temp file
-        let audioURL = try writeTempAudio(audioData)
+        // Decode audio bytes to 16kHz mono PCM via AVFoundation temp file.
+        // A bad file is a client error, not a host failure.
+        let audioURL: URL
+        do {
+            audioURL = try writeTempAudio(audioData)
+        } catch let error as NovaMLXError {
+            throw error
+        } catch {
+            throw NovaMLXError.apiError("Audio bytes could not be decoded")
+        }
         defer { try? FileManager.default.removeItem(at: audioURL) }
 
-        let (sr, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
+        let sr: Int
+        let audioArray: MLXArray
+        do {
+            (sr, audioArray) = try loadAudioArray(from: audioURL, sampleRate: 16000)
+        } catch let error as NovaMLXError {
+            throw error
+        } catch {
+            throw NovaMLXError.apiError("Audio bytes could not be decoded")
+        }
         // Audio duration (seconds) — used to compute the real-time factor once
         // generation finishes. Whisper pads/trims to 30 mel frames per 0.1s, but
         // the recorded wall-clock ÷ source-audio length is the meaningful ×RT.
