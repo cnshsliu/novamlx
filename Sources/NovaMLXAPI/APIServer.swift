@@ -1623,22 +1623,22 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                 }
 
                 let model = req.model
-                // Auto-load check
-                if !inference.imageGenerationService.isLoaded(model) {
-                    guard let record = models.downloadedModels().first(where: { $0.id == model }) else {
-                        throw NovaMLXError.modelNotFound(model)
-                    }
-                    guard record.modelType == .image else {
-                        throw NovaMLXError.unsupportedModel("Model '\(model)' is not an image model (type: \(record.modelType))")
-                    }
-                    let config = ModelConfig(identifier: ModelIdentifier(id: model, family: record.family), modelType: .image)
-                    _ = try await inference.imageGenerationService.loadModel(
-                        from: record.localURL, config: config)
-                }
-
                 guard let inputCGImage = Self.dataToCGImage(imageData) else {
                     throw NovaMLXError.apiError("Failed to decode input image")
                 }
+                if inputCGImage.width < 8 || inputCGImage.height < 8 {
+                    throw NovaMLXError.apiError(
+                        "Image is \(inputCGImage.width)x\(inputCGImage.height). Matting needs at least 8x8."
+                    )
+                }
+
+                // Same gate as embeddings: a resident model still serves; an
+                // unloaded model with auto-load off is 403 and is not loaded.
+                let matteLoadOutcome = try await Self.ensureModelReady(
+                    modelId: model, isStreaming: false,
+                    cfg: cfg, inference: inference, embeddings: embeddings,
+                    coordinator: coordinator, request: request
+                )
 
                 let tmatteStart = Date()
                 let result = try await inference.imageGenerationService.matte(
@@ -1679,7 +1679,12 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     data: outputs,
                     model: model
                 )
-                return try Self.jsonResponse(response)
+                var http = try Self.jsonResponse(response)
+                if case .justLoaded(let ms) = matteLoadOutcome {
+                    http.headers[.init("X-Model-Cold-Load")!] = "true"
+                    http.headers[.init("X-Model-Load-Time-Ms")!] = "\(ms)"
+                }
+                return http
             }
 
             // MARK: - Image Edit

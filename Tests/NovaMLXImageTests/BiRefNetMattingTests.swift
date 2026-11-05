@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import Testing
-import NovaMLXImage
+@testable import NovaMLXImage
 
 /// BiRefNet matting smoke tests. Both checkpoints live in the standard models
 /// roots; override with `NOVAMLX_BIREFNET_DIR` / `NOVAMLX_BIREFNET_PORTRAIT_DIR`.
@@ -55,6 +55,50 @@ struct BiRefNetMattingTests {
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let data = ctx.data else { fatalError("pixels") }
         return Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self), count: w * h))
+    }
+
+    @Test("non-finite mask samples become 0")
+    func maskByteClampsNonFinite() {
+        #expect(BiRefNetMattingPipeline.maskByte(.nan) == 0)
+        #expect(BiRefNetMattingPipeline.maskByte(.infinity) == 0)
+        #expect(BiRefNetMattingPipeline.maskByte(-.infinity) == 0)
+        #expect(BiRefNetMattingPipeline.maskByte(-1) == 0)
+        #expect(BiRefNetMattingPipeline.maskByte(2) == 255)
+        #expect(BiRefNetMattingPipeline.maskByte(0.5) == 128)
+    }
+
+    @Test("1x1 matte is rejected before the model runs")
+    func tinyImageRejected() {
+        let pipeline = BiRefNetMattingPipeline(directoryURL: URL(fileURLWithPath: "/tmp"))
+        let image = Self.rgba(width: 1, height: 1, alpha: 0)
+        #expect(throws: BiRefNetMattingPipeline.MattingError.self) {
+            _ = try pipeline.matte(image)
+        }
+    }
+
+    @Test("a fully transparent frame skips the model")
+    func clearImageSkipsModel() throws {
+        let pipeline = BiRefNetMattingPipeline(directoryURL: URL(fileURLWithPath: "/tmp"))
+        let image = Self.rgba(width: 8, height: 8, alpha: 0)
+        let result = try pipeline.matte(image)
+        #expect(result.mask.width == 8)
+        let pixels = Self.pixels(of: result.mask)
+        #expect(pixels.allSatisfy { $0 == 0 })
+    }
+
+    private static func rgba(width: Int, height: Int, alpha: UInt8) -> CGImage {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard
+            let ctx = CGContext(
+                data: nil, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4,
+                space: cs,
+                bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | info)
+        else { fatalError("test context") }
+        ctx.setFillColor(red: 1, green: 0, blue: 0, alpha: CGFloat(alpha) / 255)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        return ctx.makeImage()!
     }
 
     private func runMatte(dir: URL) async throws {

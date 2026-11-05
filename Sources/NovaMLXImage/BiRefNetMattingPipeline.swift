@@ -19,6 +19,7 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
     public enum MattingError: Error, CustomStringConvertible {
         case checkpointMissing(String)
         case conversionFailed(String)
+        case inputTooSmall(width: Int, height: Int)
 
         public var description: String {
             switch self {
@@ -26,6 +27,8 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
                 return "BiRefNet checkpoint not found: \(path)"
             case .conversionFailed(let reason):
                 return "BiRefNet weight conversion failed: \(reason)"
+            case .inputTooSmall(let width, let height):
+                return "Image is \(width)x\(height). Matting needs at least \(BiRefNetMattingPipeline.minimumSide)x\(BiRefNetMattingPipeline.minimumSide)."
             }
         }
     }
@@ -65,6 +68,10 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
     /// Input resolution every BiRefNet checkpoint was trained at. The portrait
     /// fine-tune uses the same 1024² canvas.
     private static let inputSize = (width: 1024, height: 1024)
+
+    /// Below this, the 1024² resize produces non-finite mask values. A 1×1
+    /// transparent PNG did that and the byte cast trapped the host process.
+    public static let minimumSide = 8
 
     public func load() async throws {
         let raw = directoryURL.appendingPathComponent("model.safetensors")
@@ -119,6 +126,18 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
 
     /// Run the matte at the source resolution of `image`.
     public func matte(_ image: CGImage) throws -> MatteResult {
+        guard image.width >= Self.minimumSide, image.height >= Self.minimumSide else {
+            throw MattingError.inputTooSmall(width: image.width, height: image.height)
+        }
+        // A fully clear frame has no foreground. Skip the network so a
+        // degenerate alpha plane cannot produce NaNs.
+        if Self.isFullyTransparent(image) {
+            let zeros = [Float](repeating: 0, count: image.width * image.height)
+            let mask = try Self.renderGrayMask(alpha: zeros, width: image.width, height: image.height)
+            let cutout = try Self.compositeCutout(
+                image: image, alpha: zeros, width: image.width, height: image.height)
+            return MatteResult(mask: mask, cutout: cutout)
+        }
         guard let pipeline = currentPipeline() else {
             throw MattingError.checkpointMissing("model not loaded")
         }
@@ -131,18 +150,32 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
         let width = prediction.sourceWidth
         let height = prediction.sourceHeight
         let alpha: [Float] = maskArray.asArray(Float.self)
+        guard alpha.count == width * height else {
+            throw MattingError.conversionFailed(
+                "mask has \(alpha.count) values for \(width)x\(height)")
+        }
 
         let mask = try Self.renderGrayMask(alpha: alpha, width: width, height: height)
         let cutout = try Self.compositeCutout(image: image, alpha: alpha, width: width, height: height)
         return MatteResult(mask: mask, cutout: cutout)
     }
 
+    /// `[0,1]` alpha → 8-bit. Non-finite values become 0. `UInt8(Float)` traps
+    /// on NaN and infinity, which takes down the host.
+    static func maskByte(_ value: Float) -> UInt8 {
+        guard value.isFinite else { return 0 }
+        let scaled = min(max(Double(value), 0), 1) * 255
+        return UInt8(min(255, max(0, Int(scaled.rounded()))))
+    }
+
     /// `[0,1]` alpha → 8-bit grayscale mask.
     private static func renderGrayMask(alpha: [Float], width: Int, height: Int) throws -> CGImage {
+        guard width > 0, height > 0, alpha.count == width * height else {
+            throw MattingError.conversionFailed("mask has \(alpha.count) values for \(width)x\(height)")
+        }
         var bytes = [UInt8](repeating: 0, count: width * height)
         for i in 0..<(width * height) {
-            let v = alpha[i]
-            bytes[i] = UInt8((v < 0 ? 0 : (v > 1 ? 1 : v)) * 255.0)
+            bytes[i] = maskByte(alpha[i])
         }
         guard
             let provider = CGDataProvider(data: Data(bytes) as CFData),
@@ -178,14 +211,15 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
             throw MattingError.conversionFailed("cutout pixels")
         }
 
+        guard alpha.count == width * height else {
+            throw MattingError.conversionFailed("mask has \(alpha.count) values for \(width)x\(height)")
+        }
         var out = [UInt8](repeating: 0, count: width * height * 4)
         for i in 0..<(width * height) {
-            let v = alpha[i]
-            let a = v < 0 ? 0 : (v > 1 ? 1 : v)
             out[i * 4 + 0] = base[i * 4 + 0]
             out[i * 4 + 1] = base[i * 4 + 1]
             out[i * 4 + 2] = base[i * 4 + 2]
-            out[i * 4 + 3] = UInt8(a * 255.0)
+            out[i * 4 + 3] = maskByte(alpha[i])
         }
         guard
             let provider = CGDataProvider(data: Data(out) as CFData),
@@ -199,5 +233,35 @@ public final class BiRefNetMattingPipeline: ImageGenerationPipeline, @unchecked 
                 intent: .defaultIntent)
         else { throw MattingError.conversionFailed("cutout render") }
         return img
+    }
+
+    /// True when every pixel alpha is 0. Images without an alpha channel are
+    /// opaque. The scan is the drawn RGBA buffer, so palette and gray inputs
+    /// share one path.
+    static func isFullyTransparent(_ image: CGImage) -> Bool {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return false }
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast:
+            return false
+        default:
+            break
+        }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard
+            let ctx = CGContext(
+                data: nil, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4,
+                space: cs,
+                bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | info)
+        else { return false }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let base = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return false }
+        for i in 0..<(width * height) where base[i * 4 + 3] != 0 {
+            return false
+        }
+        return true
     }
 }
