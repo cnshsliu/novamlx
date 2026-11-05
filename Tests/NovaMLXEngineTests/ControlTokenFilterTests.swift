@@ -396,4 +396,38 @@ struct TrimControlTokensTests {
         let result = MLXEngine.trimControlTokens("complete text<|im_end|>", patterns: patterns)
         #expect(result == "complete text")
     }
+
+    // MARK: - Windowed scan regression (quadratic burn)
+
+    /// Live regression (2026-11-05): a Flint session stream fed one chunk
+    /// per token with ~150 control patterns; scanning the FULL accumulated
+    /// text per chunk was O(tokens² × patterns) and pinned the worker at
+    /// 100% CPU for minutes. The fix scans only the tail window. Same
+    /// workload must now finish in well under a second and stay correct.
+    @Test("150 patterns x 3000 chunks stays fast and clean")
+    func windowedScanRegression() {
+        var patterns = (0..<147).map { "<|reserved_\($0)|>" }
+        patterns.append(contentsOf: ["<|user|>", "<|assistant|>", "<|end_of_text|>"])
+        var acc = ""
+        var yielded = 0
+        let started = Date()
+        for i in 0..<3000 {
+            let (text, shouldStop) = MLXEngine.filterControlInChunk(
+                "token\(i) ", accumulated: &acc, yieldedCount: &yielded, patterns: patterns)
+            #expect(!shouldStop)
+            #expect(text.hasPrefix("token"))
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(elapsed < 1.0, "filterControlInChunk regressed: \(elapsed)s for 3000 chunks")
+        // A control token straddling two chunks is still caught.
+        let (stop1, _) = { () -> (String, Bool) in
+            var a = acc; var y = yielded
+            return MLXEngine.filterControlInChunk(" tail<|end_of", accumulated: &a, yieldedCount: &y, patterns: patterns)
+        }()
+        _ = stop1
+        let (text, shouldStop) = MLXEngine.filterControlInChunk(
+            "_text|>junk", accumulated: &acc, yieldedCount: &yielded, patterns: patterns)
+        #expect(shouldStop == true)
+        #expect(text == " tail")
+    }
 }

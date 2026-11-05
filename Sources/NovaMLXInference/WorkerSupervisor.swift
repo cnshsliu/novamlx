@@ -608,12 +608,24 @@ public final class WorkerSupervisor: @unchecked Sendable {
         case WorkerMessageType.result, WorkerMessageType.error:
             lock.lock()
             let cont = pendingRequests.removeValue(forKey: requestId)
+            // A streaming request has no pendingRequests waiter — its
+            // continuation lives in streamContinuations. Without this the
+            // worker's error (e.g. modelNotFound) never terminates the
+            // stream and the SSE response hangs until the client disconnects
+            // (~200s with OpenCode), wedging the agent loop client-side.
+            let streamCont = msg.type == WorkerMessageType.error
+                ? streamContinuations.removeValue(forKey: requestId) : nil
             lock.unlock()
-            guard let cont else { return }
-            // The HTTP task continues on the resuming thread until its next
-            // await. Packaging the OCR body here used to run inside the pipe
-            // reader and wedge the host.
-            resumeOffReader(cont, returning: msg)
+            if let cont {
+                // The HTTP task continues on the resuming thread until its next
+                // await. Packaging the OCR body here used to run inside the pipe
+                // reader and wedge the host.
+                resumeOffReader(cont, returning: msg)
+            } else if let streamCont {
+                let message = msg.errorMessage ?? "Worker stream failed"
+                NovaMLXLog.error("[Sup:\(String(requestId.prefix(8)))] finishing stream with worker error: \(message)")
+                streamCont.finish(throwing: NovaMLXError.inferenceFailed(message))
+            }
 
         case WorkerMessageType.token:
             let tokenToYield: Token?

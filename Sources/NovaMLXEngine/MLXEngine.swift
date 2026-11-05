@@ -2608,10 +2608,20 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     ) -> (String, Bool) {
         accumulated += text
         let totalLen = accumulated.count
+        let maxLen = patterns.map(\.count).max() ?? 0
 
-        // 1. Full control token match — trim and stop
+        // 1. Full control token match — trim and stop. Only the tail window
+        // needs scanning: every earlier call already searched the whole
+        // accumulated text and found no match, so any NEW match must include
+        // at least one character of this chunk, i.e. start no earlier than
+        // maxLen before the chunk began. Scanning the full accumulated text
+        // per chunk was O(tokens² × patterns) — a Flint session stream with
+        // ~150 control patterns burned minutes of CPU at 100% here.
+        let windowLen = min(totalLen, maxLen + text.count)
+        let windowStart = accumulated.index(
+            accumulated.endIndex, offsetBy: -windowLen)
         for pattern in patterns {
-            if let range = accumulated.range(of: pattern) {
+            if let range = accumulated.range(of: pattern, range: windowStart..<accumulated.endIndex) {
                 let safeEnd = accumulated.distance(from: accumulated.startIndex, to: range.lowerBound)
                 let cleanText: String
                 if safeEnd > yieldedCount {
@@ -2625,7 +2635,6 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         }
 
         // 2. Partial prefix check — if tail could be start of a control token, buffer it
-        let maxLen = patterns.map(\.count).max() ?? 0
         let checkLen = min(totalLen, maxLen)
         var safeEnd = totalLen
         if checkLen > 0 {
