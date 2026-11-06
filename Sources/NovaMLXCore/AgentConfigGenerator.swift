@@ -21,8 +21,12 @@ public enum AgentConfigGenerator {
             let key = apiKey ?? "$NOVA_API_KEY"
             return "HERMES_API_KEY=\(key) hermes --model \(modelName) --base-url \(baseURL)"
         case .opencode:
-            let key = apiKey ?? "your-api-key"
-            return "OPENCODE_API_KEY=\(key) opencode --provider custom --base-url \(baseURL) --model \(modelName)"
+            // The provider/model wiring lives in opencode.json (see
+            // `writeOpenCodeConfig`); `--provider custom --base-url` are not
+            // real opencode flags. The API key reaches the config's
+            // {env:NOVA_API_KEY} reference through the environment.
+            let key = apiKey ?? "$NOVA_API_KEY"
+            return "NOVA_API_KEY=\(key) opencode --model novamlx/\(modelName)"
         case .claudeCode:
             let key = apiKey ?? "$NOVA_API_KEY"
             return "ANTHROPIC_API_KEY=\(key) ANTHROPIC_BASE_URL=\(baseURL) claude"
@@ -52,7 +56,7 @@ public enum AgentConfigGenerator {
             let model = modelName ?? "tknet"
             return generateHermesConfig(baseURL: "http://127.0.0.1:\(port)/v1", apiKey: apiKey, model: model)
         case .opencode:
-            let provider = modelName ?? "tknet"
+            let provider = modelName ?? "RecursiveSI/flint-int4"
             return generateOpenCodeConfig(baseURL: "http://127.0.0.1:\(port)/v1", apiKey: apiKey, model: provider)
         case .claudeCode, .curl, .python, .node:
             return nil
@@ -325,8 +329,31 @@ public enum AgentConfigGenerator {
         apiKey: String?,
         model: String
     ) -> String? {
-        let opencodeDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/opencode")
-        let configPath = opencodeDir.appendingPathComponent("config.json")
+        writeOpenCodeConfig(baseURL: baseURL, apiKey: apiKey, model: model)
+    }
+
+    /// OpenCode's real config shape, verified against a live session
+    /// (`Flint (RecursiveSI) NovaMLX (Local)` in the status bar, tools=13 on
+    /// the wire). The previous generator wrote `{"provider":"custom",…}` to
+    /// `~/.config/opencode/config.json` — wrong format and wrong filename;
+    /// a user who copied it got a dead config.
+    ///
+    /// Writes `<config-home>/opencode/opencode.json` (XDG_CONFIG_HOME
+    /// respected) and MERGES: foreign providers, agents, and settings in an
+    /// existing file survive. `apiKey == nil` emits the `{env:NOVA_API_KEY}`
+    /// reference instead of embedding a secret.
+    @discardableResult
+    public static func writeOpenCodeConfig(
+        baseURL: String,
+        apiKey: String?,
+        model: String?,
+        directory: URL? = nil
+    ) -> String? {
+        let configHome = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+            .map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+        let opencodeDir = directory ?? configHome.appendingPathComponent("opencode")
+        let configPath = opencodeDir.appendingPathComponent("opencode.json")
 
         do {
             try FileManager.default.createDirectory(at: opencodeDir, withIntermediateDirectories: true)
@@ -334,23 +361,100 @@ public enum AgentConfigGenerator {
             return "Failed to create opencode config directory"
         }
 
-        var config: [String: Any] = [
-            "provider": "custom",
-            "base_url": baseURL,
-            "model": model,
+        // Merge with the existing config so foreign keys survive.
+        var config: [String: Any] = [:]
+        if let data = try? Data(contentsOf: configPath),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            config = existing
+        }
+
+        var provider = config["provider"] as? [String: Any] ?? [:]
+        provider["novamlx"] = [
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "NovaMLX (Local)",
+            "options": [
+                "baseURL": baseURL,
+                "apiKey": (apiKey?.isEmpty == false) ? apiKey! : "{env:NOVA_API_KEY}",
+            ],
         ]
-        if let key = apiKey, !key.isEmpty {
-            config["api_key"] = key
+        config["provider"] = provider
+
+        if let model, !model.isEmpty {
+            config["model"] = "novamlx/\(model)"
+        }
+
+        var agent = config["agent"] as? [String: Any] ?? [:]
+        if agent["flint-driver"] == nil {
+            agent["flint-driver"] = flintDriverAgentSpec()
+            config["agent"] = agent
         }
 
         do {
-            let data = try JSONSerialization.data(withJSONObject: config, options: .prettyPrinted)
+            let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: configPath, options: .atomic)
-            log.info("[AgentConfig] Wrote OpenCode config.json")
+            log.info("[AgentConfig] Wrote OpenCode config \(configPath.path)")
         } catch {
-            return "Failed to write OpenCode config"
+            return "Failed to write OpenCode config: \(error.localizedDescription)"
         }
         return nil
+    }
+
+    /// The same config as displayable JSONC text (opencode.json accepts
+    /// comments), with the prerequisites a fresh user needs spelled out.
+    public static func openCodeConfigText(
+        baseURL: String,
+        apiKey: String?,
+        model: String?
+    ) -> String {
+        var config: [String: Any] = [
+            "$schema": "https://opencode.ai/config.json",
+            "provider": [
+                "novamlx": [
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "NovaMLX (Local)",
+                    "options": [
+                        "baseURL": baseURL,
+                        "apiKey": (apiKey?.isEmpty == false) ? apiKey! : "{env:NOVA_API_KEY}",
+                    ],
+                ],
+            ],
+            "agent": ["flint-driver": flintDriverAgentSpec()],
+        ]
+        if let model, !model.isEmpty {
+            config["model"] = "novamlx/\(model)"
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]))
+            ?? Data()
+        let json = String(decoding: data, as: UTF8.self)
+        return """
+        // Save as ~/.config/opencode/opencode.json  (JSONC: comments allowed)
+        // Prereq: export NOVA_API_KEY=<your NovaMLX API key>
+        // Prereq: OpenCode retrieval calls an embedding model — download &
+        //          load one in NovaMLX (e.g. `nova download mlx-community/bge-m3-mlx-fp16`)
+        \(json)
+        """
+    }
+
+    /// Flint under OpenCode's full 13-tool prompt avoids tools (fake output,
+    /// pseudo-XML dialects). This trimmed, strict agent was verified working
+    /// on 2026-11-05: write → run → report, 86 tok/s.
+    static func flintDriverAgentSpec() -> [String: Any] {
+        [
+            "description": "Flint-optimized coding agent (strict tool dialect, minimal toolset)",
+            "mode": "all",
+            "prompt": """
+            You are a coding agent. Follow these HARD RULES without exception:
+            1. ALWAYS act through tool calls. Never paste file contents, commands, or fake command output as chat text — that is a failure.
+            2. Use ONLY the runtime's native tool-call mechanism provided in this conversation. NEVER invent or write out other calling syntaxes (XML tags like <function_results>, <parameter=...>, or markdown fences pretending to be calls).
+            3. One tool call at a time. Call the tool, wait for its result, then decide the next step.
+            4. For any file task: create/edit the file with the write/edit tool, then verify by running it with the bash tool.
+            5. After the tools succeed, report the actual command output in one or two sentences. Keep it short.
+            """,
+            "tools": [
+                "write": true, "edit": true, "bash": true,
+                "read": true, "grep": true, "glob": true,
+            ],
+        ]
     }
 
     // MARK: - App Launch
@@ -359,7 +463,6 @@ public enum AgentConfigGenerator {
         guard let appName = agent.appName else { return false }
 
         let workspace = NSWorkspace.shared
-        let apps = workspace.urlsForApplications(withBundleIdentifier: "com.apple.TextEdit")
 
         // Try to find the app by name
         let appPath = "/Applications/\(appName).app"

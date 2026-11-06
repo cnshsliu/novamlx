@@ -243,11 +243,17 @@ struct AgentsPageView: View {
             model: default
             """
         case "opencode":
-            let keyField = key == "(none)" ? "" : ",\"apiKey\":\"\(key)\""
-            return """
-            OPENCODE_CONFIG_CONTENT=
-            {"providers":{"novamlx":{"type":"openai-compatible","baseURL":"http://127.0.0.1:\(port)/v1"\(keyField)}},"defaultProvider":"novamlx"}
-            """
+            // Real opencode.json shape (verified live; the old
+            // OPENCODE_CONFIG_CONTENT env text was not a format opencode
+            // reads). Includes the flint-driver agent and the embedding-model
+            // prerequisite — OpenCode retrieval fails fast without one.
+            let model = appState.loadedModels.first(where: { !$0.contains("bge") })
+                ?? "RecursiveSI/flint-int4"
+            let apiKey = key == "(none)" ? nil : key
+            return AgentConfigGenerator.openCodeConfigText(
+                baseURL: "http://127.0.0.1:\(port)/v1",
+                apiKey: apiKey,
+                model: model)
         default:
             return ""
         }

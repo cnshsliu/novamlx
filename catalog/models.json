@@ -1247,7 +1247,7 @@
       "id": "RecursiveSI/flint-int4",
       "url": "https://huggingface.co/RecursiveSI/flint-int4",
       "name": "Flint 40B A2.5B (Official INT4)",
-      "description": "Recursive's official INT4 Flint — 39.8B MoE (~2.5B active), reasoning + multi-turn tool calls, 256K context (35 sliding-window + 14 full-attention layers, attention sinks). Official INT4 recipe incl. 4-bit lm_head; greedy decode verified token-identical to Python mlx-lm. The community OptiQ-4bit build was used for early verification and is no longer the default.",
+      "description": "Recursive's official INT4 Flint — 39.8B MoE (~2.5B active), reasoning + multi-turn tool calls, 256K context (35 sliding-window + 14 full-attention layers, attention sinks). Official INT4 recipe incl. 4-bit lm_head; greedy decode verified token-identical to Python mlx-lm. The community OptiQ-4bit build was used for early verification and is no longer the default. Using it from OpenCode: also download an embedding model (e.g. mlx-community/bge-m3-mlx-fp16) — OpenCode retrieval needs one; then use the generated flint-driver agent (Agents page → OpenCode → copy config).",
       "size": "~22.6 GB",
       "tags": [
         "MLX",

@@ -22,6 +22,8 @@ People who want a local agent/coding model with reasoning and tool calls, and st
 
 ## How to try
 
+With OpenCode (Agents page → OpenCode → copy config gives the full `opencode.json`, including the strict `flint-driver` agent): also download an embedding model — OpenCode's retrieval calls one and fails fast without it (`nova download mlx-community/bge-m3-mlx-fp16`), and set `NOVA_API_KEY`. Under OpenCode's full 13-tool prompt Flint may avoid tools; the bundled `flint-driver` agent (trimmed tools + strict dialect) is the verified configuration.
+
 ```bash
 nova download RecursiveSI/flint-int4
 # After load, select it on the Local Inference page, or:
