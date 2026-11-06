@@ -929,6 +929,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     return try Self.peerGatewayMovedResponse()
                 }
 
+                if let message = Ernie55MoeSupport.completionsRefusal(modelId: openAIReq.model) {
+                    throw NovaMLXError.configurationError(message)
+                }
+
                 let loadOutcome = try await Self.ensureModelReady(
                     modelId: openAIReq.model, isStreaming: openAIReq.stream ?? false,
                     cfg: cfg, inference: inference, embeddings: embeddings,
@@ -1015,6 +1019,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 if Self.isMovedToPeerGateway(anthropicReq.model) {
                     return try Self.peerGatewayMovedResponse()
+                }
+
+                if let message = Ernie55MoeSupport.completionsRefusal(modelId: anthropicReq.model) {
+                    throw NovaMLXError.configurationError(message)
                 }
 
                 let anthropicLoadOutcome = try await Self.ensureModelReady(
@@ -2214,6 +2222,10 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
 
                 if Self.isMovedToPeerGateway(req.model) {
                     return try Self.peerGatewayMovedResponse()
+                }
+
+                if let message = Ernie55MoeSupport.completionsRefusal(modelId: req.model) {
+                    throw NovaMLXError.configurationError(message)
                 }
 
                 let isStreaming = req.stream ?? false
