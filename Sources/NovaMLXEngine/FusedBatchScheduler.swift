@@ -1259,7 +1259,12 @@ public final class FusedBatchScheduler: @unchecked Sendable {
 
         let chunkSize = prefillParams.prefill.resolvedStepSize()
         let tokenIds = input.text.tokens.asArray(Int32.self)
-        let prefillTimeoutSeconds: Double = 120  // 2 minute timeout for prefill
+        // Scaled prefill timeout: a fixed 120s killed any prompt above ~40K
+        // tokens (Flint chunked prefill runs ~330–460 tok/s at long context),
+        // so the first big turn of an agent conversation errored mid-prefill
+        // and — with no commit — forced the next request into a full re-prefill
+        // too. Budget 1s per 200 prompt tokens with a 120s floor.
+        let prefillTimeoutSeconds: Double = max(120, Double(tokenIds.count) / 200.0)
 
         let sampler = CompiledSampler(
             temperature: Float(request.temperature ?? container.config.temperature),
@@ -1547,13 +1552,23 @@ public final class FusedBatchScheduler: @unchecked Sendable {
             snap: snapCount, kept: kept, prompt: allTokens.count,
             evicted: evicted, checkpoints: shots.map(\.position))
         if case .full = decision { return nil }
+        // Mirror decide's identical-prompt clamp: `kept == prompt` means
+        // nothing new to prefill; re-forwarding the final token needs kept
+        // one below the prompt or the `.trim` guard below rejects the reuse.
+        var kept = kept
+        if kept >= allTokens.count { kept = allTokens.count - 1 }
         var trial = session
         let copies = stored.map { $0.copy() }
         let resumeAt: Int
         let keptShots: [FlintSlidingCheckpoint]
         switch decision {
         case .trim(let drop):
-            let trimmed = drop == 0 || copies.allSatisfy { $0.trim(drop) >= drop }
+            // trimKeepingSliding, not a plain trim: the sliding rings cannot
+            // drop their newest tokens (that deletes the window the suffix
+            // still attends to), which made every non-zero trim — e.g. an
+            // identical-prompt retry — fail this guard and fall back to a
+            // full manual prefill.
+            let trimmed = drop == 0 || FlintSWAReplay.trimKeepingSliding(copies, drop: drop)
             guard trimmed, kept < allTokens.count else { return nil }
             resumeAt = kept
             keptShots = shots.filter { $0.position <= kept }

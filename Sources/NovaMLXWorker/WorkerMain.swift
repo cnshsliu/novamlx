@@ -351,7 +351,9 @@ struct NovaMLXWorker {
             hasLinearAttention: hasLinearAttention,
             hasDraftModel: hasDraftModel,
             hasNativeMTP: nativeMtp,
-            forceSerialDecode: forceSerialDecode))
+            forceSerialDecode: forceSerialDecode,
+            flintSessionBypass: MLXEngine.sessionClientHoldsHistory(
+                request, family: engine.getContainer(for: request.model)?.identifier.family ?? .qwen)))
     }
 }
 

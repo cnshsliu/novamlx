@@ -15,6 +15,11 @@ import NovaMLXUtils
 public enum GrammarFusedRoute {
     public struct Inputs: Equatable, Sendable {
         public var hasSession: Bool
+        /// A stateful session client (full conversation in every request) on
+        /// the Flint family: the server session is skipped and the request
+        /// rides the fused path, whose `select_prefix` reuses the prompt KV.
+        /// See `MLXEngine.sessionClientHoldsHistory`.
+        public var flintSessionBypass: Bool
         public var hasJSONSchema: Bool
         public var hasJSONObject: Bool
         public var hasRegex: Bool
@@ -27,6 +32,7 @@ public enum GrammarFusedRoute {
 
         public init(
             hasSession: Bool,
+            flintSessionBypass: Bool = false,
             hasJSONSchema: Bool,
             hasJSONObject: Bool,
             hasRegex: Bool,
@@ -38,6 +44,7 @@ public enum GrammarFusedRoute {
             forceSerialDecode: Bool
         ) {
             self.hasSession = hasSession
+            self.flintSessionBypass = flintSessionBypass
             self.hasJSONSchema = hasJSONSchema
             self.hasJSONObject = hasJSONObject
             self.hasRegex = hasRegex
@@ -61,10 +68,12 @@ public enum GrammarFusedRoute {
         hasLinearAttention: Bool,
         hasDraftModel: Bool,
         hasNativeMTP: Bool,
-        forceSerialDecode: Bool
+        forceSerialDecode: Bool,
+        flintSessionBypass: Bool = false
     ) -> Inputs {
         Inputs(
             hasSession: request.sessionId != nil,
+            flintSessionBypass: flintSessionBypass,
             hasJSONSchema: request.jsonSchemaDef != nil,
             hasJSONObject: request.responseFormat == .jsonObject,
             hasRegex: request.regexPattern != nil,
@@ -84,7 +93,7 @@ public enum GrammarFusedRoute {
         if inputs.hasDraftModel { return .continuousBatcher("draft-model") }
         if inputs.hasNativeMTP { return .continuousBatcher("native-mtp") }
         if inputs.forceSerialDecode { return .continuousBatcher("serial-decode") }
-        if inputs.hasSession { return .continuousBatcher("session") }
+        if inputs.hasSession, !inputs.flintSessionBypass { return .continuousBatcher("session") }
         return .fused
     }
 

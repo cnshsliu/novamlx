@@ -205,3 +205,18 @@ struct FlintPrefixTests {
         #expect(session.takePrefix(ids: edited, trimmable: false)?.tokens == originTokens)
     }
 }
+
+@Suite("FlintPrefix select — OpenCode tool-history regression")
+struct FlintPrefixSelectToolHistoryTests {
+    @Test("partial divergence at the tail with no checkpoints still trims")
+    func tailDivergenceTrims() {
+        // Stored: prior prompt + generated tokens (the tool-call turn).
+        var stored = FlintPrefixEngine.Cache(tokens: Array(0..<45411) + [900, 901, 902, 903, 904])
+        stored.checkpoints = []   // no 65536 chunk written yet
+        // New request: same 45411 tokens, then new content.
+        let tokens = Array(0..<45411) + [800, 801, 802]
+        let sel = FlintPrefixEngine.select(prefix: stored, tokens: tokens, trimmable: true)
+        #expect(sel.common == 45411)
+        #expect(sel.cached == 45411, "trimmable partial match must trim to common, got \(sel.cached)")
+    }
+}

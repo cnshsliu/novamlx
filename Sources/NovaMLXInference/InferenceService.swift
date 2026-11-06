@@ -238,7 +238,9 @@ public final class InferenceService: @unchecked Sendable {
             hasLinearAttention: hasLinearAttention,
             hasDraftModel: hasDraftModel,
             hasNativeMTP: nativeMtp,
-            forceSerialDecode: false))
+            forceSerialDecode: false,
+            flintSessionBypass: MLXEngine.sessionClientHoldsHistory(
+                finalRequest, family: container?.identifier.family ?? .qwen)))
 
         if case .continuousBatcher(let reason) = route {
             NovaMLXLog.info("[Route:\(reqTag)] → ContinuousBatcher (reason=\(reason), model=\(resolvedId))")
@@ -344,7 +346,9 @@ public final class InferenceService: @unchecked Sendable {
             hasLinearAttention: hasLinearAttention,
             hasDraftModel: hasDraftModel,
             hasNativeMTP: nativeMtp,
-            forceSerialDecode: false))
+            forceSerialDecode: false,
+            flintSessionBypass: MLXEngine.sessionClientHoldsHistory(
+                finalRequest, family: container?.identifier.family ?? .qwen)))
 
         // Wrap any local stream with a log-tracking shim that finalizes the
         // RequestLogEntry on completion (token count + timing + HTTP request id).

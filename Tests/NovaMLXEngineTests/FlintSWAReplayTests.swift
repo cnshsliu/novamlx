@@ -232,3 +232,28 @@ struct FlintSWAReplayTests {
         #expect(caches[1].state[0].dim(2) == 8)
     }
 }
+
+@Suite("FlintSWAReplay.decide — identical-prompt retry")
+struct FlintSWAReplayDecideIdenticalTests {
+    @Test("identical prompt retry trims one token instead of full prefill")
+    func identicalRetryTrims() {
+        // snap == prompt == kept: the old `kept < prompt` guard returned
+        // .full, re-prefilling an identical retry from scratch.
+        let d = FlintSWAReplay.decide(snap: 36438, kept: 36438, prompt: 36438, evicted: false, checkpoints: [])
+        if case .trim(let drop) = d {
+            #expect(drop == 1, "re-forward exactly the final token, got drop=\(drop)")
+        } else {
+            Issue.record("expected .trim, got \(d)")
+        }
+    }
+
+    @Test("kept exceeding prompt clamps safely")
+    func keptAbovePromptClamps() {
+        let d = FlintSWAReplay.decide(snap: 100, kept: 100, prompt: 80, evicted: false, checkpoints: [])
+        if case .trim(let drop) = d {
+            #expect(drop == 100 - 79)
+        } else {
+            Issue.record("expected .trim, got \(d)")
+        }
+    }
+}

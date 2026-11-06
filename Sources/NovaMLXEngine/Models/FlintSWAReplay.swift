@@ -375,7 +375,16 @@ enum FlintSWAReplay {
     static func decide(
         snap: Int, kept: Int, prompt: Int, evicted: Bool, checkpoints: [Int]
     ) -> Decision {
-        guard kept > 0, kept <= snap, kept < prompt else { return .full }
+        guard kept > 0, kept <= snap else { return .full }
+        var kept = kept
+        if kept >= prompt {
+            // Nothing new to prefill (identical-prompt retry): the old guard
+            // returned .full here, so an identical retry re-prefilled the
+            // entire prompt (91.8s at 36K). Re-forward just the final token
+            // so the first sample has fresh logits.
+            guard prompt > 0 else { return .full }
+            kept = prompt - 1
+        }
         let drop = snap - kept
         if !evicted || drop == 0 { return .trim(drop) }
         if let checkpoint = checkpoints.filter({ $0 <= kept && $0 < snap }).max() {

@@ -3498,7 +3498,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     /// 150–260s times-to-first-token. Flint's normal path already reuses the
     /// prompt prefix (`select_prefix`), so such requests bypass the session.
     /// Stateless clients (one new user message per request) keep it.
-    static func sessionClientHoldsHistory(_ request: InferenceRequest, family: ModelFamily) -> Bool {
+    public static func sessionClientHoldsHistory(_ request: InferenceRequest, family: ModelFamily) -> Bool {
         guard family == .flint else { return false }
         return request.messages.contains { $0.role == .assistant || $0.role == .tool }
     }
