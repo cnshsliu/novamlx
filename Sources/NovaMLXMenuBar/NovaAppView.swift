@@ -16,6 +16,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
     case cluster = "Cluster"
     case requests = "Requests"
     case apiKeys = "API Keys"
+    case agents = "Agents"
     case catalogAdmin = "Catalog Admin"
     case settings = "Settings"
 
@@ -32,6 +33,7 @@ public enum AppPage: String, CaseIterable, Identifiable, Sendable {
         case .cluster: return "xserve"
         case .requests: return "list.bullet.rectangle"
         case .apiKeys: return "key.fill"
+        case .agents: return "brain.head.profile"
         case .catalogAdmin: return "checkmark.seal.fill"
         case .settings: return "gearshape"
         }
@@ -309,6 +311,9 @@ public struct NovaAppView: View {
         case .apiKeys:
             APIKeysPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.apiKeys)
                 .environmentObject(l10n)
+        case .agents:
+            AgentsPageView(appState: appState)
+                .environmentObject(l10n)
         case .settings:
             SettingsPageView(appState: appState, inferenceService: inferenceService, modelManager: modelManager, memory: pageMemory.settings)
                 .environmentObject(l10n)
@@ -331,6 +336,7 @@ public struct NovaAppView: View {
         case .talkingHead: return l10n.tr("app.talkingHead")
         case .requests: return l10n.tr("app.requests")
         case .apiKeys: return "API Keys"
+        case .agents: return l10n.tr("app.agents")
         case .catalogAdmin: return l10n.tr("app.catalogAdmin")
         case .settings: return l10n.tr("app.settings")
         }
