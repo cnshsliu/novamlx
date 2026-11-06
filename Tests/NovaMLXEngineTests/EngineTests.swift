@@ -329,3 +329,42 @@ struct ChatSessionManagerTests {
         #expect(decoded.messageCount == 5)
     }
 }
+
+// MARK: - Session bypass for stateful clients
+
+@Suite("Session client history bypass")
+struct SessionClientHistoryBypassTests {
+    @Test("flint requests carrying history bypass the session path")
+    func flintStatefulBypasses() {
+        let history = [
+            NovaMLXCore.ChatMessage(role: .system, content: "s", images: nil, name: nil,
+                toolCallId: nil, toolCalls: nil, reasoningContent: nil),
+            NovaMLXCore.ChatMessage(role: .user, content: "u", images: nil, name: nil,
+                toolCallId: nil, toolCalls: nil, reasoningContent: nil),
+            NovaMLXCore.ChatMessage(role: .assistant, content: "a", images: nil, name: nil,
+                toolCallId: nil, toolCalls: nil, reasoningContent: nil),
+        ]
+        let request = InferenceRequest(id: UUID(), model: "RecursiveSI/flint-int4", messages: history)
+        #expect(MLXEngine.sessionClientHoldsHistory(request, family: .flint))
+        // Same shape on another family keeps the session.
+        #expect(!MLXEngine.sessionClientHoldsHistory(request, family: .qwen))
+    }
+
+    @Test("a single new user message keeps the session path")
+    func statelessKeepsSession() {
+        let messages = [
+            NovaMLXCore.ChatMessage(role: .system, content: "s", images: nil, name: nil,
+                toolCallId: nil, toolCalls: nil, reasoningContent: nil),
+            NovaMLXCore.ChatMessage(role: .user, content: "hello", images: nil, name: nil,
+                toolCallId: nil, toolCalls: nil, reasoningContent: nil),
+        ]
+        let request = InferenceRequest(id: UUID(), model: "RecursiveSI/flint-int4", messages: messages)
+        #expect(!MLXEngine.sessionClientHoldsHistory(request, family: .flint))
+        // Tool results also count as client-held history.
+        let withTool = [messages[1], NovaMLXCore.ChatMessage(
+            role: .tool, content: "result", images: nil, name: nil,
+            toolCallId: "c1", toolCalls: nil, reasoningContent: nil)]
+        let toolRequest = InferenceRequest(id: UUID(), model: "RecursiveSI/flint-int4", messages: withTool)
+        #expect(MLXEngine.sessionClientHoldsHistory(toolRequest, family: .flint))
+    }
+}

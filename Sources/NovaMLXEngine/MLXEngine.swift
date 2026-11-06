@@ -2661,7 +2661,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     public func generate(_ request: InferenceRequest) async throws -> InferenceResult {
         await MLXGPUExecutor.shared.resumeOnPinnedThread()
         // Dispatch to specialized paths based on request fields
-        if let sessionId = request.sessionId {
+        if let sessionId = request.sessionId,
+           !Self.sessionClientHoldsHistory(
+               request, family: getContainer(for: request.model)?.identifier.family ?? .qwen) {
             return try await generateWithSession(request, sessionId: sessionId)
         }
         if request.jsonSchemaDef != nil || request.responseFormat == .jsonObject ||
@@ -3489,9 +3491,23 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         )
     }
 
+    /// A stateful session client (OpenCode and friends) sends the full
+    /// conversation on every request — the server-side session adds nothing
+    /// while forcing Flint onto the slow serial session path, where a real
+    /// OpenCode conversation (20K+ cached tokens, tool exchanges) showed
+    /// 150–260s times-to-first-token. Flint's normal path already reuses the
+    /// prompt prefix (`select_prefix`), so such requests bypass the session.
+    /// Stateless clients (one new user message per request) keep it.
+    static func sessionClientHoldsHistory(_ request: InferenceRequest, family: ModelFamily) -> Bool {
+        guard family == .flint else { return false }
+        return request.messages.contains { $0.role == .assistant || $0.role == .tool }
+    }
+
     public func stream(_ request: InferenceRequest) -> AsyncThrowingStream<Token, Error> {
         // Dispatch to specialized paths based on request fields
-        if let sessionId = request.sessionId {
+        if let sessionId = request.sessionId,
+           !Self.sessionClientHoldsHistory(
+               request, family: getContainer(for: request.model)?.identifier.family ?? .qwen) {
             return streamWithSession(request, sessionId: sessionId)
         }
         if request.jsonSchemaDef != nil || request.responseFormat == .jsonObject ||
