@@ -22,6 +22,6 @@
 
 **Chat 模板：** `ChatTemplateProcessorRegistry` 按 `(ModelFamily, ChatTemplateFormat)` 路由。家族处理器负责控制令牌、隐式思考检测、停止序列注入。
 
-草稿模型推荐也写在该注册表里。见 [推测解码](speculative-decoding.md)。Nemotron Bolt 文本使用单独的 `nemotron_h_puzzle` 注册，不在上表默认行中。见 [Nemotron 3.5 Bolt 文本](nemotron-bolt-text.md)。GLM-5.3-Flash 使用 `glm` 家族，上下文默认 32,768。见 [GLM-5.3-Flash 文本](glm-5-3-flash.md)。
+草稿模型推荐也写在该注册表里。见 [推测解码](speculative-decoding.md)。Nemotron Bolt 文本使用单独的 `nemotron_h_puzzle` 注册，不在上表默认行中。见 [Nemotron 3.5 Bolt 文本](nemotron-bolt-text.md)。GLM-5.3-Flash 使用 `glm` 家族，上下文默认 32,768。见 [GLM-5.3-Flash 文本](glm-5-3-flash.md)。ERNIE-5.5-Flash-Base 使用 `ernie5_5_moe`，家族落在 `other`。它是预训练 base，走 `/v1/completions`。HCA / MLA 内核还没实现。见 [ERNIE-5.5-Flash-Base](ernie-5-5-flash-base.md)。
 
 正文来自 `features.zh-CN.md`「模型架构」；标题与 pitch 为英文。

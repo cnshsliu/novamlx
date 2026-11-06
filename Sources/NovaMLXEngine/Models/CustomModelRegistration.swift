@@ -56,6 +56,17 @@ enum CustomModelRegistration {
         await LLMTypeRegistry.shared.registerModelType(
             "flint",
             creator: createCustom(FlintConfiguration.self, FlintModel.init))
+        await LLMTypeRegistry.shared.registerModelType(
+            "ernie5_5_moe",
+            creator: { data in
+                let json = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+                if let message = Ernie55MoeSupport.loadRefusal(modelId: "ernie5_5_moe", json: json) {
+                    throw Ernie55MoeSupportError(message)
+                }
+                let configuration = try JSONDecoder().decode(
+                    Ernie55MoeConfiguration.self, from: data)
+                return Ernie55MoeModel(configuration)
+            })
         await QwenMtpRegistration.ensure()
         await UnlimitedOCRRegistration.register()
     }
