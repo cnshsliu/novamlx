@@ -1563,12 +1563,10 @@ public final class FusedBatchScheduler: @unchecked Sendable {
         let keptShots: [FlintSlidingCheckpoint]
         switch decision {
         case .trim(let drop):
-            // trimKeepingSliding, not a plain trim: the sliding rings cannot
-            // drop their newest tokens (that deletes the window the suffix
-            // still attends to), which made every non-zero trim — e.g. an
-            // identical-prompt retry — fail this guard and fall back to a
-            // full manual prefill.
-            let trimmed = drop == 0 || FlintSWAReplay.trimKeepingSliding(copies, drop: drop)
+            // The rings trim exactly in the left-aligned snapshot state (see
+            // FlintSlidingKVCache.trim); decide only routes here when the
+            // drop keeps a complete window.
+            let trimmed = drop == 0 || copies.allSatisfy { $0.trim(drop) >= drop }
             guard trimmed, kept < allTokens.count else { return nil }
             resumeAt = kept
             keptShots = shots.filter { $0.position <= kept }

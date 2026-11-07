@@ -131,8 +131,10 @@ struct FlintSWAReplayTests {
             == .replay(8))
         #expect(FlintSWAReplay.decide(snap: 20, kept: 15, prompt: 18, evicted: true, checkpoints: [])
             == .full)
+        // Identical-prompt retry now trims exactly one token for re-forward
+        // instead of a full prefill (drop-1 keeps a complete window).
         #expect(FlintSWAReplay.decide(snap: 10, kept: 10, prompt: 10, evicted: true, checkpoints: [10])
-            == .full)
+            == .trim(1))
         #expect(FlintSWAReplay.decide(snap: 10, kept: 0, prompt: 4, evicted: true, checkpoints: [8])
             == .full)
     }
@@ -254,6 +256,50 @@ struct FlintSWAReplayDecideIdenticalTests {
             #expect(drop == 100 - 79)
         } else {
             Issue.record("expected .trim, got \(d)")
+        }
+    }
+}
+
+@Suite("FlintSlidingKVCache trim — left-aligned evicted ring")
+struct FlintSlidingTrimTests {
+    @Test("left-aligned evicted ring trims exactly")
+    func leftAlignedEvictedTrims() {
+        let ring = FlintSlidingKVCache(windowSize: 513)
+        // Simulate a post-chunk state: offset 36437, window full, ringIndex 0.
+        ring.offset = 36437
+        ring.setInnerStateForTests(storedLength: 513, ringIndex: 0)
+        #expect(ring.evictedTokenCount == 35924)
+        #expect(ring.isTrimmable)
+        let trimmed = ring.trim(1)
+        #expect(trimmed == 1)
+        #expect(ring.offset == 36436)
+        if case let inner = ring.innerStateForTests() {
+            #expect(inner.storedLength == 512)
+            #expect(inner.ringIndex == 0)
+        }
+    }
+
+    @Test("rotating decode state refuses to trim")
+    func rotatingRefuses() {
+        let ring = FlintSlidingKVCache(windowSize: 513)
+        ring.offset = 36437
+        ring.setInnerStateForTests(storedLength: 513, ringIndex: 5)
+        #expect(!ring.isTrimmable)
+        #expect(ring.trim(1) == 0)
+    }
+
+    @Test("decide routes an evicted drop-1 to exact trim")
+    func decideEvictedDropOne() {
+        let d = FlintSWAReplay.decide(snap: 36438, kept: 36438, prompt: 36438, evicted: true, checkpoints: [])
+        if case .trim(let drop) = d {
+            #expect(drop == 1)
+        } else {
+            Issue.record("expected .trim(1), got \(d)")
+        }
+        // drop >= 2 on an evicted ring without a checkpoint stays conservative.
+        let d2 = FlintSWAReplay.decide(snap: 100, kept: 97, prompt: 99, evicted: true, checkpoints: [])
+        if case .full = d2 {} else {
+            Issue.record("expected .full for evicted drop-3, got \(d2)")
         }
     }
 }

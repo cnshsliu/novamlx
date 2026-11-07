@@ -49,6 +49,16 @@ public final class FlintSlidingKVCache: KVCache, BoundedSlidingKVCache {
         max(0, offset - storedLength)
     }
 
+    /// Test hooks: `storedLength`/`ringIndex` are otherwise write-private.
+    public func setInnerStateForTests(storedLength: Int, ringIndex: Int) {
+        self.storedLength = storedLength
+        self.ringIndex = ringIndex
+    }
+
+    public func innerStateForTests() -> (storedLength: Int, ringIndex: Int) {
+        (storedLength, ringIndex)
+    }
+
     public func innerState() -> [MLXArray] {
         (keySlots + valueSlots).compactMap { $0 }
     }
@@ -191,10 +201,15 @@ public final class FlintSlidingKVCache: KVCache, BoundedSlidingKVCache {
         }
     }
 
-    /// Exact only while every token is still in the ring (`offset == stored`).
-    /// After the window overwrites a row, rewind goes through a checkpoint.
+    /// Exact only while every token is still in the ring (`offset == stored`)
+    /// or while the ring is left-aligned (`ringIndex == 0`, the state after
+    /// every prefill chunk and therefore every stored prefix snapshot):
+    /// shortening the window drops the newest rows, and the local-index mask
+    /// (`makeMask` uses `storedLength`) stays consistent with the rows that
+    /// remain. The rotating decode state (`ringIndex > 0`) cannot express
+    /// "drop the newest n" and still rewinds through a checkpoint.
     public var isTrimmable: Bool {
-        storedLength > 0 && offset == storedLength
+        storedLength > 0 && (offset == storedLength || ringIndex == 0)
     }
 
     public var maxTrimCount: Int {
@@ -386,7 +401,12 @@ enum FlintSWAReplay {
             kept = prompt - 1
         }
         let drop = snap - kept
-        if !evicted || drop == 0 { return .trim(drop) }
+        // drop <= 1 is exact even on an evicted ring: the re-forwarded token
+        // keeps a complete window (trim shortens the left-aligned snapshot;
+        // see FlintSlidingKVCache.trim). Larger drops lose the oldest drop-1
+        // window keys, so an evicted ring still goes through checkpoint
+        // replay or a full prefill.
+        if !evicted || drop <= 1 { return .trim(drop) }
         if let checkpoint = checkpoints.filter({ $0 <= kept && $0 < snap }).max() {
             return .replay(checkpoint)
         }
