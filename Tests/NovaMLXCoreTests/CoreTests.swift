@@ -24,6 +24,62 @@ struct CoreTypesTests {
         #expect(id.family == .llama)
     }
 
+    @Test("Loaded-model usage text covers curl, Python, and TypeScript")
+    func modelCallSnippet() {
+        let chat = ModelCallSnippet.text(
+            modelId: "org/DeepSeek-V4",
+            modelType: .llm,
+            family: .deepseek,
+            baseURL: "http://127.0.0.1:6590/",
+            apiKey: "secret"
+        )
+        #expect(chat.contains("POST http://127.0.0.1:6590/v1/chat/completions"))
+        #expect(chat.contains("--- curl ---"))
+        #expect(chat.contains("--- Python ---"))
+        #expect(chat.contains("--- TypeScript ---"))
+        #expect(chat.contains("\"model\":\"org/DeepSeek-V4\""))
+        #expect(chat.contains("Bearer secret"))
+
+        let embed = ModelCallSnippet.text(
+            modelId: "mlx-community/bge-m3-mlx-fp16",
+            modelType: .embedding,
+            family: .other,
+            baseURL: "http://127.0.0.1:6590",
+            apiKey: ""
+        )
+        #expect(embed.contains("/v1/embeddings"))
+        #expect(embed.contains("YOUR_API_KEY"))
+
+        let matte = ModelCallSnippet.text(
+            modelId: "ZhengPeng7/BiRefNet-portrait",
+            modelType: .image,
+            family: .biRefNet,
+            baseURL: "http://127.0.0.1:6590",
+            apiKey: "k"
+        )
+        #expect(matte.contains("/v1/images/matting"))
+
+        let asr = ModelCallSnippet.text(
+            modelId: "mlx-community/whisper",
+            modelType: .audio,
+            family: .whisper,
+            baseURL: "http://127.0.0.1:6590",
+            apiKey: "k"
+        )
+        #expect(asr.contains("/v1/audio/transcriptions"))
+        #expect(asr.contains("recording.wav"))
+
+        let tts = ModelCallSnippet.text(
+            modelId: "mlx-community/Qwen3-TTS",
+            modelType: .audio,
+            family: .qwen3Tts,
+            baseURL: "http://127.0.0.1:6590",
+            apiKey: "k"
+        )
+        #expect(tts.contains("/v1/audio/speech"))
+        #expect(tts.contains("speech.wav"))
+    }
+
     @Test("ModelFamily decoding unknown")
     func modelFamilyDecoding() {
         let json = "\"unknown_family\"".data(using: .utf8)!

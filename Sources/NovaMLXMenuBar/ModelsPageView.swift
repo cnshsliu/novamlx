@@ -1043,6 +1043,20 @@ struct ModelsPageView: View {
                         .help(l10n.tr("models.clickDetails"))
                         .onTapGesture { fetchModelCard(repoId: modelId) }
                     CopyIDButton(id: modelId)
+                    if isLoaded {
+                        let record = modelManager.getRecord(modelId)
+                        CopyUsageButton(
+                            text: ModelCallSnippet.text(
+                                modelId: modelId,
+                                modelType: record?.modelType,
+                                family: record?.family,
+                                baseURL: "http://127.0.0.1:\(appState.serverPort)",
+                                apiKey: appState.apiKey ?? "YOUR_API_KEY"
+                            ),
+                            helpText: l10n.tr("models.copyUsage")
+                        )
+                        .accessibilityIdentifier("models-copy-usage-\(modelId)")
+                    }
                 }
                 if !subtitle.isEmpty {
                     Text(subtitle).font(.caption2).foregroundColor(.secondary)

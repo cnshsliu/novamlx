@@ -189,6 +189,31 @@ struct CopyIDButton: View {
     }
 }
 
+/// Copies a multi-line usage note (curl, Python, TypeScript) as plain text.
+struct CopyUsageButton: View {
+    let text: String
+    var helpText: String = "Copy usage"
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "curlybraces")
+                .font(.system(size: 10))
+                .foregroundColor(copied ? NovaTheme.Colors.statusOK : NovaTheme.Colors.textTertiary)
+                .frame(width: 16, height: 16)
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+}
+
 // MARK: - Flow Layout
 
 struct FlowLayout: Layout {
