@@ -944,7 +944,20 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     )
                 }
 
-                let sessionId = Self.extractSessionId(request: request, body: openAIReq.sessionId)
+                let clientType = ClientDetector.detect(request: request)
+                // Agent-tool clients (OpenCode, Claude Code, …) resend their full
+                // conversation history on every request and fire concurrent helper
+                // requests (e.g. title generation) under the same session id. A
+                // server-side ChatSession shared across those concurrent streams
+                // cross-contaminates them — the agent reply comes back as the
+                // helper's answer. Such clients get no server session; the normal
+                // path already reuses the prompt prefix (see sessionClientHoldsHistory).
+                let sessionId: String?
+                if case .agentTool = clientType {
+                    sessionId = nil
+                } else {
+                    sessionId = Self.extractSessionId(request: request, body: openAIReq.sessionId)
+                }
                 let responseFormat: ResponseFormat?
                 var jsonSchemaDef: [String: Any]? = nil
                 var regexPattern: String? = nil
@@ -968,7 +981,6 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     responseFormat = nil
                 }
 
-                let clientType = ClientDetector.detect(request: request)
                 var response: Response
                 if openAIReq.stream ?? false {
                     response = try await Self.handleStreamChat(
