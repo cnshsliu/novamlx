@@ -233,6 +233,21 @@ struct CoreTypesTests {
         #expect(fallback.path == extra.path)
     }
 
+    @Test("prioritizeExternalFirst puts external disks ahead of internal regardless of line order")
+    func downloadRootExternalFirstPolicy() {
+        let internalDisk = URL(fileURLWithPath: "/Users/lucas/Models", isDirectory: true)
+        let wd = URL(fileURLWithPath: "/Volumes/WD/nova-models", isDirectory: true)
+        let samsung = URL(fileURLWithPath: "/Volumes/Samsung768/Models", isDirectory: true)
+
+        // Internal listed first in config — external still wins.
+        #expect(NovaMLXPaths.prioritizeExternalFirst([internalDisk, wd]) == [wd, internalDisk])
+        // Externals keep configured order among themselves.
+        #expect(NovaMLXPaths.prioritizeExternalFirst([internalDisk, samsung, wd]) == [samsung, wd, internalDisk])
+        #expect(NovaMLXPaths.prioritizeExternalFirst([wd, samsung, internalDisk]) == [wd, samsung, internalDisk])
+        // All-internal list is unchanged.
+        #expect(NovaMLXPaths.prioritizeExternalFirst([internalDisk]) == [internalDisk])
+    }
+
     @Test("downloadRoot throws when no root can hold the download")
     func downloadRootInsufficientSpaceThrows() throws {
         let fm = FileManager.default

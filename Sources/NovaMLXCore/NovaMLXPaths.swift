@@ -247,8 +247,24 @@ public enum NovaMLXPaths {
     /// A root whose directory does not exist yet is still eligible when its
     /// nearest existing ancestor is writable (the download creates it).
     /// Throws `ModelStorageError.insufficientSpace` when NO root qualifies.
+    /// Storage policy ordering: external disks first, boot-volume paths last,
+    /// regardless of configured line order — downloads land on the first
+    /// viable external disk and only fall back to an internal path when every
+    /// external disk is unmounted, read-only, or full. Configured priority is
+    /// preserved within each group.
+    public static func prioritizeExternalFirst(_ roots: [URL]) -> [URL] {
+        Array(roots.enumerated()
+            .sorted { lhs, rhs in
+                let lExternal = triggersRemovableVolumeTCC(lhs.element)
+                let rExternal = triggersRemovableVolumeTCC(rhs.element)
+                if lExternal != rExternal { return lExternal }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element))
+    }
+
     public static func downloadRoot(estimatedBytes: UInt64, roots: [URL]? = nil) throws -> URL {
-        let search = roots ?? configuredModelsDirs
+        let search = prioritizeExternalFirst(roots ?? configuredModelsDirs)
         let fm = FileManager.default
         var reasons: [String] = []
         for root in search {

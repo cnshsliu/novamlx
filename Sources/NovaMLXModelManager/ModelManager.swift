@@ -132,17 +132,21 @@ public final class ModelManager: @unchecked Sendable {
             "[ModelManager] Storage dirs updated: primary=\(primary.path) extras=\(extras.map(\.path))")
     }
 
-    /// Download root for a new registration: strict priority order across the
-    /// configured roots. Falls back to the primary when every root fails the
-    /// space/writability preflight — the actual download re-checks and
-    /// surfaces the error to the user.
+    /// Download root for a new registration: external disks first, then
+    /// internal (see `NovaMLXPaths.downloadRoot`). Falls back to the first
+    /// mounted root when every root fails the space/writability preflight —
+    /// never to an unmounted primary — so the actual download surfaces the
+    /// real error instead of writing into a dead path.
     private func rootForNewModel(sizeBytes: UInt64) -> URL {
         let roots = [modelsDirectory] + extraModelDirectories
         if let chosen = try? NovaMLXPaths.downloadRoot(
             estimatedBytes: sizeBytes, roots: roots) {
             return chosen
         }
-        return modelsDirectory
+        let fm = FileManager.default
+        return roots.first {
+            NovaMLXPaths.isVolumeMounted($0) && fm.fileExists(atPath: $0.path)
+        } ?? modelsDirectory
     }
 
     /// All on-disk locations for `modelId`, in storage-priority order:
