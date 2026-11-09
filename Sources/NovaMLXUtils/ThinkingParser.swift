@@ -174,13 +174,19 @@ public final class ThinkingParser: @unchecked Sendable {
                     }
                     closeWasSeen = false
                 } else if closeWasSeen {
-                    // After a close tag we know type is .content — yield everything.
-                    // No partial buffering needed since we aren't expecting another tag.
+                    // After a close tag we know type is .content — yield
+                    // everything. Damaged/abliterated models sometimes emit a
+                    // SECOND `</think>` mid-response; a protocol tag is never
+                    // literal content, so strip complete tag occurrences and
+                    // hold back a trailing partial tag for the next feed.
                     if !buffer.isEmpty {
-                        responseContent += buffer
-                        resultText += buffer
-                        resultType = .content
-                        buffer = ""
+                        let (clean, partial) = Self.stripResidualThinkTags(buffer)
+                        buffer = partial
+                        if !clean.isEmpty {
+                            responseContent += clean
+                            resultText += clean
+                            resultType = .content
+                        }
                     }
                     break loop
                 } else {
@@ -298,7 +304,10 @@ public final class ThinkingParser: @unchecked Sendable {
         case .potentialCloseTag:
             thinkingContent += Self.thinkClose + buffer
         case .normal:
-            responseContent += buffer
+            // A second `</think>` after the first close is protocol noise
+            // (seen from abliterated models that repeat the answer around a
+            // stray close tag), never literal content.
+            responseContent += Self.stripResidualThinkTags(buffer).text
         }
         buffer = ""
         state = .normal
@@ -326,6 +335,30 @@ public final class ThinkingParser: @unchecked Sendable {
         }
 
         return ThinkingContent(thinking: thinkingContent, response: responseContent)
+    }
+
+    /// After the first `</think>`, later think tags are protocol noise —
+    /// never literal content. Strips complete tag occurrences and returns a
+    /// trailing partial tag (split across feeds) for the caller to re-buffer.
+    private static func stripResidualThinkTags(_ text: String) -> (text: String, partial: String) {
+        let tags = ["</think>", "<think>", "</thinking>", "<thinking>"]
+        var result = text
+        var partial = ""
+        for tag in tags {
+            var i = tag.count - 1
+            while i > 0 {
+                if result.hasSuffix(String(tag.prefix(i))) {
+                    partial = String(tag.prefix(i))
+                    result = String(result.dropLast(i))
+                    break
+                }
+                i -= 1
+            }
+        }
+        for tag in tags {
+            result = result.replacingOccurrences(of: tag, with: "")
+        }
+        return (result, partial)
     }
 
     public var currentThinkingContent: String { thinkingContent }

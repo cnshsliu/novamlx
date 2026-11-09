@@ -417,21 +417,26 @@ public final class ModelContainer: @unchecked Sendable {
             }
         }
 
-        // NovaMLX-TIE: V4 (and similar) templates use `<think>` only inside a
-        // `mode == 'thinking'` conditional. Default chat mode renders `</think>`
-        // (close-only), so output should NOT be treated as implicit thinking.
-        // Reject implicit when the template gates `<think>` behind a mode check.
-        if hasInjectedOpen {
-            let lower = template.lowercased()
-            let modeGated = lower.contains("mode == 'thinking'") || lower.contains("mode==\"thinking\"")
-                || lower.contains("thinking_mode == 'thinking'")
-                || lower.contains("thinking_mode==\"thinking\"")
-            let closesByDefault = lower.contains("</think>")
-            let enableThinkingGated = lower.contains("enable_thinking is false")
-                || lower.contains("enable_thinking is defined")
-                || lower.contains("enable_thinking ==")
-            if (modeGated || enableThinkingGated) && closesByDefault {
-                NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): template gates `<think>` behind thinking mode and defaults to `</think>` → false (explicit, chat mode)")
+        // Gate-direction check — only templates whose DEFAULT generation path
+        // renders close-only are explicit. Resolve structurally which Jinja
+        // branch holds the bare open injection and whether that branch is the
+        // default. Whole-template substring matching got this wrong twice:
+        // `enable_thinking is defined` (OFF-gate guarding the closed form,
+        // default = open) and `enable_thinking is true` — which also matches
+        // EfficientThink's default-ON `enable_thinking is undefined or
+        // enable_thinking is true` reasoning-effort block that has nothing to
+        // do with the injection point.
+        //
+        //  unsloth Qwen3 family: `{%- if enable_thinking is defined and
+        //    enable_thinking is false %}<think>\n\n</think>{% else %}<think>\n`
+        //    — open in the else branch of a default-FALSE condition → IMPLICIT.
+        //  NovaMLX-TIE V4: `{%- if mode == 'thinking' %}<think>\n{% else %}
+        //    </think>` — open in the if branch of a default-FALSE condition →
+        //    EXPLICIT. A default-TRUE condition flips both.
+        if hasInjectedOpen, let genRange = template.range(of: "add_generation_prompt") {
+            let generationBlock = String(template[genRange.upperBound...])
+            if let defaultOpen = Self.thinkInjectionDefaultOpen(inGenerationBlock: generationBlock), !defaultOpen {
+                NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): open <think> only renders when a thinking-ON condition holds; default path renders close-only → false (explicit, chat mode)")
                 return false
             }
         }
@@ -452,6 +457,55 @@ public final class ModelContainer: @unchecked Sendable {
         // Step 4: no thinking format detected — not a thinking model.
         NovaMLXLog.info("[isImplicitThinkingModel] \(modelId): no thinking markers found → false")
         return false
+    }
+
+    /// Whether the bare `<think>` injection in the generation block renders on
+    /// the DEFAULT path (before any thinking flag is passed). Returns nil when
+    /// no bare open injection exists in this block.
+    ///
+    /// Walks the Jinja control tokens before the injection point to find the
+    /// innermost enclosing conditional, then classifies its condition:
+    ///  - injection in the `else` branch → renders when the condition is false
+    ///  - injection in the `if`/`elif` branch → renders when it is true
+    ///  - `is undefined or` / `is not false` conditions default to TRUE, all
+    ///    others (undefined comparisons in Jinja) default to FALSE.
+    private static func thinkInjectionDefaultOpen(inGenerationBlock block: String) -> Bool? {
+        // Quoted Jinja literals only; the closed form `'<think>\n\n</think>'`
+        // does not contain them because the closing quote never follows the
+        // escape directly.
+        let openLiterals = [
+            "'<think>\\n'", "\"<think>\\n\"", "'<thinking>\\n'", "\"<thinking>\\n\"",
+            "'<think>'", "\"<think>\"", "'<thinking>'", "\"<thinking>\"",
+        ]
+        guard let openRange = openLiterals.compactMap({ block.range(of: $0) })
+            .min(by: { $0.lowerBound < $1.lowerBound }) else { return nil }
+        let before = String(block[..<openRange.lowerBound])
+
+        let tokenPattern = "\\{%-?\\s*(if\\s[^%]*|elif\\s[^%]*|else|endif)\\s*-?%\\}"
+        guard let regex = try? NSRegularExpression(pattern: tokenPattern) else { return true }
+        var stack: [(condition: String, sawElse: Bool)] = []
+        let nsBefore = NSRange(before.startIndex..., in: before)
+        regex.enumerateMatches(in: before, range: nsBefore) { match, _, _ in
+            guard let match, let r = Range(match.range, in: before) else { return }
+            let stmt = String(before[r]).lowercased()
+            if stmt.contains("elif ") {
+                if !stack.isEmpty { stack[stack.count - 1].sawElse = true }
+                stack.append((stmt, false))
+            } else if stmt.contains("if ") {
+                stack.append((stmt, false))
+            } else if stmt.contains("else") {
+                if !stack.isEmpty { stack[stack.count - 1].sawElse = true }
+            } else if stmt.contains("endif") {
+                if !stack.isEmpty { _ = stack.removeLast() }
+            }
+        }
+        guard let innermost = stack.last else {
+            // Injection outside any conditional — always renders.
+            return true
+        }
+        let defaultTrue = innermost.condition.contains("is undefined or")
+            || innermost.condition.contains("is not false")
+        return innermost.sawElse ? !defaultTrue : defaultTrue
     }
 
     private static func loadChatTemplate(modelDir: URL) -> String? {

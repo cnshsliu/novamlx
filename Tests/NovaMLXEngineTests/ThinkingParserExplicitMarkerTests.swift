@@ -38,6 +38,32 @@ struct ThinkingParserExplicitMarkerTests {
 
     // MARK: - 1. Single-shot
 
+    @Test("Implicit single-shot: stray second </think> mid-response is stripped from content")
+    func implicitStraySecondCloseTag() {
+        // Abliterated Qwen3-family models sometimes repeat the answer around
+        // a second close tag: "T</think>answer</think>answer".
+        let parser = ThinkingParser(expectImplicitThinking: true)
+        _ = parser.feed("T\n</think>\n\n答案甲。\n</think>\n\n答案甲。")
+        let result = parser.finalize()
+        #expect(result.thinking == "T\n",
+            "text before the first close is thinking; got '\(result.thinking)'")
+        #expect(!result.response.contains("</think"),
+            "a residual protocol tag must never leak into content; got '\(result.response)'")
+        #expect(result.response.contains("答案甲"),
+            "the answer text itself is preserved")
+    }
+
+    @Test("Implicit streaming: second </think> split across chunk boundary stays out of content")
+    func implicitStraySecondCloseTagChunked() {
+        let parser = ThinkingParser(expectImplicitThinking: true)
+        _ = parser.feed("T\n</think>\n\n答案甲。\n</thi")
+        _ = parser.feed("nk>\n\n答案甲。")
+        let result = parser.finalize()
+        #expect(!result.response.contains("</think") && !result.response.contains("thi\nnk"),
+            "a partial close tag split across feeds must not leak; got '\(result.response)'")
+        #expect(result.response.contains("答案甲"))
+    }
+
     @Test("Single-shot: <|begin_of_thought|>X<|end_of_thought|>Y → thinking=X, response=Y")
     func singleShotExplicit() {
         let parser = ThinkingParser(expectImplicitThinking: false)
@@ -305,8 +331,12 @@ struct ThinkingParserExplicitMarkerTests {
             "Qwen3.6-style fixture (template <think + explicit <|begin_of_thought|> token) must be detected as NON-implicit so ThinkingParser is constructed with expectImplicitThinking=false")
     }
 
-    @Test("isImplicitThinkingModel returns FALSE for Qwen3.8-Flash-Next enable_thinking gate")
+    @Test("isImplicitThinkingModel returns TRUE for unsloth/Qwen3 OFF-gated enable_thinking template")
     func implicitDetectionFlashNextEnableThinkingGate() throws {
+        // Qwen3 / Qwen3.5-unsloth / Qwen3.8-Flash-Next shape: the condition
+        // guards the DISABLED form, and the default `{% else %}` branch injects
+        // an OPEN `<think>\n` — the model streams reasoning until `</think>`.
+        // Treating this as explicit leaked raw reasoning into content.
         let modelId = try makeFixtureModel(
             nameSuffix: "flash-next-enable-thinking",
             addedTokens: [
@@ -326,8 +356,69 @@ struct ThinkingParserExplicitMarkerTests {
         )
         defer { cleanupFixture(modelId) }
         let isImplicit = ModelContainer.isImplicitThinkingModel(for: modelId)
+        #expect(isImplicit == true,
+            "OFF-gated enable_thinking templates inject an open <think> by default → implicit")
+    }
+
+    @Test("isImplicitThinkingModel returns TRUE for EfficientThink (default-ON effort block + OFF-gated injection)")
+    func implicitDetectionEfficientThinkShapeReturnsTrue() throws {
+        // Coder390 EfficientThink shape: an earlier default-TRUE block
+        // (`enable_thinking is undefined or enable_thinking is true`) sets the
+        // reasoning effort — a plain substring scan matches `enable_thinking
+        // is true` there and mis-classifies the model as explicit. The actual
+        // injection sits in the else branch of the default-FALSE OFF-gate.
+        let modelId = try makeFixtureModel(
+            nameSuffix: "efficient-think",
+            addedTokens: [
+                ["content": "<|im_start|>", "special": true],
+                ["content": "<|im_end|>", "special": true],
+            ],
+            chatTemplate: """
+            {%- set reasoning_instructions = '' %}
+            {%- if enable_thinking is undefined or enable_thinking is true %}
+                {%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}
+            {%- endif %}
+            {%- if add_generation_prompt %}
+                {{- '<|im_start|>assistant\\n' }}
+                {%- if enable_thinking is defined and enable_thinking is false %}
+                    {{- '<think>\\n\\n</think>\\n\\n' }}
+                {%- else %}
+                    {{- '<think>\\n' }}
+                {%- endif %}
+            {%- endif %}
+            """
+        )
+        defer { cleanupFixture(modelId) }
+        let isImplicit = ModelContainer.isImplicitThinkingModel(for: modelId)
+        #expect(isImplicit == true,
+            "EfficientThink injects an open <think> by default → implicit, despite the default-TRUE effort block")
+    }
+
+    @Test("isImplicitThinkingModel returns FALSE for TIE-style thinking-ON gated template")
+    func implicitDetectionTieModeGatedReturnsFalse() throws {
+        // NovaMLX-TIE V4 shape: the open <think> renders only inside a
+        // thinking-ON condition; the default chat path emits close-only.
+        let modelId = try makeFixtureModel(
+            nameSuffix: "tie-mode-gated",
+            addedTokens: [
+                ["content": "<|im_start|>", "special": true],
+                ["content": "<|im_end|>", "special": true],
+            ],
+            chatTemplate: """
+            {%- if add_generation_prompt %}
+                {{- '<|im_start|>assistant\\n' }}
+                {%- if mode == 'thinking' %}
+                    {{- '<think>\\n' }}
+                {%- else %}
+                    {{- '</think>\\n\\n' }}
+                {%- endif %}
+            {%- endif %}
+            """
+        )
+        defer { cleanupFixture(modelId) }
+        let isImplicit = ModelContainer.isImplicitThinkingModel(for: modelId)
         #expect(isImplicit == false,
-            "Flash-Next gates <think> on enable_thinking and emits </think> when false")
+            "ON-gated templates render close-only by default → explicit")
     }
 
     @Test("isImplicitThinkingModel returns TRUE for DeepSeek-R1-style fixture (template-only, no explicit marker tokens)")
