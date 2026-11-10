@@ -210,20 +210,34 @@ public enum CacheBlockExtractor {
             || cls == "ChunkedKVCache" || cls == "QuantizedKVCache"
     }
 
-    public static func getLayerClasses(from cache: [KVCache]) -> [String] {
-        cache.map { wrapped -> String in
-            switch canonicalLayer(wrapped) {
-            case is ChunkedKVCache: "ChunkedKVCache"
-            case is KVCacheSimple: "KVCache"
-            case is RotatingKVCache: "RotatingKVCache"
-            case is BoundedSlidingKVCache: "FlintSlidingKVCache"
-            case is QuantizedKVCache: "QuantizedKVCache"
-            case is MambaCache: "MambaCache"
-            case is ArraysCache: "ArraysCache"
-            case is CacheList: "CacheList"
-            default: "KVCache"
-            }
+    /// Fixed-size (recurrent) state per layer, empty for KV layers — the
+    /// prefill-boundary anchor an anchored hybrid store needs. MLXArray is
+    /// COW and every decode step assigns new arrays into the cache slots, so
+    /// the captured references stay at the prefill boundary.
+    public static func snapshotFixedStates(_ cache: [KVCache]) -> [[MLXArray]] {
+        cache.map { wrapped in
+            let cls = layerClassName(wrapped)
+            guard !isKVClassName(cls) else { return [] }
+            return canonicalLayer(wrapped).state
         }
+    }
+
+    public static func layerClassName(_ wrapped: KVCache) -> String {
+        switch canonicalLayer(wrapped) {
+        case is ChunkedKVCache: "ChunkedKVCache"
+        case is KVCacheSimple: "KVCache"
+        case is RotatingKVCache: "RotatingKVCache"
+        case is BoundedSlidingKVCache: "FlintSlidingKVCache"
+        case is QuantizedKVCache: "QuantizedKVCache"
+        case is MambaCache: "MambaCache"
+        case is ArraysCache: "ArraysCache"
+        case is CacheList: "CacheList"
+        default: "KVCache"
+        }
+    }
+
+    public static func getLayerClasses(from cache: [KVCache]) -> [String] {
+        cache.map(layerClassName)
     }
 
     public static func getMetaStates(from cache: [KVCache]) -> [[String]] {

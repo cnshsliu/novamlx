@@ -7,6 +7,19 @@ public final class PrefixCacheManager: @unchecked Sendable {
     private let pool: PagedBlockPool
     private let durable: (any PrefixCacheDurableStore)?
     private let hot: HotPrefixTier
+
+    /// Hybrid anchored entry: the sub-block tail (KV slice + recurrent state
+    /// at the anchor length) parked under the matched chain's tip hash. Kept
+    /// OUT of the block tables so a KV-only chain hit can never masquerade as
+    /// a consistent hybrid restore.
+    struct AnchorEntry {
+        let tailTokens: [Int]
+        let layers: [[MLXArray]]
+        let layerClasses: [String]
+        let anchorLen: Int
+        var lastAccess: Date
+    }
+    private var anchors: [BlockHash: AnchorEntry] = [:]
     private let config: PrefixCacheConfig
     private let modelName: String
     private let clock: @Sendable () -> Date
@@ -88,7 +101,11 @@ public final class PrefixCacheManager: @unchecked Sendable {
         }
     }
 
-    public func fetchPrefix(tokenIds: [Int]) -> PrefixResult {
+    /// - Parameter requireAnchor: hybrid (GDN) callers pass `true` — a plain
+    ///   KV-chain hit carries no recurrent state, and restoring one would
+    ///   pair a KV prefix with a zero recurrent state (inconsistent cache).
+    ///   Without an anchor continuation such a fetch is a miss.
+    public func fetchPrefix(tokenIds: [Int], requireAnchor: Bool = false) -> PrefixResult {
         guard !tokenIds.isEmpty else {
             return PrefixResult(cache: nil, cachedTokenCount: 0, remainingTokenIds: tokenIds)
         }
@@ -160,12 +177,87 @@ public final class PrefixCacheManager: @unchecked Sendable {
             )
         }
 
+        // Hybrid anchor continuation: probe anchor entries parked under
+        // (matched tip hash, candidate tail lengths). The anchor's KV tail
+        // slice and recurrent snapshot both end at the anchor length, so the
+        // restored cache is internally consistent. Works for the multi-turn
+        // case where the new prompt strictly extends the anchored prompt —
+        // the matched tip is the same and the tail tokens coincide.
+        let matchedBlocks = blockDataList.count
+        let matchedTokenCount = matchedBlocks * config.blockSize
+        var anchorHit: AnchorEntry?
+        if !anchors.isEmpty, matchedBlocks > 0 || tokenIds.count < config.blockSize {
+            let tip = matchedBlocks > 0 ? hashes[matchedBlocks - 1] : nil
+            let maxTail = min(config.blockSize - 1, tokenIds.count - matchedTokenCount)
+            for tailLen in 1...max(1, maxTail) where tailLen <= maxTail {
+                let candidate = Array(
+                    tokenIds[matchedTokenCount ..< (matchedTokenCount + tailLen)])
+                let key = BlockHasher.computeBlockHash(
+                    parentHash: tip, tokenIds: candidate, modelName: modelName)
+                if var entry = anchors[key] {
+                    entry.lastAccess = instant
+                    anchors[key] = entry
+                    anchorHit = entry
+                    break
+                }
+            }
+        }
+
+        if let anchor = anchorHit {            var anchoredBlocks = blockDataList
+            anchoredBlocks.append(anchor.layers)
+            guard let reconstructedAnchored = CacheBlockExtractor.reconstructKVCache(
+                blockDataList: anchoredBlocks,
+                layerClasses: anchor.layerClasses,
+                metaStatesList: metaStatesList)
+            else {
+                lock.withLock { misses += 1 }
+                return PrefixResult(
+                    cache: nil, cachedTokenCount: 0, remainingTokenIds: tokenIds,
+                    scheduledAsyncLoads: scheduled)
+            }
+            let cachedTokenCount = anchor.anchorLen
+            let remaining = Array(tokenIds.dropFirst(cachedTokenCount))
+            guard !remaining.isEmpty else {
+                // Full-prompt hit leaves nothing to prefill and the decode
+                // loop cannot start from an empty input — treat as a miss.
+                lock.withLock { misses += 1 }
+                return PrefixResult(
+                    cache: nil, cachedTokenCount: 0, remainingTokenIds: tokenIds,
+                    scheduledAsyncLoads: scheduled)
+            }
+            lock.withLock {
+                hits += 1
+                tokensSaved += cachedTokenCount
+            }
+            NovaMLXLog.info(
+                "Prefix cache anchored hit: \(cachedTokenCount) tokens, \(remaining.count) remaining"
+            )
+            return PrefixResult(
+                cache: reconstructedAnchored,
+                cachedTokenCount: cachedTokenCount,
+                remainingTokenIds: remaining,
+                scheduledAsyncLoads: scheduled
+            )
+        }
+
+        if requireAnchor {
+            NovaMLXLog.info(
+                "[PrefixCache] hybrid fetch: matched=\(matchedBlocks) blocks, anchors=\(anchors.count), no anchor -> miss"
+            )
+            // Hybrid consistency: no anchor means no recurrent state — the
+            // KV chain alone cannot restore this model.
+            lock.withLock { misses += 1 }
+            return PrefixResult(
+                cache: nil, cachedTokenCount: 0, remainingTokenIds: tokenIds,
+                scheduledAsyncLoads: scheduled)
+        }
+
         let reconstructed = CacheBlockExtractor.reconstructKVCache(
             blockDataList: blockDataList,
             layerClasses: layerClasses,
             metaStatesList: metaStatesList
         )
-        let cachedTokenCount = blockDataList.count * config.blockSize
+        let cachedTokenCount = matchedTokenCount
         let remaining = Array(tokenIds.dropFirst(cachedTokenCount))
         lock.withLock {
             hits += 1
@@ -181,6 +273,97 @@ public final class PrefixCacheManager: @unchecked Sendable {
             remainingTokenIds: remaining,
             scheduledAsyncLoads: scheduled
         )
+    }
+
+    /// Anchored hybrid store. Full blocks carry KV slices only; the partial
+    /// tail block (or a single sub-block entry when the prompt is shorter
+    /// than one block) carries the KV tail slice PLUS the recurrent state
+    /// snapshotted at exactly `tokenIds.count` tokens — callers capture that
+    /// snapshot right after prefill, before any decode step advances it, and
+    /// pass it as `fixedStateAnchor` (per-layer arrays, empty for KV layers).
+    /// A fetch that walks the full blocks continues into the tail and the
+    /// restored cache is internally consistent.
+    public func storeAnchoredCache(
+        tokenIds: [Int], cache: [KVCache], fixedStateAnchor: [[MLXArray]]
+    ) {
+        guard !tokenIds.isEmpty, !cache.isEmpty else { return }
+        guard CacheBlockExtractor.admitsLongTermKV(cache) else {
+            NovaMLXLog.info("[PrefixCache] skip anchored store for \(modelName): wrapped ring")
+            return
+        }
+
+        let layerClasses = CacheBlockExtractor.getLayerClasses(from: cache)
+        let metaStates = CacheBlockExtractor.getMetaStates(from: cache)
+        let blockSize = config.blockSize
+        let numFullBlocks = tokenIds.count / blockSize
+        let anchoredLen = tokenIds.count
+
+        let instant = clock()
+        lock.withLock {
+            var parentHash: BlockHash? = nil
+
+            // Full blocks: KV-only. The fixed-size state is attached to the
+            // tail alone so byte accounting charges it once.
+            for i in 0..<numFullBlocks {
+                let start = i * blockSize
+                let end = start + blockSize
+                let blockTokens = Array(tokenIds[start..<end])
+                let hash = BlockHasher.computeBlockHash(
+                    parentHash: parentHash, tokenIds: blockTokens, modelName: modelName)
+                if pool.getBlockByHash(hash) != nil {
+                    parentHash = hash
+                    continue
+                }
+                guard let block = pool.allocateBlock() else { break }
+                pool.registerBlock(block: block, tokenIds: blockTokens, parentHash: parentHash)
+                parentHash = hash
+
+                var sliced = CacheBlockExtractor.extractBlockSlices(
+                    cache: cache, startIdx: start, endIdx: end)
+                // Strip fixed-size state from non-tail blocks.
+                for li in 0..<min(sliced.count, layerClasses.count)
+                where !CacheBlockExtractor.isKVClassName(layerClasses[li]) {
+                    sliced[li] = []
+                }
+                let hotBlock = HotPrefixBlock(
+                    layers: sliced, layerClasses: layerClasses, metaStates: metaStates,
+                    bytes: HotPrefixTier.estimatedBytes(sliced),
+                    createdAt: instant, lastAccess: instant)
+                let demoted = hot.insert(hash, block: hotBlock)
+                evictions += demoted
+            }
+
+            // Anchor entry: KV tail + recurrent state at `anchoredLen`, keyed
+            // by the matched chain's tip hash so a later fetch that walks the
+            // full blocks finds it WITHOUT the tail living in the block tables
+            // (a KV-only chain hit must never masquerade as a hybrid restore).
+            // Positional KV slices are valid against the live post-generation
+            // cache because KV arrays only append; the fixed recurrent state
+            // is replaced with the prefill-boundary anchor.
+            let tailLen = anchoredLen % blockSize
+            let tailTokens = Array(tokenIds.suffix(tailLen))
+            let tailStart = anchoredLen - tailLen
+            var tailSlices = CacheBlockExtractor.extractBlockSlices(
+                cache: cache, startIdx: tailStart, endIdx: anchoredLen)
+            for li in 0..<min(tailSlices.count, fixedStateAnchor.count)
+            where !fixedStateAnchor[li].isEmpty {
+                tailSlices[li] = fixedStateAnchor[li]
+            }
+            let anchorKey = BlockHasher.computeBlockHash(
+                parentHash: parentHash, tokenIds: tailTokens, modelName: modelName)
+            anchors[anchorKey] = AnchorEntry(
+                tailTokens: tailTokens, layers: tailSlices,
+                layerClasses: layerClasses, anchorLen: anchoredLen,
+                lastAccess: instant)
+            // Bounded LRU: each anchor holds a full recurrent snapshot, so a
+            // handful is plenty for the multi-turn working set.
+            while anchors.count > 8 {
+                let oldest = anchors.min { $0.value.lastAccess < $1.value.lastAccess }?.key
+                guard let oldest else { break }
+                anchors.removeValue(forKey: oldest)
+            }
+        }
+        NovaMLXLog.info("Anchored store: \(numFullBlocks) full blocks + anchor(len=\(anchoredLen)) for \(modelName)")
     }
 
     public func storeCache(tokenIds: [Int], cache: [KVCache]) {
@@ -279,6 +462,7 @@ public final class PrefixCacheManager: @unchecked Sendable {
     }
 
     public func clear() {
+        anchors.removeAll()
         pool.clear()
         durable?.clear()
         hot.clear()

@@ -52,4 +52,24 @@ public enum BlockHasher {
         }
         return hashes
     }
+
+    /// Hash of the sub-block tail after the last full block. Anchored hybrid
+    /// stores place their promptLen recurrent-state snapshot in this partial
+    /// block, so a fetch that walks the full blocks continues into it and
+    /// restores a cache that is internally consistent (KV prefix and recurrent
+    /// state end at the same token).
+    public static func partialTailHash(
+        tokenIds: [Int],
+        blockSize: Int,
+        modelName: String,
+        chainHashes: [BlockHash]? = nil
+    ) -> (hash: BlockHash, tailTokens: [Int])? {
+        let tailLen = tokenIds.count % blockSize
+        guard tailLen > 0 else { return nil }
+        let hashes = chainHashes ?? computeChainHashes(
+            tokenIds: tokenIds, blockSize: blockSize, modelName: modelName)
+        let parent = hashes.last
+        let tail = Array(tokenIds.suffix(tailLen))
+        return (computeBlockHash(parentHash: parent, tokenIds: tail, modelName: modelName), tail)
+    }
 }

@@ -2877,7 +2877,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         // block slicing itself is correct — TTFT dropped 53% on hits — so the
         // remaining work is a promptLen-anchored snapshot, not the pipeline.
         let hybridPrefixEnabled =
-            ProcessInfo.processInfo.environment["NOVA_HYBRID_PREFIX_CACHE"] == "1"
+            ProcessInfo.processInfo.environment["NOVA_HYBRID_PREFIX_CACHE"] != "0"
         let allPromptTokens: [Int]?
         let prefixResult: PrefixCacheManager.PrefixResult?
         if !isVLM, rotatingPrefixSafe,
@@ -2886,7 +2886,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
            promptTokenCount > 0 {
             let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
             allPromptTokens = tokens
-            prefixResult = getOrCreatePrefixCacheManager(modelId: request.model, ramOnly: isHybridPrefixModel)?.fetchPrefix(tokenIds: tokens)
+            prefixResult = getOrCreatePrefixCacheManager(modelId: request.model, ramOnly: isHybridPrefixModel)?
+                .fetchPrefix(tokenIds: tokens, requireAnchor: isHybridPrefixModel)
         } else {
             allPromptTokens = nil
             prefixResult = nil
@@ -3491,6 +3492,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
             }
         }
 
+        // Hybrid prefix anchor: prefill-boundary recurrent states (COW refs
+        // stay at promptLen while generation replaces the live slots).
+        var hybridAnchorStates: [[MLXArray]] = []
+        if isHybridPrefixModel, hybridPrefixEnabled {
+            hybridAnchorStates = CacheBlockExtractor.snapshotFixedStates(kvCache)
+        }
+
         let bytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262_144
         let ticket = createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: bytesPerToken)
 
@@ -3547,7 +3555,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
            let prefixCache = getOrCreatePrefixCacheManager(
                modelId: request.model, ramOnly: isHybridPrefixModel),
            let kvCache = kvCacheBox.value {
-            prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
+            if isHybridPrefixModel {
+                prefixCache.storeAnchoredCache(
+                    tokenIds: tokenArray, cache: kvCache,
+                    fixedStateAnchor: hybridAnchorStates)
+            } else {
+                prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
+            }
         }
 
         deferredClearCache()
@@ -3685,7 +3699,7 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     let allPromptTokens: [Int]?
                     let prefixResult: PrefixCacheManager.PrefixResult?
                     let streamHybridPrefixEnabled =
-                        ProcessInfo.processInfo.environment["NOVA_HYBRID_PREFIX_CACHE"] == "1"
+                        ProcessInfo.processInfo.environment["NOVA_HYBRID_PREFIX_CACHE"] != "0"
                     if !isVLM, streamRotatingSafe,
                         (!container.config.hasLinearAttention || streamHybridPrefixEnabled),
                        let _ = self.getOrCreatePrefixCacheManager(
@@ -3695,7 +3709,9 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         allPromptTokens = tokens
                         prefixResult = self.getOrCreatePrefixCacheManager(
                             modelId: request.model, ramOnly: container.config.hasLinearAttention
-                        )?.fetchPrefix(tokenIds: tokens)
+                        )?.fetchPrefix(
+                            tokenIds: tokens,
+                            requireAnchor: container.config.hasLinearAttention)
                     } else {
                         allPromptTokens = nil
                         prefixResult = nil
@@ -4255,6 +4271,16 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                     }
 
+                    // Hybrid prefix anchor: capture the recurrent states at
+                    // exactly the prefill boundary. Every iterator above
+                    // prefills during construction, and decode steps replace
+                    // (never mutate) the state arrays, so these COW references
+                    // stay at promptLen while generation continues below.
+                    var hybridAnchorStates: [[MLXArray]] = []
+                    if container.config.hasLinearAttention, streamHybridPrefixEnabled {
+                        hybridAnchorStates = CacheBlockExtractor.snapshotFixedStates(kvCache)
+                    }
+
                     let ticketBytesPerToken = container.kvMemoryOverride ?? container.config.kvMemoryBytesPerToken ?? 262144
                     let ticket = self.createGenerationTicket(promptTokens: Int(promptTokenCount), maxTokens: maxTokens, bytesPerToken: ticketBytesPerToken)
                     let (stream, _) = generateTask(
@@ -4337,7 +4363,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                        let prefixCache = self.getOrCreatePrefixCacheManager(
                            modelId: request.model, ramOnly: container.config.hasLinearAttention),
                        let kvCache = kvCacheBox.value {
-                        prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
+                        if container.config.hasLinearAttention {
+                            prefixCache.storeAnchoredCache(
+                                tokenIds: tokenArray, cache: kvCache,
+                                fixedStateAnchor: hybridAnchorStates)
+                        } else {
+                            prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
+                        }
                     }
 
                     let elapsed = Date().timeIntervalSince(startTime)
