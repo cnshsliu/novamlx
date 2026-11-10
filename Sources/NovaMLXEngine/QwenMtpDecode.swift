@@ -181,7 +181,7 @@ func openQwenMtpIterator(
     // Qwen's drafter publishes `maximumBlockSize` 2 (one draft + the bonus).
     // The iterator clamps to that. A larger request still verifies correctly.
     let blockSize = max(2, (numDraftTokens ?? 1) + 1)
-    let iterator = try MTPSpeculativeTokenIterator(
+    var iterator = try MTPSpeculativeTokenIterator(
         input: input,
         mainModel: model,
         drafter: drafter,
@@ -189,6 +189,12 @@ func openQwenMtpIterator(
         parameters: mtpParameters,
         blockSize: blockSize,
         components: components)
+    iterator.mtpRoundTimingNote = { t in
+        NovaMLXLog.debug(
+            String(
+                format: "[MTP:\(logTag)] round draft=%.1fms verify=%.1fms commit=%.1fms",
+                t.draftMs, t.verifyMs, t.commitMs))
+    }
     NovaMLXLog.info(
         "[\(logTag)] Qwen MTP MLXLMCommon verify draft=\(draftModelId) block=\(iterator.blockSize) greedy"
     )
