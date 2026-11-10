@@ -935,13 +935,22 @@ public final class NovaMLXAPIServer: @unchecked Sendable {
                     coordinator: coordinator, request: request
                 )
 
-                // Also ensure draft model is loaded if specified (speculative decoding)
+                // Also ensure draft model is loaded if specified (speculative decoding).
+                // Speculative companions (`qwen3_5_mtp` heads and friends) are not
+                // chat models — ensureModelReady refuses them and the request 404s.
+                // Their drafter store loads weights on demand at request time.
                 if let draftModelId = openAIReq.draftModel, !draftModelId.isEmpty {
-                    _ = try await Self.ensureModelReady(
-                        modelId: draftModelId, isStreaming: openAIReq.stream ?? false,
-                        cfg: cfg, inference: inference, embeddings: embeddings,
-                        coordinator: coordinator, request: request
-                    )
+                    let draftDir = NovaMLXPaths.directory(forModelId: draftModelId)
+                    let draftIsCompanion = NovaMLXEngine.isMtpDraftConfig(at: draftDir)
+                        || FileManager.default.fileExists(
+                            atPath: draftDir.appendingPathComponent("mtp.safetensors").path)
+                    if !draftIsCompanion {
+                        _ = try await Self.ensureModelReady(
+                            modelId: draftModelId, isStreaming: openAIReq.stream ?? false,
+                            cfg: cfg, inference: inference, embeddings: embeddings,
+                            coordinator: coordinator, request: request
+                        )
+                    }
                 }
 
                 let clientType = ClientDetector.detect(request: request)
