@@ -192,8 +192,8 @@ func openQwenMtpIterator(
     iterator.mtpRoundTimingNote = { t in
         NovaMLXLog.info(
             String(
-                format: "[MTP:\(logTag)] round draft=%.1f verify=%.1f accept=%.1f post=%.1f total=%.1fms",
-                t.draftMs, t.verifyMs, t.acceptMs, t.postMs, t.draftMs + t.verifyMs + t.commitMs))
+                format: "[MTP:\(logTag)] round draft=%.1f verify=%.1f accept=%.1f dcommit=%.1f rb=%.1f total=%.1fms",
+                t.draftMs, t.verifyMs, t.acceptMs, t.drafterCommitMs, t.rollbackMs, t.draftMs + t.verifyMs + t.commitMs))
     }
     NovaMLXLog.info(
         "[\(logTag)] Qwen MTP MLXLMCommon verify draft=\(draftModelId) block=\(iterator.blockSize) greedy"
