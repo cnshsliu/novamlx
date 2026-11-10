@@ -1455,7 +1455,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
     }
 
     public func clearPrefixCache(for modelId: String) {
-        lock.withLock { prefixCacheManagers[modelId]?.clear() }
+        lock.withLock {
+            prefixCacheManagers[modelId]?.clear()
+            prefixCacheManagers["\(modelId)#ram"]?.clear()
+        }
     }
 
     /// Override long-term prefix storage for this process. Nil fields keep
@@ -1465,9 +1468,10 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         lock.withLock { prefixCacheExplicit = settings }
     }
 
-    func getOrCreatePrefixCacheManager(modelId: String) -> PrefixCacheManager? {
+    func getOrCreatePrefixCacheManager(modelId: String, ramOnly: Bool = false) -> PrefixCacheManager? {
+        let key = ramOnly ? "\(modelId)#ram" : modelId
         let snapshot = lock.withLock { () -> (enabled: Bool, existing: PrefixCacheManager?, explicit: PrefixCacheLocation.Persisted) in
-            (prefixCacheEnabled, prefixCacheManagers[modelId], prefixCacheExplicit)
+            (prefixCacheEnabled, prefixCacheManagers[key], prefixCacheExplicit)
         }
         // Operational kill switch (ServerConfig.prefixCacheEnabled). When
         // disabled, never instantiate or return a manager — callers should
@@ -1476,25 +1480,46 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         if let existing = snapshot.existing { return existing }
 
         let resolved = PrefixCacheLocation.resolveProduction(explicit: snapshot.explicit)
-        let ssdDir = PrefixCacheLocation.modelDirectory(modelId: modelId, root: resolved.root)
-        let config = PrefixCacheConfig(
-            blockSize: 64,
-            maxBlocks: 4096,
-            initialBlocks: 256,
-            ssdCacheDir: ssdDir,
-            ssdMaxSizeBytes: resolved.ssdMaxSizeBytes,
-            hotCacheMaxBytes: resolved.hotCacheMaxBytes,
-            ttl: resolved.ttlSeconds
-        )
+        let config: PrefixCacheConfig
+        if ramOnly {
+            // Hybrid (GDN) models: the recurrent conv/state tensors are shared
+            // references across blocks (COW), so the hot tier is cheap — but
+            // serializing them per block through the durable store is what
+            // killed workers before. RAM-only until durable learns to save the
+            // fixed-size state once per chain.
+            config = PrefixCacheConfig(
+                blockSize: 64,
+                maxBlocks: 4096,
+                initialBlocks: 256,
+                ssdCacheDir: nil,
+                ssdMaxSizeBytes: 0,
+                // Hybrid chains carry one shared recurrent snapshot (~150MB
+                // for a 64-layer GDN model) plus KV slices; the stock 256MB
+                // hot budget evicts mid-chain and every fetch misses.
+                hotCacheMaxBytes: max(resolved.hotCacheMaxBytes, 1 << 30),
+                ttl: resolved.ttlSeconds
+            )
+        } else {
+            let ssdDir = PrefixCacheLocation.modelDirectory(modelId: modelId, root: resolved.root)
+            config = PrefixCacheConfig(
+                blockSize: 64,
+                maxBlocks: 4096,
+                initialBlocks: 256,
+                ssdCacheDir: ssdDir,
+                ssdMaxSizeBytes: resolved.ssdMaxSizeBytes,
+                hotCacheMaxBytes: resolved.hotCacheMaxBytes,
+                ttl: resolved.ttlSeconds
+            )
+        }
         let manager = PrefixCacheManager(config: config, modelName: modelId)
         NovaMLXLog.info(
-            "[PrefixCache] \(modelId) root=\(resolved.root.path) ttl=\(Int(resolved.ttlSeconds))s "
+            "[PrefixCache] \(modelId) ramOnly=\(ramOnly) root=\(resolved.root.path) ttl=\(Int(resolved.ttlSeconds))s "
                 + "hot=\(resolved.hotCacheMaxBytes)"
         )
         return lock.withLock {
             guard prefixCacheEnabled else { return nil }
-            if let existing = prefixCacheManagers[modelId] { return existing }
-            prefixCacheManagers[modelId] = manager
+            if let existing = prefixCacheManagers[key] { return existing }
+            prefixCacheManagers[key] = manager
             return manager
         }
     }
@@ -2830,15 +2855,38 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         defer { metricsStore.clearActivity(forModel: request.model) }
 
         // Capture prompt tokens for prefix cache storage + loading.
-        // Skip for VLM, RotatingKVCache, and GatedDeltaNet — serializing
-        // hybrid conv/recurrent state after long prefill kills the worker.
+        // Skip for VLM and RotatingKVCache. Hybrid (GDN) models participate
+        // RAM-only: the fixed conv/recurrent state is block-shared (COW), but
+        // the durable tier is skipped — per-block serialization of that state
+        // is what killed workers before.
+        let isHybridPrefixModel = container.config.hasLinearAttention
+        // A capacity-backed RotatingKVCache only becomes unsafe once the
+        // prompt + generation budget can wrap the ring; below that it holds
+        // the full history and slices like full attention. Flint's bounded
+        // window always wraps.
+        let rotatingCapacity = CacheBlockExtractor.smallestRotatingCapacity(probeCache)
+        let rotatingPrefixSafe =
+            !modelUsesRotating
+            || (rotatingCapacity != Int.max
+                && rotatingCapacity >= promptTokenCount + (request.maxTokens ?? 0) + 64)
+        // Hybrid prefix caching is OFF until the recurrent-state snapshot is
+        // taken at a prefill boundary. The post-generation snapshot stored
+        // today includes the generated tokens' state updates, so a restored
+        // GDN state runs ahead of the cached KV prefix and corrupts output
+        // (verified: cached-path generations degrade to word salad). The KV
+        // block slicing itself is correct — TTFT dropped 53% on hits — so the
+        // remaining work is a promptLen-anchored snapshot, not the pipeline.
+        let hybridPrefixEnabled =
+            ProcessInfo.processInfo.environment["NOVA_HYBRID_PREFIX_CACHE"] == "1"
         let allPromptTokens: [Int]?
         let prefixResult: PrefixCacheManager.PrefixResult?
-        if !isVLM, !modelUsesRotating, !container.config.hasLinearAttention,
-           let _ = getOrCreatePrefixCacheManager(modelId: request.model), promptTokenCount > 0 {
+        if !isVLM, rotatingPrefixSafe,
+            (!isHybridPrefixModel || hybridPrefixEnabled),
+           let _ = getOrCreatePrefixCacheManager(modelId: request.model, ramOnly: isHybridPrefixModel),
+           promptTokenCount > 0 {
             let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
             allPromptTokens = tokens
-            prefixResult = getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
+            prefixResult = getOrCreatePrefixCacheManager(modelId: request.model, ramOnly: isHybridPrefixModel)?.fetchPrefix(tokenIds: tokens)
         } else {
             allPromptTokens = nil
             prefixResult = nil
@@ -2899,13 +2947,15 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
             if cacheValid {
                 let cachedTokenCount = result.cachedTokenCount
-                // RotatingKVCache (sliding window) is incompatible with prefix cache:
-                // offset > maxSize breaks invariants, and shared KV across layers
-                // means any mismatched layer corrupts the entire attention.
-                // Fall back to full prefill if any RotatingKVCache present.
-                let hasRotating = restored.contains { $0 is RotatingKVCache }
-                if hasRotating {
-                    NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: model has RotatingKVCache layers — skipping (incompatible with sliding window)")
+                // Rotating rings are safe while the cached prefix plus the
+                // remaining prompt plus generation stays under ring capacity —
+                // before wrapping the ring holds the full history.
+                let restoredCapacity = CacheBlockExtractor.smallestRotatingCapacity(restored)
+                let rotatingRestoredSafe = restoredCapacity == Int.max
+                    || restoredCapacity >= cachedTokenCount + result.remainingTokenIds.count
+                        + (request.maxTokens ?? 0) + 64
+                if !rotatingRestoredSafe {
+                    NovaMLXLog.info("[GENERATE:\(request.id.uuidString.prefix(8))] Prefix cache: rotating ring too small for prompt budget — skipping")
                     kvCache = try model.value.newCache(parameters: parameters)
                 } else {
                     for layer in restored {
@@ -3494,7 +3544,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
         // Store KV cache in prefix cache for future requests with same prompt prefix
         if let tokenArray = allPromptTokens,
-           let prefixCache = getOrCreatePrefixCacheManager(modelId: request.model),
+           let prefixCache = getOrCreatePrefixCacheManager(
+               modelId: request.model, ramOnly: isHybridPrefixModel),
            let kvCache = kvCacheBox.value {
             prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
         }
@@ -3626,14 +3677,25 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                     // Capture prompt tokens for prefix cache storage + loading.
                     // Skip VLM, RotatingKVCache, and GatedDeltaNet (hybrid conv
                     // state is not safe to serialize after a long prefill).
+                    let streamRotatingCapacity = CacheBlockExtractor.smallestRotatingCapacity(probeCache)
+                    let streamRotatingSafe =
+                        !modelUsesRotating
+                        || (streamRotatingCapacity != Int.max
+                            && streamRotatingCapacity >= promptTokenCount + (request.maxTokens ?? 0) + 64)
                     let allPromptTokens: [Int]?
                     let prefixResult: PrefixCacheManager.PrefixResult?
-                    if !isVLM, !modelUsesRotating, !container.config.hasLinearAttention,
-                       let _ = self.getOrCreatePrefixCacheManager(modelId: request.model),
+                    let streamHybridPrefixEnabled =
+                        ProcessInfo.processInfo.environment["NOVA_HYBRID_PREFIX_CACHE"] == "1"
+                    if !isVLM, streamRotatingSafe,
+                        (!container.config.hasLinearAttention || streamHybridPrefixEnabled),
+                       let _ = self.getOrCreatePrefixCacheManager(
+                           modelId: request.model, ramOnly: container.config.hasLinearAttention),
                        promptTokenCount > 0 {
                         let tokens = input.text.tokens.asArray(Int32.self).map { Int($0) }
                         allPromptTokens = tokens
-                        prefixResult = self.getOrCreatePrefixCacheManager(modelId: request.model)?.fetchPrefix(tokenIds: tokens)
+                        prefixResult = self.getOrCreatePrefixCacheManager(
+                            modelId: request.model, ramOnly: container.config.hasLinearAttention
+                        )?.fetchPrefix(tokenIds: tokens)
                     } else {
                         allPromptTokens = nil
                         prefixResult = nil
@@ -3848,9 +3910,12 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
                         }
                         if cacheValid {
                             let cachedTokenCount = result.cachedTokenCount
-                            let hasRotating = restored.contains { $0 is RotatingKVCache }
-                            if hasRotating {
-                                NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache: model has RotatingKVCache layers — skipping (incompatible with sliding window)")
+                            let streamRestoredCapacity = CacheBlockExtractor.smallestRotatingCapacity(restored)
+                            let streamRestoredSafe = streamRestoredCapacity == Int.max
+                                || streamRestoredCapacity >= cachedTokenCount + result.remainingTokenIds.count
+                                    + (request.maxTokens ?? 0) + 64
+                            if !streamRestoredSafe {
+                                NovaMLXLog.info("[STREAM:\(request.id.uuidString.prefix(8))] Prefix cache: rotating ring too small for prompt budget — skipping")
                                 kvCache = try model.value.newCache(parameters: parameters)
                             } else {
                                 for layer in restored {
@@ -4269,7 +4334,8 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
 
                     // Store KV cache in prefix cache for future requests
                     if let tokenArray = allPromptTokens,
-                       let prefixCache = self.getOrCreatePrefixCacheManager(modelId: request.model),
+                       let prefixCache = self.getOrCreatePrefixCacheManager(
+                           modelId: request.model, ramOnly: container.config.hasLinearAttention),
                        let kvCache = kvCacheBox.value {
                         prefixCache.storeCache(tokenIds: tokenArray, cache: kvCache)
                     }

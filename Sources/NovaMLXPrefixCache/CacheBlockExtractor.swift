@@ -35,13 +35,43 @@ public enum CacheBlockExtractor {
         }
     }
 
+    /// Rings that have not wrapped still hold the entire history from position
+    /// 0, so slicing them is exactly slicing a full-attention cache. A hybrid
+    /// model with a capacity-backed `RotatingKVCache` only wraps once
+    /// `offset > maxSize`; before that the prefix is fully reconstructable.
+    public static func usesWrappedRotatingKV(_ cache: [KVCache]) -> Bool {
+        cache.contains { layer in
+            guard let rotating = canonicalLayer(layer) as? RotatingKVCache else {
+                if canonicalLayer(layer) is BoundedSlidingKVCache { return true }
+                return false
+            }
+            return rotating.offset > (rotating.maxSize ?? 0)
+        }
+    }
+
+    /// Smallest ring capacity among rotating layers — the prompt length plus
+    /// generation budget must stay under this for the prefix to remain
+    /// unwrappable. `Int.max` when no layer rotates.
+    public static func smallestRotatingCapacity(_ cache: [KVCache]) -> Int {
+        var smallest = Int.max
+        for layer in cache {
+            guard let rotating = canonicalLayer(layer) as? RotatingKVCache,
+                let capacity = rotating.maxSize
+            else { continue }
+            smallest = min(smallest, capacity)
+        }
+        return smallest
+    }
+
     /// Long-term prefix files store a full sequence axis. A sliding ring
     /// (``RotatingKVCache`` or Flint's ``BoundedSlidingKVCache``) has already
     /// dropped tokens outside its window, so flattening it would restore a
     /// prefix the model no longer has. Flint keeps that prefix in its own
     /// in-memory `select_prefix` snapshot instead.
     public static func admitsLongTermKV(_ cache: [KVCache]) -> Bool {
-        !cache.isEmpty && !usesRotatingKV(cache)
+        // Unwrapped rings (offset <= maxSize) still hold everything; only a
+        // ring that has actually dropped tokens is unsafe to flatten.
+        !cache.isEmpty && !usesWrappedRotatingKV(cache)
     }
 
     public static func extractBlockSlices(
@@ -171,6 +201,13 @@ public enum CacheBlockExtractor {
             result.append(cache)
         }
         return result
+    }
+
+    /// Layer classes whose state is a per-position KV sequence (sliceable,
+    /// concatenatable) rather than a fixed-size snapshot.
+    public static func isKVClassName(_ cls: String) -> Bool {
+        cls == "KVCache" || cls == "RotatingKVCache" || cls == "FlintSlidingKVCache"
+            || cls == "ChunkedKVCache" || cls == "QuantizedKVCache"
     }
 
     public static func getLayerClasses(from cache: [KVCache]) -> [String] {

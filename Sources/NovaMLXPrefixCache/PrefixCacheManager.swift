@@ -198,6 +198,27 @@ public final class PrefixCacheManager: @unchecked Sendable {
         let numFullBlocks = tokenIds.count / config.blockSize
         guard numFullBlocks > 0 else { return }
 
+        // Hybrid models: every block references the SAME fixed-size
+        // conv/recurrent state (COW — no per-block copy), but naive byte
+        // accounting would charge it once per block and evict the whole chain
+        // immediately. Count fixed-size state bytes once, on the first block.
+        let fixedStateBytes: Int = {
+            let firstSlices = CacheBlockExtractor.extractBlockSlices(
+                cache: cache, startIdx: 0, endIdx: config.blockSize)
+            var total = 0
+            for (i, cls) in layerClasses.enumerated()
+            where !CacheBlockExtractor.isKVClassName(cls) {
+                guard i < firstSlices.count else { continue }
+                for array in firstSlices[i] {
+                    let logical = array.nbytes
+                    total += logical > 0
+                        ? logical
+                        : array.shape.reduce(1, *) * max(array.dtype.size, 1)
+                }
+            }
+            return total
+        }()
+
         let instant = clock()
         lock.withLock {
             var parentHash: BlockHash? = nil
@@ -233,7 +254,9 @@ public final class PrefixCacheManager: @unchecked Sendable {
                     layers: sliced,
                     layerClasses: layerClasses,
                     metaStates: metaStates,
-                    bytes: HotPrefixTier.estimatedBytes(sliced),
+                    bytes: max(
+                        HotPrefixTier.estimatedBytes(sliced) - (i == 0 ? 0 : fixedStateBytes),
+                        0),
                     createdAt: instant,
                     lastAccess: instant
                 )
@@ -252,7 +275,7 @@ public final class PrefixCacheManager: @unchecked Sendable {
                 parentHash = hash
             }
         }
-        NovaMLXLog.debug("Stored \(numFullBlocks) blocks for \(modelName)")
+        NovaMLXLog.info("Stored \(numFullBlocks) blocks for \(modelName)")
     }
 
     public func clear() {

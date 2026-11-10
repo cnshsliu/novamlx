@@ -200,7 +200,17 @@ struct FlintModelTests {
         let rotating = RotatingKVCache(maxSize: 4, step: 4)
         let plain = KVCacheSimple()
         #expect(!CacheBlockExtractor.admitsLongTermKV([sliding]))
-        #expect(!CacheBlockExtractor.admitsLongTermKV([rotating]))
+        // Flint's bounded window always wraps; a capacity-backed
+        // RotatingKVCache is only unsafe once it has actually wrapped
+        // (offset > maxSize) — before that it holds the full history.
+        #expect(CacheBlockExtractor.admitsLongTermKV([rotating]))
+        // Once the ring has wrapped (offset > maxSize) flattening would
+        // restore a prefix the ring no longer holds.
+        let wrapped = RotatingKVCache(maxSize: 4, step: 4)
+        for _ in 0..<2 { _ = wrapped.update(
+            keys: MLXArray.zeros([1, 1, 4, 8]), values: MLXArray.zeros([1, 1, 4, 8])) }
+        #expect(wrapped.offset > 4)
+        #expect(!CacheBlockExtractor.admitsLongTermKV([wrapped]))
         #expect(CacheBlockExtractor.admitsLongTermKV([plain]))
 
         let dir = FileManager.default.temporaryDirectory
