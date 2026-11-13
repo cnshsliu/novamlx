@@ -1033,6 +1033,13 @@ public final class MLXEngine: InferenceEngineProtocol, @unchecked Sendable {
         } // end if !skipMemoryGate
         // --- End pre-load memory gate ---
 
+        if let configJson,
+           let message = Ernie55MoeSupport.loadRefusal(
+               modelId: config.identifier.id, json: configJson) {
+            NovaMLXLog.error("[Ernie55] \(message)")
+            throw NovaMLXError.configurationError(message)
+        }
+
         progress?(.loadingWeights)
         let activeBeforeLoad = MLX.Memory.activeMemory
 

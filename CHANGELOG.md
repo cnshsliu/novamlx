@@ -4,6 +4,9 @@ All notable changes to NovaMLX will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **ERNIE-5.5-Flash-Base streaming FP8 quant** — `Scripts/ernie55_fp8_to_mlx.py --src --dest --recipe ernie55-128gb` reads one safetensor at a time and writes MLX affine weights. Routed experts are 2-bit group 32 (103,884,521,472 bytes for the 277,025,390,592 expert params). Attention and shared projections are 6-bit. Embeddings, `lm_head`, and FP8 gates are 8-bit. BF16 router gates stay BF16. `--dry-run` prints the estimate and does not create `--dest`. `ernie5_5_moe` is registered. Official-width checkpoints refuse to allocate until Heavily Compressed Attention and MLA kernels exist. The base model is `POST /v1/completions`; chat, messages, and responses are refused. Download the FP8 checkpoint with ModelScope and aria2 (`baidu/ERNIE-5.5-Flash-Base`), not `nova download`. No Mac tok/s. Intro: [ERNIE-5.5-Flash-Base](docs/features/ernie-5-5-flash-base.md).
+
 ## [1.10.0] - 2026-11-05
 
 ### Added
